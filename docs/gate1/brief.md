@@ -30,7 +30,7 @@ _Kịch bản này là business scenario mô phỏng phù hợp với bài toán
 
 ## 3. Target User
 
-Cư dân hoặc người dùng trong hệ sinh thái VinHomes cần hoàn thành một mục tiêu liên quan đến nhiều dịch vụ — người muốn đưa ra một goal và để hệ thống tự điều phối, không cần biết service internals.
+Cư dân hoặc người dùng cá nhân trong hệ sinh thái dịch vụ nhà ở/cư dân cần hoàn thành một hoặc nhiều tác vụ liên quan — người muốn đưa ra goal và để hệ thống tự điều phối, không cần biết service internals.
 
 ---
 
@@ -115,9 +115,9 @@ Bổ sung sau Gate 2:
 
 ## 10. Scope & Assumptions
 
-**In scope:** 1 customer journey · 3 service domains · multi-service orchestration · failure recovery · controlled autonomy · mock services
+**In scope:** 1 business domain (residential/housing services) · 1 end-to-end hero journey · partial goal execution sử dụng cùng tập dịch vụ · 3 service domains · multi-service orchestration · failure recovery · controlled autonomy · mock services
 
-**Out of scope:** Production VinHomes API · toàn bộ dịch vụ VinHomes · Admin Dashboard · Healthcare scenario · multi-tenant platform · distributed orchestration
+**Out of scope:** Production VinHomes API · toàn bộ dịch vụ VinHomes · multi-domain (du lịch, khách sạn...) · Admin Dashboard · Healthcare scenario · multi-tenant platform · distributed orchestration
 
 **Architecture principle:** LLM chịu trách nhiệm goal understanding, planning và replanning. Deterministic orchestration layer chịu trách nhiệm plan validation, execution, policy enforcement, state và compensation — LLM không bypass các gate này.
 

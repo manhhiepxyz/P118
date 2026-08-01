@@ -21,7 +21,7 @@ P-118 xây dựng một AI Agent có khả năng nhận mục tiêu nhiều bư�
 
 Giá trị cốt lõi là **goal-oriented multi-service orchestration với failure-aware execution và controlled autonomy** — không phải "LLM gọi nhiều API".
 
-MVP tập trung vào một customer journey cụ thể trong hệ sinh thái dịch vụ VinHomes: `Register Resident → Register Vehicle → Book Parking → Pay Fee`. Các dịch vụ trong MVP sử dụng mock implementation.
+MVP tập trung vào một business domain (dịch vụ nhà ở/cư dân), sử dụng một khu đô thị giả lập làm bối cảnh minh họa. End-to-end hero journey: `Register Resident → Register Vehicle → Book Parking → Pay Fee`. Người dùng có thể yêu cầu toàn bộ chuỗi hoặc chỉ một phần tùy theo mục tiêu và dữ liệu hiện có. Các dịch vụ trong MVP sử dụng mock implementation.
 
 ---
 
@@ -43,7 +43,7 @@ Nếu một bước thất bại (ví dụ, Zone A hết chỗ), người dùng 
 
 ## 4. Target User
 
-**Primary user:** Cư dân hoặc người dùng trong hệ sinh thái VinHomes cần thực hiện một chuỗi tác vụ liên quan đến nhiều dịch vụ.
+**Primary user:** Cư dân hoặc người dùng cá nhân trong hệ sinh thái dịch vụ nhà ở/cư dân cần thực hiện một hoặc nhiều tác vụ liên quan đến các dịch vụ sinh hoạt.
 
 **Đặc điểm:**
 - Có mục tiêu rõ ràng nhưng không muốn tự điều phối từng bước
@@ -109,7 +109,9 @@ Pay Fee
 - `book_parking`
 - `pay_fee`
 
-> **Lưu ý:** MVP sử dụng **mock services**. Hệ thống không kết nối với production API của VinHomes. Dữ liệu không phải dữ liệu cư dân thực.
+> **Lưu ý:** Đây là end-to-end hero journey được dùng cho demo. Agent tạo TaskPlan phù hợp với mục tiêu và dữ liệu hiện có của người dùng — không nhất thiết chạy đủ 4 bước nếu một số bước đã hoàn thành hoặc không cần thiết cho goal cụ thể đó.
+
+> MVP sử dụng **mock services**. Hệ thống không kết nối với production API của VinHomes hoặc bất kỳ nhà cung cấp nào. Dữ liệu không phải dữ liệu cư dân thực.
 
 ---
 
@@ -205,6 +207,17 @@ Pay Fee
 - Recovery history hiển thị (lần thử, lý do, kết quả từng lần)
 - Kết quả cuối cùng rõ ràng (thành công / thất bại / đã hoàn tác)
 - Không hiển thị system internals (raw JSON, prompt, LangGraph state)
+
+---
+
+### US-08 — Partial Task Execution
+
+> *As a resident, I want the system to execute only the tasks required for my current goal, so that I do not repeat services that have already been completed or are not needed.*
+
+**Acceptance Criteria:**
+- Agent tạo TaskPlan dựa trên mục tiêu hiện tại và dữ liệu đã có — không chạy lại bước đã COMPLETED
+- Nếu goal chỉ yêu cầu một phần công việc (ví dụ: chỉ đặt chỗ đậu, đã có resident và vehicle), plan chỉ gồm các bước cần thiết
+- Nếu thiếu dữ liệu bắt buộc, Agent hỏi thêm hoặc đề xuất bước cần thực hiện trước — không tự đoán dữ liệu
 
 ---
 
@@ -356,7 +369,7 @@ Agent trong P-118 hoạt động dưới các ràng buộc kiểm soát bắt bu
 
 | ID | Risk | Impact | Mitigation |
 |---|---|---|---|
-| R1 | Scope quá rộng | Không đủ thời gian | Giữ 1 customer journey + 3 mock services |
+| R1 | Scope quá rộng | Không đủ thời gian | Giữ 1 business domain · 1 hero journey · 3 mock services |
 | R2 | LLM tạo plan không hợp lệ | Workflow lỗi hoặc gọi tool không cho phép | TaskPlan Validator + tool allowlist bắt buộc |
 | R3 | Service failure giữa workflow | Workflow stuck, dữ liệu treo | Persistent state + recovery handler |
 | R4 | Duplicate side effect khi retry | User bị charge 2 lần | Idempotency key (Demo Day) |

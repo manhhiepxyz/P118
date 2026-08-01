@@ -66,13 +66,13 @@ UI phải trả lời được 6 câu hỏi của người dùng:
 
 ### Purpose
 
-Cho người dùng mô tả mục tiêu bằng ngôn ngữ tự nhiên và xem lại các workflow gần đây.
+Cho người dùng mô tả mục tiêu bằng ngôn ngữ tự nhiên và xem lại các workflow gần đây. Người dùng có thể yêu cầu toàn bộ chuỗi dịch vụ hoặc chỉ một phần tùy theo nhu cầu hiện tại — hệ thống tạo task list phù hợp với goal và dữ liệu đã có.
 
 ### Wireframe
 
 ```
 +----------------------------------------------------------+
-|  P-118 — VinHomes Service Assistant                      |
+|  P-118 — Trợ lý dịch vụ cư dân                          |
 +----------------------------------------------------------+
 |                                                          |
 |                                                          |
