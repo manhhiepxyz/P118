@@ -1,0 +1,21 @@
+# Bảng Công Việc Của Mạnh Hiệp (Vai trò: Thực thi / Executor)
+
+Dựa trên phân công bạn vừa cung cấp, vai trò chính của bạn là xây dựng hệ thống **Executor** cốt lõi của dự án. Dưới đây là chi tiết các hạng mục bạn cần hoàn thành, được chia nhỏ để bạn dễ theo dõi:
+
+## 1. Lõi Thực Thi (Core Executor)
+- [ ] **Chạy đúng thứ tự phụ thuộc**: Đọc `TaskPlan` từ Planner và đảm bảo các task được chạy tuần tự hoặc song song đúng theo dependency (task nào cần output của task trước thì phải đợi).
+- [ ] **Truyền dữ liệu giữa các bước (Data Propagation)**: Lấy kết quả đầu ra (output) của bước trước tự động map thành đầu vào (input) cho bước sau.
+- [ ] **Gọi dịch vụ qua Connector**: Xây dựng hoặc tích hợp Tool/Connector để gọi tới các Mock Services (`Resident`, `Transport`, `Payment`).
+
+## 2. Xử lý Lỗi & Cơ chế Phục hồi (Resilience)
+- [ ] **Xử lý lỗi cơ bản (Error Handling)**: Bắt các ngoại lệ (exception/HTTP Error) khi gọi service bị hỏng.
+- [ ] **Cơ chế Retry**: Nếu lỗi tạm thời (ví dụ timeout), tự động chạy lại lệnh (Retry) với số lần giới hạn.
+- [ ] **Cơ chế Hoàn tác (Compensation / Rollback)**: Nếu một quy trình nhiều bước bị gãy ở giữa (ví dụ: đặt chỗ đỗ xe hết chỗ), cần gọi các hàm rollback (ví dụ: `cancel_resident`, `refund_payment`) để đảm bảo hệ thống không bị rác dữ liệu.
+
+## 3. Quản lý Trạng Thái & An Toàn (State & Idempotency)
+- [ ] **Chống chạy trùng (Idempotency)**: Đảm bảo nếu một task đã chạy thành công, khi luồng bị kích hoạt lại sẽ **KHÔNG** bị chạy lại.
+- [ ] **Phục hồi an toàn (Safe Recovery)**: Lưu trạng thái của workflow. Nếu bị crash hoặc lỗi, khi chạy lại phải tiếp tục từ chính xác bước đang dang dở.
+
+---
+**🎯 Mục tiêu đầu ra (Expected Output):**
+TaskPlan được thực hiện đúng từ đầu đến cuối; workflow có thể bị lỗi nhưng không bao giờ rơi vào trạng thái treo (treo hệ thống) hoặc chạy lại những bước đã thành công.
