@@ -1,102 +1,62 @@
-"""TaskPlan, Task, InputRef models cho P-118.
+from __future__ import annotations
 
-Owner: Thành Bảo (Decision layer)
-File: src/common/task_plan.py
-"""
+from typing import Annotated, Literal
 
-from typing import Any
-
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class InputRef(BaseModel):
-    """Tham chiếu đến field trong kết quả task khác."""
+    """Reference to an output field from a previously completed task."""
 
-    from_task: str = Field(..., description="task_id của task tham chiếu")
-    field: str = Field(..., description="Tên field trong data của task đó")
+    model_config = ConfigDict(extra="forbid")
+
+    from_task: Annotated[str, Field(min_length=1)]
+    field: Annotated[str, Field(min_length=1)]
+
+    @field_validator("from_task", "field")
+    @classmethod
+    def not_whitespace(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank or whitespace")
+        return v
+
+
+# A task input value is either a literal JSON-compatible scalar or an InputRef.
+InputValue = str | int | float | bool | None | InputRef
+
+AllowedTool = Literal[
+    "register_resident",
+    "register_vehicle",
+    "book_parking",
+    "pay_fee",
+]
 
 
 class Task(BaseModel):
-    """Một task trong TaskPlan."""
+    model_config = ConfigDict(extra="forbid")
 
-    task_id: str = Field(..., description="ID duy nhất của task")
-    tool: str = Field(..., description="Tên tool (phải trong allowlist)")
-    depends_on: list[str] = Field(default_factory=list, description="Danh sách task_id phụ thuộc")
-    input: dict[str, Any] = Field(default_factory=dict, description="Input cho tool, có thể chứa InputRef")
+    task_id: Annotated[str, Field(min_length=1)]
+    tool: AllowedTool
+    depends_on: list[str]
+    input: dict[str, InputValue]
 
-    @field_validator("tool")
+    @field_validator("task_id")
     @classmethod
-    def validate_tool(cls, v: str) -> str:
-        """Validate tool trong allowlist."""
-        allowlist = {"register_resident", "register_vehicle", "book_parking", "pay_fee"}
-        if v not in allowlist:
-            raise ValueError(f"Tool '{v}' không trong allowlist: {allowlist}")
+    def task_id_not_whitespace(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("task_id must not be blank or whitespace")
         return v
 
 
 class TaskPlan(BaseModel):
-    """Kế hoạch thực thi workflow."""
+    model_config = ConfigDict(extra="forbid")
 
-    goal: str = Field(..., description="Mục tiêu người dùng")
-    tasks: list[Task] = Field(..., description="Danh sách task")
+    goal: Annotated[str, Field(min_length=1)]
+    tasks: Annotated[list[Task], Field(min_length=1)]
 
-    @field_validator("tasks")
+    @field_validator("goal")
     @classmethod
-    def validate_unique_task_ids(cls, v: list[Task]) -> list[Task]:
-        """Kiểm tra task_id duy nhất."""
-        ids = [task.task_id for task in v]
-        if len(ids) != len(set(ids)):
-            raise ValueError("task_id phải duy nhất")
+    def goal_not_whitespace(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("goal must not be blank")
         return v
-
-    @field_validator("tasks")
-    @classmethod
-    def validate_dependencies_exist(cls, v: list[Task]) -> list[Task]:
-        """Kiểm tra dependency tồn tại."""
-        task_ids = {task.task_id for task in v}
-        for task in v:
-            for dep_id in task.depends_on:
-                if dep_id not in task_ids:
-                    raise ValueError(f"Task {task.task_id} phụ thuộc task không tồn tại: {dep_id}")
-        return v
-
-    def get_task(self, task_id: str) -> Task | None:
-        """Lấy task theo ID."""
-        for task in self.tasks:
-            if task.task_id == task_id:
-                return task
-        return None
-
-    def get_dependencies(self, task_id: str) -> list[str]:
-        """Lấy danh sách dependency của task."""
-        task = self.get_task(task_id)
-        return task.depends_on if task else []
-
-    def topological_order(self) -> list[str]:
-        """Trả về thứ tự thực thi topo (Kahn's algorithm)."""
-        from collections import deque
-
-        task_ids = {task.task_id for task in self.tasks}
-        in_degree = {tid: 0 for tid in task_ids}
-        graph = {tid: [] for tid in task_ids}
-
-        for task in self.tasks:
-            for dep in task.depends_on:
-                graph[dep].append(task.task_id)
-                in_degree[task.task_id] += 1
-
-        queue = deque([tid for tid in task_ids if in_degree[tid] == 0])
-        result = []
-
-        while queue:
-            current = queue.popleft()
-            result.append(current)
-            for neighbor in graph[current]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-
-        if len(result) != len(task_ids):
-            raise ValueError("Dependency cycle detected")
-
-        return result
