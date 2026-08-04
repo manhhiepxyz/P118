@@ -4,8 +4,7 @@ Owner: Mạnh Hiệp (Executor layer)
 File: tests/fixtures/task_plans.py
 """
 
-from src.common.task_plan import TaskPlan, Task, InputRef
-
+from src.common.task_plan import InputRef, Task, TaskPlan
 
 # Full flow: T1→T2→T3→T4
 FULL_FLOW_PLAN = TaskPlan(

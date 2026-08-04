@@ -4,12 +4,13 @@ Owner: Mạnh Hiệp (Executor layer)
 File: src/connectors/resident.py
 """
 
-import httpx
 from typing import Any
 
-from src.connectors.base import Connector
-from src.common.results import StandardResult
+import httpx
+
 from src.common.enums import ErrorCode
+from src.common.results import StandardResult
+from src.connectors.base import Connector
 
 
 class ResidentConnector(Connector):

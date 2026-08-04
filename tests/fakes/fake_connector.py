@@ -4,10 +4,12 @@ Owner: Mạnh Hiệp (Executor layer)
 File: tests/fakes/fake_connector.py
 """
 
-from typing import Any, Callable
-from src.connectors.base import Connector
-from src.common.results import StandardResult
+from collections.abc import Callable
+from typing import Any
+
 from src.common.enums import ErrorCode
+from src.common.results import StandardResult
+from src.connectors.base import Connector
 
 
 class FakeConnector(Connector):

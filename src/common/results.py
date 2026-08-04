@@ -5,7 +5,6 @@ File: src/common/results.py
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
 
 from src.common.enums import ErrorCode
 
@@ -16,10 +15,11 @@ class StandardResult:
 
     Executor chỉ nhận StandardResult, không bao giờ nhận raw JSON.
     """
+
     success: bool
     data: dict = field(default_factory=dict)
-    error_code: Optional[ErrorCode] = None
-    error_message: Optional[str] = None
+    error_code: ErrorCode | None = None
+    error_message: str | None = None
     retryable: bool = False
 
     @classmethod
@@ -33,7 +33,7 @@ class StandardResult:
         error_code: ErrorCode,
         error_message: str,
         retryable: bool = False,
-        data: Optional[dict] = None,
+        data: dict | None = None,
     ) -> "StandardResult":
         """Tạo kết quả thất bại."""
         return cls(

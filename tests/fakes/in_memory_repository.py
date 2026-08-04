@@ -5,11 +5,10 @@ File: tests/fakes/in_memory_repository.py
 """
 
 import uuid
-from typing import Optional
 from datetime import datetime
 
+from src.common.enums import TaskStatus, WorkflowStatus
 from src.common.repository import WorkflowStateRepository
-from src.common.enums import WorkflowStatus, TaskStatus
 from src.common.results import StandardResult
 
 
@@ -96,7 +95,7 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         }
         self._tasks[key]["updated_at"] = datetime.utcnow().isoformat()
 
-    async def get_workflow(self, workflow_id: str) -> Optional[dict]:
+    async def get_workflow(self, workflow_id: str) -> dict | None:
         """Lấy thông tin workflow."""
         return self._workflows.get(workflow_id)
 
@@ -104,24 +103,18 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         self,
         workflow_id: str,
         task_id: str,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Lấy thông tin task."""
         key = f"{workflow_id}:{task_id}"
         return self._tasks.get(key)
 
     async def list_tasks(self, workflow_id: str) -> list[dict]:
         """Liệt kê tất cả task của workflow."""
-        return [
-            task for key, task in self._tasks.items()
-            if task["workflow_id"] == workflow_id
-        ]
+        return [task for key, task in self._tasks.items() if task["workflow_id"] == workflow_id]
 
     async def get_completed_task_ids(self, workflow_id: str) -> list[str]:
         """Lấy danh sách task_id đã SUCCESS (dùng cho Replanner)."""
-        return [
-            task["id"] for task in await self.list_tasks(workflow_id)
-            if task["status"] == TaskStatus.SUCCESS.value
-        ]
+        return [task["id"] for task in await self.list_tasks(workflow_id) if task["status"] == TaskStatus.SUCCESS.value]
 
     # Helper methods for testing
     def clear(self) -> None:

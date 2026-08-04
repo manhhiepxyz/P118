@@ -4,8 +4,9 @@ Owner: Mạnh Hiệp (interface), Hoàng Anh (implementation)
 File: src/common/repository.py
 """
 
-from typing import Protocol, Optional
-from src.common.enums import WorkflowStatus, TaskStatus
+from typing import Protocol
+
+from src.common.enums import TaskStatus, WorkflowStatus
 from src.common.results import StandardResult
 
 
@@ -54,7 +55,7 @@ class WorkflowStateRepository(Protocol):
         """Lưu kết quả task (StandardResult)."""
         ...
 
-    async def get_workflow(self, workflow_id: str) -> Optional[dict]:
+    async def get_workflow(self, workflow_id: str) -> dict | None:
         """Lấy thông tin workflow."""
         ...
 
@@ -62,7 +63,7 @@ class WorkflowStateRepository(Protocol):
         self,
         workflow_id: str,
         task_id: str,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Lấy thông tin task."""
         ...
 

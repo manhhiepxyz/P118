@@ -4,19 +4,21 @@ Owner: Thành Bảo (Decision layer)
 File: src/common/task_plan.py
 """
 
-from typing import Any, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
-from src.common.enums import TaskStatus
 
 
 class InputRef(BaseModel):
     """Tham chiếu đến field trong kết quả task khác."""
+
     from_task: str = Field(..., description="task_id của task tham chiếu")
     field: str = Field(..., description="Tên field trong data của task đó")
 
 
 class Task(BaseModel):
     """Một task trong TaskPlan."""
+
     task_id: str = Field(..., description="ID duy nhất của task")
     tool: str = Field(..., description="Tên tool (phải trong allowlist)")
     depends_on: list[str] = Field(default_factory=list, description="Danh sách task_id phụ thuộc")
@@ -34,6 +36,7 @@ class Task(BaseModel):
 
 class TaskPlan(BaseModel):
     """Kế hoạch thực thi workflow."""
+
     goal: str = Field(..., description="Mục tiêu người dùng")
     tasks: list[Task] = Field(..., description="Danh sách task")
 
@@ -57,7 +60,7 @@ class TaskPlan(BaseModel):
                     raise ValueError(f"Task {task.task_id} phụ thuộc task không tồn tại: {dep_id}")
         return v
 
-    def get_task(self, task_id: str) -> Optional[Task]:
+    def get_task(self, task_id: str) -> Task | None:
         """Lấy task theo ID."""
         for task in self.tasks:
             if task.task_id == task_id:

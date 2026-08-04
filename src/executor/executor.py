@@ -5,13 +5,13 @@ File: src/executor/executor.py
 """
 
 import uuid
-from typing import Any, Callable, Optional
-from datetime import datetime
+from collections.abc import Callable
+from typing import Any
 
-from src.common.task_plan import TaskPlan, Task, InputRef
-from src.common.enums import WorkflowStatus, TaskStatus, ErrorCode
-from src.common.results import StandardResult
+from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
 from src.common.repository import WorkflowStateRepository
+from src.common.results import StandardResult
+from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.base import Connector
 
 
@@ -27,7 +27,7 @@ class Executor:
         self,
         connectors: list[Connector],
         repository: WorkflowStateRepository,
-        on_failure: Optional[Callable[[str, str, ErrorCode, str, bool], None]] = None,
+        on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
     ):
         """Khởi tạo Executor.
 
@@ -45,7 +45,7 @@ class Executor:
         self.repository = repository
         self.on_failure = on_failure
 
-    def _get_connector(self, tool_name: str) -> Optional[Connector]:
+    def _get_connector(self, tool_name: str) -> Connector | None:
         """Lấy Connector cho tool_name."""
         return self._connector_map.get(tool_name)
 
@@ -66,13 +66,9 @@ class Executor:
                 # Lấy kết quả từ task tham chiếu
                 ref_result = completed_results.get(value.from_task)
                 if ref_result is None or not ref_result.success:
-                    raise ValueError(
-                        f"Dependency {value.from_task} chưa hoàn thành hoặc thất bại"
-                    )
+                    raise ValueError(f"Dependency {value.from_task} chưa hoàn thành hoặc thất bại")
                 if value.field not in ref_result.data:
-                    raise ValueError(
-                        f"Field {value.field} không tồn tại trong kết quả task {value.from_task}"
-                    )
+                    raise ValueError(f"Field {value.field} không tồn tại trong kết quả task {value.from_task}")
                 resolved[key] = ref_result.data[value.field]
             else:
                 resolved[key] = value
@@ -90,8 +86,8 @@ class Executor:
     async def execute(
         self,
         plan: TaskPlan,
-        workflow_id: Optional[str] = None,
-        existing_context: Optional[dict[str, Any]] = None,
+        workflow_id: str | None = None,
+        existing_context: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         """Thực thi TaskPlan.
 
@@ -107,11 +103,13 @@ class Executor:
             workflow_id = str(uuid.uuid4())
 
         # Khởi tạo workflow trong repository
-        await self.repository.create_workflow({
-            "id": workflow_id,
-            "goal": plan.goal,
-            "status": WorkflowStatus.PENDING.value,
-        })
+        await self.repository.create_workflow(
+            {
+                "id": workflow_id,
+                "goal": plan.goal,
+                "status": WorkflowStatus.PENDING.value,
+            }
+        )
 
         # Khởi tạo task statuses
         task_statuses: dict[str, TaskStatus] = {}
@@ -120,13 +118,16 @@ class Executor:
         # Tạo task records
         for task in plan.tasks:
             task_statuses[task.task_id] = TaskStatus.PENDING
-            await self.repository.create_task(workflow_id, {
-                "id": task.task_id,
-                "tool": task.tool,
-                "depends_on": task.depends_on,
-                "input": task.input,
-                "status": TaskStatus.PENDING.value,
-            })
+            await self.repository.create_task(
+                workflow_id,
+                {
+                    "id": task.task_id,
+                    "tool": task.tool,
+                    "depends_on": task.depends_on,
+                    "input": task.input,
+                    "status": TaskStatus.PENDING.value,
+                },
+            )
 
         # Cập nhật workflow status
         await self.repository.update_workflow_status(workflow_id, WorkflowStatus.RUNNING)
@@ -154,9 +155,7 @@ class Executor:
 
                     # Update status to RUNNING
                     task_statuses[task.task_id] = TaskStatus.RUNNING
-                    await self.repository.update_task_status(
-                        workflow_id, task.task_id, TaskStatus.RUNNING
-                    )
+                    await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.RUNNING)
 
                     # Resolve input
                     try:
@@ -170,17 +169,10 @@ class Executor:
                         )
                         task_statuses[task.task_id] = TaskStatus.FAILED
                         completed_results[task.task_id] = result
-                        await self.repository.update_task_status(
-                            workflow_id, task.task_id, TaskStatus.FAILED
-                        )
-                        await self.repository.save_task_result(
-                            workflow_id, task.task_id, result
-                        )
+                        await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.FAILED)
+                        await self.repository.save_task_result(workflow_id, task.task_id, result)
                         if self.on_failure:
-                            self.on_failure(
-                                workflow_id, task.task_id,
-                                ErrorCode.DEPENDENCY_ERROR, str(e), False
-                            )
+                            self.on_failure(workflow_id, task.task_id, ErrorCode.DEPENDENCY_ERROR, str(e), False)
                         continue
 
                     # Get connector
@@ -193,16 +185,15 @@ class Executor:
                         )
                         task_statuses[task.task_id] = TaskStatus.FAILED
                         completed_results[task.task_id] = result
-                        await self.repository.update_task_status(
-                            workflow_id, task.task_id, TaskStatus.FAILED
-                        )
-                        await self.repository.save_task_result(
-                            workflow_id, task.task_id, result
-                        )
+                        await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.FAILED)
+                        await self.repository.save_task_result(workflow_id, task.task_id, result)
                         if self.on_failure:
                             self.on_failure(
-                                workflow_id, task.task_id,
-                                ErrorCode.UNKNOWN_TOOL, f"Không có Connector cho tool: {task.tool}", False
+                                workflow_id,
+                                task.task_id,
+                                ErrorCode.UNKNOWN_TOOL,
+                                f"Không có Connector cho tool: {task.tool}",
+                                False,
                             )
                         continue
 
@@ -219,18 +210,15 @@ class Executor:
                         task_statuses[task.task_id] = TaskStatus.FAILED
                         if self.on_failure:
                             self.on_failure(
-                                workflow_id, task.task_id,
+                                workflow_id,
+                                task.task_id,
                                 result.error_code or ErrorCode.UNKNOWN_ERROR,
                                 result.error_message or "Unknown error",
                                 result.is_retryable,
                             )
 
-                    await self.repository.update_task_status(
-                        workflow_id, task.task_id, task_statuses[task.task_id]
-                    )
-                    await self.repository.save_task_result(
-                        workflow_id, task.task_id, result
-                    )
+                    await self.repository.update_task_status(workflow_id, task.task_id, task_statuses[task.task_id])
+                    await self.repository.save_task_result(workflow_id, task.task_id, result)
 
             if not executed_any:
                 # Không task nào chạy được - có thể cycle hoặc dependency missing
@@ -242,19 +230,12 @@ class Executor:
                         retryable=False,
                     )
                     completed_results[task.task_id] = result
-                    await self.repository.update_task_status(
-                        workflow_id, task.task_id, TaskStatus.FAILED
-                    )
-                    await self.repository.save_task_result(
-                        workflow_id, task.task_id, result
-                    )
+                    await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.FAILED)
+                    await self.repository.save_task_result(workflow_id, task.task_id, result)
                 break
 
         # Final workflow status
-        all_success = all(
-            task_statuses[t.task_id] == TaskStatus.SUCCESS
-            for t in plan.tasks
-        )
+        all_success = all(task_statuses[t.task_id] == TaskStatus.SUCCESS for t in plan.tasks)
         final_status = WorkflowStatus.COMPLETED if all_success else WorkflowStatus.FAILED
         await self.repository.update_workflow_status(workflow_id, final_status)
 

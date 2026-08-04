@@ -4,11 +4,12 @@ Owner: Mạnh Hiệp (Executor layer)
 File: src/common/enums.py
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class WorkflowStatus(str, Enum):
+class WorkflowStatus(StrEnum):
     """Trạng thái tổng thể của workflow."""
+
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
@@ -17,8 +18,9 @@ class WorkflowStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     """Trạng thái của từng task trong workflow."""
+
     PENDING = "PENDING"
     READY = "READY"
     RUNNING = "RUNNING"
@@ -29,8 +31,9 @@ class TaskStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-class ErrorCode(str, Enum):
+class ErrorCode(StrEnum):
     """Mã lỗi chuẩn hóa nội bộ."""
+
     # Validation errors
     VALIDATION_ERROR = "VALIDATION_ERROR"
     INVALID_INPUT = "INVALID_INPUT"

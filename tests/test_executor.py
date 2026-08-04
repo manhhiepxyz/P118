@@ -4,17 +4,17 @@ Owner: Mạnh Hiệp (Executor layer)
 File: tests/test_executor.py
 """
 
-import pytest
 from typing import Any
 
-from src.executor.executor import Executor
-from src.common.task_plan import TaskPlan, Task, InputRef
-from src.common.enums import TaskStatus, WorkflowStatus, ErrorCode
+import pytest
+
+from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
 from src.common.results import StandardResult
-from src.common.repository import WorkflowStateRepository
+from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.base import Connector
+from src.executor.executor import Executor
+from tests.fakes.fake_connector import create_no_availability_response, create_success_response
 from tests.fakes.in_memory_repository import InMemoryWorkflowStateRepository
-from tests.fakes.fake_connector import FakeConnector, create_success_response, create_no_availability_response
 
 
 class MockConnector(Connector):
@@ -47,17 +47,27 @@ def connectors():
     return [
         MockConnector("register_resident", create_success_response({"resident_id": "RES-001"})),
         MockConnector("register_vehicle", create_success_response({"vehicle_id": "VEH-001"})),
-        MockConnector("book_parking", create_success_response({
-            "booking_id": "BOOK-001",
-            "parking_zone": "ZONE_A",
-            "booking_date": "2026-08-10",
-            "amount": 150000,
-            "currency": "VND",
-        })),
-        MockConnector("pay_fee", create_success_response({
-            "payment_id": "PAY-001",
-            "payment_status": "PAID",
-        })),
+        MockConnector(
+            "book_parking",
+            create_success_response(
+                {
+                    "booking_id": "BOOK-001",
+                    "parking_zone": "ZONE_A",
+                    "booking_date": "2026-08-10",
+                    "amount": 150000,
+                    "currency": "VND",
+                }
+            ),
+        ),
+        MockConnector(
+            "pay_fee",
+            create_success_response(
+                {
+                    "payment_id": "PAY-001",
+                    "payment_status": "PAID",
+                }
+            ),
+        ),
     ]
 
 
@@ -149,7 +159,6 @@ class TestExecutor:
         assert connectors[2].call_count == 1  # book_parking
 
         # Kiểm tra T2 chạy trước T3 (kiểm tra input của T3 có vehicle_id từ T2)
-        vehicle_connector = connectors[1]
         parking_connector = connectors[2]
 
         # T2 input không phụ thuộc task khác
@@ -348,13 +357,15 @@ class TestExecutor:
         failure_called = {"workflow_id": None, "task_id": None, "error_code": None, "message": None, "retryable": None}
 
         def on_failure(workflow_id, task_id, error_code, message, retryable):
-            failure_called.update({
-                "workflow_id": workflow_id,
-                "task_id": task_id,
-                "error_code": error_code,
-                "message": message,
-                "retryable": retryable,
-            })
+            failure_called.update(
+                {
+                    "workflow_id": workflow_id,
+                    "task_id": task_id,
+                    "error_code": error_code,
+                    "message": message,
+                    "retryable": retryable,
+                }
+            )
 
         fail_connector = MockConnector("register_resident", create_no_availability_response())
         connectors_fail = [
@@ -369,8 +380,12 @@ class TestExecutor:
         plan = TaskPlan(
             goal="Test failure callback",
             tasks=[
-                Task(task_id="T1", tool="register_resident", depends_on=[],
-                     input={"full_name": "Test", "apartment_code": "A101", "residential_area": "Test"}),
+                Task(
+                    task_id="T1",
+                    tool="register_resident",
+                    depends_on=[],
+                    input={"full_name": "Test", "apartment_code": "A101", "residential_area": "Test"},
+                ),
             ],
         )
 
@@ -390,7 +405,12 @@ class TestExecutor:
         plan = TaskPlan(
             goal="Test unknown tool",
             tasks=[
-                Task(task_id="T1", tool="pay_fee", depends_on=[], input={"booking_id": "BOOK-001", "amount": 100000, "currency": "VND"}),
+                Task(
+                    task_id="T1",
+                    tool="pay_fee",
+                    depends_on=[],
+                    input={"booking_id": "BOOK-001", "amount": 100000, "currency": "VND"},
+                ),
             ],
         )
 
@@ -478,8 +498,12 @@ class TestExecutorEdgeCases:
         plan = TaskPlan(
             goal="Single task",
             tasks=[
-                Task(task_id="T1", tool="register_resident", depends_on=[],
-                     input={"full_name": "Test", "apartment_code": "A101", "residential_area": "Test"}),
+                Task(
+                    task_id="T1",
+                    tool="register_resident",
+                    depends_on=[],
+                    input={"full_name": "Test", "apartment_code": "A101", "residential_area": "Test"},
+                ),
             ],
         )
 
