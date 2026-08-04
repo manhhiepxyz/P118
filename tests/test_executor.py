@@ -7,6 +7,7 @@ File: tests/test_executor.py
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
 from src.common.results import StandardResult
@@ -480,17 +481,10 @@ class TestExecutor:
 class TestExecutorEdgeCases:
     """Test edge cases."""
 
-    @pytest.mark.asyncio
-    async def test_empty_plan(self, repository, connectors):
-        """Test plan rỗng."""
-        plan = TaskPlan(goal="Empty", tasks=[])
-        executor = Executor(connectors, repository)
-
-        workflow_id, results = await executor.execute(plan)
-
-        assert len(results) == 0
-        workflow = await repository.get_workflow(workflow_id)
-        assert workflow["status"] == WorkflowStatus.COMPLETED.value
+    def test_empty_plan_rejected_before_execution(self):
+        """Plan rỗng bị schema từ chối, không bao giờ tới được Executor."""
+        with pytest.raises(ValidationError):
+            TaskPlan(goal="Empty", tasks=[])
 
     @pytest.mark.asyncio
     async def test_single_task(self, repository, connectors):
