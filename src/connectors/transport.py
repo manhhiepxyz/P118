@@ -4,6 +4,7 @@ Owner: Mạnh Hiệp (Executor layer)
 File: src/connectors/transport.py
 """
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -47,7 +48,7 @@ class TransportConnector(Connector):
         else:
             return StandardResult.fail(
                 error_code=ErrorCode.INVALID_INPUT,
-                error_message=f"Tool không được hỗ trợ: {tool_name}",
+                message=f"Tool không được hỗ trợ: {tool_name}",
             )
 
     async def _execute_register_vehicle(
@@ -64,26 +65,32 @@ class TransportConnector(Connector):
 
                 if response.is_success:
                     data = response.json()
-                    return StandardResult.ok(data={"vehicle_id": data.get("vehicle_id"), **data})
+                    if "vehicle_id" not in data:
+                        return StandardResult.fail(
+                            error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                            message="Thiếu vehicle_id trong response",
+                            retryable=False,
+                        )
+                    return StandardResult.ok(data={"vehicle_id": data["vehicle_id"]})
 
                 return self._handle_error_response(response)
 
         except httpx.TimeoutException:
             return StandardResult.fail(
                 error_code=ErrorCode.SERVICE_TIMEOUT,
-                error_message="Transport service timeout",
+                message="Transport service timeout",
                 retryable=True,
             )
         except httpx.ConnectError:
             return StandardResult.fail(
                 error_code=ErrorCode.SERVICE_UNAVAILABLE,
-                error_message="Không thể kết nối Transport service",
+                message="Không thể kết nối Transport service",
                 retryable=True,
             )
         except Exception as e:
             return StandardResult.fail(
-                error_code=ErrorCode.INTERNAL_ERROR,
-                error_message=f"Lỗi không mong đợi: {str(e)}",
+                error_code=ErrorCode.INTERNAL_SERVICE_ERROR,
+                message=f"Lỗi không mong đợi: {str(e)}",
                 retryable=False,
             )
 
@@ -101,26 +108,34 @@ class TransportConnector(Connector):
 
                 if response.is_success:
                     data = response.json()
-                    return StandardResult.ok(data={"booking_id": data.get("booking_id"), **data})
+                    required_keys = ["booking_id", "parking_zone", "booking_date", "amount", "currency"]
+                    missing = [k for k in required_keys if k not in data]
+                    if missing:
+                        return StandardResult.fail(
+                            error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                            message=f"Thiếu {', '.join(missing)} trong response",
+                            retryable=False,
+                        )
+                    return StandardResult.ok(data={k: data[k] for k in required_keys})
 
                 return self._handle_error_response(response)
 
         except httpx.TimeoutException:
             return StandardResult.fail(
                 error_code=ErrorCode.SERVICE_TIMEOUT,
-                error_message="Parking service timeout",
+                message="Parking service timeout",
                 retryable=True,
             )
         except httpx.ConnectError:
             return StandardResult.fail(
                 error_code=ErrorCode.SERVICE_UNAVAILABLE,
-                error_message="Không thể kết nối Parking service",
+                message="Không thể kết nối Parking service",
                 retryable=True,
             )
         except Exception as e:
             return StandardResult.fail(
-                error_code=ErrorCode.INTERNAL_ERROR,
-                error_message=f"Lỗi không mong đợi: {str(e)}",
+                error_code=ErrorCode.INTERNAL_SERVICE_ERROR,
+                message=f"Lỗi không mong đợi: {str(e)}",
                 retryable=False,
             )
 
@@ -128,10 +143,10 @@ class TransportConnector(Connector):
         """Map HTTP error response sang StandardResult."""
         try:
             error_data = response.json()
-            error_code_str = error_data.get("error_code", "UNKNOWN_ERROR")
+            error_code_str = error_data.get("error_code", "UNKNOWN_EXTERNAL_ERROR")
             error_message = error_data.get("message", "Unknown error")
         except Exception:
-            error_code_str = "UNKNOWN_ERROR"
+            error_code_str = "UNKNOWN_EXTERNAL_ERROR"
             error_message = f"HTTP {response.status_code}"
 
         error_code = self._map_error_code(error_code_str)
@@ -139,15 +154,15 @@ class TransportConnector(Connector):
 
         return StandardResult.fail(
             error_code=error_code,
-            error_message=error_message,
+            message=error_message,
             retryable=retryable,
         )
 
     def _map_error_code(self, code: str) -> ErrorCode:
         """Map error code từ API sang ErrorCode nội bộ."""
         mapping = {
-            "VALIDATION_ERROR": ErrorCode.VALIDATION_ERROR,
-            "VEHICLE_EXISTS": ErrorCode.CONFLICT,
+            "VALIDATION_ERROR": ErrorCode.INVALID_INPUT,
+            "VEHICLE_EXISTS": ErrorCode.VEHICLE_ALREADY_EXISTS,
             "NO_AVAILABILITY": ErrorCode.NO_AVAILABILITY,
             "VEHICLE_NOT_FOUND": ErrorCode.VEHICLE_NOT_FOUND,
             "INVALID_DATA": ErrorCode.INVALID_INPUT,
@@ -156,9 +171,12 @@ class TransportConnector(Connector):
         try:
             return ErrorCode(code)
         except ValueError:
-            return mapping.get(code, ErrorCode.UNKNOWN_ERROR)
+            return mapping.get(code, ErrorCode.UNKNOWN_EXTERNAL_ERROR)
 
-    async def _get_client(self) -> httpx.AsyncClient:
+    @asynccontextmanager
+    async def _get_client(self):
         if self._client is not None:
-            return self._client
-        return httpx.AsyncClient(timeout=self.timeout)
+            yield self._client
+        else:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                yield client

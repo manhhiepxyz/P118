@@ -36,7 +36,6 @@ class Executor:
             repository: WorkflowStateRepository để lưu state
             on_failure: Callback khi task thất bại (workflow_id, task_id, error_code, message, retryable)
         """
-        self.connectors = {c.can_handle: c for c in connectors}
         self._connector_map: dict[str, Connector] = {}
         for connector in connectors:
             for tool_name in connector.tool_names:
@@ -87,7 +86,6 @@ class Executor:
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
-        existing_context: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         """Thực thi TaskPlan.
 
@@ -132,12 +130,6 @@ class Executor:
         # Cập nhật workflow status
         await self.repository.update_workflow_status(workflow_id, WorkflowStatus.RUNNING)
 
-        # Merge existing context vào completed_results
-        if existing_context:
-            # Tạo fake StandardResult cho existing context
-            for key, value in existing_context.items():
-                completed_results[key] = StandardResult.ok(data={key: value})
-
         # Thực thi tasks theo thứ tự (topological sort đơn giản)
         remaining_tasks = list(plan.tasks)
         max_iterations = len(plan.tasks) * 2  # Prevent infinite loop
@@ -164,7 +156,7 @@ class Executor:
                         # Dependency error
                         result = StandardResult.fail(
                             error_code=ErrorCode.DEPENDENCY_ERROR,
-                            error_message=str(e),
+                            message=str(e),
                             retryable=False,
                         )
                         task_statuses[task.task_id] = TaskStatus.FAILED
@@ -180,7 +172,7 @@ class Executor:
                     if connector is None:
                         result = StandardResult.fail(
                             error_code=ErrorCode.UNKNOWN_TOOL,
-                            error_message=f"Không có Connector cho tool: {task.tool}",
+                            message=f"Không có Connector cho tool: {task.tool}",
                             retryable=False,
                         )
                         task_statuses[task.task_id] = TaskStatus.FAILED
@@ -213,7 +205,7 @@ class Executor:
                                 workflow_id,
                                 task.task_id,
                                 result.error_code or ErrorCode.UNKNOWN_ERROR,
-                                result.error_message or "Unknown error",
+                                result.message or "Unknown error",
                                 result.is_retryable,
                             )
 
@@ -226,7 +218,7 @@ class Executor:
                     task_statuses[task.task_id] = TaskStatus.FAILED
                     result = StandardResult.fail(
                         error_code=ErrorCode.DEPENDENCY_ERROR,
-                        error_message=f"Dependency không thỏa mãn cho task {task.task_id}",
+                        message=f"Dependency không thỏa mãn cho task {task.task_id}",
                         retryable=False,
                     )
                     completed_results[task.task_id] = result
@@ -236,7 +228,7 @@ class Executor:
 
         # Final workflow status
         all_success = all(task_statuses[t.task_id] == TaskStatus.SUCCESS for t in plan.tasks)
-        final_status = WorkflowStatus.COMPLETED if all_success else WorkflowStatus.FAILED
+        final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
         await self.repository.update_workflow_status(workflow_id, final_status)
 
         return workflow_id, completed_results

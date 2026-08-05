@@ -114,107 +114,101 @@ PARTIAL_PAY_FEE_PLAN = TaskPlan(
     ],
 )
 
-# Plan có cycle (để test validator)
-CYCLE_PLAN = TaskPlan(
-    goal="Test cycle detection",
-    tasks=[
-        Task(
-            task_id="T1",
-            tool="register_resident",
-            depends_on=["T2"],  # T1 phụ thuộc T2
-            input={
+# Invalid plans dưới dạng dict để tránh ValidationError khi import
+CYCLE_PLAN = {
+    "goal": "Test cycle detection",
+    "tasks": [
+        {
+            "task_id": "T1",
+            "tool": "register_resident",
+            "depends_on": ["T2"],
+            "input": {
                 "full_name": "Test",
                 "apartment_code": "A101",
                 "residential_area": "Test Area",
             },
-        ),
-        Task(
-            task_id="T2",
-            tool="register_vehicle",
-            depends_on=["T1"],  # T2 phụ thuộc T1 -> cycle
-            input={
-                "resident_id": InputRef(from_task="T1", field="resident_id"),
+        },
+        {
+            "task_id": "T2",
+            "tool": "register_vehicle",
+            "depends_on": ["T1"],
+            "input": {
+                "resident_id": {"from_task": "T1", "field": "resident_id"},
                 "plate_number": "51A-11111",
                 "vehicle_type": "car",
             },
-        ),
+        },
     ],
-)
+}
 
-# Plan thiếu dependency (T2 tham chiếu T3 không tồn tại)
-MISSING_DEPENDENCY_PLAN = TaskPlan(
-    goal="Test missing dependency",
-    tasks=[
-        Task(
-            task_id="T1",
-            tool="register_resident",
-            depends_on=[],
-            input={
+MISSING_DEPENDENCY_PLAN = {
+    "goal": "Test missing dependency",
+    "tasks": [
+        {
+            "task_id": "T1",
+            "tool": "register_resident",
+            "depends_on": [],
+            "input": {
                 "full_name": "Test",
                 "apartment_code": "A101",
                 "residential_area": "Test Area",
             },
-        ),
-        Task(
-            task_id="T2",
-            tool="register_vehicle",
-            depends_on=["T3"],  # T3 không tồn tại
-            input={
-                "resident_id": InputRef(from_task="T1", field="resident_id"),
+        },
+        {
+            "task_id": "T2",
+            "tool": "register_vehicle",
+            "depends_on": ["T3"],
+            "input": {
+                "resident_id": {"from_task": "T1", "field": "resident_id"},
                 "plate_number": "51A-11111",
                 "vehicle_type": "car",
             },
-        ),
+        },
     ],
-)
+}
 
-# Plan có tool không trong allowlist
-INVALID_TOOL_PLAN = TaskPlan(
-    goal="Test invalid tool",
-    tasks=[
-        Task(
-            task_id="T1",
-            tool="delete_resident",  # Không trong allowlist
-            depends_on=[],
-            input={
+INVALID_TOOL_PLAN = {
+    "goal": "Test invalid tool",
+    "tasks": [
+        {
+            "task_id": "T1",
+            "tool": "delete_resident",
+            "depends_on": [],
+            "input": {
                 "resident_id": "RES-001",
             },
-        ),
+        },
     ],
-)
+}
 
-# Plan thiếu required field
-MISSING_FIELD_PLAN = TaskPlan(
-    goal="Test missing field",
-    tasks=[
-        Task(
-            task_id="T1",
-            tool="register_resident",
-            depends_on=[],
-            input={
+MISSING_FIELD_PLAN = {
+    "goal": "Test missing field",
+    "tasks": [
+        {
+            "task_id": "T1",
+            "tool": "register_resident",
+            "depends_on": [],
+            "input": {
                 "full_name": "Test",
-                # Thiếu apartment_code và residential_area
             },
-        ),
+        },
     ],
-)
+}
 
-# Plan register_vehicle thiếu resident_id (không dùng InputRef)
-MISSING_RESIDENT_ID_PLAN = TaskPlan(
-    goal="Test missing resident_id",
-    tasks=[
-        Task(
-            task_id="T1",
-            tool="register_vehicle",
-            depends_on=[],
-            input={
+MISSING_RESIDENT_ID_PLAN = {
+    "goal": "Test missing resident_id",
+    "tasks": [
+        {
+            "task_id": "T1",
+            "tool": "register_vehicle",
+            "depends_on": [],
+            "input": {
                 "plate_number": "51A-11111",
                 "vehicle_type": "car",
-                # Thiếu resident_id
             },
-        ),
+        },
     ],
-)
+}
 
 # Tất cả plans để test nhanh
 ALL_PLANS = [

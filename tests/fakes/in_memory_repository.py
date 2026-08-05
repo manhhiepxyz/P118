@@ -5,7 +5,7 @@ File: tests/fakes/in_memory_repository.py
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.common.enums import TaskStatus, WorkflowStatus
 from src.common.repository import WorkflowStateRepository
@@ -28,7 +28,7 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         workflow_data = workflow_data.copy()
         workflow_data["id"] = workflow_id
         workflow_data["status"] = WorkflowStatus.PENDING.value
-        workflow_data["created_at"] = datetime.utcnow().isoformat()
+        workflow_data["created_at"] = datetime.now(UTC).isoformat()
         workflow_data["updated_at"] = workflow_data["created_at"]
         self._workflows[workflow_id] = workflow_data
         return workflow_id
@@ -42,7 +42,7 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         if workflow_id not in self._workflows:
             raise ValueError(f"Workflow not found: {workflow_id}")
         self._workflows[workflow_id]["status"] = status.value
-        self._workflows[workflow_id]["updated_at"] = datetime.utcnow().isoformat()
+        self._workflows[workflow_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def create_task(
         self,
@@ -56,7 +56,7 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         task_data = task_data.copy()
         task_data["workflow_id"] = workflow_id
         task_data["status"] = TaskStatus.PENDING.value
-        task_data["created_at"] = datetime.utcnow().isoformat()
+        task_data["created_at"] = datetime.now(UTC).isoformat()
         task_data["updated_at"] = task_data["created_at"]
 
         key = f"{workflow_id}:{task_data['id']}"
@@ -73,7 +73,7 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         if key not in self._tasks:
             raise ValueError(f"Task not found: {task_id} in workflow {workflow_id}")
         self._tasks[key]["status"] = status.value
-        self._tasks[key]["updated_at"] = datetime.utcnow().isoformat()
+        self._tasks[key]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def save_task_result(
         self,
@@ -90,10 +90,10 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
             "success": result.success,
             "data": result.data,
             "error_code": result.error_code.value if result.error_code else None,
-            "error_message": result.error_message,
+            "message": result.message,
             "retryable": result.retryable,
         }
-        self._tasks[key]["updated_at"] = datetime.utcnow().isoformat()
+        self._tasks[key]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def get_workflow(self, workflow_id: str) -> dict | None:
         """Lấy thông tin workflow."""

@@ -4,7 +4,7 @@ Owner: Mạnh Hiệp (Executor layer)
 File: src/common/results.py
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from src.common.enums import ErrorCode
 
@@ -17,30 +17,30 @@ class StandardResult:
     """
 
     success: bool
-    data: dict = field(default_factory=dict)
+    data: dict | None = None
     error_code: ErrorCode | None = None
-    error_message: str | None = None
+    message: str | None = None
     retryable: bool = False
 
     @classmethod
-    def ok(cls, data: dict) -> "StandardResult":
+    def ok(cls, data: dict, message: str | None = None) -> "StandardResult":
         """Tạo kết quả thành công."""
-        return cls(success=True, data=data, retryable=False)
+        return cls(success=True, data=data, message=message, retryable=False)
 
     @classmethod
     def fail(
         cls,
         error_code: ErrorCode,
-        error_message: str,
+        message: str,
         retryable: bool = False,
         data: dict | None = None,
     ) -> "StandardResult":
         """Tạo kết quả thất bại."""
         return cls(
             success=False,
-            data=data or {},
+            data=data,
             error_code=error_code,
-            error_message=error_message,
+            message=message,
             retryable=retryable,
         )
 

@@ -101,7 +101,7 @@ def create_no_availability_response(message: str = "Không có chỗ trống") -
     """Tạo response NO_AVAILABILITY."""
     return StandardResult.fail(
         error_code=ErrorCode.NO_AVAILABILITY,
-        error_message=message,
+        message=message,
         retryable=False,
     )
 
@@ -110,7 +110,7 @@ def create_service_timeout_response(message: str = "Service timeout") -> Standar
     """Tạo response SERVICE_TIMEOUT (retryable)."""
     return StandardResult.fail(
         error_code=ErrorCode.SERVICE_TIMEOUT,
-        error_message=message,
+        message=message,
         retryable=True,
     )
 
@@ -119,6 +119,6 @@ def create_validation_error_response(message: str = "Dữ liệu không hợp l�
     """Tạo response VALIDATION_ERROR."""
     return StandardResult.fail(
         error_code=ErrorCode.VALIDATION_ERROR,
-        error_message=message,
+        message=message,
         retryable=False,
     )

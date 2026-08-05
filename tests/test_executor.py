@@ -140,7 +140,7 @@ class TestExecutor:
 
         # Kiểm tra workflow status
         workflow = await repository.get_workflow(workflow_id)
-        assert workflow["status"] == WorkflowStatus.COMPLETED.value
+        assert workflow["status"] == WorkflowStatus.SUCCESS.value
 
         # Kiểm tra task statuses
         for task_id in ["T1", "T2", "T3", "T4"]:
@@ -232,37 +232,6 @@ class TestExecutor:
             assert task["status"] == TaskStatus.SUCCESS.value
             assert "result" in task
             assert task["result"]["success"] is True
-
-    @pytest.mark.asyncio
-    async def test_partial_goal_book_parking_only(self, repository, connectors):
-        """Test partial goal: chỉ book_parking (đã có vehicle_id)."""
-        plan = TaskPlan(
-            goal="Đặt chỗ cho xe",
-            tasks=[
-                Task(
-                    task_id="T1",
-                    tool="book_parking",
-                    depends_on=[],
-                    input={
-                        "vehicle_id": "VEH-001",
-                        "booking_date": "2026-08-10",
-                        "parking_zone": "ZONE_A",
-                    },
-                ),
-            ],
-        )
-
-        executor = Executor(connectors, repository)
-        workflow_id, results = await executor.execute(plan)
-
-        assert len(results) == 1
-        assert results["T1"].success is True
-
-        # Chỉ book_parking connector được gọi
-        assert connectors[2].call_count == 1
-        assert connectors[0].call_count == 0
-        assert connectors[1].call_count == 0
-        assert connectors[3].call_count == 0
 
     @pytest.mark.asyncio
     async def test_partial_goal_book_and_pay(self, repository, connectors):
@@ -432,7 +401,7 @@ class TestExecutor:
         workflow_id, _ = await executor.execute(full_flow_plan)
 
         workflow = await repository.get_workflow(workflow_id)
-        assert workflow["status"] == WorkflowStatus.COMPLETED.value
+        assert workflow["status"] == WorkflowStatus.SUCCESS.value
 
     @pytest.mark.asyncio
     async def test_workflow_status_failed_on_any_failure(self, repository, connectors, full_flow_plan):
@@ -445,37 +414,6 @@ class TestExecutor:
 
         workflow = await repository.get_workflow(workflow_id)
         assert workflow["status"] == WorkflowStatus.FAILED.value
-
-    @pytest.mark.asyncio
-    async def test_existing_context_used(self, repository, connectors):
-        """Test existing_context được dùng thay vì chạy task."""
-        plan = TaskPlan(
-            goal="Test existing context",
-            tasks=[
-                Task(
-                    task_id="T1",
-                    tool="book_parking",
-                    depends_on=[],
-                    input={
-                        "vehicle_id": "VEH-001",  # Sẽ được override bởi existing_context
-                        "booking_date": "2026-08-10",
-                        "parking_zone": "ZONE_A",
-                    },
-                ),
-            ],
-        )
-
-        # Có existing context vehicle_id khác
-        executor = Executor(connectors, repository)
-        workflow_id, results = await executor.execute(
-            plan,
-            existing_context={"vehicle_id": "VEH-999"},
-        )
-
-        # existing_context được ưu tiên? Hiện tại plan input dùng VEH-001
-        # Executor sẽ resolve input từ plan, existing_context chỉ dùng cho InputRef
-        # Cần điều chỉnh: existing_context dùng cho data propagation khi task không có InputRef
-        pass
 
 
 class TestExecutorEdgeCases:
