@@ -491,6 +491,7 @@ class TestExecutorEdgeCases:
 
         def on_failure(workflow_id, task_id, error_code, message, retryable):
             captured["error_code"] = error_code
+            captured["retryable"] = retryable
 
         # Connector trả failure không có error_code
         class NoErrorCodeConnector(Connector):
@@ -523,6 +524,7 @@ class TestExecutorEdgeCases:
 
         assert results["T1"].success is False
         assert captured["error_code"] == ErrorCode.UNKNOWN_EXTERNAL_ERROR
+        assert captured["retryable"] is False
 
 
 if __name__ == "__main__":

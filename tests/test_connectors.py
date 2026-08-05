@@ -314,3 +314,14 @@ async def test_unknown_external_error_mapping(mock_httpx_client):
 
     assert result.success is False
     assert result.error_code == ErrorCode.UNKNOWN_EXTERNAL_ERROR
+
+
+def test_create_invalid_input_response_helper():
+    """Kiểm tra trực tiếp helper create_invalid_input_response trả về ErrorCode.INVALID_INPUT."""
+    from tests.fakes.fake_connector import create_invalid_input_response
+
+    result = create_invalid_input_response("Test invalid input")
+    assert result.success is False
+    assert result.error_code == ErrorCode.INVALID_INPUT
+    assert result.message == "Test invalid input"
+    assert result.retryable is False
