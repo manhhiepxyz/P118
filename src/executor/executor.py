@@ -92,7 +92,6 @@ class Executor:
         Args:
             plan: TaskPlan cần thực thi
             workflow_id: ID workflow (tạo mới nếu None)
-            existing_context: Context có sẵn (resident_id, vehicle_id, booking_id)
 
         Returns:
             Tuple (workflow_id, completed_results)
@@ -204,7 +203,7 @@ class Executor:
                             self.on_failure(
                                 workflow_id,
                                 task.task_id,
-                                result.error_code or ErrorCode.UNKNOWN_ERROR,
+                                result.error_code or ErrorCode.UNKNOWN_EXTERNAL_ERROR,
                                 result.message or "Unknown error",
                                 result.is_retryable,
                             )

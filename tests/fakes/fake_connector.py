@@ -115,10 +115,10 @@ def create_service_timeout_response(message: str = "Service timeout") -> Standar
     )
 
 
-def create_validation_error_response(message: str = "Dữ liệu không hợp lệ") -> StandardResult:
-    """Tạo response VALIDATION_ERROR."""
+def create_invalid_input_response(message: str = "Dữ liệu không hợp lệ") -> StandardResult:
+    """Tạo response INVALID_INPUT."""
     return StandardResult.fail(
-        error_code=ErrorCode.VALIDATION_ERROR,
+        error_code=ErrorCode.INVALID_INPUT,
         message=message,
         retryable=False,
     )

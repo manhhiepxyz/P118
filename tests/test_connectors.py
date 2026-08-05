@@ -1,3 +1,9 @@
+"""Tests cho Connector layer.
+
+Owner: Mạnh Hiệp (Executor layer)
+File: tests/test_connectors.py
+"""
+
 from unittest.mock import MagicMock
 
 import httpx
@@ -28,6 +34,11 @@ def mock_httpx_client():
     return MockClient()
 
 
+# ---------------------------------------------------------------------------
+# ResidentConnector
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_resident_connector_success(mock_httpx_client):
     mock_response = MagicMock()
@@ -45,6 +56,25 @@ async def test_resident_connector_success(mock_httpx_client):
 
 
 @pytest.mark.asyncio
+async def test_resident_connector_url_and_payload(mock_httpx_client):
+    """ResidentConnector phải POST đúng URL /api/residents và truyền nguyên payload."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {"resident_id": "RES-999"}
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    payload = {"full_name": "Nguyễn Văn A", "apartment_code": "A101", "residential_area": "VH-SGV"}
+    connector = ResidentConnector(base_url="http://localhost:8001", client=mock_httpx_client)
+    await connector.execute("register_resident", payload)
+
+    mock_httpx_client.post_mock.assert_called_once_with(
+        "http://localhost:8001/api/residents",
+        json=payload,
+        timeout=30.0,
+    )
+
+
+@pytest.mark.asyncio
 async def test_resident_connector_missing_output(mock_httpx_client):
     mock_response = MagicMock()
     mock_response.is_success = True
@@ -56,6 +86,11 @@ async def test_resident_connector_missing_output(mock_httpx_client):
 
     assert result.success is False
     assert result.error_code == ErrorCode.UNKNOWN_EXTERNAL_ERROR
+
+
+# ---------------------------------------------------------------------------
+# TransportConnector – register_vehicle
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -70,6 +105,30 @@ async def test_transport_connector_register_vehicle_success(mock_httpx_client):
 
     assert result.success is True
     assert result.data == {"vehicle_id": "VEH-123"}
+
+
+@pytest.mark.asyncio
+async def test_transport_connector_register_vehicle_url_and_payload(mock_httpx_client):
+    """TransportConnector phải POST đúng URL /api/vehicles và truyền nguyên payload."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {"vehicle_id": "VEH-888"}
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    payload = {"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"}
+    connector = TransportConnector(base_url="http://localhost:8002", client=mock_httpx_client)
+    await connector.execute("register_vehicle", payload)
+
+    mock_httpx_client.post_mock.assert_called_once_with(
+        "http://localhost:8002/api/vehicles",
+        json=payload,
+        timeout=30.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TransportConnector – book_parking
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -100,17 +159,102 @@ async def test_transport_connector_book_parking_success(mock_httpx_client):
 
 
 @pytest.mark.asyncio
-async def test_payment_connector_success(mock_httpx_client):
+async def test_transport_connector_book_parking_url_and_payload(mock_httpx_client):
+    """TransportConnector phải POST đúng URL /api/parking/bookings và truyền nguyên payload."""
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"payment_id": "PAY-1", "payment_status": "SUCCESS"}
+    mock_response.json.return_value = {
+        "booking_id": "BOOK-777",
+        "parking_zone": "B2",
+        "booking_date": "2026-08-10",
+        "amount": 200000,
+        "currency": "VND",
+    }
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-08-10", "parking_zone": "B2"}
+    connector = TransportConnector(base_url="http://localhost:8002", client=mock_httpx_client)
+    await connector.execute("book_parking", payload)
+
+    mock_httpx_client.post_mock.assert_called_once_with(
+        "http://localhost:8002/api/parking/bookings",
+        json=payload,
+        timeout=30.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# PaymentConnector
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_payment_connector_paid_status(mock_httpx_client):
+    """Happy path: Mock API trả PAID → kết quả PAID."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {"payment_id": "PAY-1", "payment_status": "PAID"}
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = PaymentConnector(client=mock_httpx_client)
     result = await connector.execute("pay_fee", {"booking_id": "BOOK-1"})
 
     assert result.success is True
-    assert result.data == {"payment_id": "PAY-1", "payment_status": "SUCCESS"}
+    assert result.data == {"payment_id": "PAY-1", "payment_status": "PAID"}
+
+
+@pytest.mark.asyncio
+async def test_payment_connector_maps_success_to_paid(mock_httpx_client):
+    """Legacy provider trả SUCCESS → phải map thành PAID."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {"payment_id": "PAY-2", "payment_status": "SUCCESS"}
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = PaymentConnector(client=mock_httpx_client)
+    result = await connector.execute("pay_fee", {"booking_id": "BOOK-2"})
+
+    assert result.success is True
+    assert result.data["payment_status"] == "PAID", "SUCCESS phải được map sang PAID"
+
+
+@pytest.mark.asyncio
+async def test_payment_connector_unknown_status_returns_error(mock_httpx_client):
+    """payment_status không nằm trong allowlist → UNKNOWN_EXTERNAL_ERROR."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {"payment_id": "PAY-3", "payment_status": "WEIRD_STATUS"}
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = PaymentConnector(client=mock_httpx_client)
+    result = await connector.execute("pay_fee", {"booking_id": "BOOK-3"})
+
+    assert result.success is False
+    assert result.error_code == ErrorCode.UNKNOWN_EXTERNAL_ERROR
+
+
+@pytest.mark.asyncio
+async def test_payment_connector_url_and_payload(mock_httpx_client):
+    """PaymentConnector phải POST đúng URL /api/payments và truyền nguyên payload."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {"payment_id": "PAY-999", "payment_status": "PAID"}
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    payload = {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"}
+    connector = PaymentConnector(base_url="http://localhost:8003", client=mock_httpx_client)
+    await connector.execute("pay_fee", payload)
+
+    mock_httpx_client.post_mock.assert_called_once_with(
+        "http://localhost:8003/api/payments",
+        json=payload,
+        timeout=30.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Generic error cases
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

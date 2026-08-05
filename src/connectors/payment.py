@@ -62,9 +62,14 @@ class PaymentConnector(Connector):
                             message="Thiếu required output trong response",
                             retryable=False,
                         )
-                    return StandardResult.ok(
-                        data={"payment_id": data["payment_id"], "payment_status": data["payment_status"]}
-                    )
+                    normalized = self._normalize_payment_status(data["payment_status"])
+                    if normalized is None:
+                        return StandardResult.fail(
+                            error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                            message=f"payment_status không hợp lệ: {data['payment_status']}",
+                            retryable=False,
+                        )
+                    return StandardResult.ok(data={"payment_id": data["payment_id"], "payment_status": normalized})
 
                 return self._handle_error_response(response)
 
@@ -120,6 +125,19 @@ class PaymentConnector(Connector):
             return ErrorCode(code)
         except ValueError:
             return mapping.get(code, ErrorCode.UNKNOWN_EXTERNAL_ERROR)
+
+    def _normalize_payment_status(self, status: str) -> str | None:
+        """Chuẩn hóa payment_status về allowlist nội bộ.
+
+        Allowlist: PENDING, PAID, FAILED, REFUNDED.
+        Map tường minh: SUCCESS → PAID (legacy provider).
+        Giá trị không nhận biết → None (caller trả UNKNOWN_EXTERNAL_ERROR).
+        """
+        _legacy_map = {"SUCCESS": "PAID"}
+        _allowlist = {"PENDING", "PAID", "FAILED", "REFUNDED"}
+        if status in _allowlist:
+            return status
+        return _legacy_map.get(status)
 
     @asynccontextmanager
     async def _get_client(self):
