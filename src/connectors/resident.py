@@ -88,7 +88,7 @@ class ResidentConnector(Connector):
             async with self._get_client() as client:
                 response = await client.post(
                     f"{self.base_url}/api/residents",  # URL cố định theo contract
-                    json=input_data,                   # payload nguyên vẹn từ TaskPlan
+                    json=input_data,  # payload nguyên vẹn từ TaskPlan
                     timeout=self.timeout,
                 )
 
