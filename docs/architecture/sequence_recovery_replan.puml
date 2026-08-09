@@ -1,0 +1,114 @@
+@startuml Sequence - Recovery Flow (NO_AVAILABILITY → REPLAN)
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+title Sequence Diagram — Hero Recovery Scenario\nNO_AVAILABILITY → REPLAN → Zone B → SUCCESS
+
+actor User
+participant "React UI" as UI
+participant "REST API" as API
+participant "Task Scheduler" as Sched
+participant "Prepare Action" as Prep
+participant "Policy Engine" as Pol
+participant "Executor" as Exec
+participant "Tool Registry" as Reg
+participant "Transport\nAdapter" as TransAdapt
+participant "Transport\nService :8002" as TransSvc
+participant "Recovery\nHandler" as Recov
+participant "Replanner" as Replan
+participant "TaskPlan\nValidator" as PlanVal
+database "PostgreSQL" as DB
+
+== Initial execution: T1, T2 COMPLETED ==
+note over Sched
+  Giả sử T1 (register_resident) và T2 (register_vehicle)
+  đã COMPLETED. Đang thực hiện T3 (book_parking).
+end note
+
+== T3: book_parking(Zone A) → FAILURE ==
+Sched -> Prep: T3: book_parking\n{resident_id, vehicle_id, zone: "A"}
+Prep -> Pol: ProposedAction
+Pol -> Exec: AUTO_ALLOWED
+Exec -> Reg: execute("book_parking", params, key)
+Reg -> TransAdapt: adapter_fn(params, idempotency_key)
+TransAdapt -> TransSvc: POST /parking\n{zone: "A", ...}\nHeaders: Idempotency-Key
+
+alt Force error injection (?force_error=NO_AVAILABILITY)
+    TransSvc -> TransAdapt: {error: {code: "NO_AVAILABILITY",\nmessage: "No parking slot available in zone A",\nretryable: false}}
+else Normal flow (no availability)
+    TransSvc -> TransAdapt: {error: {code: "NO_AVAILABILITY", ...}}
+end
+
+TransAdapt -> Exec: StandardResult\n{success: false, error: {code: "NO_AVAILABILITY"}}
+Exec -> DB: UPDATE step_results\nstatus=FAILED, error_code="NO_AVAILABILITY"
+Exec -> Recov: failure signal\n{error_code, retryable, retry_count}
+
+== Recovery Handler decides strategy ==
+Recov -> Recov: lookup (error.code, retryable, retry_count)\n"NO_AVAILABILITY" + retryable=false → REPLAN
+Recov -> DB: UPDATE flow_executions\nstatus=RECOVERING
+Recov -> Replan: REPLAN signal\n{completed_steps: [T1, T2],\nfailed_step: T3,\nerror: "Zone A unavailable"}
+
+== Replanner reasons semantically ==
+Replan -> Replan: LLM reasoning:\n"Zone A hết chỗ → thử Zone B"\nGenerate new plan for remaining steps
+Replan -> Replan: proposed replan:\n[T3': book_parking(zone="B"),\nT4': pay_fee]
+Replan -> PlanVal: proposed replan
+PlanVal -> PlanVal: validate schema\ncheck allowlist\ncheck cycle\n(same validation as initial plan)
+PlanVal -> Sched: validated replan
+Sched -> DB: UPDATE flow_executions\nstatus=RUNNING
+
+== Continue with T3': book_parking(Zone B) ==
+Sched -> Prep: T3': book_parking\n{resident_id, vehicle_id, zone: "B"}
+Prep -> Pol: ProposedAction
+Pol -> Exec: AUTO_ALLOWED
+Exec -> Reg: execute("book_parking", params, key)
+Reg -> TransAdapt: adapter_fn(params, new_idempotency_key)
+TransAdapt -> TransSvc: POST /parking\n{zone: "B", ...}\nHeaders: Idempotency-Key
+TransSvc -> TransAdapt: {booking_id: "PKG-045",\nzone: "B", monthly_fee: 800000}
+TransAdapt -> TransAdapt: normalize → StandardResult
+TransAdapt -> Exec: StandardResult\n{success: true, transaction_id: "PKG-045",\ndata: {zone: "B", fee: 800000}}
+Exec -> DB: INSERT step_results (T3')\nstatus=COMPLETED
+Exec -> UI: emit state-change event
+UI -> UI: show T3' COMPLETED\n(zone B, fee 800k)
+
+== T4': pay_fee → SUCCESS ==
+Exec -> Sched: success → next task
+Sched -> Prep: T4': pay_fee\n{amount: 800000, booking_id: "PKG-045"}
+Prep -> Pol: ProposedAction\n{action_type: "PAYMENT",\namount: 800000}
+Pol -> Pol: check rules:\nR3: PAYMENT ≥ 300k → REQUIRES_APPROVAL
+Pol -> UI: push ProposedAction via WebSocket
+UI -> User: show approval modal\n"Thanh toán 800,000 VND cho phí đậu xe?"
+User -> UI: approve
+UI -> API: POST /flows/{id}/respond\n{approved: true}
+API -> Exec: approved
+Exec -> Reg: execute("pay_fee", params, key)
+Reg -> TransAdapt: (skip - not transport)
+note right: Actually calls Payment Adapter
+Reg -> TransAdapt: adapter_fn(params, key)
+TransAdapt -> TransSvc: (skip)
+note right: Actually calls Payment Service :8003
+TransAdapt -> Exec: (skip)
+note right: Actually Payment Adapter
+Exec -> Reg: (corrected flow)
+Reg -> TransAdapt: (not used for pay_fee)
+note over Reg
+  Correct path:
+  Executor → Registry → Payment Adapter → Payment Service
+end note
+Exec -> Sched: success → no more tasks
+
+== Workflow complete ==
+Sched -> DB: UPDATE flow_executions\nstatus=COMPLETED
+Sched -> UI: emit workflow COMPLETED event
+UI -> User: show success summary\n"Tất cả 4 bước hoàn thành\n(1 bước replan từ Zone A → Zone B)"
+
+note over Exec, TransSvc
+  **Key points:**
+  • T1, T2 không bị chạy lại (đã COMPLETED)
+  • T3 fail → REPLAN (không phải RETRY vì retryable=false)
+  • T3' thành công với zone B
+  • T4 yêu cầu HITL approval (amount ≥ 300k)
+  • Idempotency key khác nhau cho T3 và T3'
+end note
+
+@enduml

@@ -34,6 +34,7 @@ app.add_middleware(
 app.include_router(router, prefix="/api/v1")
 
 
+# health
 @app.get("/health")
 async def health():
     return {"status": "ok", "env": settings.app_env}

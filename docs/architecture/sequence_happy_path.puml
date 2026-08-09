@@ -1,0 +1,107 @@
+@startuml Sequence - Happy Path Flow
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+title Sequence Diagram — Happy Path Flow\nP-118 Agent Orchestration
+
+actor User
+participant "React UI" as UI
+participant "REST API\n:8000" as API
+participant "Goal Parser" as Parser
+participant "Task Planner" as Planner
+participant "TaskPlan\nValidator" as PlanVal
+participant "Validator" as Val
+participant "Task Scheduler" as Sched
+participant "Prepare Action" as Prep
+participant "Policy Engine" as Pol
+participant "Executor" as Exec
+participant "Tool Registry" as Reg
+participant "Resident\nAdapter" as ResAdapt
+participant "Transport\nAdapter" as TransAdapt
+participant "Payment\nAdapter" as PayAdapt
+participant "Resident\nService :8001" as ResSvc
+participant "Transport\nService :8002" as TransSvc
+participant "Payment\nService :8003" as PaySvc
+database "PostgreSQL" as DB
+
+== User submits goal ==
+User -> UI: "Tôi mới chuyển vào căn hộ A1201.\nHãy đăng ký cư dân, xe, chỗ đậu và thanh toán phí"
+UI -> API: POST /flows\n{goal_text, user_id}
+API -> Parser: parse(goal_text)
+Parser -> Parser: LLM extract intent\n{goal_type, apartment_id, user_info}
+Parser -> Planner: structured intent
+
+== Planning phase ==
+Planner -> Planner: LLM propose dependency graph\n[T1:register_resident, T2:register_vehicle,\nT3:book_parking, T4:pay_fee]
+Planner -> PlanVal: proposed TaskPlan
+PlanVal -> PlanVal: validate schema\ncheck allowlist (4 tools)\ncheck unique IDs\ncheck depends_on refs\ndetect cycles
+PlanVal -> Val: validated TaskPlan
+Val -> Val: check required fields\n(apartment_id, cccd, phone)
+Val -> DB: INSERT flow_executions\nstatus=PLANNING → RUNNING
+Val -> Sched: valid plan
+
+== Execution loop ==
+loop For each task in dependency order
+    Sched -> Sched: topological sort\nget next executable task
+    Sched -> Prep: next task (e.g., T1: register_resident)
+    Prep -> Prep: map output from COMPLETED steps\n→ input params for this task
+    Prep -> Pol: ProposedAction\n{tool, action_type, risk_level}
+
+    alt Policy = AUTO_ALLOWED
+        Pol -> Exec: AUTO_ALLOWED
+    else Policy = REQUIRES_APPROVAL
+        Pol -> UI: push ProposedAction via WebSocket
+        UI -> User: show approval modal
+        User -> UI: approve
+        UI -> API: POST /flows/{id}/respond\n{approved: true}
+        API -> Exec: approved
+    else Policy = DENIED
+        Pol -> API: DENIED → FAIL flow
+    end
+
+    Exec -> Exec: generate idempotency_key\n"{flow_id}-{task_id}-{tool_name}"
+    Exec -> Reg: execute(tool_name, params, idempotency_key)
+
+    alt T1: register_resident
+        Reg -> ResAdapt: adapter_fn(validated_params, key)
+        ResAdapt -> ResSvc: POST /residents\nHeaders: Idempotency-Key
+        ResSvc -> ResAdapt: {resident_id: "RES-123", ...}
+        ResAdapt -> ResAdapt: normalize → StandardResult\n{success: true, transaction_id, data}
+        ResAdapt -> Exec: StandardResult
+    else T2: register_vehicle
+        Reg -> TransAdapt: adapter_fn(validated_params, key)
+        TransAdapt -> TransSvc: POST /vehicles\nHeaders: Idempotency-Key
+        TransSvc -> TransAdapt: {vehicle_id: "VEH-456", ...}
+        TransAdapt -> Exec: StandardResult
+    else T3: book_parking
+        Reg -> TransAdapt: adapter_fn(validated_params, key)
+        TransAdapt -> TransSvc: POST /parking\nHeaders: Idempotency-Key
+        TransSvc -> TransAdapt: {booking_id: "PKG-789", zone: "A", fee: 800000}
+        TransAdapt -> Exec: StandardResult
+    else T4: pay_fee
+        Reg -> PayAdapt: adapter_fn(validated_params, key)
+        PayAdapt -> PaySvc: POST /charges\nHeaders: Idempotency-Key
+        PaySvc -> PayAdapt: {payment_ref: "PAY-999", paid: true}
+        PayAdapt -> Exec: StandardResult
+    end
+
+    alt Success
+        Exec -> DB: INSERT step_results\nstatus=COMPLETED\ntransaction_id, idempotency_key
+        Exec -> UI: emit state-change event via WebSocket
+        UI -> UI: update timeline\nmark task COMPLETED
+        Exec -> Sched: success → get next task
+    else Failure
+        Exec -> DB: UPDATE step_results\nstatus=FAILED, error_code
+        Exec -> Recovery: failure signal
+        note right: See Recovery Sequence diagram
+    end
+end
+
+== Workflow complete ==
+Sched -> Sched: no more PENDING tasks
+Sched -> DB: UPDATE flow_executions\nstatus=COMPLETED
+Sched -> UI: emit workflow COMPLETED event
+UI -> User: show success summary
+
+@enduml
