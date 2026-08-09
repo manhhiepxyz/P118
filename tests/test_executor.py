@@ -14,7 +14,10 @@ from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.base import Connector
 from src.executor.executor import Executor
-from tests.fakes.fake_connector import create_no_availability_response, create_success_response
+from tests.fakes.fake_connector import (
+    create_no_availability_response,
+    create_success_response,
+)
 from tests.fakes.in_memory_repository import InMemoryWorkflowStateRepository
 
 
@@ -140,7 +143,7 @@ class TestExecutor:
 
         # Kiểm tra workflow status
         workflow = await repository.get_workflow(workflow_id)
-        assert workflow["status"] == WorkflowStatus.COMPLETED.value
+        assert workflow["status"] == WorkflowStatus.SUCCESS.value
 
         # Kiểm tra task statuses
         for task_id in ["T1", "T2", "T3", "T4"]:
@@ -232,37 +235,6 @@ class TestExecutor:
             assert task["status"] == TaskStatus.SUCCESS.value
             assert "result" in task
             assert task["result"]["success"] is True
-
-    @pytest.mark.asyncio
-    async def test_partial_goal_book_parking_only(self, repository, connectors):
-        """Test partial goal: chỉ book_parking (đã có vehicle_id)."""
-        plan = TaskPlan(
-            goal="Đặt chỗ cho xe",
-            tasks=[
-                Task(
-                    task_id="T1",
-                    tool="book_parking",
-                    depends_on=[],
-                    input={
-                        "vehicle_id": "VEH-001",
-                        "booking_date": "2026-08-10",
-                        "parking_zone": "ZONE_A",
-                    },
-                ),
-            ],
-        )
-
-        executor = Executor(connectors, repository)
-        workflow_id, results = await executor.execute(plan)
-
-        assert len(results) == 1
-        assert results["T1"].success is True
-
-        # Chỉ book_parking connector được gọi
-        assert connectors[2].call_count == 1
-        assert connectors[0].call_count == 0
-        assert connectors[1].call_count == 0
-        assert connectors[3].call_count == 0
 
     @pytest.mark.asyncio
     async def test_partial_goal_book_and_pay(self, repository, connectors):
@@ -432,7 +404,7 @@ class TestExecutor:
         workflow_id, _ = await executor.execute(full_flow_plan)
 
         workflow = await repository.get_workflow(workflow_id)
-        assert workflow["status"] == WorkflowStatus.COMPLETED.value
+        assert workflow["status"] == WorkflowStatus.SUCCESS.value
 
     @pytest.mark.asyncio
     async def test_workflow_status_failed_on_any_failure(self, repository, connectors, full_flow_plan):
@@ -445,37 +417,6 @@ class TestExecutor:
 
         workflow = await repository.get_workflow(workflow_id)
         assert workflow["status"] == WorkflowStatus.FAILED.value
-
-    @pytest.mark.asyncio
-    async def test_existing_context_used(self, repository, connectors):
-        """Test existing_context được dùng thay vì chạy task."""
-        plan = TaskPlan(
-            goal="Test existing context",
-            tasks=[
-                Task(
-                    task_id="T1",
-                    tool="book_parking",
-                    depends_on=[],
-                    input={
-                        "vehicle_id": "VEH-001",  # Sẽ được override bởi existing_context
-                        "booking_date": "2026-08-10",
-                        "parking_zone": "ZONE_A",
-                    },
-                ),
-            ],
-        )
-
-        # Có existing context vehicle_id khác
-        executor = Executor(connectors, repository)
-        workflow_id, results = await executor.execute(
-            plan,
-            existing_context={"vehicle_id": "VEH-999"},
-        )
-
-        # existing_context được ưu tiên? Hiện tại plan input dùng VEH-001
-        # Executor sẽ resolve input từ plan, existing_context chỉ dùng cho InputRef
-        # Cần điều chỉnh: existing_context dùng cho data propagation khi task không có InputRef
-        pass
 
 
 class TestExecutorEdgeCases:
@@ -506,6 +447,84 @@ class TestExecutorEdgeCases:
 
         assert len(results) == 1
         assert results["T1"].success is True
+
+    @pytest.mark.asyncio
+    async def test_partial_goal_book_parking_only(self, repository, connectors):
+        """Partial goal chỉ gồm book_parking (có sẵn vehicle_id từ context).
+
+        Đây là ví dụ chính thức trong shared_contracts.md:
+        user đã có vehicle_id, chỉ cần đặt chỗ đỗ xe.
+        """
+        plan = TaskPlan(
+            goal="Đặt chỗ đỗ xe",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="book_parking",
+                    depends_on=[],
+                    input={
+                        "vehicle_id": "VEH-001",
+                        "booking_date": "2026-08-10",
+                        "parking_zone": "ZONE_A",
+                    },
+                ),
+            ],
+        )
+
+        executor = Executor(connectors, repository)
+        workflow_id, results = await executor.execute(plan)
+
+        assert len(results) == 1
+        assert results["T1"].success is True
+        assert results["T1"].data["booking_id"] == "BOOK-001"
+        assert connectors[2].last_input["vehicle_id"] == "VEH-001"
+
+        workflow = await repository.get_workflow(workflow_id)
+        assert workflow["status"] == WorkflowStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_failure_callback_receives_fallback_error_code(self, repository):
+        """Khi Connector trả StandardResult(success=False, error_code=None),
+        Executor không crash và on_failure nhận UNKNOWN_EXTERNAL_ERROR.
+        """
+        captured: dict = {}
+
+        def on_failure(workflow_id, task_id, error_code, message, retryable):
+            captured["error_code"] = error_code
+            captured["retryable"] = retryable
+
+        # Connector trả failure không có error_code
+        class NoErrorCodeConnector(Connector):
+            @property
+            def tool_names(self) -> list[str]:
+                return ["register_resident"]
+
+            async def execute(self, tool_name, input_data):
+                from src.common.results import StandardResult
+
+                return StandardResult(success=False, data=None, error_code=None, message="oops", retryable=False)
+
+        repo = InMemoryWorkflowStateRepository()
+        executor = Executor([NoErrorCodeConnector()], repo, on_failure=on_failure)
+
+        plan = TaskPlan(
+            goal="Test fallback error code",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="register_resident",
+                    depends_on=[],
+                    input={"full_name": "X", "apartment_code": "A1", "residential_area": "R"},
+                ),
+            ],
+        )
+
+        # Nếu Executor dùng ErrorCode.UNKNOWN_ERROR (không tồn tại) sẽ raise AttributeError
+        workflow_id, results = await executor.execute(plan)
+
+        assert results["T1"].success is False
+        assert captured["error_code"] == ErrorCode.UNKNOWN_EXTERNAL_ERROR
+        assert captured["retryable"] is False
 
 
 if __name__ == "__main__":
