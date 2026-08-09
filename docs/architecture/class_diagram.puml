@@ -1,0 +1,247 @@
+@startuml Class - Core Data Structures
+!theme plain
+skinparam classAttributeIconSize 0
+
+title Class Diagram\nCore Data Structures & Contracts
+
+' ===========================================================================
+' TaskPlan structures
+' ===========================================================================
+class TaskStep {
+    + id: str
+    + tool: Literal["register_resident",
+                     "register_vehicle",
+                     "book_parking",
+                     "pay_fee"]
+    + depends_on: list[str]
+    + input_mapping: dict[str, str]
+    + estimated_cost: int | None
+}
+
+class TaskPlan {
+    + tasks: list[TaskStep]
+    + validate_plan(cls, tasks)
+    __
+    **Validation rules:**
+    - Unique task IDs
+    - depends_on refs valid IDs
+    - No cyclic dependencies
+}
+
+TaskPlan "1" *-- "many" TaskStep : contains
+
+' ===========================================================================
+' StandardResult (service contract)
+' ===========================================================================
+class StandardResult {
+    + success: bool
+    + status: str
+    + transaction_id: str | None
+    + data: dict | None
+    + error: ServiceError | None
+    + meta: ResultMeta
+}
+
+class ServiceError {
+    + code: str
+    + message: str
+    + retryable: bool
+}
+
+class ResultMeta {
+    + idempotency_key: str
+    + timestamp: str
+}
+
+StandardResult "1" *-- "0..1" ServiceError : contains
+StandardResult "1" *-- "1" ResultMeta : contains
+
+' ===========================================================================
+' Tool Registry
+' ===========================================================================
+class ToolEntry {
+    + schema: type[BaseModel]
+    + adapter_fn: Callable
+    + action_type: str
+    + risk_level: str
+    + compensatable: bool
+    + compensation_fn: Callable | None
+}
+
+class TOOL_REGISTRY {
+    + {static} register_resident: ToolEntry
+    + {static} register_vehicle: ToolEntry
+    + {static} book_parking: ToolEntry
+    + {static} pay_fee: ToolEntry
+    + {static} execute(tool_name, params, key): StandardResult
+}
+
+TOOL_REGISTRY "1" *-- "4" ToolEntry : contains
+
+' ===========================================================================
+' Policy structures
+' ===========================================================================
+class ProposedAction {
+    + tool: str
+    + action_type: str
+    + amount: int | None
+    + resource_id: str | None
+    + risk_level: str
+}
+
+enum PolicyDecision {
+    AUTO_ALLOWED
+    REQUIRES_APPROVAL
+    DENIED
+}
+
+class PolicyRule {
+    + id: int
+    + condition: Callable[[ProposedAction], bool]
+    + decision: PolicyDecision
+}
+
+ProposedAction ..> PolicyDecision : evaluated by\nPolicy Engine
+
+' ===========================================================================
+' Recovery structures
+' ===========================================================================
+class RecoveryContext {
+    + error_code: str
+    + retryable: bool
+    + retry_count: int
+    + completed_steps: list[StepResult]
+    + failed_step: StepResult
+}
+
+enum RecoveryStrategy {
+    RETRY
+    REPLAN
+    REQUEST_HUMAN
+    COMPENSATE
+    FAIL_WORKFLOW
+}
+
+RecoveryContext ..> RecoveryStrategy : determines
+
+' ===========================================================================
+' Database models (simplified)
+' ===========================================================================
+class FlowExecution {
+    + id: UUID
+    + user_id: str
+    + status: str
+    + goal_text: str
+    + task_plan: JSONB
+    + completion_mode: str
+    + created_at: datetime
+    + updated_at: datetime
+}
+
+class StepResult {
+    + id: UUID
+    + flow_id: UUID
+    + task_id: str
+    + tool_name: str
+    + depends_on: JSONB
+    + status: str
+    + idempotency_key: str
+    + request_payload: JSONB
+    + response_payload: JSONB
+    + transaction_id: str | None
+    + error_code: str | None
+    + retry_count: int
+    + compensatable: bool
+    + compensation_tool: str | None
+    + started_at: datetime
+    + completed_at: datetime
+}
+
+class CompensationLog {
+    + id: UUID
+    + flow_id: UUID
+    + step_id: UUID
+    + tool_name: str
+    + status: str
+    + request_payload: JSONB
+    + response_payload: JSONB
+    + executed_at: datetime
+}
+
+FlowExecution "1" *-- "many" StepResult : has
+FlowExecution "1" *-- "many" CompensationLog : has
+StepResult "1" ..> "0..many" CompensationLog : compensated by
+
+' ===========================================================================
+' Adapter interfaces
+' ===========================================================================
+interface ServiceAdapter {
+    + {abstract} execute(params: BaseModel, idempotency_key: str): StandardResult
+    + {abstract} compensate(transaction_id: str): StandardResult
+    + {abstract} normalize(native_response: dict, idempotency_key: str): StandardResult
+}
+
+class ResidentAdapter {
+    + register(params, key): StandardResult
+    + cancel(transaction_id): StandardResult
+    - normalize(response, key): StandardResult
+}
+
+class TransportAdapter {
+    + register_vehicle(params, key): StandardResult
+    + book_parking(params, key): StandardResult
+    + cancel_vehicle(transaction_id): StandardResult
+    + cancel_parking(transaction_id): StandardResult
+    - normalize(response, key): StandardResult
+}
+
+class PaymentAdapter {
+    + charge(params, key): StandardResult
+    + refund(transaction_id): StandardResult
+    - normalize(response, key): StandardResult
+}
+
+ServiceAdapter <|.. ResidentAdapter
+ServiceAdapter <|.. TransportAdapter
+ServiceAdapter <|.. PaymentAdapter
+
+' ===========================================================================
+' Notes
+' ===========================================================================
+note right of TaskPlan
+  **TaskPlan validation:**
+  • Schema: Pydantic parse
+  • Allowlist: tool ∈ {4 tools}
+  • Unique IDs: len(set) == len(list)
+  • Valid refs: depends_on ⊆ task_ids
+  • No cycles: topological sort OK
+  • No compensation tools in plan
+end note
+
+note left of StandardResult
+  **Service contract:**
+  Mọi service response được
+  normalize thành StandardResult.
+  Executor chỉ đọc result.success (boolean).
+  transaction_id nullable: null nếu service
+  chưa tạo transaction (ví dụ: NO_AVAILABILITY).
+end note
+
+note right of TOOL_REGISTRY
+  **Tool metadata:**
+  Không có Service Tool runtime class.
+  Tool metadata (schema, action_type,
+  compensation_fn) sống trong ToolEntry.
+  Runtime call: Executor → Registry → Adapter.
+end note
+
+note bottom of ServiceAdapter
+  **Adapter layer:**
+  Layer duy nhất thay đổi khi
+  chuyển từ mock → real API.
+  Translate typed params → HTTP request.
+  Normalize native response → StandardResult.
+  Attach idempotency_key vào mọi request.
+end note
+
+@enduml

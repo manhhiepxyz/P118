@@ -1,0 +1,107 @@
+@startuml State - Flow & Step State Machines
+!theme plain
+skinparam stateAttributeFontColor blue
+
+title State Machine Diagram\nFlow & Step Lifecycle
+
+' ===========================================================================
+' Flow State Machine
+' ===========================================================================
+state "Flow State Machine" as FlowSM {
+    [*] --> PLANNING : User submits goal\nPlanner creates record
+
+    PLANNING --> VALIDATION_FAILED : TaskPlan invalid\nor required fields missing
+    PLANNING --> RUNNING : Both validations OK
+
+    RUNNING --> AWAITING_APPROVAL : Policy = REQUIRES_APPROVAL
+    RUNNING --> RECOVERING : Runtime failure
+    RUNNING --> ROLLING_BACK : Policy DENIED\n+ completed compensatable steps
+    RUNNING --> FAILED : Policy DENIED\n+ no completed steps
+    RUNNING --> COMPLETED : All tasks COMPLETED
+
+    AWAITING_APPROVAL --> RUNNING : User approved
+    AWAITING_APPROVAL --> RECOVERING : User rejected (ATOMIC)
+    AWAITING_APPROVAL --> AWAITING_APPROVAL : Timeout — remain paused
+
+    RECOVERING --> RUNNING : RETRY or REPLAN succeeded
+    RECOVERING --> AWAITING_APPROVAL : REQUEST_HUMAN
+    RECOVERING --> ROLLING_BACK : COMPENSATE triggered
+    RECOVERING --> FAILED : FAIL_WORKFLOW
+
+    ROLLING_BACK --> ROLLED_BACK : All compensations OK
+    ROLLING_BACK --> COMPENSATION_FAILED : Some compensations failed
+
+    VALIDATION_FAILED --> [*]
+    COMPLETED --> [*]
+    ROLLED_BACK --> [*]
+    FAILED --> [*]
+    COMPENSATION_FAILED --> [*]
+}
+
+' ===========================================================================
+' Step State Machine
+' ===========================================================================
+state "Step State Machine" as StepSM {
+    [*] --> PENDING : Task created by Planner
+
+    PENDING --> AWAITING_APPROVAL : Policy = REQUIRES_APPROVAL
+    PENDING --> RUNNING : Policy = AUTO_ALLOWED\nor User approved
+
+    AWAITING_APPROVAL --> RUNNING : User approved
+    AWAITING_APPROVAL --> FAILED : User rejected
+    AWAITING_APPROVAL --> TIMEOUT : No response in 10 min
+
+    RUNNING --> COMPLETED : StandardResult.success = true
+    RUNNING --> FAILED : StandardResult.success = false
+
+    FAILED --> RUNNING : Recovery = RETRY\n(retry_count < 3)
+
+    COMPLETED --> COMPENSATED : Compensator runs compensation_tool
+
+    TIMEOUT --> AWAITING_APPROVAL : User manually resumes
+    TIMEOUT --> FAILED : Admin cancels flow
+
+    COMPLETED --> [*]
+    COMPENSATED --> [*]
+    FAILED --> [*]
+}
+
+' ===========================================================================
+' Notes
+' ===========================================================================
+note right of FlowSM
+  **Flow states:**
+  • PLANNING: vừa tạo record
+  • VALIDATION_FAILED: plan hoặc fields sai
+  • RUNNING: đang execute tasks
+  • AWAITING_APPROVAL: chờ user approve (HITL)
+  • RECOVERING: đang xử lý failure
+  • ROLLING_BACK: đang compensate
+  • COMPLETED: tất cả tasks OK
+  • ROLLED_BACK: đã compensate thành công
+  • FAILED: không thể tiếp tục
+  • COMPENSATION_FAILED: một số compensate fail
+
+  **MVP = ATOMIC only:**
+  Không có PARTIALLY_COMPLETED state.
+  completion_mode field vẫn có trong DB
+  (default ATOMIC) để mở rộng sau.
+end note
+
+note left of StepSM
+  **Step states:**
+  • PENDING: chưa bắt đầu
+  • AWAITING_APPROVAL: chờ HITL
+  • RUNNING: đang gọi service
+  • COMPLETED: thành công
+  • FAILED: thất bại
+  • TIMEOUT: HITL timeout
+  • COMPENSATED: đã được undo
+
+  **Key rule:**
+  Chỉ COMPLETED → COMPENSATED.
+  FAILED step không có side effect
+  → không cần compensate.
+end note
+
+@enduml

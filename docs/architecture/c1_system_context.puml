@@ -1,0 +1,54 @@
+@startuml C1 - System Context
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/v2.0.0/C4_Context.puml
+
+title C1 - System Context Diagram\nP-118: AI Agent Multi-Service Orchestration
+
+' ===========================================================================
+' External actors
+' ===========================================================================
+Person(user, "Cư dân / Người dùng",
+    "Người dùng mục tiêu. Mô tả goal bằng tiếng Việt,\nThe dõi workflow, approve action REQUIRES_APPROVAL")
+
+' ===========================================================================
+' The system under design
+' ===========================================================================
+System(p118, "P-118 Agent Platform",
+    "Nhận goal ngôn ngữ tự nhiên → lập kế hoạch →\nthực thi ≥3 service theo dependency → phục hồi lỗi\ntrong phạm vi cho phép → trả kết quả cuối cùng")
+
+' ===========================================================================
+' External systems (not part of P-118)
+' ===========================================================================
+System_Ext(llm_provider, "LLM Provider (OpenAI / Anthropic)",
+    "Cung cấp mô hình ngôn ngữ cho Goal Parser,\nTask Planner và Replanner.\nP-118 gửi prompt và nhận structured output")
+
+System_Ext(cloud, "Cloud Hosting Platform (Render / Railway)",
+    "Chạy FastAPI server, PostgreSQL và 3 Mock Services.\nCung cấp Live URL công khai cho Gate 2")
+
+System_Ext(vinhomes, "VinHomes Production API",
+    "[Out of Scope - Extension] Production API thật.\nP-118 MVP chỉ dùng mock services")
+
+' ===========================================================================
+' Relationships
+' ===========================================================================
+Rel(user, p118, "Nhập goal tiếng Việt,\napprove/reject action nhạy cảm", "HTTPS / WebSocket")
+Rel(user, cloud, "Truy cập Live URL qua browser", "HTTPS")
+
+Rel(p118, llm_provider, "Gửi prompt để parse goal,\nlập plan và replan khi lỗi", "HTTPS (REST API)")
+Rel(p118, cloud, "Deploy và chạy trên", "Container")
+
+Rel(user, vinhomes, "[Out of scope]\nKhông kết nối trực tiếp")
+
+' ===========================================================================
+' Boundary note
+' ===========================================================================
+Boundary(p118_boundary, "P-118 System Boundary", "") {
+}
+
+note bottom of p118
+  **Giá trị cốt lõi:**
+  Goal-oriented orchestration · Dependency-aware execution
+  Failure-aware recovery · Controlled autonomy
+  KHÔNG PHẢI "LLM gọi nhiều API"
+end note
+
+@enduml

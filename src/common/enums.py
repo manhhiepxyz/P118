@@ -55,6 +55,8 @@ class ErrorCode(StrEnum):
     # Business logic errors
     RESIDENT_NOT_FOUND = "RESIDENT_NOT_FOUND"
     RESIDENT_ALREADY_EXISTS = "RESIDENT_ALREADY_EXISTS"
+    OWNERSHIP_NOT_FOUND = "OWNERSHIP_NOT_FOUND"
+    OWNERSHIP_MISMATCH = "OWNERSHIP_MISMATCH"
     VEHICLE_NOT_FOUND = "VEHICLE_NOT_FOUND"
     VEHICLE_ALREADY_EXISTS = "VEHICLE_ALREADY_EXISTS"
     BOOKING_NOT_FOUND = "BOOKING_NOT_FOUND"
@@ -106,5 +108,7 @@ class ErrorCode(StrEnum):
             ErrorCode.APPROVAL_DENIED,
             ErrorCode.POLICY_VIOLATION,
             ErrorCode.CONFLICT,
+            ErrorCode.OWNERSHIP_NOT_FOUND,
+            ErrorCode.OWNERSHIP_MISMATCH,
         }
         return self in user_facing_errors
