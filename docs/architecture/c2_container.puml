@@ -1,0 +1,113 @@
+@startuml C2 - Container Diagram
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/v2.0.0/C4_Container.puml
+
+title C2 - Container Diagram\nP-118: Các container và luồng dữ liệu chính
+
+' ===========================================================================
+' External actors (giữ context)
+' ===========================================================================
+Person(user, "Cư dân / Người dùng")
+System_Ext(llm_provider, "LLM Provider", "OpenAI / Anthropic API")
+
+' ===========================================================================
+' System boundary
+' ===========================================================================
+System_Boundary(p118, "P-118 Agent Platform") {
+
+    ' ---------- Presentation ----------
+    Container_Boundary(presentation, "Presentation Layer [Optional ở Gate 2]") {
+        Container(react_ui, "React Frontend", "React + Vite",
+            "Timeline UI realtime · HITL Modal\n3 màn hình: Home / Timeline / Detail")
+        Container(ws_client, "WebSocket Client", "Browser WS API",
+            "Subscribe events theo flow_id\nTự reconnect khi mất kết nối")
+    }
+
+    ' ---------- API Layer ----------
+    Container_Boundary(api, "API Layer · FastAPI :8000") {
+        Container(rest_api, "REST API", "FastAPI :8000",
+            "POST /flows · GET /flows/{id}\nPOST /flows/{id}/respond (HITL)\nValidate JWT trên mọi request")
+        Container(ws_server, "WebSocket Server", "FastAPI WebSocket",
+            "Persistent connection theo flow_id\nBroadcast state-change events từ Executor")
+    }
+
+    ' ---------- Agent Core ----------
+    Container_Boundary(core, "Agent Core · LangGraph") {
+        Container(llm_layer, "LLM Layer", "non-deterministic",
+            "Goal Parser · Task Planner · Replanner\nExtract intent, propose dependency graph,\nreasoning khi replan")
+        Container(det_layer, "Deterministic Orchestration Layer", "Python code cứng",
+            "TaskPlan Validator · Scheduler · Policy Engine\nHITL Manager · Executor · Recovery · Compensator\nLLM KHÔNG bypass được layer này")
+    }
+
+    ' ---------- Tool Layer ----------
+    Container_Boundary(tool, "Tool Layer") {
+        Container(tool_registry, "Tool Registry", "Python dict",
+            "tool_name → {schema, adapter_fn,\naction_type, compensatable, compensation_fn}\n4 tool cho phép")
+        Container(adapters, "Service Adapters (×3)", "HTTP client",
+            "Translate typed params → HTTP request\nNormalize native response → StandardResult\n**Layer duy nhất thay đổi khi mock → real**")
+    }
+
+    ' ---------- Persistence ----------
+    ContainerDb(postgres, "PostgreSQL", "Persistence",
+        "flow_executions · step_results · compensation_log\nResume/audit được từ DB")
+
+    ' ---------- Mock Services ----------
+    Container_Boundary(mock, "Mock Service Layer · MVP") {
+        Container(resident_svc, "Resident Service :8001", "FastAPI",
+            "POST /residents · DELETE /residents/{id}")
+        Container(transport_svc, "Transport Service :8002", "FastAPI",
+            "POST /vehicles · POST /parking\nDELETE /vehicles/{id} · DELETE /parking/{id}")
+        Container(payment_svc, "Payment Service :8003", "FastAPI",
+            "POST /wallets · POST /charges · POST /refunds")
+    }
+}
+
+' ===========================================================================
+' Relationships
+' ===========================================================================
+' User → Presentation
+Rel(user, react_ui, "Nhập goal / approve", "HTTPS")
+Rel_D(react_ui, ws_client, "Render events")
+Rel(ws_client, ws_server, "Subscribe events", "WebSocket")
+
+' Presentation → API
+Rel(react_ui, rest_api, "POST /flows", "HTTPS/JSON")
+
+' API → Agent
+Rel(rest_api, llm_layer, "Invoke flow")
+Rel(ws_server, react_ui, "Push events", "WebSocket")
+
+' LLM layer internal
+Rel(llm_layer, det_layer, "Propose plan → validate gate")
+Rel(det_layer, llm_layer, "REPLAN signal → new plan")
+Rel(llm_layer, llm_provider, "Chat completions", "HTTPS")
+
+' Agent → Tool
+Rel(det_layer, tool_registry, "execute(tool, params, key)")
+Rel(tool_registry, adapters, "adapter_fn()")
+
+' Adapters → Mock services
+Rel(adapters, resident_svc, "HTTP + Idempotency-Key", "REST")
+Rel(adapters, transport_svc, "HTTP + Idempotency-Key", "REST")
+Rel(adapters, payment_svc, "HTTP + Idempotency-Key", "REST")
+
+' Agent → DB
+Rel(det_layer, postgres, "Read/Write state", "SQL")
+Rel(tool_registry, postgres, "Audit idempotency key")
+
+' ===========================================================================
+' Note
+' ===========================================================================
+note bottom of det_layer
+  **Security boundary:**
+  LLM không bao giờ: bypass validator,
+  gọi thẳng Adapter, gọi compensation tool,
+  inject arbitrary URL, thay đổi step COMPLETED.
+end note
+
+note right of mock
+  **Idempotency memory dict:**
+  Lưu {idempotency_key → response}
+  cùng key → trả response cũ
+end note
+
+@enduml

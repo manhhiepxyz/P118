@@ -25,6 +25,7 @@ class InputRef(BaseModel):
 InputValue = str | int | float | bool | None | InputRef
 
 AllowedTool = Literal[
+    "verify_apartment_ownership",
     "register_resident",
     "register_vehicle",
     "book_parking",

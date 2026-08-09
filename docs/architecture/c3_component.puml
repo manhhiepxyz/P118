@@ -1,0 +1,152 @@
+@startuml C3 - Component Diagram (Agent Core)
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/v2.0.0/C4_Component.puml
+
+title C3 - Component Diagram\nP-118 Agent Core: Orchestration Layer (phóng to từ C2)
+
+' ===========================================================================
+' Container boundary (Agent Core)
+' ===========================================================================
+Container_Boundary(core, "Agent Core · LangGraph (FastAPI process)") {
+
+    ' ---------- LLM Layer ----------
+    Component_Boundary(llm, "LLM Layer — non-deterministic") {
+        Component(parser, "Goal Parser", "Python + LLM",
+            "Extract {goal_type, apartment_id, user_info}\ntừ tiếng Việt → structured intent")
+        Component(planner, "Task Planner", "Python + LLM",
+            "Propose dependency graph:\n[{id, tool, depends_on, input_mapping}]\nTạo flow_executions status=PLANNING")
+        Component(replanner, "Replanner", "Python + LLM",
+            "Nhận REPLAN signal + context\nReasoning: 'Zone A hết → Zone B'\nKHÔNG sửa step COMPLETED")
+    }
+
+    ' ---------- Deterministic Orchestration ----------
+    Component_Boundary(det, "Deterministic Orchestration Layer") {
+        Component(plan_val, "TaskPlan Validator", "Python (Pydantic)",
+            "Gate giữa LLM và Scheduler:\nSchema · Allowlist (4 tool) · Unique IDs\nCycle detection · Từ chối compensation tool\nFail → VALIDATION_FAILED")
+        Component(validator, "Validator", "Python",
+            "Check required fields:\napartment_id · cccd · phone\nFail → VALIDATION_FAILED")
+        Component(scheduler, "Task Scheduler", "Python",
+            "Topological sort dependency graph\nTrả task có depends_on=COMPLETED\nKhông còn task → SUCCESS")
+        Component(prepare, "Prepare Action", "Python",
+            "Map output COMPLETED steps\n→ input params của next task\nBuild ProposedAction cho Policy")
+        Component(policy, "Policy Engine", "Python",
+            "Rule-based (5 rule cứng)\nAUTO_ALLOWED | REQUIRES_APPROVAL | DENIED\nKHÔNG dùng LLM")
+        Component(denied_h, "Policy Denied Handler", "Python",
+            "Xử lý kết quả DENIED (KHÔNG phải runtime)\nCó COMPLETED compensatable? → Compensator\nKhông có → FAIL flow")
+        Component(hitl, "HITL Manager", "Python + WS",
+            "Set step = AWAITING_APPROVAL\nPush ProposedAction qua WS\nTimeout 10' → giữ paused\nReject → Recovery (ATOMIC)")
+        Component(executor, "Executor", "Python",
+            "Gen idempotency_key = {flow}-{task}-{tool}\nGọi ToolRegistry · ghi step_results\nEmit WS event · đọc result.success")
+        Component(recovery, "Recovery Handler", "Python",
+            "RUNTIME failures ONLY\nLookup (error.code, retryable, retry_count)\n→ RETRY | REPLAN | HUMAN | COMPENSATE | FAIL")
+        Component(compensator, "Compensator", "Python",
+            "Query compensatable=true AND COMPLETED\nORDER BY completed_at DESC\nStep FAILED → skip (không có side effect)")
+    }
+
+    ' ---------- Tool Layer ----------
+    Component_Boundary(tool, "Tool Layer") {
+        Component(registry, "Tool Registry", "Python dict",
+            "TOOL_REGISTRY[tool_name] = ToolEntry\n(schema, adapter_fn, action_type,\nrisk_level, compensatable, compensation_fn)")
+        Component(res_adapt, "Resident Adapter", "HTTP client",
+            "→ Resident Service :8001\nPOST /residents · DELETE /residents/{id}")
+        Component(trans_adapt, "Transport Adapter", "HTTP client",
+            "→ Transport Service :8002\nPOST /vehicles · POST /parking")
+        Component(pay_adapt, "Payment Adapter", "HTTP client",
+            "→ Payment Service :8003\nPOST /charges · POST /refunds")
+    }
+}
+
+' ===========================================================================
+' External containers (đơn giản hóa)
+' ===========================================================================
+Container(react_ui, "React Frontend", "React")
+Container(rest_api, "REST API", "FastAPI :8000")
+ContainerDb(postgres, "PostgreSQL", "flow_executions\nstep_results\ncompensation_log")
+Container(resident_svc, "Resident Service :8001")
+Container(transport_svc, "Transport Service :8002")
+Container(payment_svc, "Payment Service :8003")
+
+' ===========================================================================
+' Relationships — Entry flow
+' ===========================================================================
+Rel(rest_api, parser, "invoke flow")
+Rel(react_ui, rest_api, "POST /flows")
+
+' LLM layer flow
+Rel(parser, planner, "structured intent")
+Rel(planner, plan_val, "proposed TaskPlan")
+Rel(plan_val, validator, "validated plan")
+Rel(validator, scheduler, "valid fields")
+Rel(replanner, plan_val, "proposed replan")
+
+' Deterministic orchestration loop
+Rel(scheduler, prepare, "next task ready")
+Rel(prepare, policy, "ProposedAction")
+Rel(policy, executor, "AUTO_ALLOWED")
+Rel(policy, hitl, "REQUIRES_APPROVAL")
+Rel(policy, denied_h, "DENIED")
+Rel(denied_h, compensator, "có COMPLETED steps")
+Rel(denied_h, rest_api, "no compensatable → FAIL")
+Rel(hitl, executor, "user approved")
+Rel(hitl, recovery, "user rejected (ATOMIC)")
+Rel(executor, scheduler, "success → next")
+Rel(executor, recovery, "failure")
+Rel(recovery, replanner, "REPLAN")
+Rel(recovery, compensator, "COMPENSATE")
+Rel(recovery, rest_api, "FAIL_WORKFLOW")
+
+' Tool chain
+Rel(executor, registry, "execute(tool, params, key)")
+Rel(registry, res_adapt, "adapter_fn()")
+Rel(registry, trans_adapt, "adapter_fn()")
+Rel(registry, pay_adapt, "adapter_fn()")
+
+' Adapters → external services
+Rel(res_adapt, resident_svc, "HTTP + Idempotency-Key")
+Rel(trans_adapt, transport_svc, "HTTP + Idempotency-Key")
+Rel(pay_adapt, payment_svc, "HTTP + Idempotency-Key")
+
+' Persistence
+Rel(planner, postgres, "create flow_executions")
+Rel(executor, postgres, "write step_results")
+Rel(compensator, postgres, "append compensation_log")
+Rel(scheduler, postgres, "read deps")
+
+' WS push
+Rel(executor, react_ui, "state-change event", "WebSocket")
+Rel(hitl, react_ui, "ProposedAction UI", "WebSocket")
+
+' ===========================================================================
+' Notes
+' ===========================================================================
+note bottom of plan_val
+  **Security gate #1**
+  LLM không bypass được.
+  Mọi plan (kể cả replan)
+  đều qua đây trước Scheduler.
+end note
+
+note right of policy
+  **Security gate #2**
+  5 rule cứng:
+  R1: READ_ONLY → AUTO
+  R2: PAYMENT < 300k → AUTO
+  R3: PAYMENT ≥ 300k → APPROVAL
+  R4: DESTRUCTIVE → APPROVAL
+  R5: BLOCKED → DENIED
+end note
+
+note bottom of recovery
+  **Phân biệt 2 nguồn lỗi:**
+  • Policy outcome → Denied Handler
+  • Runtime failure → Recovery Handler
+  KHÔNG xử lý trùng.
+end note
+
+note bottom of compensator
+  Chỉ COMPLETED step mới
+  có side effect cần undo.
+  FAILED step = không có gì
+  để compensate.
+end note
+
+@enduml
