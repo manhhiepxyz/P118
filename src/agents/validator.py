@@ -10,7 +10,6 @@ class TaskPlanValidator:
 
     ALLOWED_TOOLS: frozenset[str] = frozenset(
         {
-            "verify_apartment_ownership",
             "register_resident",
             "register_vehicle",
             "book_parking",
@@ -19,7 +18,6 @@ class TaskPlanValidator:
     )
 
     REQUIRED_INPUTS: dict[str, frozenset[str]] = {
-        "verify_apartment_ownership": frozenset({"full_name", "apartment_code", "residential_area"}),
         "register_resident": frozenset({"full_name", "apartment_code", "residential_area"}),
         "register_vehicle": frozenset({"resident_id", "plate_number", "vehicle_type"}),
         "book_parking": frozenset({"vehicle_id", "booking_date", "parking_zone"}),

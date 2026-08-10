@@ -1,14 +1,30 @@
 """
 src/services/mock/ownership_service.py
-P-118 — ApartmentOwnershipService
+P-118 — ApartmentOwnershipService (Mock Ownership Provider)
 
 Owner: Hoàng Anh
 
-Verify quyền sở hữu căn hộ trước khi cho phép đăng ký cư dân.
-Tra bảng apartment_owners (seed từ ban quản lý chung cư):
+Nghiệp vụ của Mock Ownership Provider — KHÔNG phải một Agent tool.
+
+Kiến trúc đích (Week 2):
+    P-118 Auth/VerificationGuard
+    → Mock Ownership Provider   (module này)
+    → chỉ VERIFIED mới cho Agent Workflow chạy
+    (VerificationGuard chưa được implement ở Week 1.)
+
+Tra bảng apartment_owners (seed từ ban quản lý chung cư) — trạng thái hỗ trợ
+HÔM NAY:
   - Không có record → 404 OWNERSHIP_NOT_FOUND
   - Có nhưng owner_name != full_name gửi lên → 403 OWNERSHIP_MISMATCH
-  - Match → OK, cho phép register_resident tiếp tục
+  - Match → VERIFIED
+
+PENDING / REJECTED là trạng thái DỰ KIẾN cho Week 2 — chưa implement.
+
+`owner_name` là PII: chỉ dùng để so khớp trong bộ nhớ, không trả về caller và
+không bao giờ được log.
+
+`error_code` ở đây là mã của provider (string), không phải `ErrorCode` nội bộ
+của P-118: verification chạy trước workflow nên không đi qua StandardResult.
 """
 
 from __future__ import annotations
@@ -17,15 +33,13 @@ import logging
 
 import asyncpg
 
-from src.common.enums import ErrorCode
-
 logger = logging.getLogger(__name__)
 
 
 class OwnershipNotVerifiedError(Exception):
     """Lỗi verify ownership thất bại — map sang 404 hoặc 403."""
 
-    def __init__(self, error_code: ErrorCode, message: str) -> None:
+    def __init__(self, error_code: str, message: str) -> None:
         self.error_code = error_code
         self.message = message
         super().__init__(message)
@@ -38,7 +52,7 @@ class OwnershipNotFoundError(OwnershipNotVerifiedError):
         self.apartment_code = apartment_code
         self.residential_area = residential_area
         super().__init__(
-            ErrorCode.OWNERSHIP_NOT_FOUND,
+            "OWNERSHIP_NOT_FOUND",
             f"Apartment {apartment_code} in {residential_area} not found in ownership records",
         )
 
@@ -50,7 +64,7 @@ class OwnershipMismatchError(OwnershipNotVerifiedError):
         self.apartment_code = apartment_code
         self.residential_area = residential_area
         super().__init__(
-            ErrorCode.OWNERSHIP_MISMATCH,
+            "OWNERSHIP_MISMATCH",
             f"Requester is not the owner of apartment {apartment_code} in {residential_area}",
         )
 
@@ -75,7 +89,9 @@ class ApartmentOwnershipService:
         Xác minh quyền sở hữu căn hộ.
 
         Returns:
-            {"verified": True, "owner_name": ..., "apartment_code": ..., "residential_area": ...}
+            {"verified": True, "apartment_code": ..., "residential_area": ...}
+
+            Không trả `owner_name` — PII, chỉ dùng so khớp nội bộ.
 
         Raises:
             OwnershipNotFoundError: căn hộ chưa có trong ownership records.
@@ -102,23 +118,21 @@ class ApartmentOwnershipService:
 
         owner_name = row["owner_name"]
         if owner_name != full_name:
+            # Không log full_name hoặc owner_name — đây là PII.
             logger.info(
-                "ownership mismatch for apartment=%s area=%s (requester=%s)",
+                "ownership mismatch for apartment=%s area=%s",
                 apartment_code,
                 residential_area,
-                full_name,
             )
             raise OwnershipMismatchError(apartment_code, residential_area)
 
         logger.info(
-            "ownership verified: %s owns %s in %s",
-            full_name,
+            "ownership verified for apartment=%s area=%s",
             apartment_code,
             residential_area,
         )
         return {
             "verified": True,
-            "owner_name": owner_name,
             "apartment_code": apartment_code,
             "residential_area": residential_area,
         }

@@ -94,7 +94,13 @@ class ResidentConnector(Connector):
 
                 # --- Bước 3a: HTTP thành công (2xx) ---
                 if response.is_success:
-                    data = response.json()
+                    # Mock API trả envelope {success, data, error_code, ...};
+                    # canonical field nằm trong data, KHÔNG ở top level.
+                    data, env_error = self._extract_payload(response.json())
+
+                    # HTTP 2xx nhưng envelope báo lỗi → vẫn là failure.
+                    if env_error is not None:
+                        return self._build_envelope_failure(env_error)
 
                     # Kiểm tra required output field.
                     # Mock API có thể trả thêm field thừa (extra_field, created_at, ...)

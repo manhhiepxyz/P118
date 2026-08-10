@@ -6,6 +6,7 @@ như ``HTTPException`` mặc định). Custom exception handler ``mock_error_han
 """
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
@@ -72,9 +73,47 @@ async def mock_api_error_handler(request, exc: MockApiError) -> JSONResponse:
     )
 
 
+def _safe_validation_message(exc: RequestValidationError) -> str:
+    """Dựng message từ RequestValidationError mà KHÔNG lộ giá trị caller gửi lên.
+
+    BẢO MẬT: ``exc.errors()`` có key ``"input"`` chứa nguyên giá trị người dùng
+    submit (có thể là PII: ``full_name``, ``id_number``, ...). Message chỉ được
+    dựng từ **vị trí field** (``loc``) và **loại lỗi** (``type``) — không bao giờ
+    nội suy ``err["input"]`` hay ``err["msg"]`` (msg của pydantic đôi khi echo
+    lại giá trị đầu vào).
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+    for err in exc.errors():
+        loc = ".".join(str(item) for item in err.get("loc", ())) or "body"
+        err_type = str(err.get("type", "value_error"))
+        part = f"{loc} ({err_type})"
+        if part not in seen:
+            seen.add(part)
+            parts.append(part)
+    if not parts:
+        return "Invalid input"
+    return "Invalid input for field(s): " + ", ".join(parts)
+
+
+async def validation_error_handler(request, exc: RequestValidationError) -> JSONResponse:
+    """422 của FastAPI → envelope chuẩn với ``error_code=INVALID_INPUT``.
+
+    Mặc định FastAPI trả ``{"detail": [...]}`` — không khớp envelope contract nên
+    ``Connector._handle_error_response()`` fallback về ``UNKNOWN_EXTERNAL_ERROR``.
+    Handler này đảm bảo 422 cũng theo đúng ``{success, data, error_code, message,
+    retryable}``.
+    """
+    return JSONResponse(
+        status_code=422,
+        content=_build_envelope("INVALID_INPUT", _safe_validation_message(exc), False),
+    )
+
+
 def install_error_handler(app: FastAPI) -> None:
-    """Gắn exception handler cho MockApiError vào app."""
+    """Gắn exception handler cho MockApiError + RequestValidationError vào app."""
     app.add_exception_handler(MockApiError, mock_api_error_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)
 
 
 # ---- Failure injection (dùng chung cho cả 4 router) ----

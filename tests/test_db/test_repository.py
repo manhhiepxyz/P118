@@ -16,11 +16,14 @@ Tiêu chí Module DoD (team-plan.md):
 
 from __future__ import annotations
 
+import uuid as uuid_module
+
 import asyncpg
 import pytest
 
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
 from src.common.results import StandardResult
+from src.common.task_plan import InputRef
 from src.db import (
     BookingAlreadyExistsError,
     NoAvailabilityError,
@@ -49,6 +52,25 @@ async def test_create_workflow_returns_uuid(db_pool):
     assert wf_id is not None
     assert len(wf_id) == 36  # UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
     assert wf_id.count("-") == 4
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_uses_supplied_id(db_pool):
+    """Executor tự sinh workflow_id và truyền qua key "id" → repo phải dùng lại."""
+    repo = make_repo(db_pool)
+    supplied = str(uuid_module.uuid4())
+
+    wf_id = await repo.create_workflow(
+        {
+            "id": supplied,
+            "goal": "Test supplied id",
+            "status": WorkflowStatus.PENDING.value,
+        }
+    )
+
+    assert wf_id == supplied
+    wf = await repo.get_workflow(supplied)
+    assert wf["workflow"]["goal"] == "Test supplied id"
 
 
 @pytest.mark.asyncio
@@ -83,7 +105,7 @@ async def test_create_task_uses_task_plan_id(db_pool):
     await repo.create_task(
         wf_id,
         {
-            "task_id": "T1",
+            "id": "T1",
             "tool": "register_resident",
             "input": {"full_name": "Lâm Thành Bảo", "apartment_code": "A1201"},
         },
@@ -104,7 +126,7 @@ async def test_create_task_idempotent(db_pool):
     wf_id = await repo.create_workflow({"goal": "Test"})
 
     for _ in range(2):
-        await repo.create_task(wf_id, {"task_id": "T1", "tool": "register_resident"})
+        await repo.create_task(wf_id, {"id": "T1", "tool": "register_resident"})
 
     result = await repo.get_workflow(wf_id)
     assert len(result["tasks"]) == 1
@@ -114,7 +136,7 @@ async def test_create_task_idempotent(db_pool):
 async def test_update_task_status(db_pool):
     repo = make_repo(db_pool)
     wf_id = await repo.create_workflow({"goal": "Test"})
-    await repo.create_task(wf_id, {"task_id": "T1", "tool": "register_resident"})
+    await repo.create_task(wf_id, {"id": "T1", "tool": "register_resident"})
 
     await repo.update_task_status(wf_id, "T1", TaskStatus.RUNNING)
     await repo.update_task_status(wf_id, "T1", TaskStatus.SUCCESS)
@@ -127,13 +149,13 @@ async def test_update_task_status(db_pool):
 async def test_save_task_result_success(db_pool):
     repo = make_repo(db_pool)
     wf_id = await repo.create_workflow({"goal": "Test"})
-    await repo.create_task(wf_id, {"task_id": "T1", "tool": "register_resident"})
+    await repo.create_task(wf_id, {"id": "T1", "tool": "register_resident"})
 
     result = StandardResult(
         success=True,
         data={"resident_id": "RES-001"},
         error_code=None,
-        error_message="Resident registered",
+        message="Resident registered",
         retryable=False,
     )
     await repo.save_task_result(wf_id, "T1", result)
@@ -149,13 +171,13 @@ async def test_save_task_result_success(db_pool):
 async def test_save_task_result_failure(db_pool):
     repo = make_repo(db_pool)
     wf_id = await repo.create_workflow({"goal": "Test"})
-    await repo.create_task(wf_id, {"task_id": "T1", "tool": "book_parking"})
+    await repo.create_task(wf_id, {"id": "T1", "tool": "book_parking"})
 
     result = StandardResult(
         success=False,
         data=None,
         error_code=ErrorCode.NO_AVAILABILITY,
-        error_message="ZONE_A is full on 2026-08-10",
+        message="ZONE_A is full on 2026-08-10",
         retryable=False,
     )
     await repo.save_task_result(wf_id, "T1", result)
@@ -164,6 +186,145 @@ async def test_save_task_result_failure(db_pool):
     task = wf["tasks"][0]
     assert task["error_code"] == "NO_AVAILABILITY"
     assert task["retryable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: Protocol read methods (get_task / list_tasks / get_completed_task_ids)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_task_returns_persisted_task(db_pool):
+    repo = make_repo(db_pool)
+    wf_id = await repo.create_workflow({"goal": "Test"})
+    await repo.create_task(
+        wf_id,
+        {
+            "id": "T1",
+            "tool": "register_resident",
+            "depends_on": [],
+            "input": {"full_name": "Lâm Thành Bảo", "apartment_code": "A1201"},
+            "status": TaskStatus.PENDING.value,
+        },
+    )
+
+    task = await repo.get_task(wf_id, "T1")
+
+    assert task is not None
+    assert task["task_id"] == "T1"
+    assert task["tool"] == "register_resident"
+    assert task["status"] == "PENDING"
+    # get_task deserialise mọi cột JSONB — input_data đã là dict, không phải str.
+    assert isinstance(task["input_data"], dict)
+    assert task["input_data"]["apartment_code"] == "A1201"
+
+
+@pytest.mark.asyncio
+async def test_get_task_returns_none_when_missing(db_pool):
+    repo = make_repo(db_pool)
+    wf_id = await repo.create_workflow({"goal": "Test"})
+
+    assert await repo.get_task(wf_id, "T404") is None
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_returns_all_tasks(db_pool):
+    repo = make_repo(db_pool)
+    wf_id = await repo.create_workflow({"goal": "Test"})
+    for task_id, tool in [
+        ("T1", "register_resident"),
+        ("T2", "register_vehicle"),
+        ("T3", "book_parking"),
+    ]:
+        await repo.create_task(wf_id, {"id": task_id, "tool": tool, "input": {}})
+
+    tasks = await repo.list_tasks(wf_id)
+
+    assert [t["task_id"] for t in tasks] == ["T1", "T2", "T3"]
+    assert [t["tool"] for t in tasks] == [
+        "register_resident",
+        "register_vehicle",
+        "book_parking",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_scoped_to_workflow(db_pool):
+    """Task của workflow khác không được lẫn vào kết quả."""
+    repo = make_repo(db_pool)
+    wf_a = await repo.create_workflow({"goal": "A"})
+    wf_b = await repo.create_workflow({"goal": "B"})
+    await repo.create_task(wf_a, {"id": "T1", "tool": "register_resident"})
+    await repo.create_task(wf_b, {"id": "T1", "tool": "book_parking"})
+
+    tasks_b = await repo.list_tasks(wf_b)
+
+    assert len(tasks_b) == 1
+    assert tasks_b[0]["tool"] == "book_parking"
+
+
+@pytest.mark.asyncio
+async def test_get_completed_task_ids_returns_only_success(db_pool):
+    repo = make_repo(db_pool)
+    wf_id = await repo.create_workflow({"goal": "Test"})
+    for task_id, tool in [
+        ("T1", "register_resident"),
+        ("T2", "register_vehicle"),
+        ("T3", "book_parking"),
+    ]:
+        await repo.create_task(wf_id, {"id": task_id, "tool": tool})
+
+    await repo.update_task_status(wf_id, "T1", TaskStatus.SUCCESS)
+    await repo.update_task_status(wf_id, "T2", TaskStatus.FAILED)
+    # T3 vẫn PENDING
+
+    completed = await repo.get_completed_task_ids(wf_id)
+
+    assert completed == ["T1"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: task input chứa InputRef (Pydantic) phải serialise được sang JSON
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_input_ref_is_json_serialised(db_pool):
+    """json.dumps() gọi thẳng lên InputRef sẽ raise TypeError.
+
+    Repository phải convert Pydantic model → dict trước khi persist,
+    kể cả khi InputRef nằm lồng trong list/dict.
+    """
+    repo = make_repo(db_pool)
+    wf_id = await repo.create_workflow({"goal": "Test InputRef"})
+
+    await repo.create_task(
+        wf_id,
+        {
+            "id": "T2",
+            "tool": "register_vehicle",
+            "depends_on": ["T1"],
+            "input": {
+                "resident_id": InputRef(from_task="T1", field="resident_id"),
+                "plate_number": "51A-00001",
+                "nested": {"deep": InputRef(from_task="T1", field="apartment_code")},
+                "items": [InputRef(from_task="T1", field="resident_id"), 42],
+            },
+            "status": TaskStatus.PENDING.value,
+        },
+    )
+
+    task = await repo.get_task(wf_id, "T2")
+    assert task is not None
+    # get_task deserialise mọi cột JSONB — input_data đã là dict, không phải str.
+    input_data = task["input_data"]
+    assert isinstance(input_data, dict)
+
+    assert input_data["resident_id"] == {"from_task": "T1", "field": "resident_id"}
+    assert input_data["plate_number"] == "51A-00001"
+    assert input_data["nested"]["deep"] == {"from_task": "T1", "field": "apartment_code"}
+    assert input_data["items"][0] == {"from_task": "T1", "field": "resident_id"}
+    assert input_data["items"][1] == 42
 
 
 # ---------------------------------------------------------------------------
