@@ -166,7 +166,6 @@ Completed tasks không bị chạy lại. Data propagation từ các bước tr�
 ├── .github/workflows/       # CI/CD
 ├── .claude/ .codex/ .cursor/ .gemini/   # Per-tool hook configs
 ├── JOURNAL.md
-├── WORKLOG.md
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -268,7 +267,6 @@ docker-compose up --build
 - [Wireframe / UI Flow](docs/gate1/wireframe.md)
 - [Architecture Diagram](docs/architecture_diagram.md)
 - [Weekly Journal](JOURNAL.md)
-- [Worklog](WORKLOG.md)
 - [Evaluation](eval/results/report.md)
 
 ---
