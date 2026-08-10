@@ -1,6 +1,6 @@
 # P118-001 — Thành Bảo · Tầng Quyết định
 
-> Đọc `docs/shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
+> Đọc `shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
 
 ---
 

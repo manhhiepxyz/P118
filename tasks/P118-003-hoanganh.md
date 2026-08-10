@@ -1,6 +1,6 @@
 # P118-003 — Hoàng Anh · Tầng Dịch vụ + Dữ liệu + Giao diện
 
-> Đọc `docs/shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
+> Đọc `shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
 
 ---
 
