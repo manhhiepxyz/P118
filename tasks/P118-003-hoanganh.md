@@ -131,15 +131,63 @@ class WorkflowStateRepository(Protocol):
 
 ---
 
-## Tuần 2 (11–17/08) — API + State persistence
+## Tuần 2 (10–14/08) — Gate 2: Workflow API + Database Wiring
 
-| Việc | File |
-|---|---|
-| Viết FastAPI routes cho workflow | `src/api/routes.py` |
-| `POST /workflow/start` — nhận goal, trả workflow_id | `src/api/routes.py` |
-| `GET /workflow/{id}/status` — trả trạng thái hiện tại | `src/api/routes.py` |
-| Lưu đầy đủ workflow state sau mỗi task | `src/db/postgres_repository.py` |
-| Đảm bảo `resident_id`, `vehicle_id`, `booking_id` được lưu | `src/db/postgres_repository.py` |
+> **Mục tiêu nội bộ:** hoàn thành và freeze trước 23:59 ngày 14/08; ngày
+> 15/08 chỉ dùng để sửa lỗi, kiểm tra README và quay/nộp demo. Workflow route
+> chỉ gọi orchestration boundary, không tự gọi Connector hay chọn task.
+
+### Trạng thái đầu tuần
+
+- Ba Mock Provider và PostgreSQL repository đã hoạt động.
+- Workflow state, task result và `depends_on` đã persist và đọc lại được.
+- Docker Compose đã khai báo PostgreSQL cùng Resident, Transport và Payment
+  provider nhưng chưa được kiểm chứng full stack trên máy có Docker.
+- `src/api/routes.py` hiện là route starter `/chat`; chưa có workflow API theo
+  contract Gate 2.
+
+### Việc cần làm
+
+| Việc | File | Hoàn thành khi |
+|---|---|---|
+| Định nghĩa request/response cho workflow API | `src/api/` | Request nhận `goal`; response không lộ raw provider response hoặc secret |
+| Viết `POST /workflow/start` | `src/api/routes.py` | Gọi orchestration boundary và trả tối thiểu `workflow_id`, `status` |
+| Viết `GET /workflow/{workflow_id}/status` | `src/api/routes.py` | Đọc PostgreSQL và trả workflow cùng trạng thái/kết quả từng task |
+| Khởi tạo database trong FastAPI lifespan | `src/main.py`, `src/db/connection.py` | Pool được mở/đóng đúng vòng đời và migration chạy trước khi nhận request |
+| Inject repository/orchestration dependency | `src/api/` | API test được bằng fake; production wiring dùng implementation thật |
+| Duy trì cấu hình API/DB service trong Docker Compose | `docker-compose.yml` | Backend, PostgreSQL và Mock Provider có đúng env/healthcheck; Mạnh Hiệp chịu trách nhiệm chạy smoke full stack |
+| Viết hướng dẫn API và database | `README.md`, `.env.example` | Có env vars, migration, workflow endpoint và sample request; không chứa secret thật |
+
+### Làm độc lập
+
+- Unit test API bằng fake orchestration service trả `workflow_id`; không cần
+  đợi Planner hoặc Executor thật.
+- Test repository bằng PostgreSQL test DB như Week 1.
+- Không gọi trực tiếp Connector/Executor từ logic route. Route chỉ gọi boundary
+  đã inject và đọc state qua repository.
+- Mạnh Hiệp sở hữu full-stack integration test, smoke test và kiểm chứng Docker
+  runtime; Hoàng Anh chỉ xử lý lỗi thuộc API, database hoặc cấu hình service
+  mình sở hữu.
+
+### Tiêu chí hoàn thành Week 2
+
+- [ ] `/workflow/start` nhận goal tự nhiên và kích hoạt orchestration flow.
+- [ ] `/workflow/{workflow_id}/status` phản ánh đúng PostgreSQL state.
+- [ ] Full flow lưu được `resident_id`, `vehicle_id`, `booking_id`, payment
+  result và trạng thái của cả bốn task.
+- [ ] Cấu hình Docker cho API/database đúng; smoke full stack do Mạnh Hiệp chạy
+  có thể kết nối vào API và PostgreSQL.
+- [ ] Phần README về API/database đủ để thành viên khác cấu hình và gọi sample
+  request; Thành Bảo review bản README cuối.
+- [ ] API/repository test, full regression, `ruff check` và
+  `ruff format --check` pass.
+
+### Không làm trong critical path Gate 2
+
+- HITL approve/reject, WebSocket và React frontend hoàn chỉnh.
+- eKYC/Didit thật hoặc lưu dữ liệu sinh trắc học.
+- Compensation endpoint, deploy production hoặc Live URL nếu happy path bằng
+  LLM thật chưa ổn định.
 
 ---
 

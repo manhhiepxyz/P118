@@ -141,14 +141,68 @@ class InMemoryWorkflowStateRepository:
 
 ---
 
-## Tuần 2 (11–17/08) — Happy path end-to-end
+## Tuần 2 (10–14/08) — Gate 2: nối Planner với Runtime
 
-| Việc | File |
-|---|---|
-| Kết nối Connector với Mock API thật của Hoàng Anh | `src/connectors/*.py` |
-| Chạy full flow T1→T2→T3→T4 thành công | Integration test |
-| Executor gọi `repository.save_task_result()` sau mỗi task | `src/executor/executor.py` |
-| Hero scenario: `NO_AVAILABILITY` → báo Replanner | `src/executor/executor.py` |
+> **Mục tiêu nội bộ:** hoàn thành và freeze trước 23:59 ngày 14/08. Không
+> viết lại phần deterministic core đã pass; tập trung tạo execution boundary
+> ổn định để LangGraph và workflow API gọi được.
+
+### Trạng thái đầu tuần
+
+- Ba Connector đã gọi đúng Mock Provider và chuẩn hóa response về
+  `StandardResult`.
+- Executor đã chạy full flow T1→T2→T3→T4, resolve `InputRef` và lưu kết quả
+  qua repository.
+- Happy path và `NO_AVAILABILITY` đã có integration test xuyên stack với
+  PostgreSQL thật.
+- Phần còn thiếu là nối output Planner/LangGraph thật vào runtime và chuẩn
+  hóa kết quả cho API.
+
+### Việc cần làm
+
+| Việc | File | Hoàn thành khi |
+|---|---|---|
+| Cung cấp execution boundary cho LangGraph/API | `src/executor/executor.py` hoặc module orchestration được nhóm chốt | Nhận `TaskPlan` đã validate và trả `workflow_id` + kết quả task theo contract hiện có |
+| Nối plan do Planner tạo vào Executor | Integration layer/test | Không dùng hardcoded plan trong đường chạy demo Gate 2 |
+| Chuẩn hóa success/failure output | `src/executor/executor.py` | Caller nhận được workflow status, `StandardResult` từng task và failure signal an toàn |
+| Xác nhận data propagation với plan từ LLM | Integration test | `resident_id` → `vehicle_id` → `booking_id` → payment chạy đúng |
+| Xác nhận failure scenario | Integration test | `NO_AVAILABILITY` làm task/workflow `FAILED`, không chạy task phụ thuộc và trả error code có ý nghĩa |
+| Sở hữu full-stack integration test | `tests/test_integration/` | Phủ Planner boundary → Executor → Connector → Mock Provider → PostgreSQL; phối hợp Thành Bảo để cắm Planner thật |
+| Viết smoke test cho runtime | `scripts/` hoặc lệnh được ghi trong README | Có một lệnh tái hiện được happy path trước khi quay demo |
+| Chạy kiểm chứng Docker Compose full stack | Không sửa service contract nếu chưa trao đổi | PostgreSQL và 3 Mock Provider healthy; Connector gọi đúng cổng và full flow chạy được |
+| Điều tra lỗi tích hợp liên tầng | Integration PR | Phân biệt rõ lỗi Planner, Executor, Connector, Provider hay DB và chuyển đúng owner xử lý |
+| Viết hướng dẫn runtime | `README.md` | Có lệnh chạy Executor/Connector, full regression và smoke test; Thành Bảo review bản cuối |
+
+### Làm độc lập
+
+- Tiếp tục dùng `TaskPlan` fixture và fake Planner; không cần đợi LLM code của
+  Thành Bảo để hoàn thiện execution boundary.
+- Không sửa `src/agents/**` hoặc `src/api/**`. Chỉ cung cấp interface và test
+  fixture để hai tầng đó tích hợp.
+- Có thể chạy và kiểm chứng `docker-compose.yml`; nếu cần thay đổi cấu hình
+  service/database thì phối hợp Hoàng Anh hoặc thực hiện trong PR integration
+  có review, không tự đổi API contract.
+- Không thay đổi `TaskPlan`, `StandardResult`, enum hoặc repository contract
+  nếu không có blocker được cả nhóm duyệt.
+
+### Tiêu chí hoàn thành Week 2
+
+- [ ] LangGraph/API gọi được Executor qua một execution boundary rõ ràng.
+- [ ] TaskPlan do LLM tạo chạy được full flow mà không hardcode lại task.
+- [ ] Executor tiếp tục lưu status/result sau mỗi task vào PostgreSQL.
+- [ ] InputRef truyền đúng ID thực giữa bốn bước.
+- [ ] Happy path kết thúc với workflow `SUCCESS`.
+- [ ] `NO_AVAILABILITY` kết thúc có kiểm soát với workflow `FAILED`.
+- [ ] Full-stack integration test và smoke test chạy được bằng một lệnh đã ghi
+  trong README.
+- [ ] Docker Compose được kiểm chứng runtime, không chỉ validate YAML.
+- [ ] Unit test, integration test, `ruff check` và `ruff format --check` pass.
+
+### Không làm trong critical path Gate 2
+
+- Retry/recovery handler hoàn chỉnh, nhận plan mới từ Replanner.
+- Compensation/Saga rollback.
+- Tự generate TaskPlan hoặc quyết định Policy/HITL.
 
 ---
 
