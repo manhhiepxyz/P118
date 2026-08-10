@@ -641,8 +641,8 @@ Primary owner đề xuất thay đổi. Các thay đổi ảnh hưởng interfac
 
 **English:**
 
-> Read and follow `docs/shared_contracts.md` as the source of truth. Treat tool names, internal fields, TaskPlan, StandardResult, statuses, and normalized error codes as fixed contracts. External API endpoints, authentication, and vendor-specific fields belong inside connectors. Do not assume that a real API must match the mock API. If the requested integration requires a business workflow that cannot be represented by the current contract, stop and report the conflict before generating code.
+> Read and follow `shared_contracts.md` as the source of truth. Treat tool names, internal fields, TaskPlan, StandardResult, statuses, and normalized error codes as fixed contracts. External API endpoints, authentication, and vendor-specific fields belong inside connectors. Do not assume that a real API must match the mock API. If the requested integration requires a business workflow that cannot be represented by the current contract, stop and report the conflict before generating code.
 
 **Tiếng Việt:**
 
-> Hãy đọc và tuân thủ `docs/shared_contracts.md` như nguồn quy ước chính thức. Xem tên tool, field nội bộ, TaskPlan, StandardResult, trạng thái và mã lỗi chuẩn hóa là contract cố định. Endpoint, xác thực và field riêng của API bên ngoài phải nằm trong Connector. Không giả định API thật phải giống mock API. Nếu tích hợp yêu cầu quy trình nghiệp vụ không thể biểu diễn bằng contract hiện tại, hãy dừng và báo xung đột trước khi sinh code.
+> Hãy đọc và tuân thủ `shared_contracts.md` như nguồn quy ước chính thức. Xem tên tool, field nội bộ, TaskPlan, StandardResult, trạng thái và mã lỗi chuẩn hóa là contract cố định. Endpoint, xác thực và field riêng của API bên ngoài phải nằm trong Connector. Không giả định API thật phải giống mock API. Nếu tích hợp yêu cầu quy trình nghiệp vụ không thể biểu diễn bằng contract hiện tại, hãy dừng và báo xung đột trước khi sinh code.

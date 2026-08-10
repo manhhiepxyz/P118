@@ -39,7 +39,7 @@
 
 ### Ngày 1 — Cả nhóm chốt contract (bắt buộc trước khi tách)
 
-Contract đã có sẵn trong `docs/shared_contracts.md`. Ngày 1 chỉ cần confirm:
+Contract đã có sẵn trong `shared_contracts.md`. Ngày 1 chỉ cần confirm:
 
 - 4 tool và input/output: đúng như `shared_contracts.md`
 - File ownership: ai sở hữu file nào trong `src/common/`

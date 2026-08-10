@@ -127,7 +127,7 @@ Bổ sung sau Gate 2:
 
 | Tài liệu                  | Link                           |
 | ------------------------- | ------------------------------ |
-| PRD                       | `docs/gate1/prd.md`            |
+| PRD                       | `docs/gate1/PRD.md`            |
 | Wireframe & UI Flow       | `docs/gate1/wireframe.md`      |
 | Architecture Diagram | `docs/architecture_diagram.md` |
 

@@ -263,7 +263,7 @@ docker-compose up --build
 ## Documentation
 
 - [Project Brief](docs/gate1/brief.md)
-- [PRD](docs/gate1/prd.md)
+- [PRD](docs/gate1/PRD.md)
 - [Wireframe / UI Flow](docs/gate1/wireframe.md)
 - [Architecture Diagram](docs/architecture_diagram.md)
 - [Weekly Journal](JOURNAL.md)
