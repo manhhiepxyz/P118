@@ -100,16 +100,62 @@ fake_failure = StandardResult(success=False, data=None,
 
 ---
 
-## Tuần 2 (11–17/08) — Planner + Validator + LangGraph
+## Tuần 2 (10–14/08) — Gate 2: LLM Planner + LangGraph
 
-| Việc | File |
-|---|---|
-| Viết Planner node (LLM tạo TaskPlan) | `src/agents/planner.py` |
-| Viết prompt cho Planner | `src/agents/prompts/planner_prompt.py` |
-| Tích hợp Validator vào LangGraph flow | `src/agents/graph.py` |
-| Test Planner với 5 goal mẫu | `tests/test_planner.py` |
+> **Mục tiêu nội bộ:** hoàn thành và freeze trước 23:59 ngày 14/08; ngày
+> 15/08 chỉ dùng để sửa lỗi và hoàn thiện hồ sơ nộp Gate 2. LLM trong đường
+> chạy demo phải là LLM thật; các API nghiệp vụ vẫn là Mock Provider.
 
-> Tuần 2 chưa tích hợp Policy Engine thật — placeholder hoặc `AUTO_ALLOWED` mặc định để happy path chạy được.
+### Trạng thái đầu tuần
+
+- `TaskPlan`, `Task`, `InputRef` và `TaskPlanValidator` đã hoàn thành.
+- Full flow deterministic T1→T2→T3→T4 đã chạy qua Executor, Mock Provider
+  và PostgreSQL.
+- `src/agents/graph.py` hiện chỉ là graph mẫu; chưa có Planner thật.
+- Chưa có `src/agents/planner.py`, prompt Planner và test Planner.
+
+### Việc cần làm
+
+| Việc | File | Hoàn thành khi |
+|---|---|---|
+| Viết LLM Planner tạo structured output | `src/agents/planner.py` | Goal tiếng Việt được chuyển thành `TaskPlan`, không parse JSON tùy ý ngoài schema |
+| Viết system prompt cho Planner | `src/agents/prompts/planner_prompt.py` | Prompt chỉ cho phép 4 tool, dùng `InputRef` đúng contract và không chứa URL/token/credential |
+| Xử lý thiếu thông tin | `src/agents/planner.py` | Không tự đoán ID hoặc dữ liệu nghiệp vụ; trả yêu cầu bổ sung thông tin có ý nghĩa |
+| Tích hợp Planner → Validator vào LangGraph | `src/agents/graph.py` | Mọi plan đều phải qua `TaskPlanValidator` trước khi tới execution boundary |
+| Thêm state cần thiết cho planning | `src/agents/state.py` | Lưu goal, context, plan, validation error và workflow result; không định nghĩa lại shared schema |
+| Unit test Planner bằng fake LLM | `tests/test_planner.py` | Test ổn định, không cần API key và phủ full goal, thiếu thông tin, tool lạ |
+| Chạy manual eval bằng LLM thật | `eval/results/report.md` | Có ít nhất 5 prompt và output thực tế để làm evidence Gate 2 |
+| Cập nhật sơ đồ luồng thực tế | Tài liệu architecture hiện hành | Thể hiện Goal → Planner → Validator → Executor → Connector → Mock Provider → PostgreSQL |
+| Chuẩn bị kịch bản demo 3 phút | Tài liệu Gate 2 | Có lời dẫn, sample goal, happy path, failure case và kết quả cần quay |
+
+### Làm độc lập
+
+- Dùng fake LLM response và fake execution boundary trong unit test; không
+  cần đợi API của Hoàng Anh hoặc thay đổi Executor của Mạnh Hiệp.
+- Output duy nhất của Planner là `TaskPlan` trong
+  `src/common/task_plan.py`; không tạo schema kế hoạch riêng trong
+  `src/agents/`.
+- Mạnh Hiệp tiếp tục test Executor bằng hardcoded plan. Hoàng Anh tiếp tục
+  test API bằng fake orchestration service.
+
+### Tiêu chí hoàn thành Week 2
+
+- [ ] Ít nhất một goal chạy bằng LLM thật và tạo `TaskPlan` hợp lệ.
+- [ ] Planner chỉ sử dụng 4 tool trong shared contract.
+- [ ] Plan từ LLM luôn qua `TaskPlanValidator` trước khi thực thi.
+- [ ] Thiếu thông tin thì hỏi lại, không tự bịa ID hoặc input.
+- [ ] Unit test không phụ thuộc network/API key; manual eval mới dùng LLM thật.
+- [ ] LangGraph gọi được execution boundary do Mạnh Hiệp cung cấp.
+- [ ] Có 5 manual eval case với output thực tế.
+- [ ] Có architecture diagram và kịch bản video 3 phút khớp với code thực tế.
+- [ ] `ruff check`, `ruff format --check` và test liên quan đều pass.
+
+### Không làm trong critical path Gate 2
+
+- Policy Engine/HITL thật: giữ `AUTO_ALLOWED` tạm thời cho happy path.
+- Replanner hoàn chỉnh, Retry, Compensation, MCP hoặc eKYC thật.
+- Không mở rộng allowlist và không thay đổi shared contract nếu không có
+  blocker được cả nhóm duyệt.
 
 ---
 
