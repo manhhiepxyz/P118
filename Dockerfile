@@ -24,6 +24,11 @@ COPY . .
 # Create data directory with correct ownership
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
+# /root/.local được copy từ builder giữ owner root — appuser (non-root)
+# không đọc/execute được uvicorn và các package khác → crash loop
+# Permission denied. Chuyển quyền cho appuser trước khi USER chuyển user.
+RUN chown -R appuser:appuser /root/.local
+
 USER appuser
 
 EXPOSE 8000

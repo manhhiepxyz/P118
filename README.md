@@ -251,11 +251,72 @@ Logs tự động submit lên grading server mỗi khi `git push`.
 
 ---
 
+## Runtime (Gate 2)
+
+### Khởi động full stack
+
+```bash
+# 1. Khởi động PostgreSQL + 3 Mock Provider + Backend
+docker compose up -d
+
+# 2. Kiểm tra health (chờ tất cả healthy)
+docker compose ps
+for p in 8000 8001 8002 8003; do curl -s http://localhost:$p/health; done
+```
+
+| Service | Cổng | Mô tả |
+| --- | --- | --- |
+| Backend | 8000 | FastAPI app (API + WebSocket) |
+| Mock Resident | 8001 | `POST /api/residents` |
+| Mock Transport | 8002 | `POST /api/vehicles` + `POST /api/parking/bookings` |
+| Mock Payment | 8003 | `POST /api/payments` |
+| PostgreSQL | 5432 | Workflow state persistence |
+
+### Smoke test (tái hiện happy path)
+
+```bash
+# Cần: Docker Compose đang chạy + healthy containers
+python scripts/smoke_runtime.py
+
+# Tùy chọn
+python scripts/smoke_runtime.py --goal "Đăng ký cư dân, xe, chỗ đậu, thanh toán"
+python scripts/smoke_runtime.py --seed "demo-01"   # prefix unique để tái chạy được
+```
+
+Smoke test chạy full flow 4 task (resident → vehicle → parking → payment) qua execution boundary, in kết quả từng bước, exit code 0 nếu SUCCESS / 1 nếu fail.
+
+### Full regression
+
+```bash
+# Unit test (không cần Docker)
+pytest tests/test_executor.py tests/test_connectors.py -v
+
+# Integration test (cần PostgreSQL thật + TEST_DATABASE_URL)
+TEST_DATABASE_URL=postgresql://p118:p118pass@localhost:5432/p118_db \
+  pytest tests/test_integration/ -v
+
+# Lint + format check
+ruff check .
+ruff format --check .
+```
+
+### Debug lỗi liên tầng
+
+Khi test fail, xem [docs/integration-debug-guide.md](docs/integration-debug-guide.md) để phân loại lỗi thuộc Planner / Executor / Connector / Provider / DB / Docker.
+
+---
+
 ## Docker
 
 ```bash
 # Chạy full stack
-docker-compose up --build
+docker compose up -d
+
+# Build lại image (nếu đổi code)
+docker compose build
+
+# Xem log
+docker compose logs -f mock-resident
 ```
 
 ---
