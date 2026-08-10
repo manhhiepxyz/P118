@@ -66,7 +66,6 @@
 | File | Thay đổi |
 |---|---|
 | [Makefile](Makefile) | Thêm target `run-mock` (cổng 8001) và `test-mock` |
-| [Week1.md](Week1.md) | Thêm **mục 5** — mô tả code mock API, cách chạy, cập nhật checklist; đánh số lại các mục |
 
 ### 2.4 Thay đổi v0.2.0 — Response envelope + Failure injection
 
@@ -281,7 +280,7 @@ make test-mock
 
 ### Cần nhóm xác nhận (mang tính chính thức vào contract)
 - [ ] Hai mã lỗi `BOOKING_ALREADY_EXISTS`, `PAYMENT_AMOUNT_MISMATCH` đang dùng trong mock — đồng ý đưa vào `shared_contracts.md` mục 8 (`ErrorCode`) chính thức không? (Chủ quản: Mạnh Hiệp — sở hữu `src/common/enums.py`)
-- [ ] Kịch bản đỗ xe có được giảng viên chấp nhận là "bài toán tương đương" không? (mục 2.4 Week1.md)
+- [ ] Kịch bản đỗ xe có được giảng viên chấp nhận là "bài toán tương đương" không?
 
 ### Chưa làm (thuộc kế hoạch tuần)
 - [x] ~~PostgreSQL: 3 bảng `workflow`, `task`, `execution` + migration/script khởi tạo (ngày 4–5 tuần 1)~~ ✅ Hoàn thành v0.3.0 — `schema.sql` + `seed.sql` chạy đúng, có `workflow`, `workflow_task`, `execution_log` (+ `residents`, `vehicles`, `parking_*`, `payments` cho mock service)
