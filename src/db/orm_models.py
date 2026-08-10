@@ -176,6 +176,8 @@ class WorkflowTask(Base):
     task_id: Mapped[str] = mapped_column(String(20), nullable=False)
     tool: Mapped[str] = mapped_column(String(60), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="PENDING")
+    # list[str] task_id phụ thuộc (TaskPlan.depends_on) — Replanner dựng lại DAG từ đây
+    depends_on: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     input_data: Mapped[dict] = mapped_column(JSONB)
     result_data: Mapped[dict] = mapped_column(JSONB)
     error_code: Mapped[str] = mapped_column(String(60))

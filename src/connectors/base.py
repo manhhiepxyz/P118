@@ -27,9 +27,24 @@ Quy tắc triển khai (mọi subclass phải tuân thủ):
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, NamedTuple
 
+from src.common.enums import ErrorCode
 from src.common.results import StandardResult
+
+
+class EnvelopeError(NamedTuple):
+    """Thông tin lỗi trích từ Mock API envelope.
+
+    Connector dùng struct này để dựng StandardResult.fail():
+      - error_code: string thô từ API, caller phải map qua _map_error_code().
+      - message   : mô tả lỗi từ API (không chứa input payload của user).
+      - retryable : cờ retryable do API khai báo.
+    """
+
+    error_code: str
+    message: str
+    retryable: bool
 
 
 class Connector(ABC):
@@ -99,6 +114,80 @@ class Connector(ABC):
             StandardResult object. KHÔNG trả raw JSON.
         """
         ...
+
+    @staticmethod
+    def _extract_payload(body: Any) -> tuple[dict[str, Any] | None, EnvelopeError | None]:
+        """Lấy canonical payload từ Mock API envelope.
+
+        Mock Provider trả envelope chuẩn (mục 6 shared_contracts.md)::
+
+            {"success": true, "data": {...}, "error_code": null,
+             "message": "...", "retryable": false}
+
+        Canonical field nằm trong ``data``, KHÔNG ở top level. Helper này là
+        nơi DUY NHẤT bóc envelope — subclass không được tự đọc ``body[...]``.
+
+        Quy tắc:
+          - body là dict CÓ key "success" → là envelope:
+              • success=False → (None, EnvelopeError(...)) để caller dựng
+                StandardResult.fail() với error_code đã map + retryable.
+              • success=True  → (body["data"] or {}, None).
+          - body là dict KHÔNG có "success" → provider ngoài trả flat response
+            (fallback được dung thứ) → (body, None).
+          - body không phải dict → (None, EnvelopeError(...)).
+
+        Returns:
+            (payload, None) khi thành công; (None, EnvelopeError) khi lỗi.
+            KHÔNG bao giờ trả envelope thô cho caller.
+        """
+        if not isinstance(body, dict):
+            return None, EnvelopeError(
+                error_code="UNKNOWN_EXTERNAL_ERROR",
+                message="Response body không phải JSON object",
+                retryable=False,
+            )
+
+        # Flat response từ provider không dùng envelope — tolerated fallback.
+        if "success" not in body:
+            return body, None
+
+        if body.get("success"):
+            data = body.get("data")
+            # data=null hoặc không phải dict → coi như payload rỗng; caller sẽ
+            # bắt lỗi thiếu required field và trả UNKNOWN_EXTERNAL_ERROR.
+            return (data if isinstance(data, dict) else {}), None
+
+        # HTTP 2xx nhưng envelope báo lỗi → caller phải trả failure.
+        return None, EnvelopeError(
+            error_code=str(body.get("error_code") or "UNKNOWN_EXTERNAL_ERROR"),
+            message=str(body.get("message") or "Unknown error"),
+            retryable=bool(body.get("retryable", False)),
+        )
+
+    def _map_error_code(self, code: str) -> ErrorCode:
+        """Map error code string từ API sang ErrorCode nội bộ.
+
+        Default: khớp trực tiếp với enum, không khớp → UNKNOWN_EXTERNAL_ERROR.
+        Subclass override để bổ sung bảng mapping riêng của từng service.
+        """
+        try:
+            return ErrorCode(code)
+        except ValueError:
+            return ErrorCode.UNKNOWN_EXTERNAL_ERROR
+
+    def _build_envelope_failure(self, env_error: EnvelopeError) -> StandardResult:
+        """Dựng StandardResult.fail() từ EnvelopeError của _extract_payload().
+
+        Dùng khi HTTP 2xx nhưng envelope có success=false: error_code thô được
+        map qua _map_error_code() của subclass, message giữ nguyên từ API
+        (không nội suy input payload để tránh lộ dữ liệu nhạy cảm).
+        """
+        error_code = self._map_error_code(env_error.error_code)
+        return StandardResult.fail(
+            error_code=error_code,
+            message=env_error.message,
+            retryable=env_error.retryable or error_code.is_retryable,
+        )
 
     def can_handle(self, tool_name: str) -> bool:
         """Kiểm tra connector có xử lý tool này không.

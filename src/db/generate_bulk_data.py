@@ -50,21 +50,48 @@ DATABASE_URL = os.environ.get(
 )
 BASE_DATE = date(2026, 8, 10)  # ngày bắt đầu phát sinh booking (gần "hôm nay")
 
-ZONE_PRICE = {"ZONE_A": 150_000, "ZONE_B": 100_000}      # khớp zone_capacity_config
-ZONE_CAPACITY = {"ZONE_A": 3, "ZONE_B": 10}              # khớp seed.sql
-PER_DAY = sum(ZONE_CAPACITY.values())                    # 13 booking/ngày tối đa
+ZONE_PRICE = {"ZONE_A": 150_000, "ZONE_B": 100_000}  # khớp zone_capacity_config
+ZONE_CAPACITY = {"ZONE_A": 3, "ZONE_B": 10}  # khớp seed.sql
+PER_DAY = sum(ZONE_CAPACITY.values())  # 13 booking/ngày tối đa
 
 # Tên tiếng Việt — lặp lại theo vòng nếu N > len(FULL_NAMES)
 FULL_NAMES = [
-    "Nguyễn Văn An", "Trần Thị Bích", "Lê Hoàng Cường", "Phạm Minh Dũng",
-    "Hoàng Thị Hoa", "Vũ Quốc Huy", "Đặng Thị Hạnh", "Bùi Thanh Long",
-    "Đỗ Minh Ngọc", "Hồ Thị Phương", "Ngô Quang Sơn", "Dương Văn Tài",
-    "Lý Thị Thu", "Phan Công Vinh", "Võ Thị Yến", "Tạ Quốc Bảo",
-    "Đoàn Thị Cúc", "Trịnh Văn Đạt", "Nguyễn Thị Giang", "Lương Minh Hiếu",
-    "Phùng Thị Kim", "Cao Văn Lâm", "Nghiêm Thị Mơ", "Kiều Văn Nam",
-    "Phạm Thị Oanh", "Trần Quốc Phong", "Mai Thị Quỳnh", "Hà Văn Sơn",
-    "Lê Thị Tuyết", "Đinh Văn Uyên", "Nguyễn Quốc Vũ", "Trần Thị Xuyến",
-    "Lý Văn Yên", "Ngô Thị Yến Nhi", "Phạm Hồng Đức", "Vũ Thị Lan",
+    "Nguyễn Văn An",
+    "Trần Thị Bích",
+    "Lê Hoàng Cường",
+    "Phạm Minh Dũng",
+    "Hoàng Thị Hoa",
+    "Vũ Quốc Huy",
+    "Đặng Thị Hạnh",
+    "Bùi Thanh Long",
+    "Đỗ Minh Ngọc",
+    "Hồ Thị Phương",
+    "Ngô Quang Sơn",
+    "Dương Văn Tài",
+    "Lý Thị Thu",
+    "Phan Công Vinh",
+    "Võ Thị Yến",
+    "Tạ Quốc Bảo",
+    "Đoàn Thị Cúc",
+    "Trịnh Văn Đạt",
+    "Nguyễn Thị Giang",
+    "Lương Minh Hiếu",
+    "Phùng Thị Kim",
+    "Cao Văn Lâm",
+    "Nghiêm Thị Mơ",
+    "Kiều Văn Nam",
+    "Phạm Thị Oanh",
+    "Trần Quốc Phong",
+    "Mai Thị Quỳnh",
+    "Hà Văn Sơn",
+    "Lê Thị Tuyết",
+    "Đinh Văn Uyên",
+    "Nguyễn Quốc Vũ",
+    "Trần Thị Xuyến",
+    "Lý Văn Yên",
+    "Ngô Thị Yến Nhi",
+    "Phạm Hồng Đức",
+    "Vũ Thị Lan",
 ]
 
 CONNECTOR_BY_TOOL = {
@@ -86,9 +113,7 @@ def workflow_types(n_workflows: int) -> list[str]:
     """
     success = round(0.7 * n_workflows)
     running = round(0.2 * n_workflows)
-    return (["SUCCESS"] * success
-            + ["RUNNING"] * running
-            + ["FAILED"] * max(0, n_workflows - success - running))
+    return ["SUCCESS"] * success + ["RUNNING"] * running + ["FAILED"] * max(0, n_workflows - success - running)
 
 
 def _apartment_code(i: int, base: int = 0) -> str:
@@ -100,9 +125,9 @@ def _apartment_code(i: int, base: int = 0) -> str:
 # ─────────────────────────────────────────────────────────────────────
 # Business data
 # ─────────────────────────────────────────────────────────────────────
-def build_business(n_residents: int, n_workflows: int,
-                   base: int = 0,
-                   existing_capacity: set[tuple[str, str]] | None = None) -> dict[str, list[list[object]]]:
+def build_business(
+    n_residents: int, n_workflows: int, base: int = 0, existing_capacity: set[tuple[str, str]] | None = None
+) -> dict[str, list[list[object]]]:
     """Sinh residents/vehicles/bookings/payments/capacity + metadata cho workflow.
 
     `base` = offset ID khi --no-wipe (số cư dân hiện có) để không trùng khóa.
@@ -155,7 +180,8 @@ def build_business(n_residents: int, n_workflows: int,
             "booking_date": booking_date,
             "parking_zone": zone,
             "amount": amount,
-            "booking_id": None, "payment_id": None,
+            "booking_id": None,
+            "payment_id": None,
         }
 
         if wf_type == "FAILED":
@@ -199,8 +225,7 @@ def build_business(n_residents: int, n_workflows: int,
 # ─────────────────────────────────────────────────────────────────────
 # Workflow state (SUCCESS / RUNNING+HITL / FAILED)
 # ─────────────────────────────────────────────────────────────────────
-def build_workflows(business: dict, n_workflows: int,
-                    base: int = 0) -> dict[str, list[list[object]]]:
+def build_workflows(business: dict, n_workflows: int, base: int = 0) -> dict[str, list[list[object]]]:
     """Sinh workflows + workflow_tasks + execution_logs + approval_decisions.
 
     Chỉ xử lý n_workflows chain đầu tiên (phần còn lại là business data thuần).
@@ -241,77 +266,184 @@ def build_workflows(business: dict, n_workflows: int,
         # input_data, result_data, error_code, error_message, retryable).
         # Trường lỗi = None khi task thành công → executemany cùng arity.
         if c["type"] in ("SUCCESS", "RUNNING"):
-            tasks.append((workflow_id, "T1", "register_resident", "SUCCESS",
-                          {"full_name": c["full_name"], "apartment_code": c["apartment_code"],
-                           "residential_area": "Vinhomes Ocean Park"},
-                          {"resident_id": c["resident_id"]}, None, None, False))
+            tasks.append(
+                (
+                    workflow_id,
+                    "T1",
+                    "register_resident",
+                    "SUCCESS",
+                    {
+                        "full_name": c["full_name"],
+                        "apartment_code": c["apartment_code"],
+                        "residential_area": "Vinhomes Ocean Park",
+                    },
+                    {"resident_id": c["resident_id"]},
+                    None,
+                    None,
+                    False,
+                )
+            )
             logs.append(_ok_log(workflow_id, "T1", 1, "register_resident"))
 
-            tasks.append((workflow_id, "T2", "register_vehicle", "SUCCESS",
-                          {"resident_id": c["resident_id"], "plate_number": c["plate_number"],
-                           "vehicle_type": c["vehicle_type"]},
-                          {"vehicle_id": c["vehicle_id"]}, None, None, False))
+            tasks.append(
+                (
+                    workflow_id,
+                    "T2",
+                    "register_vehicle",
+                    "SUCCESS",
+                    {
+                        "resident_id": c["resident_id"],
+                        "plate_number": c["plate_number"],
+                        "vehicle_type": c["vehicle_type"],
+                    },
+                    {"vehicle_id": c["vehicle_id"]},
+                    None,
+                    None,
+                    False,
+                )
+            )
             logs.append(_ok_log(workflow_id, "T2", 1, "register_vehicle"))
 
-            booking_input = {"vehicle_id": c["vehicle_id"],
-                             "booking_date": c["booking_date"].isoformat(),
-                             "parking_zone": c["parking_zone"]}
-            booking_result = {"booking_id": c["booking_id"], "parking_zone": c["parking_zone"],
-                              "booking_date": c["booking_date"].isoformat(),
-                              "amount": c["amount"], "currency": "VND"}
-            tasks.append((workflow_id, "T3", "book_parking", "SUCCESS",
-                          booking_input, booking_result, None, None, False))
+            booking_input = {
+                "vehicle_id": c["vehicle_id"],
+                "booking_date": c["booking_date"].isoformat(),
+                "parking_zone": c["parking_zone"],
+            }
+            booking_result = {
+                "booking_id": c["booking_id"],
+                "parking_zone": c["parking_zone"],
+                "booking_date": c["booking_date"].isoformat(),
+                "amount": c["amount"],
+                "currency": "VND",
+            }
+            tasks.append(
+                (workflow_id, "T3", "book_parking", "SUCCESS", booking_input, booking_result, None, None, False)
+            )
             logs.append(_ok_log(workflow_id, "T3", 1, "book_parking"))
             if c["type"] == "RUNNING":  # T4 pay_fee chờ HITL approve
-                tasks.append((workflow_id, "T4", "pay_fee", "WAITING_APPROVAL",
-                              {"booking_id": c["booking_id"], "amount": c["amount"],
-                               "currency": "VND"}, None, None, None, False))
+                tasks.append(
+                    (
+                        workflow_id,
+                        "T4",
+                        "pay_fee",
+                        "WAITING_APPROVAL",
+                        {"booking_id": c["booking_id"], "amount": c["amount"], "currency": "VND"},
+                        None,
+                        None,
+                        None,
+                        False,
+                    )
+                )
                 # HITL audit: quyết định approve (chưa execute nên không có execution_log)
-                approvals.append((workflow_id, "T4", "user:hoanganh", "APPROVED",
-                                  f"Đồng ý thanh toán phí đỗ xe {c['amount']:,} VND"))
+                approvals.append(
+                    (workflow_id, "T4", "user:hoanganh", "APPROVED", f"Đồng ý thanh toán phí đỗ xe {c['amount']:,} VND")
+                )
 
         else:  # FAILED: T1, T2 thành công; T3 book_parking thất bại NO_AVAILABILITY
-            tasks.append((workflow_id, "T1", "register_resident", "SUCCESS",
-                          {"full_name": c["full_name"], "apartment_code": c["apartment_code"],
-                           "residential_area": "Vinhomes Ocean Park"},
-                          {"resident_id": c["resident_id"]}, None, None, False))
+            tasks.append(
+                (
+                    workflow_id,
+                    "T1",
+                    "register_resident",
+                    "SUCCESS",
+                    {
+                        "full_name": c["full_name"],
+                        "apartment_code": c["apartment_code"],
+                        "residential_area": "Vinhomes Ocean Park",
+                    },
+                    {"resident_id": c["resident_id"]},
+                    None,
+                    None,
+                    False,
+                )
+            )
             logs.append(_ok_log(workflow_id, "T1", 1, "register_resident"))
-            tasks.append((workflow_id, "T2", "register_vehicle", "SUCCESS",
-                          {"resident_id": c["resident_id"], "plate_number": c["plate_number"],
-                           "vehicle_type": c["vehicle_type"]},
-                          {"vehicle_id": c["vehicle_id"]}, None, None, False))
+            tasks.append(
+                (
+                    workflow_id,
+                    "T2",
+                    "register_vehicle",
+                    "SUCCESS",
+                    {
+                        "resident_id": c["resident_id"],
+                        "plate_number": c["plate_number"],
+                        "vehicle_type": c["vehicle_type"],
+                    },
+                    {"vehicle_id": c["vehicle_id"]},
+                    None,
+                    None,
+                    False,
+                )
+            )
             logs.append(_ok_log(workflow_id, "T2", 1, "register_vehicle"))
-            tasks.append((workflow_id, "T3", "book_parking", "FAILED",
-                          {"vehicle_id": c["vehicle_id"],
-                           "booking_date": c["booking_date"].isoformat(),
-                           "parking_zone": c["parking_zone"]}, None,
-                          "NO_AVAILABILITY",
-                          f"Parking Zone A ({c['parking_zone']}) is full on "
-                          f"{c['booking_date'].isoformat()}", False))
+            tasks.append(
+                (
+                    workflow_id,
+                    "T3",
+                    "book_parking",
+                    "FAILED",
+                    {
+                        "vehicle_id": c["vehicle_id"],
+                        "booking_date": c["booking_date"].isoformat(),
+                        "parking_zone": c["parking_zone"],
+                    },
+                    None,
+                    "NO_AVAILABILITY",
+                    f"Parking Zone A ({c['parking_zone']}) is full on {c['booking_date'].isoformat()}",
+                    False,
+                )
+            )
             logs.append(_fail_log(workflow_id, "T3", 1, "book_parking", c))
 
     return {"workflows": workflows, "tasks": tasks, "logs": logs, "approvals": approvals}
 
 
 def _ok_log(wf_id: uuid.UUID, task_id: str, attempt: int, tool: str) -> tuple:
-    return (wf_id, task_id, attempt, CONNECTOR_BY_TOOL[tool], 201, None,
-            {"success": True, "data": {"ok": True}, "error_code": None}, 100)
+    return (
+        wf_id,
+        task_id,
+        attempt,
+        CONNECTOR_BY_TOOL[tool],
+        201,
+        None,
+        {"success": True, "data": {"ok": True}, "error_code": None},
+        100,
+    )
 
 
 def _fail_log(wf_id: uuid.UUID, task_id: str, attempt: int, tool: str, c: dict) -> tuple:
-    return (wf_id, task_id, attempt, CONNECTOR_BY_TOOL[tool], 409, "NO_AVAILABILITY",
-            {"success": False, "data": None, "error_code": "NO_AVAILABILITY",
-             "message": f"Parking Zone A ({c['parking_zone']}) is full on "
-                        f"{c['booking_date'].isoformat()}",
-             "retryable": False}, 150)
+    return (
+        wf_id,
+        task_id,
+        attempt,
+        CONNECTOR_BY_TOOL[tool],
+        409,
+        "NO_AVAILABILITY",
+        {
+            "success": False,
+            "data": None,
+            "error_code": "NO_AVAILABILITY",
+            "message": f"Parking Zone A ({c['parking_zone']}) is full on {c['booking_date'].isoformat()}",
+            "retryable": False,
+        },
+        150,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Insert + verify
 # ─────────────────────────────────────────────────────────────────────
-TABLE_ORDER = ["residents", "vehicles", "parking_bookings", "parking_capacity",
-               "payments", "workflows", "workflow_tasks", "execution_logs",
-               "approval_decisions"]
+TABLE_ORDER = [
+    "residents",
+    "vehicles",
+    "parking_bookings",
+    "parking_capacity",
+    "payments",
+    "workflows",
+    "workflow_tasks",
+    "execution_logs",
+    "approval_decisions",
+]
 
 
 async def wipe(conn: asyncpg.Connection) -> None:
@@ -330,10 +462,7 @@ async def insert_rows(conn: asyncpg.Connection, table: str, rows: list[list[obje
     # execution_logs.id, approval_decisions.id), tránh UUID parse vào id.
     placeholders = ", ".join(f"${i}" for i in range(1, len(rows[0]) + 1))
     # dict → JSON string (asyncpg encode JSONB dạng str; cột là JSONB)
-    encoded = [
-        [json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v for v in row]
-        for row in rows
-    ]
+    encoded = [[json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v for v in row] for row in rows]
     await conn.executemany(
         f"INSERT INTO {table} ({COLUMNS[table]}) VALUES ({placeholders})",
         encoded,
@@ -343,14 +472,14 @@ async def insert_rows(conn: asyncpg.Connection, table: str, rows: list[list[obje
 
 # Cột INSERT tường minh — bỏ qua cột auto/id, khớp thứ tự tuple trong build_*
 COLUMNS = {
-    "residents":         "resident_id, full_name, apartment_code, residential_area",
-    "vehicles":          "vehicle_id, resident_id, plate_number, vehicle_type",
-    "parking_bookings":  "booking_id, vehicle_id, parking_zone, booking_date, amount, currency",
-    "parking_capacity":  "parking_zone, booking_date, capacity",
-    "payments":          "payment_id, booking_id, amount, currency, payment_status",
-    "workflows":         "workflow_id, goal, status",
-    "workflow_tasks":    "workflow_id, task_id, tool, status, input_data, result_data, error_code, error_message, retryable",
-    "execution_logs":    "workflow_id, task_id, attempt_number, connector_name, http_status, raw_error_code, standard_result, duration_ms",
+    "residents": "resident_id, full_name, apartment_code, residential_area",
+    "vehicles": "vehicle_id, resident_id, plate_number, vehicle_type",
+    "parking_bookings": "booking_id, vehicle_id, parking_zone, booking_date, amount, currency",
+    "parking_capacity": "parking_zone, booking_date, capacity",
+    "payments": "payment_id, booking_id, amount, currency, payment_status",
+    "workflows": "workflow_id, goal, status",
+    "workflow_tasks": "workflow_id, task_id, tool, status, input_data, result_data, error_code, error_message, retryable",
+    "execution_logs": "workflow_id, task_id, attempt_number, connector_name, http_status, raw_error_code, standard_result, duration_ms",
     "approval_decisions": "workflow_id, task_id, decided_by, decision, comment",
 }
 
@@ -394,13 +523,18 @@ async def verify(conn: asyncpg.Connection) -> None:
     )
 
     print("\n── Số dòng mỗi bảng ──────────────────────────────")
-    for col in ("residents", "vehicles", "bookings", "capacity",
-                "payments", "workflows", "tasks", "logs", "approvals"):
+    for col in ("residents", "vehicles", "bookings", "capacity", "payments", "workflows", "tasks", "logs", "approvals"):
         print(f"  {col:<12} {row[col]:>6}")
     print("── Toàn vẹn FK (mồ côi = 0) ──────────────────────")
     total_orphan = 0
-    for col in ("vehicles_orphan", "bookings_orphan", "payments_orphan",
-                "tasks_orphan", "logs_orphan", "approvals_orphan"):
+    for col in (
+        "vehicles_orphan",
+        "bookings_orphan",
+        "payments_orphan",
+        "tasks_orphan",
+        "logs_orphan",
+        "approvals_orphan",
+    ):
         val = orphans[col]
         total_orphan += val
         print(f"  {col:<16} {val}")
@@ -425,8 +559,7 @@ async def run(n_residents: int, n_workflows: int, do_wipe: bool) -> None:
                 rows = await conn.fetch("SELECT parking_zone, booking_date FROM parking_capacity")
                 existing_capacity = {(r["parking_zone"], r["booking_date"].isoformat()) for r in rows}
 
-            business = build_business(n_residents, n_workflows, base=base,
-                                      existing_capacity=existing_capacity)
+            business = build_business(n_residents, n_workflows, base=base, existing_capacity=existing_capacity)
             workflows = build_workflows(business, n_workflows, base=base)
 
             async with conn.transaction():
@@ -459,12 +592,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="P-118 bulk test data generator — mặc định 100 cư dân + chuỗi happy path + 20 workflow.",
     )
-    parser.add_argument("--residents", type=int, default=100,
-                        help="Số cư dân (mỗi người 1 xe → booking → payment). Mặc định 100.")
-    parser.add_argument("--workflows", type=int, default=20,
-                        help="Số workflow state sinh thêm (≤ residents). Mặc định 20.")
-    parser.add_argument("--no-wipe", action="store_true",
-                        help="KHÔNG TRUNCATE — thêm vào dữ liệu hiện có.")
+    parser.add_argument(
+        "--residents", type=int, default=100, help="Số cư dân (mỗi người 1 xe → booking → payment). Mặc định 100."
+    )
+    parser.add_argument(
+        "--workflows", type=int, default=20, help="Số workflow state sinh thêm (≤ residents). Mặc định 20."
+    )
+    parser.add_argument("--no-wipe", action="store_true", help="KHÔNG TRUNCATE — thêm vào dữ liệu hiện có.")
     args = parser.parse_args()
 
     if args.workflows > args.residents:

@@ -107,6 +107,18 @@ class PostgreSQLWorkflowStateRepository:
         """Lưu StandardResult sau khi Connector trả về."""
         await self.workflows.save_task_result(workflow_id, task_id, result)
 
+    async def get_task(self, workflow_id: str, task_id: str) -> dict | None:
+        """Lấy một task của workflow (None nếu chưa tồn tại)."""
+        return await self.workflows.get_task(workflow_id, task_id)
+
+    async def list_tasks(self, workflow_id: str) -> list[dict]:
+        """Liệt kê tất cả task của workflow."""
+        return await self.workflows.list_tasks(workflow_id)
+
+    async def get_completed_task_ids(self, workflow_id: str) -> list[str]:
+        """Danh sách task_id đã SUCCESS (Replanner dùng cho idempotency)."""
+        return await self.workflows.get_completed_task_ids(workflow_id)
+
     # ------------------------------------------------------------------
     # Capacity check (fix race condition — SELECT FOR UPDATE)
     # ------------------------------------------------------------------

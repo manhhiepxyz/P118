@@ -86,7 +86,12 @@ class PaymentConnector(Connector):
 
                 # --- Bước 3: Xử lý khi HTTP Response trả về thành công (2xx) ---
                 if response.is_success:
-                    data = response.json()
+                    # Envelope {success, data, ...} → canonical field nằm trong data.
+                    data, env_error = self._extract_payload(response.json())
+
+                    # HTTP 2xx nhưng envelope báo lỗi → vẫn là failure.
+                    if env_error is not None:
+                        return self._build_envelope_failure(env_error)
 
                     # 3a. Kiểm tra required output field theo contract
                     if "payment_id" not in data or "payment_status" not in data:

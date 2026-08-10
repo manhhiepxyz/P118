@@ -50,14 +50,18 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Mock API — chạy riêng cổng 8001 (phát triển nội bộ)
+  # Mock Providers — 3 provider độc lập theo domain.
+  # Cổng phải khớp base_url mặc định của Connector:
+  #   ResidentConnector  → 8001
+  #   TransportConnector → 8002  (register_vehicle + book_parking)
+  #   PaymentConnector   → 8003
   # ----------------------------------------------------------------
-  mock:
+  mock-resident:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: p118_mock
-    command: ["uvicorn", "src.mock.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    container_name: p118_mock_resident
+    command: ["uvicorn", "src.services.mock.resident:resident_app", "--host", "0.0.0.0", "--port", "8001"]
     ports:
       - "8001:8001"
     env_file:
@@ -67,9 +71,104 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  mock-transport:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_transport
+    command: ["uvicorn", "src.services.mock.transport:transport_app", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  mock-payment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_payment
+    command: ["uvicorn", "src.services.mock.payment:payment_app", "--host", "0.0.0.0", "--port", "8003"]
+    ports:
+      - "8003:8003"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # Mock Ownership Provider — 8004.
+  # KHÔNG phải Agent tool: phục vụ Auth/VerificationGuard (Week 2),
+  # chạy trước Agent Workflow. Không Connector nào gọi service này.
+  # ----------------------------------------------------------------
+  mock-ownership:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_ownership
+    command:
+      ["uvicorn", "src.services.mock.apartment_ownership:apartment_ownership_app", "--host", "0.0.0.0", "--port", "8004"]
+    ports:
+      - "8004:8004"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     profiles:
-      - mock   # chỉ chạy khi: docker compose --profile mock up
+      - ownership   # docker compose --profile ownership up
+
+  # ----------------------------------------------------------------
+  # Mock monolith — gộp mọi router vào một app, chỉ dùng cho test.
+  # Cổng 8010 để không chiếm cổng của provider độc lập ở trên.
+  # ----------------------------------------------------------------
+  mock-monolith:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_monolith
+    command: ["uvicorn", "src.mock.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - monolith   # docker compose --profile monolith up
 
 volumes:
   postgres_data:

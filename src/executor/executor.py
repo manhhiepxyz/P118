@@ -99,14 +99,19 @@ class Executor:
         if workflow_id is None:
             workflow_id = str(uuid.uuid4())
 
-        # Khởi tạo workflow trong repository
-        await self.repository.create_workflow(
+        # Khởi tạo workflow trong repository.
+        # Repository trả về ID đã thực sự persist — có thể KHÁC id truyền vào
+        # (ví dụ khi backend tự sinh UUID). Luôn dùng giá trị trả về cho mọi
+        # lời gọi repository sau đó.
+        persisted_id = await self.repository.create_workflow(
             {
                 "id": workflow_id,
                 "goal": plan.goal,
                 "status": WorkflowStatus.PENDING.value,
             }
         )
+        if persisted_id:
+            workflow_id = str(persisted_id)
 
         # Khởi tạo task statuses
         task_statuses: dict[str, TaskStatus] = {}

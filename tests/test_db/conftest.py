@@ -15,13 +15,11 @@ Chạy test:
 
 from __future__ import annotations
 
-import os
-
 import asyncpg
-import pytest
 import pytest_asyncio
 
 from src.db.migrations import create_test_db
+from tests._dbcheck import require_test_database_url
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -30,12 +28,10 @@ async def db_pool() -> asyncpg.Pool:
     Tạo pool kết nối tới test DB và chạy migration.
     scope="session": dùng chung pool cho cả test session → nhanh hơn.
     """
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip(
-            "TEST_DATABASE_URL chưa được set — bỏ qua test PostgreSQL. "
-            "Set biến này trong .env để chạy integration test."
-        )
+    # Thiếu TEST_DATABASE_URL: skip khi chạy local, FAIL khi chạy CI.
+    # Skip âm thầm trong CI khiến toàn bộ tầng PostgreSQL không được kiểm
+    # mà suite vẫn báo xanh.
+    test_url = require_test_database_url()
 
     pool = await create_test_db(test_url)
     yield pool
