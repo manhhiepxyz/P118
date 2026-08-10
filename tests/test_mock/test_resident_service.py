@@ -12,8 +12,6 @@ Các case:
 
 from __future__ import annotations
 
-import os
-
 import asyncpg
 import pytest
 import pytest_asyncio
@@ -24,13 +22,13 @@ from src.services.mock.resident_service import (
     ResidentNotFoundError,
     ResidentService,
 )
+from tests._dbcheck import require_test_database_url
 
 
 @pytest_asyncio.fixture(scope="session")
 async def svc_pool() -> asyncpg.Pool:
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL chưa được set — bỏ qua test ResidentService.")
+    # Thiếu TEST_DATABASE_URL: skip khi chạy local, FAIL khi chạy CI.
+    test_url = require_test_database_url()
 
     pool = await asyncpg.create_pool(dsn=test_url, min_size=1, max_size=5)
     await run_migrations(pool)

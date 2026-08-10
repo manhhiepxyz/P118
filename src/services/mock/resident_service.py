@@ -113,7 +113,8 @@ class ResidentService:
             )
             raise  # propagate để router trả 500, không giả vờ là 409
 
-        logger.info("registered resident %s → %s", full_name, resident_id)
+        # Không log full_name — đây là PII. resident_id đủ để trace.
+        logger.info("registered resident %s", resident_id)
         return {"resident_id": resident_id}
 
     async def get(self, resident_id: str) -> dict:

@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 # Đường dẫn tuyệt đối tới thư mục src/db/
 _DB_DIR = Path(__file__).parent
 
+# Thứ tự chạy migration:
+#   1. schema.sql            — tạo bảng cho DB mới (CREATE ... IF NOT EXISTS)
+#   2. schema_migrations.sql — ALTER ... IF NOT EXISTS cho DB đã tồn tại
+#                              (schema.sql KHÔNG bao giờ thêm cột vào bảng có sẵn)
+#   3. seed.sql              — dữ liệu khởi tạo
+MIGRATION_FILES = ["schema.sql", "schema_migrations.sql", "seed.sql"]
+
+# Dùng lại trong test để chứng minh đường nâng cấp từ schema cũ.
+SCHEMA_MIGRATIONS_PATH = _DB_DIR / "schema_migrations.sql"
+
 
 async def run_migrations(pool: asyncpg.Pool) -> None:
     """
@@ -33,7 +43,7 @@ async def run_migrations(pool: asyncpg.Pool) -> None:
     Gọi từ src/db/connection.py::lifespan() trong startup.
     """
     async with pool.acquire() as conn:
-        for sql_file in ["schema.sql", "seed.sql"]:
+        for sql_file in MIGRATION_FILES:
             path = _DB_DIR / sql_file
             if not path.exists():
                 logger.warning("Migration file không tồn tại, bỏ qua: %s", path)

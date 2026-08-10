@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS workflow_tasks (
                           'PENDING', 'READY', 'RUNNING', 'WAITING_APPROVAL',
                           'SUCCESS', 'FAILED', 'SKIPPED', 'CANCELLED'
                       )),
+    depends_on    JSONB        NOT NULL DEFAULT '[]',     -- list[str] task_id phụ thuộc, Replanner đọc lại
     input_data    JSONB,                                  -- input resolved sau data propagation
     result_data   JSONB,                                  -- StandardResult.data khi SUCCESS
     error_code    VARCHAR(60),                            -- ErrorCode enum khi FAILED

@@ -4,15 +4,22 @@ Owner: Mạnh Hiệp (Executor layer)
 File: tests/test_connectors.py
 """
 
+import uuid
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 
 from src.common.enums import ErrorCode
+from src.connectors.base import Connector
 from src.connectors.payment import PaymentConnector
 from src.connectors.resident import ResidentConnector
 from src.connectors.transport import TransportConnector
+from src.services.mock.payment import payment_app
+from src.services.mock.resident import resident_app
+from src.services.mock.transport import transport_app
 
 
 @pytest.fixture
@@ -43,7 +50,13 @@ def mock_httpx_client():
 async def test_resident_connector_success(mock_httpx_client):
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"resident_id": "RES-123", "extra_field": "ignore_me"}
+    mock_response.json.return_value = {
+        "success": True,
+        "data": {"resident_id": "RES-123", "extra_field": "ignore_me"},
+        "error_code": None,
+        "message": "Created",
+        "retryable": False,
+    }
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = ResidentConnector(client=mock_httpx_client)
@@ -60,7 +73,7 @@ async def test_resident_connector_url_and_payload(mock_httpx_client):
     """ResidentConnector phải POST đúng URL /api/residents và truyền nguyên payload."""
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"resident_id": "RES-999"}
+    mock_response.json.return_value = {"success": True, "data": {"resident_id": "RES-999"}, "message": "Created"}
     mock_httpx_client.post_mock.return_value = mock_response
 
     payload = {"full_name": "Nguyễn Văn A", "apartment_code": "A101", "residential_area": "VH-SGV"}
@@ -78,7 +91,7 @@ async def test_resident_connector_url_and_payload(mock_httpx_client):
 async def test_resident_connector_missing_output(mock_httpx_client):
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"something": "else"}
+    mock_response.json.return_value = {"success": True, "data": {"something": "else"}, "message": "Created"}
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = ResidentConnector(client=mock_httpx_client)
@@ -97,7 +110,11 @@ async def test_resident_connector_missing_output(mock_httpx_client):
 async def test_transport_connector_register_vehicle_success(mock_httpx_client):
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"vehicle_id": "VEH-123", "color": "red"}
+    mock_response.json.return_value = {
+        "success": True,
+        "data": {"vehicle_id": "VEH-123", "color": "red"},
+        "message": "Created",
+    }
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = TransportConnector(client=mock_httpx_client)
@@ -112,7 +129,7 @@ async def test_transport_connector_register_vehicle_url_and_payload(mock_httpx_c
     """TransportConnector phải POST đúng URL /api/vehicles và truyền nguyên payload."""
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"vehicle_id": "VEH-888"}
+    mock_response.json.return_value = {"success": True, "data": {"vehicle_id": "VEH-888"}, "message": "Created"}
     mock_httpx_client.post_mock.return_value = mock_response
 
     payload = {"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"}
@@ -136,12 +153,18 @@ async def test_transport_connector_book_parking_success(mock_httpx_client):
     mock_response = MagicMock()
     mock_response.is_success = True
     mock_response.json.return_value = {
-        "booking_id": "BOOK-1",
-        "parking_zone": "A1",
-        "booking_date": "2026-08-10",
-        "amount": 100,
-        "currency": "VND",
-        "ignore_me": "yes",
+        "success": True,
+        "data": {
+            "booking_id": "BOOK-1",
+            "parking_zone": "ZONE_A",
+            "booking_date": "2026-08-10",
+            "amount": 100,
+            "currency": "VND",
+            "ignore_me": "yes",
+        },
+        "error_code": None,
+        "message": "Created",
+        "retryable": False,
     }
     mock_httpx_client.post_mock.return_value = mock_response
 
@@ -151,7 +174,7 @@ async def test_transport_connector_book_parking_success(mock_httpx_client):
     assert result.success is True
     assert result.data == {
         "booking_id": "BOOK-1",
-        "parking_zone": "A1",
+        "parking_zone": "ZONE_A",
         "booking_date": "2026-08-10",
         "amount": 100,
         "currency": "VND",
@@ -164,15 +187,19 @@ async def test_transport_connector_book_parking_url_and_payload(mock_httpx_clien
     mock_response = MagicMock()
     mock_response.is_success = True
     mock_response.json.return_value = {
-        "booking_id": "BOOK-777",
-        "parking_zone": "B2",
-        "booking_date": "2026-08-10",
-        "amount": 200000,
-        "currency": "VND",
+        "success": True,
+        "data": {
+            "booking_id": "BOOK-777",
+            "parking_zone": "ZONE_B",
+            "booking_date": "2026-08-10",
+            "amount": 200000,
+            "currency": "VND",
+        },
+        "message": "Created",
     }
     mock_httpx_client.post_mock.return_value = mock_response
 
-    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-08-10", "parking_zone": "B2"}
+    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-08-10", "parking_zone": "ZONE_B"}
     connector = TransportConnector(base_url="http://localhost:8002", client=mock_httpx_client)
     await connector.execute("book_parking", payload)
 
@@ -193,7 +220,7 @@ async def test_payment_connector_paid_status(mock_httpx_client):
     """Happy path: Mock API trả PAID → kết quả PAID."""
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"payment_id": "PAY-1", "payment_status": "PAID"}
+    mock_response.json.return_value = {"success": True, "data": {"payment_id": "PAY-1", "payment_status": "PAID"}}
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = PaymentConnector(client=mock_httpx_client)
@@ -208,7 +235,7 @@ async def test_payment_connector_maps_success_to_paid(mock_httpx_client):
     """Legacy provider trả SUCCESS → phải map thành PAID."""
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"payment_id": "PAY-2", "payment_status": "SUCCESS"}
+    mock_response.json.return_value = {"success": True, "data": {"payment_id": "PAY-2", "payment_status": "SUCCESS"}}
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = PaymentConnector(client=mock_httpx_client)
@@ -223,7 +250,10 @@ async def test_payment_connector_unknown_status_returns_error(mock_httpx_client)
     """payment_status không nằm trong allowlist → UNKNOWN_EXTERNAL_ERROR."""
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"payment_id": "PAY-3", "payment_status": "WEIRD_STATUS"}
+    mock_response.json.return_value = {
+        "success": True,
+        "data": {"payment_id": "PAY-3", "payment_status": "WEIRD_STATUS"},
+    }
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = PaymentConnector(client=mock_httpx_client)
@@ -238,7 +268,7 @@ async def test_payment_connector_url_and_payload(mock_httpx_client):
     """PaymentConnector phải POST đúng URL /api/payments và truyền nguyên payload."""
     mock_response = MagicMock()
     mock_response.is_success = True
-    mock_response.json.return_value = {"payment_id": "PAY-999", "payment_status": "PAID"}
+    mock_response.json.return_value = {"success": True, "data": {"payment_id": "PAY-999", "payment_status": "PAID"}}
     mock_httpx_client.post_mock.return_value = mock_response
 
     payload = {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"}
@@ -291,7 +321,13 @@ async def test_service_unavailable(mock_httpx_client):
 async def test_no_availability_mapping(mock_httpx_client):
     mock_response = MagicMock()
     mock_response.is_success = False
-    mock_response.json.return_value = {"error_code": "NO_AVAILABILITY", "message": "Full"}
+    mock_response.json.return_value = {
+        "success": False,
+        "data": None,
+        "error_code": "NO_AVAILABILITY",
+        "message": "Full",
+        "retryable": False,
+    }
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = TransportConnector(client=mock_httpx_client)
@@ -306,7 +342,13 @@ async def test_no_availability_mapping(mock_httpx_client):
 async def test_unknown_external_error_mapping(mock_httpx_client):
     mock_response = MagicMock()
     mock_response.is_success = False
-    mock_response.json.return_value = {"error_code": "WEIRD_ERROR", "message": "???"}
+    mock_response.json.return_value = {
+        "success": False,
+        "data": None,
+        "error_code": "WEIRD_ERROR",
+        "message": "???",
+        "retryable": False,
+    }
     mock_httpx_client.post_mock.return_value = mock_response
 
     connector = TransportConnector(client=mock_httpx_client)
@@ -324,4 +366,335 @@ def test_create_invalid_input_response_helper():
     assert result.success is False
     assert result.error_code == ErrorCode.INVALID_INPUT
     assert result.message == "Test invalid input"
+    assert result.retryable is False
+
+
+# ---------------------------------------------------------------------------
+# Envelope: HTTP 2xx nhưng success=false
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resident_envelope_success_false_returns_failure(mock_httpx_client):
+    """HTTP 2xx + envelope success=false → StandardResult failure đã map error_code."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {
+        "success": False,
+        "data": None,
+        "error_code": "RESIDENT_ALREADY_EXISTS",
+        "message": "Resident for apartment A101 already exists",
+        "retryable": False,
+    }
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = ResidentConnector(client=mock_httpx_client)
+    result = await connector.execute("register_resident", {"full_name": "Test"})
+
+    assert result.success is False
+    assert result.data is None
+    assert result.error_code == ErrorCode.RESIDENT_ALREADY_EXISTS
+    assert result.retryable is False
+    assert result.message == "Resident for apartment A101 already exists"
+
+
+@pytest.mark.asyncio
+async def test_transport_envelope_success_false_maps_alias_error_code(mock_httpx_client):
+    """error_code alias (VEHICLE_EXISTS) trong envelope phải đi qua _map_error_code()."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {
+        "success": False,
+        "data": None,
+        "error_code": "VEHICLE_EXISTS",
+        "message": "Duplicated plate",
+        "retryable": False,
+    }
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = TransportConnector(client=mock_httpx_client)
+    result = await connector.execute("register_vehicle", {"plate_number": "51A-00000"})
+
+    assert result.success is False
+    assert result.error_code == ErrorCode.VEHICLE_ALREADY_EXISTS
+
+
+@pytest.mark.asyncio
+async def test_transport_book_parking_envelope_success_false_retryable(mock_httpx_client):
+    """Envelope retryable=true phải được giữ nguyên trên StandardResult."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {
+        "success": False,
+        "data": None,
+        "error_code": "SERVICE_UNAVAILABLE",
+        "message": "[MOCK] Injected: service unavailable",
+        "retryable": True,
+    }
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = TransportConnector(client=mock_httpx_client)
+    result = await connector.execute("book_parking", {"vehicle_id": "VEH-1"})
+
+    assert result.success is False
+    assert result.error_code == ErrorCode.SERVICE_UNAVAILABLE
+    assert result.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_payment_envelope_success_false_returns_failure(mock_httpx_client):
+    """PaymentConnector: envelope success=false → PAYMENT_FAILED, không normalize status."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {
+        "success": False,
+        "data": None,
+        "error_code": "INSUFFICIENT_BALANCE",
+        "message": "[MOCK] Injected: insufficient balance",
+        "retryable": False,
+    }
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = PaymentConnector(client=mock_httpx_client)
+    result = await connector.execute("pay_fee", {"booking_id": "BOOK-1"})
+
+    assert result.success is False
+    assert result.data is None
+    assert result.error_code == ErrorCode.PAYMENT_FAILED
+
+
+@pytest.mark.asyncio
+async def test_envelope_success_true_but_data_null(mock_httpx_client):
+    """success=true nhưng data=null → thiếu canonical field → UNKNOWN_EXTERNAL_ERROR."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {"success": True, "data": None, "message": "Created"}
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = ResidentConnector(client=mock_httpx_client)
+    result = await connector.execute("register_resident", {"full_name": "Test"})
+
+    assert result.success is False
+    assert result.error_code == ErrorCode.UNKNOWN_EXTERNAL_ERROR
+
+
+def test_extract_payload_handles_flat_and_invalid_body():
+    """Helper: flat dict được dung thứ; body không phải dict → EnvelopeError."""
+    payload, err = Connector._extract_payload({"resident_id": "RES-1"})
+    assert err is None
+    assert payload == {"resident_id": "RES-1"}
+
+    payload, err = Connector._extract_payload(["not", "a", "dict"])
+    assert payload is None
+    assert err is not None
+    assert err.error_code == "UNKNOWN_EXTERNAL_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Integration: Connector ↔ Mock Provider thật (in-process qua ASGITransport)
+#
+# KHÔNG dùng MagicMock — các test này chứng minh Connector nhận đúng ID thật
+# do Mock Provider sinh ra, và bóc đúng envelope {success, data, ...}.
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def resident_client():
+    async with AsyncClient(transport=ASGITransport(app=resident_app), base_url="http://test") as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def transport_client():
+    async with AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://test") as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def payment_client():
+    async with AsyncClient(transport=ASGITransport(app=payment_app), base_url="http://test") as ac:
+        yield ac
+
+
+def _unique(prefix: str) -> str:
+    """Sinh giá trị duy nhất — store của mock provider dùng chung giữa các test."""
+    return f"{prefix}{uuid.uuid4().hex[:8].upper()}"
+
+
+@pytest.mark.asyncio
+async def test_integration_register_resident(resident_client):
+    connector = ResidentConnector(base_url="http://test", client=resident_client)
+
+    result = await connector.execute(
+        "register_resident",
+        {
+            "full_name": "Nguyễn Văn A",
+            "apartment_code": _unique("A"),
+            "residential_area": "VH-SGV",
+        },
+    )
+
+    assert result.success is True, result.message
+    assert set(result.data) == {"resident_id"}, "Chỉ canonical field được trả về"
+    assert result.data["resident_id"].startswith("RES")
+
+
+@pytest.mark.asyncio
+async def test_integration_register_vehicle(resident_client, transport_client):
+    resident_connector = ResidentConnector(base_url="http://test", client=resident_client)
+    transport_connector = TransportConnector(base_url="http://test", client=transport_client)
+
+    resident = await resident_connector.execute(
+        "register_resident",
+        {"full_name": "Trần Thị B", "apartment_code": _unique("A"), "residential_area": "VH-SGV"},
+    )
+    assert resident.success is True, resident.message
+
+    result = await transport_connector.execute(
+        "register_vehicle",
+        {
+            "resident_id": resident.data["resident_id"],
+            "plate_number": _unique("51A-"),
+            "vehicle_type": "car",
+        },
+    )
+
+    assert result.success is True, result.message
+    assert set(result.data) == {"vehicle_id"}
+    assert result.data["vehicle_id"].startswith("VEH")
+
+
+@pytest.mark.asyncio
+async def test_integration_book_parking(resident_client, transport_client):
+    resident_connector = ResidentConnector(base_url="http://test", client=resident_client)
+    transport_connector = TransportConnector(base_url="http://test", client=transport_client)
+
+    resident = await resident_connector.execute(
+        "register_resident",
+        {"full_name": "Lê Văn C", "apartment_code": _unique("A"), "residential_area": "VH-SGV"},
+    )
+    vehicle = await transport_connector.execute(
+        "register_vehicle",
+        {
+            "resident_id": resident.data["resident_id"],
+            "plate_number": _unique("51B-"),
+            "vehicle_type": "car",
+        },
+    )
+    assert vehicle.success is True, vehicle.message
+
+    result = await transport_connector.execute(
+        "book_parking",
+        {
+            "vehicle_id": vehicle.data["vehicle_id"],
+            "booking_date": "2026-08-10",
+            "parking_zone": "ZONE_B",
+        },
+    )
+
+    assert result.success is True, result.message
+    assert set(result.data) == {"booking_id", "parking_zone", "booking_date", "amount", "currency"}
+    assert result.data["booking_id"].startswith("BOOK")
+    assert result.data["parking_zone"] == "ZONE_B"
+    assert result.data["booking_date"] == "2026-08-10"
+    assert result.data["currency"] == "VND"
+    assert isinstance(result.data["amount"], int)
+
+
+@pytest.mark.asyncio
+async def test_integration_pay_fee_full_chain(resident_client, transport_client, payment_client):
+    """Chuỗi 4 bước đầy đủ: resident → vehicle → booking → payment."""
+    resident_connector = ResidentConnector(base_url="http://test", client=resident_client)
+    transport_connector = TransportConnector(base_url="http://test", client=transport_client)
+    payment_connector = PaymentConnector(base_url="http://test", client=payment_client)
+
+    resident = await resident_connector.execute(
+        "register_resident",
+        {"full_name": "Phạm Thị D", "apartment_code": _unique("A"), "residential_area": "VH-SGV"},
+    )
+    vehicle = await transport_connector.execute(
+        "register_vehicle",
+        {
+            "resident_id": resident.data["resident_id"],
+            "plate_number": _unique("51C-"),
+            "vehicle_type": "motorcycle",
+        },
+    )
+    booking = await transport_connector.execute(
+        "book_parking",
+        {
+            "vehicle_id": vehicle.data["vehicle_id"],
+            "booking_date": "2026-08-11",
+            "parking_zone": "ZONE_B",
+        },
+    )
+    assert booking.success is True, booking.message
+
+    result = await payment_connector.execute(
+        "pay_fee",
+        {
+            "booking_id": booking.data["booking_id"],
+            "amount": booking.data["amount"],
+            "currency": booking.data["currency"],
+        },
+    )
+
+    assert result.success is True, result.message
+    assert set(result.data) == {"payment_id", "payment_status"}
+    assert result.data["payment_id"].startswith("PAY")
+    assert result.data["payment_status"] == "PAID"
+
+
+@pytest.mark.asyncio
+async def test_integration_error_envelope_from_real_provider(transport_client):
+    """Lỗi nghiệp vụ từ provider thật → Connector map sang ErrorCode nội bộ."""
+    connector = TransportConnector(base_url="http://test", client=transport_client)
+
+    result = await connector.execute(
+        "book_parking",
+        {"vehicle_id": "VEH-KHONG-TON-TAI", "booking_date": "2026-08-12", "parking_zone": "ZONE_A"},
+    )
+
+    assert result.success is False
+    assert result.error_code == ErrorCode.VEHICLE_NOT_FOUND
+    assert result.data is None
+
+
+@pytest.mark.asyncio
+async def test_integration_validation_error_maps_to_invalid_input(resident_client, transport_client):
+    """422 từ provider thật (schema validation) → ErrorCode.INVALID_INPUT.
+
+    FastAPI mặc định trả ``{"detail": [...]}`` cho 422 — không khớp envelope nên
+    connector sẽ fallback UNKNOWN_EXTERNAL_ERROR. Handler chung trong
+    ``src/mock/errors.py`` đảm bảo 422 cũng theo envelope contract.
+    """
+    resident_connector = ResidentConnector(base_url="http://test", client=resident_client)
+    transport_connector = TransportConnector(base_url="http://test", client=transport_client)
+
+    resident = await resident_connector.execute(
+        "register_resident",
+        {"full_name": "Hoàng Văn E", "apartment_code": _unique("A"), "residential_area": "VH-SGV"},
+    )
+    vehicle = await transport_connector.execute(
+        "register_vehicle",
+        {
+            "resident_id": resident.data["resident_id"],
+            "plate_number": _unique("51D-"),
+            "vehicle_type": "car",
+        },
+    )
+    assert vehicle.success is True, vehicle.message
+
+    result = await transport_connector.execute(
+        "book_parking",
+        {
+            "vehicle_id": vehicle.data["vehicle_id"],
+            "booking_date": "2026-08-13",
+            "parking_zone": "NOT_A_ZONE",
+        },
+    )
+
+    assert result.success is False
+    assert result.error_code == ErrorCode.INVALID_INPUT
+    assert result.data is None
     assert result.retryable is False

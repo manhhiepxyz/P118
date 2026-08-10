@@ -1,6 +1,9 @@
 """Tests for TaskPlanValidator."""
 
+import typing
+
 import pytest
+from pydantic import ValidationError
 
 from src.agents.examples.plans import (
     PLAN_FULL_FLOW,
@@ -8,7 +11,7 @@ from src.agents.examples.plans import (
     PLAN_PARTIAL_BOOK_ONLY,
 )
 from src.agents.validator import TaskPlanValidator
-from src.common.task_plan import InputRef, Task, TaskPlan
+from src.common.task_plan import AllowedTool, InputRef, Task, TaskPlan
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -639,3 +642,85 @@ def test_example_plans_still_valid_after_sweep() -> None:
     """The three Week 1 example plans must survive the full sensitive-content sweep."""
     for plan in (PLAN_FULL_FLOW, PLAN_PARTIAL_BOOK_ONLY, PLAN_PARTIAL_BOOK_AND_PAY):
         assert TaskPlanValidator.validate(plan) is plan
+
+
+# ---------------------------------------------------------------------------
+# Regression: the Planner contract is exactly four tools
+#
+# Ownership verification is an external VerificationGuard concern that runs
+# BEFORE the workflow — it must never reappear as a TaskPlan tool.
+# ---------------------------------------------------------------------------
+
+EXPECTED_TOOLS = frozenset(
+    {
+        "register_resident",
+        "register_vehicle",
+        "book_parking",
+        "pay_fee",
+    }
+)
+
+
+def test_planner_contract_is_exactly_four_tools() -> None:
+    """Schema, validator allowlist and required-input table must agree on 4 tools."""
+    assert frozenset(typing.get_args(AllowedTool)) == EXPECTED_TOOLS
+    assert TaskPlanValidator.ALLOWED_TOOLS == EXPECTED_TOOLS
+    assert frozenset(TaskPlanValidator.REQUIRED_INPUTS) == EXPECTED_TOOLS
+
+
+def test_verify_apartment_ownership_absent_from_contract() -> None:
+    """The removed tool must not linger in any layer of the Planner contract."""
+    assert "verify_apartment_ownership" not in typing.get_args(AllowedTool)
+    assert "verify_apartment_ownership" not in TaskPlanValidator.ALLOWED_TOOLS
+    assert "verify_apartment_ownership" not in TaskPlanValidator.REQUIRED_INPUTS
+
+
+def test_schema_rejects_verify_apartment_ownership_task() -> None:
+    """A plan naming the tool is rejected by Pydantic before the validator runs."""
+    with pytest.raises(ValidationError):
+        TaskPlan(
+            goal="Xác minh quyền sở hữu căn hộ giúp tôi.",
+            tasks=[
+                Task(
+                    task_id="T0",
+                    tool="verify_apartment_ownership",
+                    depends_on=[],
+                    input={
+                        "full_name": "Lâm Thành Bảo",
+                        "apartment_code": "A1201",
+                        "residential_area": "Vinhomes Ocean Park",
+                    },
+                )
+            ],
+        )
+
+
+def test_schema_rejects_ownership_task_from_raw_json() -> None:
+    """An LLM-produced plan (raw dict) naming the tool is rejected at parse time."""
+    raw_plan = {
+        "goal": "Xác minh quyền sở hữu rồi đăng ký cư dân.",
+        "tasks": [
+            {
+                "task_id": "T0",
+                "tool": "verify_apartment_ownership",
+                "depends_on": [],
+                "input": {
+                    "full_name": "Lâm Thành Bảo",
+                    "apartment_code": "A1201",
+                    "residential_area": "Vinhomes Ocean Park",
+                },
+            },
+            {
+                "task_id": "T1",
+                "tool": "register_resident",
+                "depends_on": ["T0"],
+                "input": {
+                    "full_name": "Lâm Thành Bảo",
+                    "apartment_code": "A1201",
+                    "residential_area": "Vinhomes Ocean Park",
+                },
+            },
+        ],
+    }
+    with pytest.raises(ValidationError):
+        TaskPlan.model_validate(raw_plan)

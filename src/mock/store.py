@@ -8,22 +8,66 @@ Singleton ``store`` dùng chung cho cả 4 service để mô phỏng dữ liệu
 from dataclasses import dataclass, field
 from threading import RLock
 
-
 # Dữ liệu chủ sở hữu căn hộ — seed từ ban quản lý chung cư.
 # Dùng verify quyền sở hữu khi register_resident.
 # Phải khớp với dữ liệu test (Lâm Thành Bảo / A1201 / Vinhomes Ocean Park).
 DEFAULT_APARTMENT_OWNERS = [
-    {"apartment_code": "A1201", "residential_area": "Vinhomes Ocean Park", "owner_name": "Lâm Thành Bảo", "id_number": "***1234"},
-    {"apartment_code": "B2305", "residential_area": "Vinhomes Ocean Park", "owner_name": "Trần Thị Bích", "id_number": "***5678"},
-    {"apartment_code": "C1801", "residential_area": "Vinhomes Ocean Park", "owner_name": "Nguyễn Văn Cường", "id_number": "***9012"},
-    {"apartment_code": "D0502", "residential_area": "Vinhomes Smart City", "owner_name": "Lê Thị Dung", "id_number": "***3456"},
-    {"apartment_code": "E1101", "residential_area": "Vinhomes Smart City", "owner_name": "Phạm Minh Quân", "id_number": "***7890"},
+    {
+        "apartment_code": "A1201",
+        "residential_area": "Vinhomes Ocean Park",
+        "owner_name": "Lâm Thành Bảo",
+        "id_number": "***1234",
+    },
+    {
+        "apartment_code": "B2305",
+        "residential_area": "Vinhomes Ocean Park",
+        "owner_name": "Trần Thị Bích",
+        "id_number": "***5678",
+    },
+    {
+        "apartment_code": "C1801",
+        "residential_area": "Vinhomes Ocean Park",
+        "owner_name": "Nguyễn Văn Cường",
+        "id_number": "***9012",
+    },
+    {
+        "apartment_code": "D0502",
+        "residential_area": "Vinhomes Smart City",
+        "owner_name": "Lê Thị Dung",
+        "id_number": "***3456",
+    },
+    {
+        "apartment_code": "E1101",
+        "residential_area": "Vinhomes Smart City",
+        "owner_name": "Phạm Minh Quân",
+        "id_number": "***7890",
+    },
     # Test data cho capacity tests (test_book_parking_no_availability_zone_a)
     # Một người có thể sở hữu nhiều căn hộ
-    {"apartment_code": "B0", "residential_area": "Vinhomes Ocean Park", "owner_name": "Lâm Thành Bảo", "id_number": "***T000"},
-    {"apartment_code": "B1", "residential_area": "Vinhomes Ocean Park", "owner_name": "Lâm Thành Bảo", "id_number": "***T001"},
-    {"apartment_code": "B2", "residential_area": "Vinhomes Ocean Park", "owner_name": "Lâm Thành Bảo", "id_number": "***T002"},
-    {"apartment_code": "B3", "residential_area": "Vinhomes Ocean Park", "owner_name": "Lâm Thành Bảo", "id_number": "***T003"},
+    {
+        "apartment_code": "B0",
+        "residential_area": "Vinhomes Ocean Park",
+        "owner_name": "Lâm Thành Bảo",
+        "id_number": "***T000",
+    },
+    {
+        "apartment_code": "B1",
+        "residential_area": "Vinhomes Ocean Park",
+        "owner_name": "Lâm Thành Bảo",
+        "id_number": "***T001",
+    },
+    {
+        "apartment_code": "B2",
+        "residential_area": "Vinhomes Ocean Park",
+        "owner_name": "Lâm Thành Bảo",
+        "id_number": "***T002",
+    },
+    {
+        "apartment_code": "B3",
+        "residential_area": "Vinhomes Ocean Park",
+        "owner_name": "Lâm Thành Bảo",
+        "id_number": "***T003",
+    },
 ]
 
 
