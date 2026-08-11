@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from src.agents.planner import (
     MISSING_FIELD_LABELS,
+    PAYMENT_QUOTE_REQUIRED_FIELD,
     UNSUPPORTED_GOAL_FIELD,
     Planner,
     PlannerError,
@@ -43,6 +44,26 @@ class _FakeStructuredLLM:
         return self._response
 
 
+class _SequencedStructuredLLM:
+    """Trả kết quả khác nhau theo từng lượt gọi — để test corrective retry.
+
+    Mỗi phần tử của `outcomes` là object sẽ trả về, hoặc `Exception` sẽ raise.
+    """
+
+    def __init__(self, outcomes: list[Any]) -> None:
+        self._outcomes = list(outcomes)
+        self.calls: list[Any] = []
+
+    async def ainvoke(self, input: Any) -> Any:
+        self.calls.append(input)
+        if not self._outcomes:
+            raise AssertionError("Planner gọi LLM nhiều lần hơn số outcome đã chuẩn bị.")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
 class FakeLLM:
     """Đứng thay chat model. Ghi lại schema đã truyền cho structured output."""
 
@@ -57,6 +78,29 @@ class FakeLLM:
     @property
     def calls(self) -> list[Any]:
         return self._structured.calls
+
+
+class SequencedFakeLLM:
+    """FakeLLM trả kết quả theo trình tự đã định."""
+
+    def __init__(self, outcomes: list[Any]) -> None:
+        self._structured = _SequencedStructuredLLM(outcomes)
+
+    def with_structured_output(self, schema: Any) -> _SequencedStructuredLLM:
+        return self._structured
+
+    @property
+    def calls(self) -> list[Any]:
+        return self._structured.calls
+
+
+def _schema_validation_error() -> ValidationError:
+    """`ValidationError` thật, giống hệt cái LangChain ném khi model trả sai schema."""
+    try:
+        PlannerResponse(status="READY", plan=None)
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("mong đợi ValidationError")
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +164,28 @@ def _full_flow_plan(goal: str = "kế hoạch do LLM đặt tên") -> TaskPlan:
             ),
         ],
     )
+
+
+def _standalone_pay_plan(
+    booking_id: Any = "BOOK-001",
+    amount: Any = 150000,
+    currency: Any = "VND",
+) -> TaskPlan:
+    """Thanh toán độc lập: một task pay_fee, giá trị literal (không InputRef)."""
+    return TaskPlan(
+        goal="Thanh toán phí đỗ xe giúp tôi.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="pay_fee",
+                depends_on=[],
+                input={"booking_id": booking_id, "amount": amount, "currency": currency},
+            )
+        ],
+    )
+
+
+TRUSTED_PAYMENT_CONTEXT = {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"}
 
 
 def _book_only_plan() -> TaskPlan:
@@ -483,52 +549,731 @@ async def test_missing_fields_are_deduplicated_in_order() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_reject_ready_without_plan() -> None:
-    llm = FakeLLM(PlannerResponse(status="READY", plan=None))
-    planner = Planner(llm)
-
-    with pytest.raises(PlannerError, match="READY"):
-        await planner.plan(GOAL_FULL, existing_context={})
+# Hai trạng thái loại trừ nhau ngay ở TẦNG SCHEMA: các tổ hợp dưới không dựng
+# nổi object, nên không thể tới được Planner. Trước đây chúng dựng được và chỉ
+# bị `_to_result` chặn — đó là khe hở đã gây lỗi trong manual eval OpenRouter.
 
 
-@pytest.mark.asyncio
-async def test_reject_ready_that_still_lists_missing_fields() -> None:
-    llm = FakeLLM(
+def test_schema_rejects_ready_without_plan() -> None:
+    with pytest.raises(ValidationError, match="READY phải kèm plan"):
+        PlannerResponse(status="READY", plan=None)
+
+
+def test_schema_rejects_ready_that_still_lists_missing_fields() -> None:
+    """Chính xác tổ hợp đã làm hỏng manual eval."""
+    with pytest.raises(ValidationError, match="missing_fields phải rỗng"):
         PlannerResponse(
             status="READY",
             plan=_full_flow_plan(),
             missing_fields=["booking_date"],
         )
-    )
-    planner = Planner(llm)
-
-    with pytest.raises(PlannerError, match="READY"):
-        await planner.plan(GOAL_FULL, existing_context={})
 
 
-@pytest.mark.asyncio
-async def test_reject_needs_information_that_still_carries_a_plan() -> None:
-    llm = FakeLLM(
+def test_schema_rejects_needs_information_that_still_carries_a_plan() -> None:
+    with pytest.raises(ValidationError, match="plan phải null"):
         PlannerResponse(
             status="NEEDS_INFORMATION",
             plan=_full_flow_plan(),
             missing_fields=["booking_date"],
         )
+
+
+def test_schema_rejects_needs_information_without_missing_fields() -> None:
+    with pytest.raises(ValidationError, match="ít nhất một field"):
+        PlannerResponse(status="NEEDS_INFORMATION", plan=None)
+
+
+# ---------------------------------------------------------------------------
+# Corrective retry — đúng 1 lần, chỉ cho lỗi sửa được
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_schema_error_then_valid_response_succeeds_in_two_calls() -> None:
+    """Model trả sai schema lần đầu, đúng lần hai -> thành công, đúng 2 call."""
+    llm = SequencedFakeLLM(
+        [
+            _schema_validation_error(),
+            PlannerResponse(status="READY", plan=_full_flow_plan()),
+        ]
     )
     planner = Planner(llm)
 
-    with pytest.raises(PlannerError, match="NEEDS_INFORMATION"):
+    result = await planner.plan(GOAL_FULL, existing_context={})
+
+    assert result.is_ready
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_inconsistent_missing_field_then_valid_succeeds_in_two_calls() -> None:
+    """Vi phạm do Planner tự phát hiện (field ngoài allowlist) cũng được sửa."""
+    llm = SequencedFakeLLM(
+        [
+            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["khong_ton_tai"]),
+            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["booking_date"]),
+        ]
+    )
+    planner = Planner(llm)
+
+    result = await planner.plan(GOAL_FULL, existing_context={})
+
+    assert result.status == "NEEDS_INFORMATION"
+    assert result.missing_fields == ("booking_date",)
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_twice_raises_planner_error_after_exactly_two_calls() -> None:
+    """Sai cả hai lần -> PlannerError, KHÔNG retry lần ba."""
+    llm = SequencedFakeLLM(
+        [
+            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["khong_ton_tai"]),
+            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["van_sai"]),
+        ]
+    )
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không hợp lệ"):
+        await planner.plan(GOAL_FULL, existing_context={})
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_schema_error_twice_raises_planner_error_after_two_calls() -> None:
+    llm = SequencedFakeLLM([_schema_validation_error(), _schema_validation_error()])
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="ValidationError"):
+        await planner.plan(GOAL_FULL, existing_context={})
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "api_error",
+    [
+        ConnectionError("network unreachable"),
+        TimeoutError("read timeout"),
+        PermissionError("401 Unauthorized"),
+        RuntimeError("429 rate limit exceeded"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_api_errors_are_not_retried(api_error: Exception) -> None:
+    """Auth, rate limit, network, config: hỏi lại vô ích -> đúng 1 call."""
+    llm = SequencedFakeLLM([api_error])
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không gọi được LLM"):
+        await planner.plan(GOAL_FULL, existing_context={})
+
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_wrapped_validation_error_is_still_retried() -> None:
+    """LangChain có thể bọc lỗi parse — phải dò cả chuỗi `__cause__`."""
+
+    # Tên cố ý trùng `langchain_core.exceptions.OutputParserException` để mô
+    # phỏng đúng lớp bọc thật của LangChain.
+    class OutputParserException(Exception):  # noqa: N818
+        pass
+
+    wrapped = OutputParserException("could not parse")
+    wrapped.__cause__ = _schema_validation_error()
+
+    llm = SequencedFakeLLM([wrapped, PlannerResponse(status="READY", plan=_full_flow_plan())])
+    planner = Planner(llm)
+
+    result = await planner.plan(GOAL_FULL, existing_context={})
+
+    assert result.is_ready
+    assert len(llm.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Corrective message không được rò rỉ gì
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_corrective_message_leaks_nothing() -> None:
+    """Message sửa lỗi không chứa goal, context, response cũ hay secret."""
+    secret_goal = "Đặt chỗ, token của tôi là sk-live-LEAK-9876543210"
+    secret_context = {"vehicle_id": "VEH-SECRET-42"}
+    leaky_field = "https://evil.com/callback?api_key=STOLEN"
+
+    llm = SequencedFakeLLM(
+        [
+            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=[leaky_field]),
+            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["booking_date"]),
+        ]
+    )
+    planner = Planner(llm)
+
+    await planner.plan(secret_goal, existing_context=secret_context)
+
+    # Lượt thứ hai có thêm message sửa lỗi ở cuối.
+    second_call = llm.calls[1]
+    assert len(second_call) == len(llm.calls[0]) + 1
+
+    corrective_role, corrective_text = second_call[-1]
+    assert corrective_role == "human"
+
+    for leaked in ("sk-live-LEAK-9876543210", "VEH-SECRET-42", "evil.com", "STOLEN", leaky_field):
+        assert leaked not in corrective_text
+
+    # Vẫn phải nêu đúng loại vi phạm để model sửa được.
+    assert "missing_fields" in corrective_text
+    assert "danh sách cho phép" in corrective_text
+
+
+@pytest.mark.asyncio
+async def test_corrective_message_names_the_violated_rule() -> None:
+    """Mỗi loại vi phạm có hướng dẫn riêng, không dùng chung một câu chung chung."""
+    llm = SequencedFakeLLM(
+        [
+            _schema_validation_error(),
+            PlannerResponse(status="READY", plan=_full_flow_plan()),
+        ]
+    )
+    planner = Planner(llm)
+    await planner.plan(GOAL_FULL, existing_context={})
+
+    _, corrective_text = llm.calls[1][-1]
+    assert "không khớp schema" in corrective_text
+
+
+# ---------------------------------------------------------------------------
+# Trust boundary: amount/currency của pay_fee là dữ liệu authoritative
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_flow_pay_fee_uses_three_input_refs() -> None:
+    """Full flow không đổi: cả ba field lấy từ book_parking qua InputRef."""
+    llm = FakeLLM(PlannerResponse(status="READY", plan=_full_flow_plan()))
+    planner = Planner(llm)
+
+    result = await planner.plan(GOAL_FULL, existing_context={})
+
+    pay_task = next(t for t in result.plan.tasks if t.tool == "pay_fee")
+    book_task = next(t for t in result.plan.tasks if t.tool == "book_parking")
+
+    for field_name in ("booking_id", "amount", "currency"):
+        ref = pay_task.input[field_name]
+        assert isinstance(ref, InputRef)
+        assert ref.from_task == book_task.task_id
+
+
+@pytest.mark.asyncio
+async def test_standalone_payment_ready_when_context_is_trusted() -> None:
+    """Có đủ trusted context -> đúng một task pay_fee."""
+    llm = FakeLLM(PlannerResponse(status="READY", plan=_standalone_pay_plan()))
+    planner = Planner(llm)
+
+    result = await planner.plan(
+        "Thanh toán phí đỗ xe giúp tôi.",
+        existing_context=TRUSTED_PAYMENT_CONTEXT,
+    )
+
+    assert result.is_ready
+    assert len(result.plan.tasks) == 1
+    assert result.plan.tasks[0].tool == "pay_fee"
+
+
+@pytest.mark.asyncio
+async def test_standalone_payment_with_only_booking_id_asks_for_quote() -> None:
+    """Chỉ có booking_id -> payment_quote, KHÔNG hỏi người dùng số tiền."""
+    llm = FakeLLM(
+        PlannerResponse(
+            status="NEEDS_INFORMATION",
+            missing_fields=[PAYMENT_QUOTE_REQUIRED_FIELD],
+        )
+    )
+    planner = Planner(llm)
+
+    result = await planner.plan(
+        "Thanh toán phí cho mã đặt chỗ BOOK-001.",
+        existing_context={"booking_id": "BOOK-001"},
+    )
+
+    assert result.status == "NEEDS_INFORMATION"
+    assert result.plan is None
+    assert result.missing_fields == (PAYMENT_QUOTE_REQUIRED_FIELD,)
+    # Không được liệt kê amount/currency như thứ người dùng phải cung cấp.
+    assert "amount" not in result.missing_fields
+    assert "currency" not in result.missing_fields
+
+
+def test_payment_quote_question_does_not_ask_user_for_an_amount() -> None:
+    question = build_question((PAYMENT_QUOTE_REQUIRED_FIELD,))
+
+    assert "chưa lấy được thông tin phí" in question
+    assert "kiểm tra lại mã đặt chỗ" in question
+    # Không mời người dùng tự nhập số tiền.
+    for inviting in ("bổ sung giúp mình", "số tiền", "loại tiền tệ"):
+        assert inviting not in question
+
+
+@pytest.mark.asyncio
+async def test_amount_from_user_goal_is_rejected_without_trusted_context() -> None:
+    """Người dùng tự khai số tiền nhưng không có trusted context -> từ chối."""
+    llm = SequencedFakeLLM(
+        [
+            # Model nhặt "1 đồng" từ câu goal.
+            PlannerResponse(status="READY", plan=_standalone_pay_plan(amount=1)),
+            PlannerResponse(
+                status="NEEDS_INFORMATION",
+                missing_fields=[PAYMENT_QUOTE_REQUIRED_FIELD],
+            ),
+        ]
+    )
+    planner = Planner(llm)
+
+    result = await planner.plan(
+        "Thanh toán 1 đồng cho mã đặt chỗ BOOK-001.",
+        existing_context={"booking_id": "BOOK-001"},
+    )
+
+    # Lần đầu bị chặn, corrective retry đưa về payment_quote.
+    assert result.status == "NEEDS_INFORMATION"
+    assert result.missing_fields == (PAYMENT_QUOTE_REQUIRED_FIELD,)
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_goal_amount_cannot_override_trusted_context() -> None:
+    """Context nói 150000, goal nói 1 -> plan dùng 1 phải bị từ chối."""
+    llm = SequencedFakeLLM(
+        [
+            PlannerResponse(status="READY", plan=_standalone_pay_plan(amount=1)),
+            PlannerResponse(status="READY", plan=_standalone_pay_plan(amount=150000)),
+        ]
+    )
+    planner = Planner(llm)
+
+    result = await planner.plan(
+        "Thanh toán 1 đồng cho mã đặt chỗ BOOK-001.",
+        existing_context=TRUSTED_PAYMENT_CONTEXT,
+    )
+
+    # Chỉ giá trị khớp trusted context mới được chấp nhận.
+    assert result.is_ready
+    assert result.plan.tasks[0].input["amount"] == 150000
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("field_name", "tampered"),
+    [
+        ("amount", 1),
+        ("currency", "USD"),
+        ("booking_id", "BOOK-999"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_any_payment_field_mismatching_context_is_rejected(field_name: str, tampered: Any) -> None:
+    bad_plan = _standalone_pay_plan(**{field_name: tampered})
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=bad_plan)] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không đến từ book_parking hay existing_context"):
+        await planner.plan("Thanh toán giúp tôi.", existing_context=TRUSTED_PAYMENT_CONTEXT)
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_input_ref_must_point_at_a_book_parking_task() -> None:
+    """InputRef trỏ tới task khác book_parking cũng không phải nguồn tin cậy."""
+    plan = TaskPlan(
+        goal="Đăng ký cư dân rồi thanh toán.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="register_resident",
+                depends_on=[],
+                input={
+                    "full_name": "Lâm Thành Bảo",
+                    "apartment_code": "A1201",
+                    "residential_area": "Vinhomes Ocean Park",
+                },
+            ),
+            Task(
+                task_id="T2",
+                tool="pay_fee",
+                depends_on=["T1"],
+                input={
+                    # T1 là register_resident, không sinh ra amount.
+                    "booking_id": InputRef(from_task="T1", field="booking_id"),
+                    "amount": InputRef(from_task="T1", field="amount"),
+                    "currency": InputRef(from_task="T1", field="currency"),
+                },
+            ),
+        ],
+    )
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=plan)] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không phải book_parking"):
         await planner.plan(GOAL_FULL, existing_context={})
 
 
 @pytest.mark.asyncio
-async def test_reject_needs_information_without_missing_fields_or_question() -> None:
-    llm = FakeLLM(PlannerResponse(status="NEEDS_INFORMATION", plan=None))
+async def test_untrusted_payment_corrective_message_leaks_no_amount() -> None:
+    """Hướng dẫn sửa lỗi không được echo số tiền model đã đề xuất."""
+    llm = SequencedFakeLLM(
+        [
+            PlannerResponse(status="READY", plan=_standalone_pay_plan(amount=987654321)),
+            PlannerResponse(
+                status="NEEDS_INFORMATION",
+                missing_fields=[PAYMENT_QUOTE_REQUIRED_FIELD],
+            ),
+        ]
+    )
     planner = Planner(llm)
 
-    with pytest.raises(PlannerError, match="không nêu thiếu gì"):
-        await planner.plan(GOAL_FULL, existing_context={})
+    await planner.plan("Thanh toán 987654321 đồng.", existing_context={"booking_id": "BOOK-001"})
+
+    _, corrective_text = llm.calls[1][-1]
+    assert "987654321" not in corrective_text
+    # Vẫn phải nêu đúng luật để model sửa được.
+    assert "book_parking" in corrective_text
+    assert "payment_quote" in corrective_text
+
+
+# --- InputRef phải trỏ đúng output field, không chỉ đúng task ---------------
+
+
+def _pay_after_booking_plan(**pay_input: Any) -> TaskPlan:
+    """book_parking -> pay_fee, cho phép chỉnh từng input của pay_fee."""
+    return TaskPlan(
+        goal="Đặt chỗ và thanh toán.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="book_parking",
+                depends_on=[],
+                input={
+                    "vehicle_id": "VEH-001",
+                    "booking_date": "2026-08-10",
+                    "parking_zone": "ZONE_A",
+                },
+            ),
+            Task(task_id="T2", tool="pay_fee", depends_on=["T1"], input=pay_input),
+        ],
+    )
+
+
+def _correct_refs() -> dict[str, Any]:
+    return {
+        "booking_id": InputRef(from_task="T1", field="booking_id"),
+        "amount": InputRef(from_task="T1", field="amount"),
+        "currency": InputRef(from_task="T1", field="currency"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("target_field", "wrong_source_field"),
+    [
+        ("amount", "booking_id"),
+        ("currency", "amount"),
+        ("booking_id", "currency"),
+        ("amount", "currency"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_input_ref_pointing_at_wrong_output_field_is_rejected(target_field: str, wrong_source_field: str) -> None:
+    """Đúng task nhưng sai field vẫn là nguồn sai.
+
+    `amount = InputRef(T1, "booking_id")` trỏ đúng book_parking nhưng sẽ trả
+    số tiền bằng một chuỗi mã đặt chỗ.
+    """
+    refs = _correct_refs()
+    refs[target_field] = InputRef(from_task="T1", field=wrong_source_field)
+
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=_pay_after_booking_plan(**refs))] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="output field không tương ứng"):
+        await planner.plan("Đặt chỗ và thanh toán.", existing_context={})
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_input_ref_with_correct_task_and_field_passes() -> None:
+    """Đối chứng: đúng cả from_task lẫn field thì qua."""
+    llm = FakeLLM(PlannerResponse(status="READY", plan=_pay_after_booking_plan(**_correct_refs())))
+    planner = Planner(llm)
+
+    result = await planner.plan("Đặt chỗ và thanh toán.", existing_context={})
+
+    assert result.is_ready
+    pay_task = next(t for t in result.plan.tasks if t.tool == "pay_fee")
+    for field_name in ("booking_id", "amount", "currency"):
+        ref = pay_task.input[field_name]
+        assert isinstance(ref, InputRef)
+        assert ref.from_task == "T1"
+        assert ref.field == field_name
+
+
+# --- So khớp literal phải siết kiểu -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_boolean_amount_does_not_match_trusted_integer_one() -> None:
+    """`True == 1` trong Python — không loại bool thì plan trả True sẽ lọt."""
+    trusted = {"booking_id": "BOOK-001", "amount": 1, "currency": "VND"}
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=_standalone_pay_plan(amount=True))] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không đến từ book_parking hay existing_context"):
+        await planner.plan("Thanh toán giúp tôi.", existing_context=trusted)
+
+
+@pytest.mark.asyncio
+async def test_boolean_in_trusted_context_is_not_usable_as_reference() -> None:
+    """Backend lỡ đưa bool vào context cũng không được dùng làm chuẩn so khớp."""
+    trusted = {"booking_id": "BOOK-001", "amount": True, "currency": "VND"}
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=_standalone_pay_plan(amount=True))] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không đến từ book_parking hay existing_context"):
+        await planner.plan("Thanh toán giúp tôi.", existing_context=trusted)
+
+
+@pytest.mark.parametrize("numeric_amount", [150000, 150000.0])
+@pytest.mark.asyncio
+async def test_int_and_float_amount_are_treated_as_the_same_money(numeric_amount: Any) -> None:
+    """Chính sách đã chọn: 150000 và 150000.0 là cùng một số tiền."""
+    llm = FakeLLM(PlannerResponse(status="READY", plan=_standalone_pay_plan(amount=numeric_amount)))
+    planner = Planner(llm)
+
+    result = await planner.plan("Thanh toán giúp tôi.", existing_context=TRUSTED_PAYMENT_CONTEXT)
+
+    assert result.is_ready
+
+
+@pytest.mark.parametrize(
+    ("field_name", "wrong_type_value"),
+    [
+        ("booking_id", 1),
+        ("booking_id", True),
+        ("currency", 1),
+        ("currency", True),
+        ("amount", "150000"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_wrong_type_never_matches_trusted_context(field_name: str, wrong_type_value: Any) -> None:
+    """Chuỗi phải là chuỗi, số phải là số — không dựa vào `==` lỏng lẻo."""
+    trusted = {"booking_id": "1", "amount": 1, "currency": "1"}
+    bad_plan = _standalone_pay_plan(**{field_name: wrong_type_value})
+
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=bad_plan)] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không đến từ book_parking hay existing_context"):
+        await planner.plan("Thanh toán giúp tôi.", existing_context=trusted)
+
+
+# --- Ba field payment phải cùng một provenance ------------------------------
+
+
+def _two_bookings_plan(**pay_input: Any) -> TaskPlan:
+    """Hai task book_parking (T1, T2) rồi pay_fee (T3)."""
+
+    def _booking(task_id: str, zone: str) -> Task:
+        return Task(
+            task_id=task_id,
+            tool="book_parking",
+            depends_on=[],
+            input={
+                "vehicle_id": "VEH-001",
+                "booking_date": "2026-08-10",
+                "parking_zone": zone,
+            },
+        )
+
+    return TaskPlan(
+        goal="Đặt hai chỗ rồi thanh toán.",
+        tasks=[
+            _booking("T1", "ZONE_A"),
+            _booking("T2", "ZONE_B"),
+            Task(task_id="T3", tool="pay_fee", depends_on=["T1", "T2"], input=pay_input),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_three_input_refs_from_one_booking_pass() -> None:
+    """Đối chứng: cùng một booking thì qua, kể cả khi plan có booking khác."""
+    plan = _two_bookings_plan(
+        booking_id=InputRef(from_task="T1", field="booking_id"),
+        amount=InputRef(from_task="T1", field="amount"),
+        currency=InputRef(from_task="T1", field="currency"),
+    )
+    llm = FakeLLM(PlannerResponse(status="READY", plan=plan))
+    planner = Planner(llm)
+
+    result = await planner.plan("Đặt hai chỗ rồi thanh toán.", existing_context={})
+
+    assert result.is_ready
+
+
+@pytest.mark.asyncio
+async def test_booking_id_and_amount_from_different_bookings_is_rejected() -> None:
+    """booking_id của đơn này + amount của đơn kia = trả sai phí cho sai đơn."""
+    plan = _two_bookings_plan(
+        booking_id=InputRef(from_task="T1", field="booking_id"),
+        amount=InputRef(from_task="T2", field="amount"),
+        currency=InputRef(from_task="T2", field="currency"),
+    )
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=plan)] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="nhiều task khác nhau"):
+        await planner.plan("Đặt hai chỗ rồi thanh toán.", existing_context={})
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_error_for_mixed_bookings_does_not_echo_task_ids() -> None:
+    plan = _two_bookings_plan(
+        booking_id=InputRef(from_task="T1", field="booking_id"),
+        amount=InputRef(from_task="T2", field="amount"),
+        currency=InputRef(from_task="T1", field="currency"),
+    )
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=plan)] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError) as exc_info:
+        await planner.plan("Đặt hai chỗ rồi thanh toán.", existing_context={})
+
+    message = str(exc_info.value)
+    assert "T1" not in message
+    assert "T2" not in message
+
+
+@pytest.mark.parametrize(
+    "pay_input_builder",
+    [
+        # booking_id literal, amount/currency InputRef
+        lambda: {
+            "booking_id": "BOOK-001",
+            "amount": InputRef(from_task="T1", field="amount"),
+            "currency": InputRef(from_task="T1", field="currency"),
+        },
+        # amount literal, còn lại InputRef
+        lambda: {
+            "booking_id": InputRef(from_task="T1", field="booking_id"),
+            "amount": 150000,
+            "currency": InputRef(from_task="T1", field="currency"),
+        },
+        # chỉ currency là InputRef
+        lambda: {
+            "booking_id": "BOOK-001",
+            "amount": 150000,
+            "currency": InputRef(from_task="T1", field="currency"),
+        },
+    ],
+)
+@pytest.mark.asyncio
+async def test_mixing_input_ref_and_literal_is_rejected(pay_input_builder: Any) -> None:
+    plan = _pay_after_booking_plan(**pay_input_builder())
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=plan)] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="trộn InputRef và giá trị literal"):
+        await planner.plan("Đặt chỗ và thanh toán.", existing_context=TRUSTED_PAYMENT_CONTEXT)
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_all_three_literals_matching_context_pass() -> None:
+    llm = FakeLLM(PlannerResponse(status="READY", plan=_standalone_pay_plan()))
+    planner = Planner(llm)
+
+    result = await planner.plan("Thanh toán giúp tôi.", existing_context=TRUSTED_PAYMENT_CONTEXT)
+
+    assert result.is_ready
+
+
+@pytest.mark.parametrize("mismatched_field", ["booking_id", "amount", "currency"])
+@pytest.mark.asyncio
+async def test_single_literal_mismatch_rejects_the_whole_triple(mismatched_field: str) -> None:
+    """Hai field khớp context nhưng một field lệch -> cả bộ ba bị từ chối."""
+    tampered = {"booking_id": "BOOK-999", "amount": 1, "currency": "USD"}[mismatched_field]
+    plan = _standalone_pay_plan(**{mismatched_field: tampered})
+
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=plan)] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không đến từ book_parking hay existing_context"):
+        await planner.plan("Thanh toán giúp tôi.", existing_context=TRUSTED_PAYMENT_CONTEXT)
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_partial_trusted_context_is_rejected() -> None:
+    """Context chỉ có booking_id, model tự điền amount/currency -> từ chối."""
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=_standalone_pay_plan())] * 2)
+    planner = Planner(llm)
+
+    with pytest.raises(PlannerError, match="không đến từ book_parking hay existing_context"):
+        await planner.plan("Thanh toán giúp tôi.", existing_context={"booking_id": "BOOK-001"})
+
+
+def test_matches_trusted_value_unit_behaviour() -> None:
+    """Kiểm thẳng predicate để khoá từng luật kiểu."""
+    from src.agents.planner import _matches_trusted_value
+
+    assert _matches_trusted_value("amount", 150000, 150000) is True
+    assert _matches_trusted_value("amount", 150000.0, 150000) is True
+    assert _matches_trusted_value("amount", True, 1) is False
+    assert _matches_trusted_value("amount", 1, True) is False
+    assert _matches_trusted_value("amount", "150000", 150000) is False
+
+    assert _matches_trusted_value("booking_id", "BOOK-001", "BOOK-001") is True
+    assert _matches_trusted_value("booking_id", 1, 1) is False
+    assert _matches_trusted_value("currency", "VND", "VND") is True
+    assert _matches_trusted_value("currency", True, True) is False
+
+
+def test_missing_payment_field_is_left_to_the_validator() -> None:
+    """Field vắng mặt là lỗi thiếu required input, không phải lỗi trust."""
+    plan = TaskPlan(
+        goal="Thanh toán giúp tôi.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="pay_fee",
+                depends_on=[],
+                input={"booking_id": "BOOK-001"},  # thiếu amount, currency
+            )
+        ],
+    )
+    # Không raise: kiểm tra trust chỉ xét field CÓ MẶT.
+    Planner._reject_untrusted_payment_values(plan, {"booking_id": "BOOK-001"})
+
+
+@pytest.mark.asyncio
+async def test_first_call_has_no_corrective_message() -> None:
+    llm = SequencedFakeLLM([PlannerResponse(status="READY", plan=_full_flow_plan())])
+    planner = Planner(llm)
+
+    await planner.plan(GOAL_FULL, existing_context={})
+
+    first_call = llm.calls[0]
+    assert len(first_call) == 2  # system + human
+    assert all("không hợp lệ" not in text for _role, text in first_call)
 
 
 # ---------------------------------------------------------------------------
