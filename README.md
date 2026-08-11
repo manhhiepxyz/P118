@@ -190,9 +190,12 @@ pip install -e ".[dev]"
 
 # 4. Cấu hình environment
 cp .env.example .env
-# Điền vào .env:
-#   OPENAI_API_KEY=sk-...
-#   AI_LOG_API_KEY=<key từ phoenix.note.transformerlabs.ai>
+# Chọn một LLM provider trong .env:
+#   LLM_PROVIDER=openai      + OPENAI_API_KEY=sk-...
+# hoặc
+#   LLM_PROVIDER=openrouter  + OPENROUTER_API_KEY=sk-or-v1-...
+# OpenRouter mặc định dùng openrouter/free để smoke test structured output.
+# Không commit file .env.
 
 # 5. Cài AI logging hooks (chạy một lần)
 bash scripts/setup_hooks.sh
