@@ -21,9 +21,13 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     # LLM
+    llm_provider: Literal["openai", "openrouter"] = "openai"
     openai_api_key: str = ""
     model_name: str = "gpt-4o-mini"
-    llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    openrouter_api_key: str = ""
+    openrouter_model_name: str = "openrouter/free"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
     # Database
     database_url: str = "sqlite:///./data/app.db"
