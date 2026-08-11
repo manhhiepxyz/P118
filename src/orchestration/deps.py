@@ -24,7 +24,10 @@ from src.config import get_settings
 from src.connectors.payment import PaymentConnector
 from src.connectors.resident import ResidentConnector
 from src.connectors.transport import TransportConnector
+from src.db.migrations import run_migrations
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+from src.executor.executor import Executor
+from src.orchestration.boundary import ValidatedExecutionBoundary
 
 
 def build_connectors(
@@ -52,13 +55,33 @@ def build_connectors(
 async def build_repository() -> PostgreSQLWorkflowStateRepository:
     """Dựng PostgreSQLWorkflowStateRepository từ DATABASE_URL config.
 
-    Trả pool từ settings.database_url (đã được docker-compose override
-    bằng POSTGRES_USER/PASSWORD/DB). Nếu không có DB chạy, lời gọi sẽ
-    lỗi connection — smoke test nên báo rõ lỗi này cho user.
+    Tạo pool từ settings.database_url rồi chạy migration idempotent trước khi
+    trả repository. PostgreSQL mới từ Docker vì vậy luôn có schema cần thiết.
     """
     settings = get_settings()
     pool = await asyncpg.create_pool(settings.database_url)
+    try:
+        await run_migrations(pool)
+    except BaseException:
+        # Không để pool mở nếu startup/migration thất bại.
+        await pool.close()
+        raise
     return PostgreSQLWorkflowStateRepository(pool)
+
+
+async def build_execution_boundary(
+    resident_url: str = "http://localhost:8001",
+    transport_url: str = "http://localhost:8002",
+    payment_url: str = "http://localhost:8003",
+) -> tuple[ValidatedExecutionBoundary, PostgreSQLWorkflowStateRepository]:
+    """Dựng boundary tương thích trực tiếp với Planner graph.
+
+    Repository được trả kèm để caller quản lý vòng đời pool khi cần. Boundary
+    chỉ trả tuple chuẩn của ``Executor.execute``; không tạo wrapper result mới.
+    """
+    connectors, repository = await build_runtime(resident_url, transport_url, payment_url)
+    executor = Executor(connectors, repository)
+    return ValidatedExecutionBoundary(executor), repository
 
 
 async def build_runtime(
@@ -69,7 +92,7 @@ async def build_runtime(
     """Dựng toàn bộ runtime: connectors + repository.
 
     Returns:
-        (connectors, repository) sẵn sàng truyền vào execute_plan().
+        (connectors, repository) để dựng Executor hoặc test từng tầng.
     """
     connectors = build_connectors(resident_url, transport_url, payment_url)
     repository = await build_repository()

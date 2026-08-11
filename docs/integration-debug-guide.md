@@ -32,7 +32,10 @@ Cả 4 container app (backend, mock-resident, mock-transport, mock-payment) cras
 
 **Nguyên nhân:** Dockerfile multi-stage — Stage 1 `pip install --user` cài vào `/root/.local` với owner **root**, Stage 2 copy giữ nguyên owner root, rồi `USER appuser` (non-root) → appuser không đọc/execute được.
 
-**Đã sửa:** Thêm `RUN chown -R appuser:appuser /root/.local` sau USER appuser trong Dockerfile.
+**Đã sửa đúng:** Cài dependency vào virtualenv `/opt/venv`, copy nguyên
+virtualenv sang production image và thêm `/opt/venv/bin` vào `PATH`. Không dùng
+`/root/.local`: dù đổi owner, `appuser` vẫn không nên phụ thuộc vào thư mục home
+của root và Python không tự tìm user-site của root.
 
 ### 2.2 Docker build — Network timeout PyPI
 
@@ -71,12 +74,15 @@ for p in 8000 8001 8002 8003; do curl -s http://localhost:$p/health; done
 pytest tests/test_executor.py tests/test_connectors.py -v
 
 # 5. Chạy integration test (cần TEST_DATABASE_URL + Docker)
-TEST_DATABASE_URL=postgresql://p118:p118pass@localhost:5432/p118_db \
+TEST_DATABASE_URL=postgresql://p118:p118pass@localhost:5432/p118_test_db \
   pytest tests/test_integration/ -v
 
 # 6. Chạy smoke test (cần Docker + healthy containers)
 python scripts/smoke_runtime.py
 ```
+
+> Integration fixture chạy `TRUNCATE TABLE`. Không bao giờ đặt
+> `TEST_DATABASE_URL` thành DB phát triển `p118_db`.
 
 ---
 
