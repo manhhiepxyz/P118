@@ -107,7 +107,7 @@ Compensation actions (`cancel_resident`, `refund_payment`...) không xuất hi�
 - Policy Engine — phân loại action thành `AUTO_ALLOWED` / `REQUIRES_APPROVAL` / `DENIED`
 - HITL — agent dừng chờ user approve với action `REQUIRES_APPROVAL`
 - Retry, Saga Compensation, Idempotency
-- React Workflow Timeline (WebSocket realtime)
+- React Workflow Timeline; WebSocket realtime là hạng mục Demo Day, chưa triển khai
 
 > Policy Engine, HITL, Saga Compensation và React UI thuộc Demo Day Final MVP. Gate 2 tập trung vào core orchestration và Live URL.
 
@@ -138,7 +138,7 @@ Completed tasks không bị chạy lại. Data propagation từ các bước tr�
 │   │   ├── state.py         # WorkflowState schema
 │   │   ├── nodes/           # planner, executor, hitl, compensator
 │   │   └── tools/           # Agent tools (@tool)
-│   ├── api/                 # FastAPI routes + WebSocket
+│   ├── api/                 # FastAPI routes
 │   │   └── routes.py
 │   ├── services/            # Business logic
 │   │   └── mock/            # Mock services: Resident, Transport, Payment
@@ -254,11 +254,78 @@ Logs tự động submit lên grading server mỗi khi `git push`.
 
 ---
 
+## Runtime (Gate 2)
+
+### Khởi động full stack
+
+```bash
+# 1. Khởi động PostgreSQL + 3 Mock Provider + Backend
+docker compose up -d
+
+# 2. Kiểm tra health (chờ tất cả healthy)
+docker compose ps
+for p in 8000 8001 8002 8003; do curl -s http://localhost:$p/health; done
+```
+
+| Service | Cổng | Mô tả |
+| --- | --- | --- |
+| Backend | 8000 | FastAPI app |
+| Mock Resident | 8001 | `POST /api/residents` |
+| Mock Transport | 8002 | `POST /api/vehicles` + `POST /api/parking/bookings` |
+| Mock Payment | 8003 | `POST /api/payments` |
+| PostgreSQL | 5432 | Workflow state persistence |
+
+### Smoke test deterministic của runtime
+
+```bash
+# Cần: Docker Compose đang chạy + healthy containers
+python scripts/smoke_runtime.py
+```
+
+Smoke test dựng sẵn full flow 4 task bằng code để kiểm tra Executor → Connector
+→ Mock Provider → PostgreSQL. Đây **không phải** test LLM/Planner và không nhận
+`--goal`. Mỗi lần chạy tự tạo resident, vehicle và booking date mới để không
+đụng dữ liệu lần trước. Exit code là 0 khi mọi task thành công, ngược lại là 1.
+
+### Full regression
+
+```bash
+# Unit test (không cần Docker)
+pytest tests/test_executor.py tests/test_connectors.py -v
+
+# Tạo DB test riêng một lần (bỏ qua nếu đã tồn tại)
+docker compose exec postgres createdb -U p118 p118_test_db
+
+# Integration test (cần PostgreSQL thật + TEST_DATABASE_URL)
+TEST_DATABASE_URL=postgresql://p118:p118pass@localhost:5432/p118_test_db \
+  pytest tests/test_integration/ -v
+
+# Lint + format check
+ruff check src/ tests/
+ruff format --check src/ tests/
+```
+
+> **Cảnh báo:** integration fixture có chạy `TRUNCATE TABLE`. Chỉ trỏ
+> `TEST_DATABASE_URL` tới `p118_test_db`; tuyệt đối không dùng DB phát triển
+> `p118_db`.
+
+### Debug lỗi liên tầng
+
+Khi test fail, xem [docs/integration-debug-guide.md](docs/integration-debug-guide.md) để phân loại lỗi thuộc Planner / Executor / Connector / Provider / DB / Docker.
+
+---
+
 ## Docker
 
 ```bash
 # Chạy full stack
-docker-compose up --build
+docker compose up -d
+
+# Build lại image (nếu đổi code)
+docker compose build
+
+# Xem log
+docker compose logs -f mock-resident
 ```
 
 ---
@@ -266,7 +333,7 @@ docker-compose up --build
 ## Documentation
 
 - [Project Brief](docs/gate1/brief.md)
-- [PRD](docs/gate1/prd.md)
+- [PRD](docs/gate1/PRD.md)
 - [Wireframe / UI Flow](docs/gate1/wireframe.md)
 - [Architecture Diagram](docs/architecture_diagram.md)
 - [Weekly Journal](JOURNAL.md)

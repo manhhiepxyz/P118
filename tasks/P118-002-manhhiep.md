@@ -1,6 +1,6 @@
 # P118-002 — Mạnh Hiệp · Tầng Thực thi
 
-> Đọc `docs/shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
+> Đọc `shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
 
 ---
 

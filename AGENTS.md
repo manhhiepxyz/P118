@@ -27,7 +27,7 @@ Register Resident → Register Vehicle → Book Parking → Pay Fee
 
 | File | Trả lời câu hỏi |
 |---|---|
-| `docs/shared_contracts.md` | Các module giao tiếp với nhau như thế nào? |
+| `shared_contracts.md` | Các module giao tiếp với nhau như thế nào? |
 | `tasks/P118-001-thanhbao.md` | Thành Bảo cần làm gì? |
 | `tasks/P118-002-manhhiep.md` | Mạnh Hiệp cần làm gì? |
 | `tasks/P118-003-hoanganh.md` | Hoàng Anh cần làm gì? |
@@ -108,7 +108,7 @@ Schema tách thành file riêng để tránh Git conflict:
 
 - Mỗi người chỉ sửa file schema mình sở hữu.
 - Không định nghĩa lại schema trong module riêng.
-- Mọi thay đổi schema phải cập nhật `docs/shared_contracts.md` và có review.
+- Mọi thay đổi schema phải cập nhật `shared_contracts.md` và có review.
 
 ---
 
@@ -163,7 +163,7 @@ Ba thành viên không làm theo thứ tự tuần tự. Cả ba phát triển s
 
 ## Quy tắc bắt buộc cho AI
 
-1. **Đọc `docs/shared_contracts.md` trước khi sinh code** liên quan đến tool name, field, status, error code.
+1. **Đọc `shared_contracts.md` trước khi sinh code** liên quan đến tool name, field, status, error code.
 2. **Không tự đổi tên** tool, field, trạng thái hoặc error code.
 3. **Không thêm tool mới** vào allowlist mà không có yêu cầu rõ ràng.
 4. **Tất cả field nội bộ dùng `snake_case`.**
@@ -268,12 +268,12 @@ Một module hoàn thành độc lập khi:
 Một task chỉ được merge khi:
 
 - [ ] Code đúng phạm vi task, không lấn sang module khác
-- [ ] Tuân thủ `docs/shared_contracts.md`
+- [ ] Tuân thủ `shared_contracts.md`
 - [ ] Không tự đổi tool, field, status hoặc error code
 - [ ] Unit test liên quan pass
 - [ ] Integration test pass nếu task giao tiếp module khác
 - [ ] `ruff check` và `ruff format` pass
-- [ ] `docs/shared_contracts.md` đã cập nhật nếu có thay đổi contract
+- [ ] `shared_contracts.md` đã cập nhật nếu có thay đổi contract
 - [ ] Không chứa secret hoặc credential
 - [ ] Pull request đã được ít nhất 1 thành viên khác review
 - [ ] Acceptance criteria trong task file đã đạt
