@@ -11,7 +11,7 @@ PLAN_FULL_FLOW = TaskPlan(
     goal=(
         "Tôi mới chuyển vào căn hộ A1201 tại Vinhomes Ocean Park. "
         "Hãy đăng ký cư dân, đăng ký xe biển số 51A-12345, "
-        "đặt chỗ tại ZONE_A ngày 2026-08-10 và thanh toán phí."
+        "đặt chỗ tại ZONE_A ngày 2026-12-10 và thanh toán phí."
     ),
     tasks=[
         Task(
@@ -40,7 +40,7 @@ PLAN_FULL_FLOW = TaskPlan(
             depends_on=["T2"],
             input={
                 "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -62,7 +62,7 @@ PLAN_FULL_FLOW = TaskPlan(
 # ---------------------------------------------------------------------------
 
 PLAN_PARTIAL_BOOK_ONLY = TaskPlan(
-    goal="Đặt chỗ cho xe của tôi tại ZONE_A ngày 2026-08-10.",
+    goal="Đặt chỗ cho xe của tôi tại ZONE_A ngày 2026-12-10.",
     tasks=[
         Task(
             task_id="T1",
@@ -70,7 +70,7 @@ PLAN_PARTIAL_BOOK_ONLY = TaskPlan(
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -90,7 +90,7 @@ PLAN_PARTIAL_BOOK_AND_PAY = TaskPlan(
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),

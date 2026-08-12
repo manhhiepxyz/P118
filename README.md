@@ -86,12 +86,24 @@ Pay Fee (dùng payment_info)
 
 **Planner tool allowlist:**
 
+- `search_properties`
+- `schedule_property_viewing`
+- `register_property_interest`
+- `create_maintenance_request`
+- `schedule_move`
 - `register_resident`
 - `register_vehicle`
 - `book_parking`
 - `pay_fee`
 
 Compensation actions (`cancel_resident`, `refund_payment`...) không xuất hiện trong Planner plan — chỉ được hệ thống nội bộ gọi khi rollback.
+
+Luồng tìm nhà là read-only: `search_properties` chỉ trả gợi ý. Sau khi người
+dùng tự chọn `property_id`, họ có thể chạy `schedule_property_viewing` hoặc
+`register_property_interest`. Hai task độc lập có thể chạy song song.
+Agent không tự đặt cọc, ký hợp đồng hoặc hoàn tất giao dịch thuê/mua.
+Bảo trì và chuyển nhà chỉ dành cho tài khoản cư dân đã liên kết; hai yêu cầu
+độc lập có thể được Executor chạy song song.
 
 > **Partial goals:** Người dùng không bắt buộc phải chạy đủ 4 bước. Agent tạo TaskPlan dựa trên mục tiêu hiện tại và dữ liệu đã có — không chạy lại bước đã hoàn thành hoặc không cần thiết. The MVP focuses on one housing-services domain; the connector-based architecture allows future integration with other residential service providers.
 
@@ -259,12 +271,12 @@ Logs tự động submit lên grading server mỗi khi `git push`.
 ### Khởi động full stack
 
 ```bash
-# 1. Khởi động PostgreSQL + 3 Mock Provider + Backend
+# 1. Khởi động PostgreSQL + 4 Mock Provider + Backend
 docker compose up -d
 
 # 2. Kiểm tra health (chờ tất cả healthy)
 docker compose ps
-for p in 8000 8001 8002 8003; do curl -s http://localhost:$p/health; done
+for p in 8000 8001 8002 8003 8005; do curl -s http://localhost:$p/health; done
 ```
 
 | Service | Cổng | Mô tả |
@@ -273,6 +285,7 @@ for p in 8000 8001 8002 8003; do curl -s http://localhost:$p/health; done
 | Mock Resident | 8001 | `POST /api/residents` |
 | Mock Transport | 8002 | `POST /api/vehicles` + `POST /api/parking/bookings` |
 | Mock Payment | 8003 | `POST /api/payments` |
+| Mock Property | 8005 | `POST /api/properties/search` + `POST /api/projects/viewings` + `POST /api/projects/interests` |
 | PostgreSQL | 5432 | Workflow state persistence |
 
 ### Smoke test deterministic của runtime

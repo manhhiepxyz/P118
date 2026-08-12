@@ -157,7 +157,7 @@ async def test_transport_connector_book_parking_success(mock_httpx_client):
         "data": {
             "booking_id": "BOOK-1",
             "parking_zone": "ZONE_A",
-            "booking_date": "2026-08-10",
+            "booking_date": "2026-12-10",
             "amount": 100,
             "currency": "VND",
             "ignore_me": "yes",
@@ -175,7 +175,7 @@ async def test_transport_connector_book_parking_success(mock_httpx_client):
     assert result.data == {
         "booking_id": "BOOK-1",
         "parking_zone": "ZONE_A",
-        "booking_date": "2026-08-10",
+        "booking_date": "2026-12-10",
         "amount": 100,
         "currency": "VND",
     }
@@ -191,7 +191,7 @@ async def test_transport_connector_book_parking_url_and_payload(mock_httpx_clien
         "data": {
             "booking_id": "BOOK-777",
             "parking_zone": "ZONE_B",
-            "booking_date": "2026-08-10",
+            "booking_date": "2026-12-10",
             "amount": 200000,
             "currency": "VND",
         },
@@ -199,7 +199,7 @@ async def test_transport_connector_book_parking_url_and_payload(mock_httpx_clien
     }
     mock_httpx_client.post_mock.return_value = mock_response
 
-    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-08-10", "parking_zone": "ZONE_B"}
+    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_B"}
     connector = TransportConnector(base_url="http://localhost:8002", client=mock_httpx_client)
     await connector.execute("book_parking", payload)
 
@@ -587,7 +587,7 @@ async def test_integration_book_parking(resident_client, transport_client):
         "book_parking",
         {
             "vehicle_id": vehicle.data["vehicle_id"],
-            "booking_date": "2026-08-10",
+            "booking_date": "2026-12-10",
             "parking_zone": "ZONE_B",
         },
     )
@@ -596,7 +596,7 @@ async def test_integration_book_parking(resident_client, transport_client):
     assert set(result.data) == {"booking_id", "parking_zone", "booking_date", "amount", "currency"}
     assert result.data["booking_id"].startswith("BOOK")
     assert result.data["parking_zone"] == "ZONE_B"
-    assert result.data["booking_date"] == "2026-08-10"
+    assert result.data["booking_date"] == "2026-12-10"
     assert result.data["currency"] == "VND"
     assert isinstance(result.data["amount"], int)
 
@@ -624,7 +624,7 @@ async def test_integration_pay_fee_full_chain(resident_client, transport_client,
         "book_parking",
         {
             "vehicle_id": vehicle.data["vehicle_id"],
-            "booking_date": "2026-08-11",
+            "booking_date": "2026-12-11",
             "parking_zone": "ZONE_B",
         },
     )

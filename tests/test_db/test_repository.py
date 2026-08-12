@@ -177,7 +177,7 @@ async def test_save_task_result_failure(db_pool):
         success=False,
         data=None,
         error_code=ErrorCode.NO_AVAILABILITY,
-        message="ZONE_A is full on 2026-08-10",
+        message="ZONE_A is full on 2026-12-10",
         retryable=False,
     )
     await repo.save_task_result(wf_id, "T1", result)

@@ -18,7 +18,8 @@ Ranh giới ba tầng:
 
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 from langgraph.graph import END, StateGraph
 
@@ -43,6 +44,9 @@ class ExecutionBoundary(Protocol):
         plan: TaskPlan,
         workflow_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]: ...
+
+
+StageCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +107,7 @@ def _may_execute(state: AgentState) -> bool:
 def build_planner_graph(
     planner: Planner,
     execution_boundary: ExecutionBoundary,
+    on_stage: StageCallback | None = None,
 ) -> StateGraph:
     """Dựng graph Planner → Validator → Execution.
 
@@ -110,8 +115,18 @@ def build_planner_graph(
     đọc API key, không tạo `ChatOpenAI` và không chạm tầng thực thi thật.
     """
 
+    async def emit(stage: str, payload: dict[str, Any] | None = None) -> None:
+        """Phát trạng thái quan sát an toàn; lỗi UI không được làm hỏng workflow."""
+        if on_stage is None:
+            return
+        try:
+            await on_stage(stage, payload or {})
+        except Exception:  # noqa: BLE001 - callback quan sát không thuộc critical path
+            return
+
     async def plan_node(state: AgentState) -> dict:
         """Gọi Planner. Không log goal hay existing_context."""
+        await emit("PLANNING")
         try:
             result = await planner.plan(
                 state.get("goal", ""),
@@ -132,6 +147,7 @@ def build_planner_graph(
             # READY: không đặt `question` — không có gì để hỏi người dùng.
             # `plan_validated=False` ghi đè mọi giá trị caller truyền vào initial
             # state: chỉ `validate_node` mới có quyền đặt cờ này thành True.
+            await emit("PLANNED", {"plan": result.plan})
             return {
                 "planner_status": "READY",
                 "plan": result.plan,
@@ -141,6 +157,7 @@ def build_planner_graph(
 
         # NEEDS_INFORMATION: không đưa `plan` vào state, tránh mọi khả năng một
         # nhánh sau này nhặt được plan chưa tồn tại.
+        await emit("NEEDS_INFORMATION", {"question": result.question})
         return {
             "planner_status": "NEEDS_INFORMATION",
             "missing_fields": result.missing_fields,
@@ -150,6 +167,7 @@ def build_planner_graph(
 
     async def validate_node(state: AgentState) -> dict:
         """Cổng deterministic duy nhất trước khi thực thi."""
+        await emit("VALIDATING")
         plan = state.get("plan")
 
         # Phòng thủ: routing đã đảm bảo điều này, nhưng nếu ai đó nối lại cạnh
@@ -166,10 +184,12 @@ def build_planner_graph(
             # Message của Validator chỉ nêu vị trí vi phạm và tên pattern khớp,
             # không echo giá trị nhạy cảm — an toàn để đưa vào state.
             # Plan sai KHÔNG được sửa hay "chữa": chỉ từ chối.
+            await emit("VALIDATION_FAILED")
             return {"validation_error": str(exc), "plan_validated": False}
 
         # Đây là chỗ DUY NHẤT đặt `plan_validated=True`.
         # Giữ nguyên canonical plan, không thay thế bằng bản sao.
+        await emit("VALIDATED")
         return {"plan_validated": True}
 
     async def execute_node(state: AgentState) -> dict:
@@ -181,13 +201,19 @@ def build_planner_graph(
         if not _may_execute(state):
             return {"execution_error": "Không có kế hoạch đã được kiểm tra để thực thi."}
 
+        await emit("EXECUTING")
         try:
-            workflow_id, task_results = await execution_boundary.execute(plan)
+            workflow_id, task_results = await execution_boundary.execute(
+                plan,
+                state.get("workflow_id"),
+            )
         except Exception as exc:  # noqa: BLE001 — không để raw exception thoát ra UI
             # Chỉ giữ tên loại: message của tầng thực thi có thể chứa payload,
             # connection string hay dữ liệu người dùng.
+            await emit("EXECUTION_FAILED")
             return {"execution_error": f"Thực thi thất bại ({type(exc).__name__})."}
 
+        await emit("FINISHED")
         return {"workflow_id": workflow_id, "task_results": task_results}
 
     def route_after_plan(state: AgentState) -> str:

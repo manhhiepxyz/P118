@@ -58,6 +58,7 @@ class Connector(ABC):
       - TransportConnector → POST /api/vehicles          (port 8002)
                            → POST /api/parking/bookings  (port 8002)
       - PaymentConnector   → POST /api/payments          (port 8003)
+      - PropertyConnector  → POST /api/properties/* và /api/projects/* (port 8005)
     """
 
     @property

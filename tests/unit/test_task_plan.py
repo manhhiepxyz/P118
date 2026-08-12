@@ -36,7 +36,7 @@ FULL_FLOW_DATA = {
             "depends_on": ["T2"],
             "input": {
                 "vehicle_id": {"from_task": "T2", "field": "vehicle_id"},
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         },
@@ -81,7 +81,7 @@ def test_parse_partial_plan_book_parking_only() -> None:
                 "depends_on": [],
                 "input": {
                     "vehicle_id": "VEH-001",
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "parking_zone": "ZONE_B",
                 },
             }

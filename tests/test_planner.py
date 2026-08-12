@@ -113,7 +113,7 @@ def _schema_validation_error() -> ValidationError:
 GOAL_FULL = (
     "Tôi mới chuyển vào căn hộ A1201 tại Vinhomes Ocean Park. "
     "Hãy đăng ký cư dân cho Lâm Thành Bảo, đăng ký ô tô biển số 51A-12345, "
-    "đặt chỗ ZONE_A ngày 2026-08-10 và thanh toán phí."
+    "đặt chỗ ZONE_A ngày 2026-12-10 và thanh toán phí."
 )
 
 
@@ -148,7 +148,7 @@ def _full_flow_plan(goal: str = "kế hoạch do LLM đặt tên") -> TaskPlan:
                 depends_on=["T2"],
                 input={
                     "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -207,9 +207,59 @@ def _book_only_plan() -> TaskPlan:
     )
 
 
+def _property_search_plan() -> TaskPlan:
+    return TaskPlan(
+        goal="Tìm căn hộ thuê tại Vinhomes Ocean Park dưới 20 triệu.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="search_properties",
+                depends_on=[],
+                input={
+                    "transaction_type": "rent",
+                    "property_type": "apartment",
+                    "residential_area": "Vinhomes Ocean Park",
+                    "max_price": 20_000_000,
+                },
+            )
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # READY — full onboarding
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_planner_accepts_property_search_without_adding_transaction() -> None:
+    goal = "Tìm căn hộ thuê tại Vinhomes Ocean Park dưới 20 triệu."
+    llm = FakeLLM(PlannerResponse(status="READY", plan=_property_search_plan()))
+
+    result = await Planner(llm).plan(goal)
+
+    assert result.status == "READY"
+    assert result.plan is not None
+    assert [task.tool for task in result.plan.tasks] == ["search_properties"]
+    assert all(task.tool not in {"rent_property", "pay_deposit"} for task in result.plan.tasks)
+
+
+@pytest.mark.asyncio
+async def test_property_search_missing_fields_use_deterministic_question() -> None:
+    llm = FakeLLM(
+        PlannerResponse(
+            status="NEEDS_INFORMATION",
+            plan=None,
+            missing_fields=["residential_area", "max_price"],
+        )
+    )
+
+    result = await Planner(llm).plan("Tìm căn hộ để thuê.")
+
+    assert result.status == "NEEDS_INFORMATION"
+    assert result.question == (
+        "Mình cần thêm thông tin để lập kế hoạch: tên khu đô thị và ngân sách tối đa. Bạn bổ sung giúp mình nhé?"
+    )
 
 
 def test_full_goal_states_every_value_the_plan_uses() -> None:
@@ -225,7 +275,7 @@ def test_full_goal_states_every_value_the_plan_uses() -> None:
     assert "ô tô" in GOAL_FULL
 
     # Các giá trị literal khác cũng phải xuất hiện trong goal.
-    for literal in ("A1201", "Vinhomes Ocean Park", "Lâm Thành Bảo", "51A-12345", "ZONE_A", "2026-08-10"):
+    for literal in ("A1201", "Vinhomes Ocean Park", "Lâm Thành Bảo", "51A-12345", "ZONE_A", "2026-12-10"):
         assert literal in GOAL_FULL, f"GOAL_FULL thiếu {literal!r}"
 
 
@@ -959,7 +1009,7 @@ def _pay_after_booking_plan(**pay_input: Any) -> TaskPlan:
                 depends_on=[],
                 input={
                     "vehicle_id": "VEH-001",
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -1094,7 +1144,7 @@ def _two_bookings_plan(**pay_input: Any) -> TaskPlan:
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": zone,
             },
         )

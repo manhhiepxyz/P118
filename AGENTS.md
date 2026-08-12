@@ -17,7 +17,15 @@ User nhập goal bằng ngôn ngữ tự nhiên → Agent tự lập kế hoạc
 Register Resident → Register Vehicle → Book Parking → Pay Fee
 ```
 
-**3 mock services:** Resident · Transport/Parking · Payment
+**Gate 2 property-discovery extension:**
+```
+Search Properties → user selects a property → Schedule Property Viewing
+```
+
+Hai tool mở rộng chỉ hỗ trợ tìm kiếm và liên hệ. Agent không tự thuê/mua,
+giữ căn, đặt cọc hoặc ký hợp đồng bất động sản.
+
+**4 mock services:** Property · Resident · Transport/Parking · Payment
 
 > **Lưu ý phạm vi:** VinHomes chỉ là bối cảnh minh họa giả lập. Dự án không phải sản phẩm chính thức của VinHomes. Không sử dụng API production hoặc dữ liệu thật của VinHomes. Các tên khu đô thị trong ví dụ chỉ là dữ liệu mock.
 

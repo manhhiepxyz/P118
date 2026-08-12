@@ -48,15 +48,15 @@ ON CONFLICT (vehicle_id) DO NOTHING;
 
 INSERT INTO parking_bookings (booking_id, vehicle_id, parking_zone, booking_date, amount, currency)
 VALUES
-    ('BOOK-001', 'VEH-001', 'ZONE_A', '2026-08-10', 150000, 'VND'),
-    ('BOOK-002', 'VEH-002', 'ZONE_B', '2026-08-10', 100000, 'VND'),
+    ('BOOK-001', 'VEH-001', 'ZONE_A', '2026-12-10', 150000, 'VND'),
+    ('BOOK-002', 'VEH-002', 'ZONE_B', '2026-12-10', 100000, 'VND'),
     ('BOOK-003', 'VEH-003', 'ZONE_A', '2026-08-12', 150000, 'VND')
 ON CONFLICT (booking_id) DO NOTHING;
 
 INSERT INTO parking_capacity (parking_zone, booking_date, capacity)
 VALUES
-    ('ZONE_A', '2026-08-10', 3),
-    ('ZONE_B', '2026-08-10', 10),
+    ('ZONE_A', '2026-12-10', 3),
+    ('ZONE_B', '2026-12-10', 10),
     ('ZONE_A', '2026-08-12', 3)
 ON CONFLICT (parking_zone, booking_date) DO NOTHING;
 
@@ -88,8 +88,8 @@ VALUES
      '{"resident_id":"RES-001","plate_number":"51A-12345","vehicle_type":"car"}',
      '{"vehicle_id":"VEH-001"}'),
     ('11111111-1111-1111-1111-111111111111', 'T3', 'book_parking', 'SUCCESS',
-     '{"vehicle_id":"VEH-001","booking_date":"2026-08-10","parking_zone":"ZONE_A"}',
-     '{"booking_id":"BOOK-001","parking_zone":"ZONE_A","booking_date":"2026-08-10","amount":150000,"currency":"VND"}'),
+     '{"vehicle_id":"VEH-001","booking_date":"2026-12-10","parking_zone":"ZONE_A"}',
+     '{"booking_id":"BOOK-001","parking_zone":"ZONE_A","booking_date":"2026-12-10","amount":150000,"currency":"VND"}'),
     ('11111111-1111-1111-1111-111111111111', 'T4', 'pay_fee', 'SUCCESS',
      '{"booking_id":"BOOK-001","amount":150000,"currency":"VND"}',
      '{"payment_id":"PAY-001","payment_status":"PAID"}')

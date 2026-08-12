@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./data/app.db"
 
+    # Service connectors
+    resident_service_url: str = "http://localhost:8001"
+    transport_service_url: str = "http://localhost:8002"
+    payment_service_url: str = "http://localhost:8003"
+    property_service_url: str = "http://localhost:8005"
+    resident_services_service_url: str = "http://localhost:8006"
+
     # Vector Store
     chroma_persist_dir: str = "./data/chroma"
 

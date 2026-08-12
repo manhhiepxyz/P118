@@ -3,7 +3,7 @@
 GOAL_FULL_ONBOARDING = (
     "Tôi mới chuyển vào căn hộ A1201 tại Vinhomes Ocean Park. "
     "Hãy đăng ký cư dân, đăng ký xe biển số 51A-12345, "
-    "đặt chỗ tại ZONE_A ngày 2026-08-10 và thanh toán phí."
+    "đặt chỗ tại ZONE_A ngày 2026-12-10 và thanh toán phí."
 )
 
 GOAL_BOOK_PARKING_ONLY = "Đặt chỗ cho xe của tôi tại ZONE_A ngày mai."

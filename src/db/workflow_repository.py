@@ -88,7 +88,9 @@ class WorkflowRepository:
                 INSERT INTO workflows (workflow_id, goal, status, task_plan)
                 VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4)
                 ON CONFLICT (workflow_id) DO UPDATE
-                    SET goal = EXCLUDED.goal, updated_at = NOW()
+                    SET goal = EXCLUDED.goal,
+                        task_plan = COALESCE(EXCLUDED.task_plan, workflows.task_plan),
+                        updated_at = NOW()
                 RETURNING workflow_id
                 """,
                 supplied_id,

@@ -7,11 +7,30 @@ Từ v0.2.0: mọi endpoint trả **envelope** dạng gần `StandardResult` (m�
 Request model giữ nguyên; response model cũ được thay bằng ``ApiEnvelope``.
 """
 
-from datetime import date
+from datetime import date, time
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _reject_past(value: date) -> date:
+    if value < date.today():
+        raise ValueError("date must not be in the past")
+    return value
+
+
+def _check_business_time(value: str, opens_at: time, closes_at: time) -> str:
+    parsed = time.fromisoformat(value)
+    if not opens_at <= parsed <= closes_at:
+        raise ValueError("time is outside service hours")
+    return value
+
+
+def _validate_optional_email(value: str | None) -> str | None:
+    if value is not None and (value.count("@") != 1 or "." not in value.rsplit("@", 1)[1]):
+        raise ValueError("email không đúng định dạng cơ bản")
+    return value
 
 
 class VehicleType(StrEnum):
@@ -35,6 +54,16 @@ class PaymentStatus(StrEnum):
     REFUNDED = "REFUNDED"
 
 
+class PropertyTransactionType(StrEnum):
+    RENT = "rent"
+    BUY = "buy"
+
+
+class PropertyType(StrEnum):
+    APARTMENT = "apartment"
+    ROOM = "room"
+
+
 # ---- register_resident ----
 class RegisterResidentRequest(BaseModel):
     full_name: str = Field(..., min_length=1, description="Tên cư dân, không rỗng")
@@ -55,12 +84,85 @@ class BookParkingRequest(BaseModel):
     booking_date: date = Field(..., description="Ngày đặt chỗ, định dạng YYYY-MM-DD")
     parking_zone: ParkingZone
 
+    _booking_not_past = field_validator("booking_date")(_reject_past)
+
 
 # ---- pay_fee ----
 class PayFeeRequest(BaseModel):
     booking_id: str = Field(..., min_length=1)
     amount: int = Field(..., ge=0, description="Số tiền nguyên, không âm")
     currency: Currency
+
+
+# ---- search_properties ----
+class SearchPropertiesRequest(BaseModel):
+    transaction_type: PropertyTransactionType
+    property_type: PropertyType
+    residential_area: str = Field(..., min_length=1)
+    max_price: int = Field(..., gt=0, description="Ngân sách tối đa, đơn vị VND")
+
+
+# ---- schedule_property_viewing ----
+class SchedulePropertyViewingRequest(BaseModel):
+    project_id: str = Field(..., min_length=1)
+    viewing_date: date
+    viewing_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    full_name: str | None = Field(default=None, min_length=2, max_length=100)
+    phone: str | None = Field(default=None, pattern=r"^\+?[0-9 ]{9,15}$")
+    email: str | None = Field(default=None, max_length=254)
+    note: str | None = Field(default=None, max_length=500)
+
+    _viewing_not_past = field_validator("viewing_date")(_reject_past)
+    _valid_viewing_email = field_validator("email")(_validate_optional_email)
+
+    @field_validator("viewing_time")
+    @classmethod
+    def viewing_during_business_hours(cls, value: str) -> str:
+        return _check_business_time(value, time(8, 0), time(17, 30))
+
+
+class RegisterPropertyInterestRequest(BaseModel):
+    project_id: str = Field(..., min_length=1)
+    interest_type: Literal["buy", "rent", "consultation"]
+    preferred_contact_time: Literal["morning", "afternoon", "evening"]
+    consent: Literal[True]
+    full_name: str | None = Field(default=None, min_length=2, max_length=100)
+    phone: str | None = Field(default=None, pattern=r"^\+?[0-9 ]{9,15}$")
+    email: str | None = Field(default=None, max_length=254)
+    note: str | None = Field(default=None, max_length=500)
+
+    _valid_interest_email = field_validator("email")(_validate_optional_email)
+
+
+# ---- resident services: maintenance / moving ----
+class CreateMaintenanceRequest(BaseModel):
+    issue_type: Literal["air_conditioning", "electrical", "plumbing", "other"]
+    description: str = Field(..., min_length=1, max_length=500)
+    location: str = Field(..., min_length=1, max_length=100)
+    preferred_date: date
+    preferred_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+    _maintenance_not_past = field_validator("preferred_date")(_reject_past)
+
+    @field_validator("preferred_time")
+    @classmethod
+    def maintenance_during_business_hours(cls, value: str) -> str:
+        return _check_business_time(value, time(8, 0), time(18, 0))
+
+
+class ScheduleMoveRequest(BaseModel):
+    move_date: date
+    move_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    needs_elevator: bool
+    needs_loading_support: bool
+    move_vehicle: Literal["none", "van", "truck"]
+
+    _move_not_past = field_validator("move_date")(_reject_past)
+
+    @field_validator("move_time")
+    @classmethod
+    def move_during_business_hours(cls, value: str) -> str:
+        return _check_business_time(value, time(7, 0), time(20, 0))
 
 
 # ---- verify_ownership ----

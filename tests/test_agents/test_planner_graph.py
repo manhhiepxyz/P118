@@ -53,6 +53,7 @@ class FakeExecutionBoundary:
         self._task_results = task_results if task_results is not None else {}
         self._error = error
         self.calls: list[TaskPlan] = []
+        self.workflow_ids: list[str | None] = []
 
     async def execute(
         self,
@@ -60,6 +61,7 @@ class FakeExecutionBoundary:
         workflow_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         self.calls.append(plan)
+        self.workflow_ids.append(workflow_id)
         if self._error is not None:
             raise self._error
         return self._workflow_id, self._task_results
@@ -72,7 +74,7 @@ class FakeExecutionBoundary:
 GOAL = (
     "Tôi mới chuyển vào căn hộ A1201 tại Vinhomes Ocean Park. "
     "Hãy đăng ký cư dân cho Lâm Thành Bảo, đăng ký ô tô biển số 51A-12345, "
-    "đặt chỗ ZONE_A ngày 2026-08-10 và thanh toán phí."
+    "đặt chỗ ZONE_A ngày 2026-12-10 và thanh toán phí."
 )
 
 
@@ -107,7 +109,7 @@ def _valid_plan() -> TaskPlan:
                 depends_on=["T2"],
                 input={
                     "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -152,7 +154,7 @@ def _plan_with_cycle() -> TaskPlan:
                 depends_on=["T2"],
                 input={
                     "vehicle_id": "VEH-001",
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -180,7 +182,7 @@ def _plan_with_unknown_dependency() -> TaskPlan:
                 depends_on=["T99"],  # không tồn tại
                 input={
                     "vehicle_id": "VEH-001",
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "parking_zone": "ZONE_A",
                 },
             )
@@ -240,6 +242,31 @@ async def test_goal_and_context_reach_the_planner() -> None:
     goal, context = planner.calls[0]
     assert goal == GOAL
     assert context == {"vehicle_id": "VEH-001"}
+
+
+@pytest.mark.asyncio
+async def test_graph_emits_stages_and_preserves_supplied_workflow_id() -> None:
+    planner = FakePlanner(PlannerResult(status="READY", plan=_valid_plan()))
+    boundary = FakeExecutionBoundary(workflow_id="wf-realtime")
+    stages: list[str] = []
+
+    async def on_stage(stage: str, payload: dict[str, Any]) -> None:
+        stages.append(stage)
+        if stage == "PLANNED":
+            assert isinstance(payload["plan"], TaskPlan)
+
+    graph = build_planner_graph(planner, boundary, on_stage=on_stage)
+    state = await graph.ainvoke(
+        {
+            "goal": GOAL,
+            "existing_context": {},
+            "workflow_id": "wf-realtime",
+        }
+    )
+
+    assert stages == ["PLANNING", "PLANNED", "VALIDATING", "VALIDATED", "EXECUTING", "FINISHED"]
+    assert boundary.workflow_ids == ["wf-realtime"]
+    assert state["workflow_id"] == "wf-realtime"
 
 
 # ---------------------------------------------------------------------------

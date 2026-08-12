@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections import deque
+from datetime import date, time
 
 from src.common.task_plan import InputRef, TaskPlan
 
@@ -10,6 +12,11 @@ class TaskPlanValidator:
 
     ALLOWED_TOOLS: frozenset[str] = frozenset(
         {
+            "search_properties",
+            "schedule_property_viewing",
+            "register_property_interest",
+            "create_maintenance_request",
+            "schedule_move",
             "register_resident",
             "register_vehicle",
             "book_parking",
@@ -18,10 +25,37 @@ class TaskPlanValidator:
     )
 
     REQUIRED_INPUTS: dict[str, frozenset[str]] = {
+        "search_properties": frozenset({"transaction_type", "property_type", "residential_area", "max_price"}),
+        "schedule_property_viewing": frozenset({"project_id", "viewing_date", "viewing_time"}),
+        "register_property_interest": frozenset({"project_id", "interest_type", "preferred_contact_time", "consent"}),
+        "create_maintenance_request": frozenset(
+            {"issue_type", "description", "location", "preferred_date", "preferred_time"}
+        ),
+        "schedule_move": frozenset(
+            {"move_date", "move_time", "needs_elevator", "needs_loading_support", "move_vehicle"}
+        ),
         "register_resident": frozenset({"full_name", "apartment_code", "residential_area"}),
         "register_vehicle": frozenset({"resident_id", "plate_number", "vehicle_type"}),
         "book_parking": frozenset({"vehicle_id", "booking_date", "parking_zone"}),
         "pay_fee": frozenset({"booking_id", "amount", "currency"}),
+    }
+
+    DATE_INPUTS: dict[str, str] = {
+        "schedule_property_viewing": "viewing_date",
+        "book_parking": "booking_date",
+        "create_maintenance_request": "preferred_date",
+        "schedule_move": "move_date",
+    }
+
+    TIME_INPUTS: dict[str, tuple[str, time, time]] = {
+        "schedule_property_viewing": ("viewing_time", time(8, 0), time(17, 30)),
+        "create_maintenance_request": ("preferred_time", time(8, 0), time(18, 0)),
+        "schedule_move": ("move_time", time(7, 0), time(20, 0)),
+    }
+
+    ENUM_INPUTS: dict[tuple[str, str], frozenset[str]] = {
+        ("register_vehicle", "vehicle_type"): frozenset({"car", "motorcycle"}),
+        ("book_parking", "parking_zone"): frozenset({"ZONE_A", "ZONE_B"}),
     }
 
     FORBIDDEN_INPUT_KEYS: frozenset[str] = frozenset(
@@ -190,6 +224,9 @@ class TaskPlanValidator:
                     f"Task '{task.task_id}' (tool='{task.tool}') is missing required input fields: {sorted(missing)}"
                 )
 
+            cls._validate_schedule_values(task.tool, task.input)
+            cls._validate_enum_values(task.tool, task.input)
+
             for key, value in task.input.items():
                 if isinstance(value, InputRef):
                     # 7. InputRef.from_task exists in plan
@@ -207,3 +244,42 @@ class TaskPlanValidator:
                         )
 
         return plan
+
+    @classmethod
+    def _validate_enum_values(cls, tool: str, input_data: dict) -> None:
+        """Chặn literal enum ngoài contract mà không echo giá trị do LLM sinh."""
+        for (rule_tool, field), allowed in cls.ENUM_INPUTS.items():
+            if tool != rule_tool:
+                continue
+            value = input_data.get(field)
+            if isinstance(value, InputRef):
+                continue
+            if not isinstance(value, str) or value not in allowed:
+                raise ValueError(f"Tool '{tool}' has invalid {field}; allowed values: {sorted(allowed)}")
+
+    @classmethod
+    def _validate_schedule_values(cls, tool: str, input_data: dict) -> None:
+        """Chặn literal ngày/giờ sai trước execution; InputRef để runtime resolve."""
+        date_field = cls.DATE_INPUTS.get(tool)
+        if date_field is not None:
+            raw_date = input_data.get(date_field)
+            if isinstance(raw_date, str):
+                try:
+                    parsed_date = date.fromisoformat(raw_date)
+                except ValueError:
+                    raise ValueError(f"Tool '{tool}' has invalid {date_field} format") from None
+                if parsed_date < date.today():
+                    raise ValueError(f"Tool '{tool}' has {date_field} in the past")
+
+        time_rule = cls.TIME_INPUTS.get(tool)
+        if time_rule is None:
+            return
+        time_field, opens_at, closes_at = time_rule
+        raw_time = input_data.get(time_field)
+        if not isinstance(raw_time, str):
+            return
+        if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw_time) is None:
+            raise ValueError(f"Tool '{tool}' has invalid {time_field} format")
+        parsed_time = time.fromisoformat(raw_time)
+        if not opens_at <= parsed_time <= closes_at:
+            raise ValueError(f"Tool '{tool}' has {time_field} outside business hours")

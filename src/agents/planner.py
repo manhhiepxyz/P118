@@ -42,7 +42,7 @@ from src.common.task_plan import InputRef, TaskPlan
 
 PlannerStatus = Literal["READY", "NEEDS_INFORMATION"]
 
-# Dùng khi mục tiêu chứa việc nằm ngoài 4 tool được hỗ trợ. Đây là control
+# Dùng khi mục tiêu chứa việc nằm ngoài 6 tool được hỗ trợ. Đây là control
 # value, không phải một field nghiệp vụ.
 UNSUPPORTED_GOAL_FIELD = "supported_goal"
 
@@ -58,6 +58,25 @@ PAYMENT_QUOTE_REQUIRED_FIELD = "payment_quote"
 # LLM chỉ được chọn tên trong đây; mọi thứ khác bị từ chối. Nhờ khớp chính xác
 # nên chuỗi rỗng, whitespace, URL và credential marker đều tự động bị loại.
 MISSING_FIELD_LABELS: dict[str, str] = {
+    "transaction_type": "hình thức giao dịch (rent hoặc buy)",
+    "property_type": "loại bất động sản (apartment hoặc room)",
+    "max_price": "ngân sách tối đa",
+    "project_id": "tên dự án trong danh sách được hỗ trợ; tên khu vực chung chưa đủ",
+    "viewing_date": "ngày xem nhà theo định dạng YYYY-MM-DD",
+    "viewing_time": "giờ xem nhà theo định dạng HH:MM",
+    "interest_type": "nhu cầu tư vấn (buy, rent hoặc consultation)",
+    "preferred_contact_time": "thời gian muốn được liên hệ (morning, afternoon hoặc evening)",
+    "consent": "đồng ý để bộ phận tư vấn liên hệ",
+    "issue_type": "hạng mục cần bảo trì",
+    "description": "mô tả sự cố",
+    "location": "vị trí cần sửa chữa",
+    "preferred_date": "ngày muốn bảo trì theo định dạng YYYY-MM-DD",
+    "preferred_time": "giờ muốn bảo trì theo định dạng HH:MM",
+    "move_date": "ngày chuyển nhà theo định dạng YYYY-MM-DD",
+    "move_time": "giờ chuyển nhà theo định dạng HH:MM",
+    "needs_elevator": "có cần đăng ký thang máy hay không",
+    "needs_loading_support": "có cần hỗ trợ bốc dỡ hay không",
+    "move_vehicle": "phương tiện chuyển nhà (none, van hoặc truck)",
     "full_name": "họ tên cư dân",
     "apartment_code": "mã căn hộ",
     "residential_area": "tên khu đô thị",
@@ -65,7 +84,7 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "plate_number": "biển số xe",
     "vehicle_type": "loại xe (car hoặc motorcycle)",
     "vehicle_id": "mã phương tiện",
-    "booking_date": "ngày đặt chỗ theo định dạng YYYY-MM-DD",
+    "booking_date": "ngày đặt chỗ hợp lệ, không ở quá khứ, theo định dạng YYYY-MM-DD",
     "parking_zone": "khu vực đỗ xe (ZONE_A hoặc ZONE_B)",
     "booking_id": "mã đặt chỗ",
     "amount": "số tiền",
@@ -100,7 +119,8 @@ _TRUSTED_PAYMENT_FIELDS: tuple[str, ...] = ("booking_id", "amount", "currency")
 
 _UNSUPPORTED_GOAL_QUESTION = (
     "Mục tiêu của bạn có phần nằm ngoài các dịch vụ mình hỗ trợ "
-    "(đăng ký cư dân, đăng ký xe, đặt chỗ đậu xe, thanh toán phí). "
+    "(tìm nhà, đặt lịch xem nhà, đăng ký cư dân, đăng ký xe, "
+    "đặt chỗ đậu xe, bảo trì, chuyển nhà, thanh toán phí). "
     "Bạn xác nhận chỉ thực hiện những dịch vụ này, hoặc mô tả lại mục tiêu giúp mình nhé?"
 )
 

@@ -4,8 +4,9 @@ Owner: Mạnh Hiệp (Executor layer)
 File: src/executor/executor.py
 """
 
+import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
@@ -28,6 +29,7 @@ class Executor:
         connectors: list[Connector],
         repository: WorkflowStateRepository,
         on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
+        on_progress: Callable[[str, str, TaskStatus], Awaitable[None]] | None = None,
     ):
         """Khởi tạo Executor.
 
@@ -43,6 +45,16 @@ class Executor:
 
         self.repository = repository
         self.on_failure = on_failure
+        self.on_progress = on_progress
+
+    async def _emit_progress(self, workflow_id: str, task_id: str, status: TaskStatus) -> None:
+        """Phát tiến độ quan sát; lỗi giao diện không được làm hỏng workflow."""
+        if self.on_progress is None:
+            return
+        try:
+            await self.on_progress(workflow_id, task_id, status)
+        except Exception:  # noqa: BLE001 - observer nằm ngoài critical path
+            return
 
     def _get_connector(self, tool_name: str) -> Connector | None:
         """Lấy Connector cho tool_name."""
@@ -108,6 +120,7 @@ class Executor:
                 "id": workflow_id,
                 "goal": plan.goal,
                 "status": WorkflowStatus.PENDING.value,
+                "task_plan": plan.model_dump(mode="json"),
             }
         )
         if persisted_id:
@@ -134,7 +147,9 @@ class Executor:
         # Cập nhật workflow status
         await self.repository.update_workflow_status(workflow_id, WorkflowStatus.RUNNING)
 
-        # Thực thi tasks theo thứ tự (topological sort đơn giản)
+        # Thực thi theo từng "wave" của DAG. Mọi task có dependency đã SUCCESS
+        # trong cùng wave được gọi Connector song song; task phụ thuộc chỉ xuất
+        # hiện ở wave sau.
         remaining_tasks = list(plan.tasks)
         max_iterations = len(plan.tasks) * 2  # Prevent infinite loop
 
@@ -142,81 +157,8 @@ class Executor:
             if not remaining_tasks:
                 break
 
-            executed_any = False
-            for task in list(remaining_tasks):
-                if self._check_dependencies(task, task_statuses):
-                    # Task sẵn sàng chạy
-                    remaining_tasks.remove(task)
-                    executed_any = True
-
-                    # Update status to RUNNING
-                    task_statuses[task.task_id] = TaskStatus.RUNNING
-                    await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.RUNNING)
-
-                    # Resolve input
-                    try:
-                        resolved_input = self._resolve_input(task, completed_results)
-                    except ValueError as e:
-                        # Dependency error
-                        result = StandardResult.fail(
-                            error_code=ErrorCode.DEPENDENCY_ERROR,
-                            message=str(e),
-                            retryable=False,
-                        )
-                        task_statuses[task.task_id] = TaskStatus.FAILED
-                        completed_results[task.task_id] = result
-                        await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.FAILED)
-                        await self.repository.save_task_result(workflow_id, task.task_id, result)
-                        if self.on_failure:
-                            self.on_failure(workflow_id, task.task_id, ErrorCode.DEPENDENCY_ERROR, str(e), False)
-                        continue
-
-                    # Get connector
-                    connector = self._get_connector(task.tool)
-                    if connector is None:
-                        result = StandardResult.fail(
-                            error_code=ErrorCode.UNKNOWN_TOOL,
-                            message=f"Không có Connector cho tool: {task.tool}",
-                            retryable=False,
-                        )
-                        task_statuses[task.task_id] = TaskStatus.FAILED
-                        completed_results[task.task_id] = result
-                        await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.FAILED)
-                        await self.repository.save_task_result(workflow_id, task.task_id, result)
-                        if self.on_failure:
-                            self.on_failure(
-                                workflow_id,
-                                task.task_id,
-                                ErrorCode.UNKNOWN_TOOL,
-                                f"Không có Connector cho tool: {task.tool}",
-                                False,
-                            )
-                        continue
-
-                    # Execute tool
-                    result = await connector.execute(task.tool, resolved_input)
-
-                    # Save result
-                    completed_results[task.task_id] = result
-
-                    # Update task status
-                    if result.success:
-                        task_statuses[task.task_id] = TaskStatus.SUCCESS
-                    else:
-                        task_statuses[task.task_id] = TaskStatus.FAILED
-                        if self.on_failure:
-                            self.on_failure(
-                                workflow_id,
-                                task.task_id,
-                                result.error_code or ErrorCode.UNKNOWN_EXTERNAL_ERROR,
-                                result.message or "Unknown error",
-                                result.is_retryable,
-                            )
-
-                    await self.repository.update_task_status(workflow_id, task.task_id, task_statuses[task.task_id])
-                    await self.repository.save_task_result(workflow_id, task.task_id, result)
-
-            if not executed_any:
+            ready_tasks = [task for task in remaining_tasks if self._check_dependencies(task, task_statuses)]
+            if not ready_tasks:
                 # Không task nào chạy được - có thể cycle hoặc dependency missing
                 for task in remaining_tasks:
                     task_statuses[task.task_id] = TaskStatus.FAILED
@@ -228,7 +170,53 @@ class Executor:
                     completed_results[task.task_id] = result
                     await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.FAILED)
                     await self.repository.save_task_result(workflow_id, task.task_id, result)
+                    await self._emit_progress(workflow_id, task.task_id, TaskStatus.FAILED)
                 break
+
+            for task in ready_tasks:
+                remaining_tasks.remove(task)
+                task_statuses[task.task_id] = TaskStatus.RUNNING
+                await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.RUNNING)
+                await self._emit_progress(workflow_id, task.task_id, TaskStatus.RUNNING)
+
+            async def run_task(task: Task) -> StandardResult:
+                try:
+                    resolved_input = self._resolve_input(task, completed_results)
+                except ValueError as exc:
+                    return StandardResult.fail(ErrorCode.DEPENDENCY_ERROR, str(exc), retryable=False)
+
+                connector = self._get_connector(task.tool)
+                if connector is None:
+                    return StandardResult.fail(
+                        ErrorCode.UNKNOWN_TOOL,
+                        f"Không có Connector cho tool: {task.tool}",
+                        retryable=False,
+                    )
+                try:
+                    return await connector.execute(task.tool, resolved_input)
+                except Exception:  # noqa: BLE001 - cô lập lỗi của một nhánh song song
+                    return StandardResult.fail(
+                        ErrorCode.INTERNAL_SERVICE_ERROR,
+                        "Connector gặp lỗi không mong đợi",
+                        retryable=False,
+                    )
+
+            wave_results = await asyncio.gather(*(run_task(task) for task in ready_tasks))
+            for task, result in zip(ready_tasks, wave_results, strict=True):
+                completed_results[task.task_id] = result
+                status = TaskStatus.SUCCESS if result.success else TaskStatus.FAILED
+                task_statuses[task.task_id] = status
+                if not result.success and self.on_failure:
+                    self.on_failure(
+                        workflow_id,
+                        task.task_id,
+                        result.error_code or ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                        result.message or "Unknown error",
+                        result.is_retryable,
+                    )
+                await self.repository.update_task_status(workflow_id, task.task_id, status)
+                await self.repository.save_task_result(workflow_id, task.task_id, result)
+                await self._emit_progress(workflow_id, task.task_id, status)
 
         # Final workflow status
         all_success = all(task_statuses[t.task_id] == TaskStatus.SUCCESS for t in plan.tasks)

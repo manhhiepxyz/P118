@@ -35,6 +35,11 @@ services:
     environment:
       # Override DATABASE_URL để trỏ vào postgres service trong compose network
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+      RESIDENT_SERVICE_URL: http://mock-resident:8001
+      TRANSPORT_SERVICE_URL: http://mock-transport:8002
+      PAYMENT_SERVICE_URL: http://mock-payment:8003
+      PROPERTY_SERVICE_URL: http://mock-property:8005
+      RESIDENT_SERVICES_SERVICE_URL: http://mock-resident-services:8006
     volumes:
       - ./data:/app/data
     depends_on:
@@ -48,11 +53,13 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Mock Providers — 3 provider độc lập theo domain.
+  # Mock Providers — provider độc lập theo domain.
   # Cổng phải khớp base_url mặc định của Connector:
   #   ResidentConnector  → 8001
   #   TransportConnector → 8002  (register_vehicle + book_parking)
   #   PaymentConnector   → 8003
+  #   PropertyConnector  → 8005
+  #   ResidentServicesConnector → 8006
   # ----------------------------------------------------------------
   mock-resident:
     build:
@@ -115,6 +122,50 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  mock-property:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_property
+    command: ["uvicorn", "src.services.mock.property:property_app", "--host", "0.0.0.0", "--port", "8005"]
+    ports:
+      - "8005:8005"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  mock-resident-services:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_resident_services
+    command: ["uvicorn", "src.services.mock.resident_services:resident_services_app", "--host", "0.0.0.0", "--port", "8006"]
+    ports:
+      - "8006:8006"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -24,8 +24,8 @@ Trạng thái provider hỗ trợ HÔM NAY (Week 1):
 Nguyên tắc hub thuần:
 - Provider này KHÔNG biết gì về Resident/Transport/Payment provider
 - Provider chỉ trả trạng thái xác minh, không tạo resident hay vehicle
-- Planner và Executor không gọi provider này; TaskPlan chỉ có 4 tool nghiệp vụ
-  (register_resident, register_vehicle, book_parking, pay_fee)
+- Planner và Executor không gọi provider này; xác minh quyền sở hữu không nằm
+  trong allowlist tool nghiệp vụ của TaskPlan.
 
 VerificationGuard CHƯA được implement (hạng mục Week 2) — hiện provider chạy độc
 lập và đã sẵn sàng để Guard gọi.

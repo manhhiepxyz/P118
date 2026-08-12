@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from src.services.mock.transport import transport_app
 
 VEHICLE = {"resident_id": "RES-999", "plate_number": "51A-12345", "vehicle_type": "car"}
-BOOKING = {"vehicle_id": "VEH-001", "booking_date": "2026-08-10", "parking_zone": "ZONE_A"}
+BOOKING = {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"}
 
 
 async def _register_vehicle(ac, plate: str = "51A-12345") -> str:
@@ -57,7 +57,7 @@ async def test_book_parking_success():
     data = body["data"]
     assert data["booking_id"].startswith("BOOK-")
     assert data["parking_zone"] == "ZONE_A"
-    assert data["booking_date"] == "2026-08-10"
+    assert data["booking_date"] == "2026-12-10"
     assert data["amount"] == 150_000
     assert data["currency"] == "VND"
 
@@ -81,14 +81,14 @@ async def test_book_parking_capacity_real():
             vid = await _register_vehicle(ac, plate=f"51A-000{i + 1}")
             r = await ac.post(
                 "/api/parking/bookings",
-                json={"vehicle_id": vid, "booking_date": "2026-08-10", "parking_zone": "ZONE_A"},
+                json={"vehicle_id": vid, "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
             )
             assert r.status_code == 201
 
         fourth = await _register_vehicle(ac, plate="51A-9999")
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": fourth, "booking_date": "2026-08-10", "parking_zone": "ZONE_A"},
+            json={"vehicle_id": fourth, "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
         )
     assert response.status_code == 409
     body = response.json()

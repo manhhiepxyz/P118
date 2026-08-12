@@ -67,6 +67,21 @@ def test_prompt_forbids_inferring_ambiguous_phrases() -> None:
     assert "ngày mai" in PROMPT
 
 
+def test_prompt_defines_schedule_windows_and_rejects_invalid_values() -> None:
+    assert "08:00–17:30" in PROMPT
+    assert "08:00–18:00" in PROMPT
+    assert "07:00–20:00" in PROMPT
+    assert "không được ở quá khứ" in PROMPT
+    assert "không được tự sửa sang một ngày/giờ khác" in PROMPT
+
+
+def test_prompt_forbids_mapping_generic_location_to_default_project() -> None:
+    assert '"Zone C", "Vinhomes" không phải là' in PROMPT
+    assert "Không được tự ánh xạ chúng sang PRJ-001" in PROMPT
+    assert 'missing_fields=["project_id"]' in PROMPT
+    assert "không hỏi người dùng mã PRJ" in PROMPT
+
+
 # ---------------------------------------------------------------------------
 # Thứ tự nguồn dữ liệu
 # ---------------------------------------------------------------------------
@@ -254,7 +269,37 @@ def test_prompt_has_self_check_before_output() -> None:
     assert "amount, currency" in checklist  # nhắc đúng cặp hay sai nhất
     assert "InputRef" in checklist
     assert "pay_fee" in checklist
-    assert "4 tool" in checklist
+    assert "9 tool" in checklist
+
+
+def test_property_search_is_read_only_and_never_auto_schedules() -> None:
+    section = PROMPT.split("## Quy tắc tìm nhà và đặt lịch xem", 1)[1].split("## Quy tắc book_parking", 1)[0]
+
+    assert "search_properties" in section
+    assert "không tạo giao dịch" in section
+    assert "Không tự thêm `schedule_property_viewing`" in section
+    assert "người dùng phải chọn một `project_id`" in section
+
+
+def test_property_transaction_actions_remain_outside_tool_contract() -> None:
+    tool_section = PROMPT.split("## Tool được phép dùng", 1)[1].split("## Định dạng giá trị", 1)[0]
+
+    assert "search_properties" in tool_section
+    assert "schedule_property_viewing" in tool_section
+    assert "register_property_interest" in tool_section
+    assert "create_maintenance_request" in tool_section
+    assert "schedule_move" in tool_section
+    assert "rent_property" not in tool_section
+    assert "pay_deposit" not in tool_section
+    assert "đặt cọc" in tool_section
+
+
+def test_viewing_and_interest_are_explicitly_parallel_when_independent() -> None:
+    section = PROMPT.split("## Quy tắc tìm nhà và đặt lịch xem", 1)[1].split("## Quy tắc book_parking", 1)[0]
+
+    assert "register_property_interest" in section
+    assert "KHÔNG phụ thuộc output của nhau" in section
+    assert "chạy song song" in section
 
 
 # ---------------------------------------------------------------------------

@@ -59,10 +59,15 @@ Connector thực hiện mapping nhưng luôn trả kết quả về chuẩn nộ
 
 ## 3. Tool Allowlist
 
-Chỉ dùng đúng 4 tool nghiệp vụ chính:
+Gate 2 mở rộng dùng đúng 9 tool nghiệp vụ:
 
 | Tool | Mô tả |
 |---|---|
+| `search_properties` | Tìm và gợi ý bất động sản phù hợp; không tạo giao dịch |
+| `schedule_property_viewing` | Đặt lịch tham quan dự án người dùng đã chọn |
+| `register_property_interest` | Đăng ký nhu cầu tư vấn cho dự án qua account contact đã xác minh |
+| `create_maintenance_request` | Tạo yêu cầu bảo trì cho căn hộ đã liên kết |
+| `schedule_move` | Đăng ký lịch chuyển nhà, thang máy và hỗ trợ bốc dỡ |
 | `register_resident` | Đăng ký cư dân mới |
 | `register_vehicle` | Đăng ký phương tiện |
 | `book_parking` | Đặt chỗ đậu xe |
@@ -79,6 +84,11 @@ Chỉ dùng đúng 4 tool nghiệp vụ chính:
 
 | Tool | Required internal input | Internal output |
 |---|---|---|
+| `search_properties` | `transaction_type`, `property_type`, `residential_area`, `max_price` | `properties`, `result_count` |
+| `schedule_property_viewing` | `project_id`, `viewing_date`, `viewing_time` | `viewing_id`, `project_id`, `project_name`, `viewing_date`, `viewing_time`, `viewing_status`, `contact_name`, `contact_phone` |
+| `register_property_interest` | `project_id`, `interest_type`, `preferred_contact_time`, `consent` | `interest_id`, `project_id`, `project_name`, `interest_status`, `contact_channel` |
+| `create_maintenance_request` | `issue_type`, `description`, `location`, `preferred_date`, `preferred_time` | `maintenance_id`, `maintenance_status`, `appointment_date`, `appointment_time` |
+| `schedule_move` | `move_date`, `move_time`, `needs_elevator`, `needs_loading_support`, `move_vehicle` | `move_request_id`, `move_status`, `move_date`, `move_time`, `elevator_slot` |
 | `register_resident` | `full_name`, `apartment_code`, `residential_area` | `resident_id` |
 | `register_vehicle` | `resident_id`, `plate_number`, `vehicle_type` | `vehicle_id` |
 | `book_parking` | `vehicle_id`, `booking_date`, `parking_zone` | `booking_id`, `parking_zone`, `booking_date`, `amount`, `currency` |
@@ -88,6 +98,26 @@ Chỉ dùng đúng 4 tool nghiệp vụ chính:
 
 | Field | Type / Format | Ghi chú |
 |---|---|---|
+| `transaction_type` | enum string | `rent`, `buy` |
+| `property_type` | enum string | `apartment`, `room` |
+| `max_price` | integer | Ngân sách tối đa, đơn vị VND, lớn hơn 0 |
+| `property_id` | string | Ví dụ: PROP-001 |
+| `project_id` | string | Mã dự án từ danh sách provider, ví dụ: PRJ-001 |
+| `project_name` | string | Tên dự án do provider trả về |
+| `properties` | list[object] | Danh sách gợi ý đã lọc |
+| `result_count` | integer | Số kết quả tìm thấy |
+| `price` | integer | Giá thuê/tham khảo do provider trả về, đơn vị theo `currency` |
+| `bedrooms` | integer | Số phòng ngủ |
+| `viewing_date` | string, YYYY-MM-DD | Ngày xem nhà |
+| `viewing_time` | string, HH:MM | Giờ xem nhà |
+| `viewing_id` | string | Ví dụ: VIEW-001 |
+| `viewing_status` | enum string | MVP dùng `SCHEDULED` |
+| `interest_type` | enum string | `buy`, `rent`, `consultation` |
+| `preferred_contact_time` | enum string | `morning`, `afternoon`, `evening` |
+| `consent` | boolean | Phải là `true`, không được Planner tự suy diễn |
+| `interest_status` | enum string | MVP dùng `RECEIVED` |
+| `contact_name` | string | Tên liên hệ nghiệp vụ do provider trả về |
+| `contact_phone` | string | Số liên hệ nghiệp vụ do provider trả về |
 | `full_name` | string | Không rỗng |
 | `apartment_code` | string | Ví dụ: A1201 |
 | `residential_area` | string | Tên khu đô thị giả lập |
@@ -107,6 +137,104 @@ Chỉ dùng đúng 4 tool nghiệp vụ chính:
 - Timestamp lưu theo ISO 8601.
 - Ưu tiên UTC trong database.
 - UI có thể chuyển sang múi giờ người dùng.
+
+### search_properties
+
+```json
+// Input
+{
+  "transaction_type": "rent",
+  "property_type": "apartment",
+  "residential_area": "Vinhomes Ocean Park",
+  "max_price": 20000000
+}
+
+// Output (rút gọn)
+{
+  "properties": [
+    {
+      "property_id": "PROP-001",
+      "title": "Căn hộ 2 phòng ngủ gần công viên",
+      "price": 18000000,
+      "currency": "VND"
+    }
+  ],
+  "result_count": 1
+}
+```
+
+`search_properties` là read-only. Kết quả chỉ là gợi ý; Agent không tự chọn
+căn, giữ căn, đặt cọc, ký hợp đồng hoặc hoàn tất thuê/mua.
+
+Mỗi phần tử trong `properties` chỉ gồm các field canonical:
+`property_id`, `title`, `transaction_type`, `property_type`,
+`residential_area`, `price`, `currency`, `bedrooms`, `contact_name`,
+`contact_phone`. Connector phải loại bỏ mọi field lồng nhau khác từ provider.
+
+### schedule_property_viewing
+
+```json
+// Input
+{
+  "project_id": "PRJ-001",
+  "viewing_date": "2026-08-15",
+  "viewing_time": "10:00"
+}
+
+// Output
+{
+  "viewing_id": "VIEW-001",
+  "project_id": "PRJ-001",
+  "project_name": "Vinhomes Sài Gòn Park",
+  "viewing_date": "2026-08-15",
+  "viewing_time": "10:00",
+  "viewing_status": "SCHEDULED",
+  "contact_name": "Minh Anh - Tư vấn",
+  "contact_phone": "0900000001"
+}
+```
+
+`schedule_property_viewing` đặt lịch ở cấp dự án, không phải một căn hộ cụ thể.
+Không tự nối `search_properties → schedule_property_viewing`: người dùng phải
+chọn `project_id` từ danh sách dự án trước khi đặt lịch.
+
+`project_id` là khóa nội bộ. UI/chat chỉ hiển thị và nhận `project_name`;
+API boundary đối chiếu tên với danh mục dự án đóng rồi đưa ID tin cậy vào
+`existing_context`. Không yêu cầu người dùng biết hoặc nhập mã `PRJ-*`.
+
+### register_property_interest
+
+```json
+// Input
+{
+  "project_id": "PRJ-001",
+  "interest_type": "consultation",
+  "preferred_contact_time": "afternoon",
+  "consent": true
+}
+
+// Output
+{
+  "interest_id": "INT-001",
+  "project_id": "PRJ-001",
+  "project_name": "Vinhomes Sài Gòn Park",
+  "interest_status": "RECEIVED",
+  "contact_channel": "VERIFIED_ACCOUNT_CONTACT"
+}
+```
+
+`register_property_interest` cũng đăng ký nhu cầu ở cấp dự án. Phone/email
+không đi qua TaskPlan. Provider hoặc account directory lấy thông
+tin liên hệ đã xác minh. `register_property_interest` và
+`schedule_property_viewing` không phụ thuộc output của nhau nên có thể nằm
+trong cùng một wave song song của DAG.
+
+### create_maintenance_request / schedule_move
+
+Hai tool này chỉ chạy khi account đã có resident-property mapping `VERIFIED`.
+TaskPlan không chứa resident ID, apartment ID, thông tin liên hệ hay giấy tờ;
+Provider lấy quan hệ căn hộ từ account đã xác minh. Hai tác vụ độc lập, có thể
+chạy song song và không tự tạo `pay_fee` trong MVP.
 
 ---
 
@@ -420,9 +548,9 @@ Người dùng không phải lúc nào cũng chạy đủ 4 tác vụ. Với yê
 - Nếu đã có `vehicle_id` → không chạy lại `register_vehicle`.
 - Nếu đã có `booking_id` → có thể chỉ chạy `pay_fee`.
 - Existing context được nạp trước khi lập hoặc thực thi TaskPlan.
-- Planner có thể nhận các giá trị đã có: `resident_id`, `vehicle_id`, `booking_id`.
+- Planner có thể nhận các giá trị đã có: `property_id`, `project_id`, `resident_id`, `vehicle_id`, `booking_id`.
 - Task đã hoàn thành hoặc dữ liệu đã tồn tại không được tạo lại nếu không cần thiết.
-- Gate 2 chưa cần thêm tool tra cứu mới vào allowlist.
+- Tool tìm bất động sản chỉ trả gợi ý; không mở rộng quyền Agent sang giao dịch.
 - Nếu dữ liệu cần thiết chưa tồn tại, Agent phải hỏi người dùng hoặc thêm tác vụ hợp lệ để tạo dữ liệu đó.
 - Không được tự đoán ID.
 
@@ -497,6 +625,9 @@ book_parking internal input
 
 | Method | Path | Mô tả |
 |---|---|---|
+| `POST` | `/api/properties/search` | Tìm bất động sản phù hợp |
+| `POST` | `/api/projects/viewings` | Đặt lịch tham quan dự án đã chọn |
+| `POST` | `/api/projects/interests` | Đăng ký nhận tư vấn cho dự án đã chọn |
 | `POST` | `/api/residents` | Đăng ký cư dân |
 | `POST` | `/api/vehicles` | Đăng ký phương tiện |
 | `POST` | `/api/parking/bookings` | Đặt chỗ đậu xe |

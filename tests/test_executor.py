@@ -4,6 +4,7 @@ Owner: Mạnh Hiệp (Executor layer)
 File: tests/test_executor.py
 """
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -40,6 +41,23 @@ class MockConnector(Connector):
         return self._response
 
 
+class ConcurrentProbeConnector(Connector):
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    @property
+    def tool_names(self) -> list[str]:
+        return ["schedule_property_viewing", "register_property_interest"]
+
+    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.01)
+        self.active -= 1
+        return StandardResult.ok({"tool": tool_name})
+
+
 @pytest.fixture
 def repository() -> InMemoryWorkflowStateRepository:
     return InMemoryWorkflowStateRepository()
@@ -57,7 +75,7 @@ def connectors():
                 {
                     "booking_id": "BOOK-001",
                     "parking_zone": "ZONE_A",
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "amount": 150000,
                     "currency": "VND",
                 }
@@ -107,7 +125,7 @@ def full_flow_plan() -> TaskPlan:
                 depends_on=["T2"],
                 input={
                     "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2026-12-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -149,6 +167,60 @@ class TestExecutor:
         for task_id in ["T1", "T2", "T3", "T4"]:
             task = await repository.get_task(workflow_id, task_id)
             assert task["status"] == TaskStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_execute_emits_real_task_progress_in_dependency_order(self, repository, connectors, full_flow_plan):
+        events: list[tuple[str, TaskStatus]] = []
+
+        async def on_progress(_workflow_id: str, task_id: str, status: TaskStatus) -> None:
+            events.append((task_id, status))
+
+        executor = Executor(connectors, repository, on_progress=on_progress)
+
+        await executor.execute(full_flow_plan, "workflow-realtime")
+
+        assert events == [
+            ("T1", TaskStatus.RUNNING),
+            ("T1", TaskStatus.SUCCESS),
+            ("T2", TaskStatus.RUNNING),
+            ("T2", TaskStatus.SUCCESS),
+            ("T3", TaskStatus.RUNNING),
+            ("T3", TaskStatus.SUCCESS),
+            ("T4", TaskStatus.RUNNING),
+            ("T4", TaskStatus.SUCCESS),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_independent_dag_tasks_execute_concurrently(self, repository):
+        connector = ConcurrentProbeConnector()
+        plan = TaskPlan(
+            goal="Đặt lịch tham quan và đăng ký tư vấn.",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="schedule_property_viewing",
+                    depends_on=[],
+                    input={"project_id": "PRJ-001", "viewing_date": "2026-11-20", "viewing_time": "10:00"},
+                ),
+                Task(
+                    task_id="T2",
+                    tool="register_property_interest",
+                    depends_on=[],
+                    input={
+                        "project_id": "PRJ-001",
+                        "interest_type": "consultation",
+                        "preferred_contact_time": "afternoon",
+                        "consent": True,
+                    },
+                ),
+            ],
+        )
+
+        _, results = await Executor([connector], repository).execute(plan)
+
+        assert connector.max_active == 2
+        assert results["T1"].success is True
+        assert results["T2"].success is True
 
     @pytest.mark.asyncio
     async def test_dependency_order_parking_not_before_vehicle(self, repository, connectors, full_flow_plan):
@@ -248,7 +320,7 @@ class TestExecutor:
                     depends_on=[],
                     input={
                         "vehicle_id": "VEH-001",
-                        "booking_date": "2026-08-10",
+                        "booking_date": "2026-12-10",
                         "parking_zone": "ZONE_A",
                     },
                 ),
@@ -464,7 +536,7 @@ class TestExecutorEdgeCases:
                     depends_on=[],
                     input={
                         "vehicle_id": "VEH-001",
-                        "booking_date": "2026-08-10",
+                        "booking_date": "2026-12-10",
                         "parking_zone": "ZONE_A",
                     },
                 ),
