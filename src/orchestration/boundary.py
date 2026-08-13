@@ -30,7 +30,15 @@ class ExecutorBoundary(Protocol):
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
-    ) -> tuple[str, dict[str, StandardResult]]: ...
+        *,
+        finalize: bool = True,
+    ) -> tuple[str, dict[str, StandardResult]]:
+        """`finalize=False`: caller chỉ chạy MỘT PHẦN plan.
+
+        Mọi boundary trung gian phải chuyển tiếp cờ này. Nuốt nó đi là để
+        Executor chốt workflow SUCCESS khi mới chạy xong phần trước thanh toán.
+        """
+        ...
 
 
 class PlanRejectedError(ValueError):
@@ -64,10 +72,12 @@ class ValidatedExecutionBoundary:
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
+        *,
+        finalize: bool = True,
     ) -> tuple[str, dict[str, StandardResult]]:
         try:
             validated_plan = self._validator.validate(plan)
         except ValueError:
             raise PlanRejectedError("TaskPlan validation failed.") from None
 
-        return await self._executor.execute(validated_plan, workflow_id)
+        return await self._executor.execute(validated_plan, workflow_id, finalize=finalize)

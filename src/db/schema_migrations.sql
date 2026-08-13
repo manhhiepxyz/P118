@@ -15,3 +15,123 @@
 -- nuốt mất dependency edge, Replanner không đọc lại được DAG từ DB.
 ALTER TABLE IF EXISTS workflow_tasks
     ADD COLUMN IF NOT EXISTS depends_on JSONB NOT NULL DEFAULT '[]';
+
+-- 2026-08 — payments.idempotency_key
+-- Chống double-charge khi client/Executor retry sau timeout.
+--
+-- Partial index uq_payments_paid_booking đã chặn "hai PAID cho cùng booking",
+-- nhưng nó chỉ có tác dụng SAU KHI giao dịch đầu thành công. Một retry xảy ra
+-- lúc giao dịch đầu còn PENDING vẫn tạo được row thứ hai. Idempotency key
+-- deterministic (workflow_id + payment task_id) chặn ngay từ lần INSERT.
+--
+-- Cột cho phép NULL để không phá row đã có; UNIQUE index bỏ qua NULL nên
+-- payment cũ không bị ảnh hưởng.
+--
+-- Toàn bộ khối này bọc trong kiểm tra to_regclass: file migration còn được
+-- chạy trên database legacy chỉ có vài bảng (xem test_schema_migrations_
+-- upgrades_legacy_table), nơi payments/parking_bookings chưa tồn tại.
+--
+-- to_regclass KHÔNG qualify schema: migration bám theo search_path, nên guard
+-- phải giải tên bảng đúng cách ALTER bên dưới sẽ giải.
+DO $$
+BEGIN
+    IF to_regclass('payments') IS NOT NULL THEN
+        ALTER TABLE payments ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(120);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_idempotency_key
+            ON payments(idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+
+        -- Thanh toán thật phải lớn hơn 0. NOT VALID để không đụng dữ liệu cũ.
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_payments_amount_positive') THEN
+            ALTER TABLE payments
+                ADD CONSTRAINT ck_payments_amount_positive CHECK (amount > 0) NOT VALID;
+        END IF;
+
+        -- MVP chỉ dùng VND.
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_payments_currency_vnd') THEN
+            ALTER TABLE payments
+                ADD CONSTRAINT ck_payments_currency_vnd CHECK (currency = 'VND') NOT VALID;
+        END IF;
+    END IF;
+
+    IF to_regclass('parking_bookings') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_bookings_currency_vnd') THEN
+            ALTER TABLE parking_bookings
+                ADD CONSTRAINT ck_bookings_currency_vnd CHECK (currency = 'VND') NOT VALID;
+        END IF;
+        -- Báo giá phải > 0, khớp ck_payments_amount_positive và Tool Contract.
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_bookings_amount_positive') THEN
+            ALTER TABLE parking_bookings
+                ADD CONSTRAINT ck_bookings_amount_positive CHECK (amount > 0) NOT VALID;
+        END IF;
+    END IF;
+END
+$$;
+
+-- 2026-08 — sequence sinh ID nghiệp vụ
+-- `SELECT max(id) + 1` bị race: nhiều transaction đồng thời đọc cùng một giá
+-- trị rồi cùng INSERT, gây va chạm PRIMARY KEY. Sequence là bộ đếm nguyên tử
+-- nằm ngoài transaction nên không bao giờ trả trùng.
+CREATE SEQUENCE IF NOT EXISTS seq_resident_id;
+CREATE SEQUENCE IF NOT EXISTS seq_vehicle_id;
+CREATE SEQUENCE IF NOT EXISTS seq_booking_id;
+CREATE SEQUENCE IF NOT EXISTS seq_payment_id;
+
+-- Đẩy sequence vượt qua dữ liệu đã có để không đụng ID cũ.
+DO $$
+DECLARE
+    highest BIGINT;
+BEGIN
+    IF to_regclass('residents') IS NOT NULL THEN
+        SELECT COALESCE(MAX(NULLIF(regexp_replace(resident_id, '\D', '', 'g'), '')::BIGINT), 0)
+          INTO highest FROM residents;
+        PERFORM setval('seq_resident_id', GREATEST(highest, 1), highest > 0);
+    END IF;
+    IF to_regclass('vehicles') IS NOT NULL THEN
+        SELECT COALESCE(MAX(NULLIF(regexp_replace(vehicle_id, '\D', '', 'g'), '')::BIGINT), 0)
+          INTO highest FROM vehicles;
+        PERFORM setval('seq_vehicle_id', GREATEST(highest, 1), highest > 0);
+    END IF;
+    IF to_regclass('parking_bookings') IS NOT NULL THEN
+        SELECT COALESCE(MAX(NULLIF(regexp_replace(booking_id, '\D', '', 'g'), '')::BIGINT), 0)
+          INTO highest FROM parking_bookings;
+        PERFORM setval('seq_booking_id', GREATEST(highest, 1), highest > 0);
+    END IF;
+    IF to_regclass('payments') IS NOT NULL THEN
+        SELECT COALESCE(MAX(NULLIF(regexp_replace(payment_id, '\D', '', 'g'), '')::BIGINT), 0)
+          INTO highest FROM payments;
+        PERFORM setval('seq_payment_id', GREATEST(highest, 1), highest > 0);
+    END IF;
+END
+$$;
+
+-- 2026-08 — payment_approvals
+-- Ngữ cảnh chờ xác nhận thanh toán, để resume KHÔNG phụ thuộc RAM.
+--
+-- `_DEMO_JOBS` và exception object đều biến mất khi backend restart. Nếu resume
+-- dựa vào chúng thì một lần restart giữa lúc user đang cân nhắc là mất luôn
+-- booking đã giữ chỗ. Bảng này giữ đủ để dựng lại lệnh thanh toán từ số 0.
+--
+-- `booking_id`/`amount`/`currency` chép từ booking đã persist tại thời điểm
+-- báo giá, KHÔNG lấy từ goal hay browser.
+DO $$
+BEGIN
+    -- Bảng này có FK tới workflows; database legacy trong test migration chỉ có
+    -- vài bảng nên phải guard, nếu không migration vỡ trên chính đường nâng cấp.
+    IF to_regclass('workflows') IS NOT NULL THEN
+        CREATE TABLE IF NOT EXISTS payment_approvals (
+            workflow_id UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
+            task_id     VARCHAR(20)  NOT NULL,
+            booking_id  VARCHAR(20)  NOT NULL,
+            amount      INTEGER      NOT NULL CHECK (amount > 0),
+            currency    VARCHAR(10)  NOT NULL DEFAULT 'VND' CHECK (currency = 'VND'),
+            status      VARCHAR(20)  NOT NULL DEFAULT 'AWAITING'
+                            CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED')),
+            created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            decided_at  TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_payment_approvals_status ON payment_approvals(status);
+    END IF;
+END
+$$;

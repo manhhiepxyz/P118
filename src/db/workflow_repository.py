@@ -65,6 +65,28 @@ def _row_to_task(row: asyncpg.Record) -> dict:
     return task
 
 
+def _require_one_row(command_tag: str, workflow_id: str, task_id: str) -> None:
+    """asyncpg trả tag dạng "UPDATE <n>". n == 0 nghĩa là không khớp row nào."""
+    if not str(command_tag).endswith(" 1"):
+        raise TaskNotFoundError(workflow_id, task_id)
+
+
+class TaskNotFoundError(RuntimeError):
+    """UPDATE nhắm vào một workflow_task không tồn tại.
+
+    Trước đây `UPDATE ... WHERE task_id = $x` không khớp row nào vẫn trả về
+    bình thường, nên việc lưu kết quả một task chưa được tạo là no-op im lặng.
+    Hệ quả thật đã xảy ra: `payments` có row PAID trong khi `workflow_tasks`
+    không hề có bước thanh toán — tiền đúng nhưng audit trail thiếu.
+
+    Message chỉ nêu workflow_id và task_id (đều là định danh nội bộ, không phải
+    dữ liệu người dùng). Không chứa payload, SQL hay connection string.
+    """
+
+    def __init__(self, workflow_id: str, task_id: str) -> None:
+        super().__init__(f"Workflow task không tồn tại: workflow={workflow_id} task={task_id}")
+
+
 class WorkflowRepository:
     """CRUD operations for workflows and workflow_tasks."""
 
@@ -89,7 +111,22 @@ class WorkflowRepository:
                 VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4)
                 ON CONFLICT (workflow_id) DO UPDATE
                     SET goal = EXCLUDED.goal,
-                        task_plan = COALESCE(EXCLUDED.task_plan, workflows.task_plan),
+                        -- Snapshot ĐÃ CÓ thì giữ nguyên, không cho ghi đè.
+                        --
+                        -- Orchestration ghi canonical plan ĐẦY ĐỦ trước khi
+                        -- chạy bước đầu tiên; sau đó Executor gọi lại
+                        -- create_workflow với plan NÓ NHẬN — lúc chờ duyệt đó
+                        -- là plan prefix đã bỏ pay_fee. Cho ghi đè thì
+                        -- `workflows.task_plan` mất hẳn bước thanh toán và
+                        -- resume không dựng lại được kế hoạch gốc.
+                        -- NULLIF(..., 'null'::jsonb): `_json_dumps(None)` lưu
+                        -- JSONB 'null' chứ không phải SQL NULL, nên COALESCE
+                        -- trần sẽ coi "chưa có plan" là "đã có" và không bao
+                        -- giờ điền được snapshot.
+                        task_plan = COALESCE(
+                            NULLIF(workflows.task_plan, 'null'::jsonb),
+                            EXCLUDED.task_plan
+                        ),
                         updated_at = NOW()
                 RETURNING workflow_id
                 """,
@@ -175,7 +212,7 @@ class WorkflowRepository:
 
     async def update_task_status(self, workflow_id: str, task_id: str, status: str) -> None:
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE workflow_tasks
                 SET status = $1, updated_at = NOW()
@@ -185,10 +222,11 @@ class WorkflowRepository:
                 _uuid(workflow_id),
                 task_id,
             )
+        _require_one_row(result, workflow_id, task_id)
 
     async def save_task_result(self, workflow_id: str, task_id: str, result: Any) -> None:
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            command = await conn.execute(
                 """
                 UPDATE workflow_tasks
                 SET result_data   = $1,
@@ -206,6 +244,7 @@ class WorkflowRepository:
                 _uuid(workflow_id),
                 task_id,
             )
+        _require_one_row(command, workflow_id, task_id)
 
     async def get_task(self, workflow_id: str, task_id: str) -> dict | None:
         """Lấy 1 task theo (workflow_id, task_id). None nếu không tồn tại."""
@@ -245,3 +284,58 @@ class WorkflowRepository:
                 _uuid(workflow_id),
             )
             return [r["task_id"] for r in rows]
+
+    async def list_workflows(self, *, statuses: tuple[str, ...] | None, limit: int) -> list[dict]:
+        """Liệt kê workflow kèm số task đã xong — đọc thẳng PostgreSQL.
+
+        Chỉ trả cột cần cho danh sách. KHÔNG trả `task_plan`: snapshot đó chứa
+        input nghiệp vụ (biển số, ngày giờ, ghi chú) và không có việc gì phải
+        đi ra danh sách tổng quan.
+
+        `archived_at IS NULL` — workflow đã lưu trữ không hiện ở tổng quan.
+        """
+        where = ["w.archived_at IS NULL"]
+        params: list[object] = []
+        if statuses:
+            params.append(list(statuses))
+            where.append(f"w.status = ANY(${len(params)}::varchar[])")
+        params.append(limit)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    w.workflow_id,
+                    w.goal,
+                    w.status,
+                    w.created_at,
+                    w.updated_at,
+                    COUNT(t.id) FILTER (WHERE t.task_id IS NOT NULL) AS total_tasks,
+                    COUNT(t.id) FILTER (WHERE t.status = 'SUCCESS')   AS completed_tasks
+                FROM workflows w
+                LEFT JOIN workflow_tasks t ON t.workflow_id = w.workflow_id
+                WHERE {" AND ".join(where)}
+                GROUP BY w.workflow_id
+                ORDER BY w.updated_at DESC
+                LIMIT ${len(params)}
+                """,  # noqa: S608 - mệnh đề WHERE dựng từ literal nội bộ, giá trị luôn là tham số
+                *params,
+            )
+        return [dict(row) for row in rows]
+
+    async def current_step_titles(self, workflow_ids: list[str]) -> dict[str, str]:
+        """Tool của bước đang chạy (hoặc đang chờ) cho từng workflow."""
+        if not workflow_ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (workflow_id) workflow_id, tool, status
+                FROM workflow_tasks
+                WHERE workflow_id = ANY($1::uuid[])
+                  AND status IN ('RUNNING', 'WAITING_APPROVAL', 'READY', 'PENDING')
+                ORDER BY workflow_id, id
+                """,
+                [_uuid(w) for w in workflow_ids],
+            )
+        return {str(row["workflow_id"]): row["tool"] for row in rows}

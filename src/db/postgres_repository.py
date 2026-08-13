@@ -111,6 +111,12 @@ class PostgreSQLWorkflowStateRepository:
         """Lấy một task của workflow (None nếu chưa tồn tại)."""
         return await self.workflows.get_task(workflow_id, task_id)
 
+    async def list_workflows(self, *, statuses: tuple[str, ...] | None = None, limit: int = 20) -> list[dict]:
+        return await self.workflows.list_workflows(statuses=statuses, limit=limit)
+
+    async def current_step_titles(self, workflow_ids: list[str]) -> dict[str, str]:
+        return await self.workflows.current_step_titles(workflow_ids)
+
     async def list_tasks(self, workflow_id: str) -> list[dict]:
         """Liệt kê tất cả task của workflow."""
         return await self.workflows.list_tasks(workflow_id)

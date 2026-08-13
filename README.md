@@ -276,17 +276,35 @@ docker compose up -d
 
 # 2. Kiểm tra health (chờ tất cả healthy)
 docker compose ps
-for p in 8000 8001 8002 8003 8005; do curl -s http://localhost:$p/health; done
+for p in 8080 8001 8002 8003 8005; do curl -s http://localhost:$p/health; done
+
+# Mở Agent Workspace dùng cho demo
+open http://localhost:8080/demo
 ```
 
 | Service | Cổng | Mô tả |
 | --- | --- | --- |
-| Backend | 8000 | FastAPI app |
+| Backend | 8080 | FastAPI app + Agent Workspace (`/demo`) |
 | Mock Resident | 8001 | `POST /api/residents` |
 | Mock Transport | 8002 | `POST /api/vehicles` + `POST /api/parking/bookings` |
 | Mock Payment | 8003 | `POST /api/payments` |
 | Mock Property | 8005 | `POST /api/properties/search` + `POST /api/projects/viewings` + `POST /api/projects/interests` |
 | PostgreSQL | 5432 | Workflow state persistence |
+
+### Chat trong Terminal
+
+Sau khi `docker compose up -d` và backend healthy, chạy:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/demo_chat.py
+```
+
+CLI dùng cùng workflow API với giao diện `/demo`: tự hiển thị tiến độ, hỏi
+thông tin còn thiếu và chỉ gửi quyết định `approve`/`reject` khi backend đã
+trả báo giá thanh toán. Nhập `/quit` để thoát. Dùng persona khách bằng
+`--account prospect`; mặc định là cư dân demo đã liên kết căn hộ. Khi Agent
+đang hỏi thông tin và chưa chạy dịch vụ nào, dùng `/new <yêu cầu mới>` để bỏ
+kế hoạch nháp hoặc `/cancel` để dừng yêu cầu đang soạn.
 
 ### Smoke test deterministic của runtime
 

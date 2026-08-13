@@ -230,6 +230,10 @@ Người dùng có thể đã có sẵn resident_id, vehicle_id hoặc booking_i
   resident_id đó vào input của register_vehicle (giá trị literal, không InputRef).
 - Đã có vehicle_id -> KHÔNG tạo register_resident và register_vehicle. Điền
   thẳng vehicle_id vào book_parking.
+- Muốn đặt chỗ nhưng chưa có vehicle_id: KHÔNG hỏi user "mã phương tiện" vì
+  đây là ID nội bộ. Nếu chưa có biển số/loại xe thì trả NEEDS_INFORMATION với
+  plate_number và vehicle_type; khi đã đủ, tạo register_vehicle rồi dùng
+  InputRef vehicle_id cho book_parking.
 - Đã có booking_id -> có thể chỉ cần pay_fee.
 - Đã chọn project_id -> có thể lập riêng task schedule_property_viewing;
   KHÔNG chạy lại search_properties nếu người dùng chỉ yêu cầu đặt lịch.

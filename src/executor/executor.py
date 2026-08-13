@@ -98,6 +98,8 @@ class Executor:
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
+        *,
+        finalize: bool = True,
     ) -> tuple[str, dict[str, StandardResult]]:
         """Thực thi TaskPlan.
 
@@ -218,9 +220,24 @@ class Executor:
                 await self.repository.save_task_result(workflow_id, task.task_id, result)
                 await self._emit_progress(workflow_id, task.task_id, status)
 
-        # Final workflow status
+        # Final workflow status.
+        #
+        # `finalize=False` khi caller cố tình chỉ chạy MỘT PHẦN plan — ví dụ
+        # `PaymentApprovalBoundary` chạy các bước trước `pay_fee` để lấy báo giá.
+        # Không có cờ này, luật "mọi task trong plan nhận được đều SUCCESS" sẽ
+        # đánh dấu cả workflow là SUCCESS trong khi chưa ai thanh toán. Một lần
+        # poll rơi vào khoảng đó sẽ thấy giao dịch đã hoàn tất, và mọi hệ thống
+        # đối soát đọc trạng thái workflow đều ghi nhận sai.
+        #
+        # Task status vẫn được cập nhật đầy đủ: chỉ trạng thái TỔNG THỂ của
+        # workflow là thứ caller giữ quyền quyết định.
         all_success = all(task_statuses[t.task_id] == TaskStatus.SUCCESS for t in plan.tasks)
-        final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
-        await self.repository.update_workflow_status(workflow_id, final_status)
+        if finalize:
+            final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
+            await self.repository.update_workflow_status(workflow_id, final_status)
+        elif not all_success:
+            # Chạy một phần mà đã hỏng thì vẫn phải chốt FAILED: không có bước
+            # tiếp theo nào để cứu nó.
+            await self.repository.update_workflow_status(workflow_id, WorkflowStatus.FAILED)
 
         return workflow_id, completed_results

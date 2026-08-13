@@ -27,17 +27,18 @@ app = FastAPI(
 
 
 @app.exception_handler(RequestValidationError)
-async def safe_request_validation_error(_request, exc: RequestValidationError) -> JSONResponse:
-    """Không để FastAPI echo PII từ request sai định dạng trong response."""
-    fields = []
-    for error in exc.errors():
-        location = ".".join(str(part) for part in error.get("loc", ())) or "body"
-        if location not in fields:
-            fields.append(location)
-    detail = "Dữ liệu không hợp lệ"
-    if fields:
-        detail += ": " + ", ".join(fields)
-    return JSONResponse(status_code=422, content={"detail": detail})
+async def safe_request_validation_error(_request, _exc: RequestValidationError) -> JSONResponse:
+    """Không echo PII lẫn vị trí field kỹ thuật của request sai định dạng.
+
+    Trước đây handler ghép `error["loc"]` vào detail, nên client nhận nguyên
+    chuỗi `Dữ liệu không hợp lệ: body.goal`. Chuỗi đó vừa lộ schema vừa vô
+    nghĩa với người dùng cuối, mà UI lại hiện thẳng nó trong khung chat. Detail
+    giờ là một câu cố định; cần debug thì đọc log server, không đọc response.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Yêu cầu chưa hợp lệ. Bạn kiểm tra lại thông tin vừa nhập giúp mình nhé."},
+    )
 
 
 settings = get_settings()

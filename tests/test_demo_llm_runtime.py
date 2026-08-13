@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from scripts import demo_llm_runtime
@@ -28,14 +29,30 @@ def _plan(tool: str) -> TaskPlan:
 class _Boundary:
     def __init__(self) -> None:
         self.calls: list[tuple[TaskPlan, str | None]] = []
+        self.finalize_flags: list[bool] = []
 
     async def execute(
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
+        *,
+        finalize: bool = True,
     ) -> tuple[str, dict[str, StandardResult]]:
+        # `finalize` thuộc Protocol của execution boundary: double phải nhận,
+        # nếu không nó che mất việc boundary thật có chuyển tiếp cờ hay không.
+        self.finalize_flags.append(finalize)
         self.calls.append((plan, workflow_id))
         return "workflow-1", {"T1": StandardResult.ok({"id": "result-1"})}
+
+
+class _Verifier:
+    def __init__(self, verified: bool = True) -> None:
+        self.verified = verified
+        self.calls: list[str] = []
+
+    async def verify(self, resident_id: str) -> bool:
+        self.calls.append(resident_id)
+        return self.verified
 
 
 @pytest.mark.asyncio
@@ -103,6 +120,100 @@ async def test_resident_service_uses_server_verified_mapping() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resident_service_calls_authoritative_directory_before_execution() -> None:
+    plan = _plan("pay_fee")
+    inner = _Boundary()
+    verifier = _Verifier()
+    stages: list[str] = []
+
+    async def _on_stage(stage: str, _payload: dict) -> None:
+        stages.append(stage)
+
+    boundary = demo_service.ResidentAccessBoundary(
+        inner,
+        {"resident_verification_status": "VERIFIED", "resident_id": "RES-001"},
+        verifier=verifier,
+        on_stage=_on_stage,
+    )
+
+    await boundary.execute(plan, "workflow-resident")
+
+    assert verifier.calls == ["RES-001"]
+    assert stages == ["RESIDENT_CHECKING", "RESIDENT_VERIFIED"]
+    assert inner.calls == [(plan, "workflow-resident")]
+
+
+@pytest.mark.asyncio
+async def test_directory_rejection_blocks_executor() -> None:
+    inner = _Boundary()
+    verifier = _Verifier(verified=False)
+    boundary = demo_service.ResidentAccessBoundary(
+        inner,
+        {"resident_verification_status": "VERIFIED", "resident_id": "RES-001"},
+        verifier=verifier,
+    )
+
+    with pytest.raises(demo_service.ResidentAccessRequiredError):
+        await boundary.execute(_plan("pay_fee"))
+
+    assert verifier.calls == ["RES-001"]
+    assert inner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_register_vehicle_must_use_verified_resident_id() -> None:
+    inner = _Boundary()
+    verifier = _Verifier()
+    plan = TaskPlan(
+        goal="Đăng ký xe",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="register_vehicle",
+                depends_on=[],
+                input={"resident_id": "RES-FORGED", "plate_number": "51A-12345", "vehicle_type": "car"},
+            )
+        ],
+    )
+    boundary = demo_service.ResidentAccessBoundary(
+        inner,
+        {"resident_verification_status": "VERIFIED", "resident_id": "RES-001"},
+        verifier=verifier,
+    )
+
+    with pytest.raises(demo_service.ResidentAccessRequiredError):
+        await boundary.execute(plan)
+
+    assert inner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_resident_directory_client_requires_matching_success_envelope() -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/residents/RES-001"
+        return httpx.Response(200, json={"success": True, "data": {"resident_id": "RES-001"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler), base_url="http://resident") as client:
+        verifier = demo_service.ResidentDirectoryClient("http://resident", client=client)
+        assert await verifier.verify("RES-001") is True
+
+
+@pytest.mark.asyncio
+async def test_resident_directory_client_fails_closed_without_leaking_response() -> None:
+    provider_body = "sensitive-provider-body-must-not-leak"
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text=provider_body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler), base_url="http://resident") as client:
+        verifier = demo_service.ResidentDirectoryClient("http://resident", client=client)
+        with pytest.raises(demo_service.ResidentDirectoryUnavailableError) as captured:
+            await verifier.verify("RES-001")
+
+    assert provider_body not in str(captured.value)
+
+
+@pytest.mark.asyncio
 async def test_demo_service_composes_real_factories_and_closes_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,7 +240,7 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
             }
 
     monkeypatch.setattr(demo_service, "get_llm", lambda: llm)
-    monkeypatch.setattr(demo_service, "Planner", lambda received: planner if received is llm else None)
+    monkeypatch.setattr(demo_service, "Planner", lambda received, **_kwargs: planner if received is llm else None)
 
     async def _build_boundary(*urls: str, on_task_progress=None):
         assert on_task_progress is not None

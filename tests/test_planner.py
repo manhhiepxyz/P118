@@ -468,7 +468,7 @@ async def test_missing_booking_date_returns_needs_information_without_plan() -> 
 
 
 @pytest.mark.asyncio
-async def test_missing_vehicle_id_returns_needs_information_without_plan() -> None:
+async def test_internal_vehicle_id_is_replaced_with_user_facing_vehicle_fields() -> None:
     llm = FakeLLM(PlannerResponse(status="NEEDS_INFORMATION", plan=None, missing_fields=["vehicle_id"]))
     planner = Planner(llm)
 
@@ -476,7 +476,17 @@ async def test_missing_vehicle_id_returns_needs_information_without_plan() -> No
 
     assert result.status == "NEEDS_INFORMATION"
     assert result.plan is None
-    assert result.missing_fields == ("vehicle_id",)
+    assert result.missing_fields == ("plate_number", "vehicle_type")
+    assert "mã phương tiện" not in result.question
+
+
+def test_booking_question_uses_plain_language_not_internal_format() -> None:
+    question = build_question(("booking_date", "parking_zone"))
+
+    assert "ngày muốn đặt chỗ" in question
+    assert "Khu A hoặc Khu B" in question
+    assert "YYYY-MM-DD" not in question
+    assert "ZONE_A" not in question
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +516,7 @@ async def test_question_is_generated_deterministically_from_missing_fields() -> 
 @pytest.mark.asyncio
 async def test_llm_cannot_inject_text_into_the_public_question() -> None:
     """LLM không có kênh nào đưa văn bản tự do ra tới người dùng."""
-    secret = "sk-live-LEAK-987654321"
+    secret = "sk-live-LEAK-987654321"  # secret-fixture
 
     # Schema không còn field `question`, nên LLM không thể gửi kèm văn bản.
     assert "question" not in PlannerResponse.model_fields
@@ -751,7 +761,7 @@ async def test_wrapped_validation_error_is_still_retried() -> None:
 @pytest.mark.asyncio
 async def test_corrective_message_leaks_nothing() -> None:
     """Message sửa lỗi không chứa goal, context, response cũ hay secret."""
-    secret_goal = "Đặt chỗ, token của tôi là sk-live-LEAK-9876543210"
+    secret_goal = "Đặt chỗ, token của tôi là sk-live-LEAK-9876543210"  # secret-fixture
     secret_context = {"vehicle_id": "VEH-SECRET-42"}
     leaky_field = "https://evil.com/callback?api_key=STOLEN"
 
@@ -772,7 +782,7 @@ async def test_corrective_message_leaks_nothing() -> None:
     corrective_role, corrective_text = second_call[-1]
     assert corrective_role == "human"
 
-    for leaked in ("sk-live-LEAK-9876543210", "VEH-SECRET-42", "evil.com", "STOLEN", leaky_field):
+    for leaked in ("sk-live-LEAK-9876543210", "VEH-SECRET-42", "evil.com", "STOLEN", leaky_field):  # secret-fixture
         assert leaked not in corrective_text
 
     # Vẫn phải nêu đúng loại vi phạm để model sửa được.
@@ -1458,7 +1468,7 @@ def test_unknown_tool_cannot_enter_the_response_schema() -> None:
 
 @pytest.mark.asyncio
 async def test_llm_exception_becomes_planner_error_without_leaking_details() -> None:
-    secret = "sk-live-SUPERSECRET-abcdef123456"
+    secret = "sk-live-SUPERSECRET-abcdef123456"  # secret-fixture
     llm = FakeLLM(error=RuntimeError(f"401 Unauthorized: api_key={secret}"))
     planner = Planner(llm)
 

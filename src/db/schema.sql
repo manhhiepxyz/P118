@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS parking_bookings (
     parking_zone VARCHAR(20)  NOT NULL
                      CHECK (parking_zone IN ('ZONE_A', 'ZONE_B')),
     booking_date DATE         NOT NULL,
-    amount       INTEGER      NOT NULL CHECK (amount >= 0),
+    amount       INTEGER      NOT NULL CHECK (amount > 0),
     currency     VARCHAR(10)  NOT NULL DEFAULT 'VND',
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS payments (
     payment_id     VARCHAR(20)  PRIMARY KEY,          -- PAY-001…
     booking_id     VARCHAR(20)  NOT NULL
                        REFERENCES parking_bookings(booking_id),
-    amount         INTEGER      NOT NULL CHECK (amount >= 0),
+    amount         INTEGER      NOT NULL CHECK (amount > 0),
     currency       VARCHAR(10)  NOT NULL DEFAULT 'VND',
     payment_status VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
                        CHECK (payment_status IN ('PENDING', 'PAID', 'FAILED', 'REFUNDED')),

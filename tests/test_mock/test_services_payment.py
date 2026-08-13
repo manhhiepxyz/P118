@@ -13,17 +13,18 @@ PAYMENT = {"booking_id": "BOOK-999", "amount": 150000, "currency": "VND"}
 
 
 @pytest.mark.asyncio
-async def test_pay_fee_success_ignores_booking():
-    """Cross-provider: booking_id/amount tùy ý vẫn 201 (HUB inject đã verify)."""
+async def test_pay_fee_rejects_a_booking_that_does_not_exist():
+    """Đảo chiều test cũ: booking_id/amount tùy ý KHÔNG còn được cho qua.
+
+    Test này từng khoá hành vi "booking_id và amount tùy ý vẫn 201" với lý do
+    HUB đã verify. Thực tế HUB chỉ chuyển tiếp thứ Planner sinh ra, nên không
+    ai verify — đó là đường thanh toán cho một booking không tồn tại, với số
+    tiền do caller tự đặt.
+    """
     async with AsyncClient(transport=ASGITransport(app=payment_app), base_url="http://test") as ac:
         response = await ac.post("/api/payments", json=PAYMENT)
-    assert response.status_code == 201
-    body = response.json()
-    assert body["success"] is True
-    assert body["data"]["payment_id"].startswith("PAY-")
-    assert body["data"]["payment_status"] == "PAID"
-    assert body["error_code"] is None
-    assert body["message"] == "Created"
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "BOOKING_NOT_FOUND"
 
 
 @pytest.mark.asyncio

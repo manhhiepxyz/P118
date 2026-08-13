@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -50,7 +50,13 @@ class DemoWorkflowRequest(BaseModel):
 
     goal: str = Field(..., min_length=1, max_length=5000)
     approve_mock_payment: bool = False
-    account_state: Literal["prospect", "resident"] = "resident"
+    # Fail-closed. Default cũ là "resident", nên một request chỉ có `goal` được
+    # cấp thẳng quyền cư dân đã xác thực — quên khai là leo thang đặc quyền.
+    # Mặc định prospect: quên khai thì mất quyền, không phải được thêm quyền.
+    #
+    # Đây vẫn chỉ là persona demo do browser gửi. PRODUCTION phải lấy quyền từ
+    # auth/session và resident directory, KHÔNG tin field này trong request body.
+    account_state: Literal["prospect", "resident"] = "prospect"
     project_name: str | None = Field(default=None, min_length=2, max_length=100)
     contact_profile: DemoContactProfile | None = None
 
@@ -100,7 +106,10 @@ class DemoDetailItem(BaseModel):
 class DemoTaskResult(BaseModel):
     task_id: str
     tool: str
-    status: Literal["PENDING", "RUNNING", "SUCCESS", "FAILED", "NOT_RUN"]
+    # Khớp đủ vòng đời task trong `workflow_tasks`. Thiếu WAITING_APPROVAL thì
+    # API không nói được "bước thanh toán đang chờ bạn duyệt" ở mức từng bước —
+    # chỉ nói được ở mức workflow, và giao diện phải tự đoán.
+    status: Literal["PENDING", "RUNNING", "WAITING_APPROVAL", "SUCCESS", "FAILED", "CANCELLED", "NOT_RUN"]
     error_code: str | None = None
     retryable: bool = False
     title: str
@@ -115,6 +124,9 @@ class DemoWorkflowEvent(BaseModel):
         "PLANNED",
         "VALIDATING",
         "VALIDATED",
+        "RESIDENT_CHECKING",
+        "RESIDENT_VERIFIED",
+        "WAITING_APPROVAL",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",
@@ -129,6 +141,59 @@ class DemoWorkflowEvent(BaseModel):
     task_status: Literal["RUNNING", "SUCCESS", "FAILED"] | None = None
 
 
+class DemoWorkflowListItem(BaseModel):
+    """Một dòng trong danh sách tổng quan.
+
+    Cố ý KHÔNG có `task_plan`, `input_data` hay `result_data`: chúng chứa dữ
+    liệu nghiệp vụ (biển số, ngày giờ, ghi chú) không cần cho một danh sách.
+    """
+
+    workflow_id: str
+    title: str
+    status: str
+    current_step: str | None = None
+    completed_tasks: int = 0
+    total_tasks: int = 0
+    needs_attention: bool = False
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class DemoWorkflowListResponse(BaseModel):
+    items: list[DemoWorkflowListItem] = Field(default_factory=list)
+
+
+class DemoProjectListResponse(BaseModel):
+    """Danh mục công khai chỉ có tên; không lộ project_id nội bộ."""
+
+    projects: list[str] = Field(default_factory=list)
+
+
+class DemoCapabilityItem(BaseModel):
+    """Một mục tiêu người dùng có thể giao cho P-118."""
+
+    name: str
+    description: str
+    requires_resident: bool = False
+
+
+class DemoCapabilityListResponse(BaseModel):
+    capabilities: list[DemoCapabilityItem] = Field(default_factory=list)
+
+
+class DemoPaymentDecisionRequest(BaseModel):
+    """Body của lệnh duyệt/từ chối thanh toán.
+
+    CHỈ có `decision`. Browser không được gửi booking_id, amount, currency hay
+    idempotency key: backend đọc tất cả từ booking đã persist. Nếu nhận số tiền
+    từ client thì người dùng tự định giá được dịch vụ.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+
+
 class DemoWorkflowResponse(BaseModel):
     status: Literal[
         "PENDING",
@@ -136,6 +201,15 @@ class DemoWorkflowResponse(BaseModel):
         "SUCCESS",
         "FAILED",
         "NEEDS_INFORMATION",
+        # Tên CANONICAL, giống hệt `WorkflowStatus.WAITING_APPROVAL` và cột
+        # workflows.status trong PostgreSQL. Trước đây API dùng
+        # một biến thể khác (tiền tố "A-") còn DB dùng tên này, không có mapping
+        # nào ở giữa — hai tên cho một trạng thái là nguồn lỗi im lặng khi ai đó
+        # so chuỗi ở một tầng.
+        #
+        # Lưu ý: `payment_approvals.status` (AWAITING/APPROVED/REJECTED) là một
+        # TRỤC KHÁC — vòng đời của QUYẾT ĐỊNH, không phải trạng thái workflow.
+        "WAITING_APPROVAL",
         "PLANNING_ERROR",
         "VALIDATION_ERROR",
         "PAYMENT_APPROVAL_REQUIRED",
@@ -147,6 +221,9 @@ class DemoWorkflowResponse(BaseModel):
             "PLANNED",
             "VALIDATING",
             "VALIDATED",
+            "RESIDENT_CHECKING",
+            "RESIDENT_VERIFIED",
+            "WAITING_APPROVAL",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",
@@ -164,6 +241,9 @@ class DemoWorkflowResponse(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     summary: str | None = None
     workflow_id: str | None = None
+    # Báo giá authoritative đọc từ booking đã persist. Browser KHÔNG được gửi
+    # amount/currency; nó chỉ hiển thị lại đúng con số backend đưa xuống.
+    payment_quote: dict[str, Any] | None = None
     plan: list[DemoPlanTask] = Field(default_factory=list)
     tasks: list[DemoTaskResult] = Field(default_factory=list)
     events: list[DemoWorkflowEvent] = Field(default_factory=list)

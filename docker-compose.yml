@@ -23,16 +23,51 @@ services:
   # ----------------------------------------------------------------
   # Backend — FastAPI app
   # ----------------------------------------------------------------
+  # One-shot job: nâng cấp schema TRƯỚC khi bất kỳ service nào chạm database.
+  #
+  # Không để từng provider tự migrate trong lifespan: sáu service khởi động song
+  # song sẽ chạy cùng một ALTER TABLE từ sáu kết nối, và quyền đổi schema bị
+  # phát tán ra mọi container. Migration hỏng cũng phải chặn được cả cụm, chứ
+  # không phải để một container restart lặp trong khi số còn lại chạy trên
+  # schema sai.
+  #
+  # `docker-entrypoint-initdb.d` không thay thế được job này: PostgreSQL chỉ
+  # chạy thư mục đó khi volume còn trống, nên nó không nâng cấp được volume đã
+  # có dữ liệu.
+  db-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_db_migrate
+    command: ["python", "-m", "src.db.migrate_cli"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Job chạy một lần rồi thoát. `on-failure` để lỗi tạm thời được thử lại,
+    # nhưng lỗi SQL thật vẫn kết thúc bằng exit code khác 0.
+    restart: "no"
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: p118_backend
     ports:
-      - "${APP_PORT:-8000}:8000"
+      # 8080 tránh đụng các FastAPI dev server thường dùng cổng 8000 trên host.
+      # Cổng bên trong container vẫn là 8000 nên healthcheck không đổi.
+      - "${APP_PORT:-8080}:8000"
     env_file:
       - .env
     environment:
+      # Key KHÔNG bao giờ nằm trong file này — chỉ tham chiếu môi trường.
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL_NAME: ${DEEPSEEK_MODEL_NAME:-deepseek-v4-flash}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       # Override DATABASE_URL để trỏ vào postgres service trong compose network
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
       RESIDENT_SERVICE_URL: http://mock-resident:8001
@@ -44,7 +79,9 @@ services:
       - ./data:/app/data
     depends_on:
       postgres:
-        condition: service_healthy   # chờ postgres sẵn sàng mới start backend
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully   # chờ postgres sẵn sàng mới start backend
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -76,6 +113,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 30s
@@ -98,6 +137,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
       interval: 30s
@@ -120,6 +161,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
       interval: 30s
@@ -142,6 +185,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
       interval: 30s
@@ -164,6 +209,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health')"]
       interval: 30s
@@ -192,6 +239,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     profiles:
       - ownership   # docker compose --profile ownership up
@@ -215,6 +264,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     profiles:
       - monolith   # docker compose --profile monolith up

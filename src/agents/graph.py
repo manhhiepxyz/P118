@@ -24,9 +24,10 @@ from typing import Any, Protocol
 from langgraph.graph import END, StateGraph
 
 from src.agents.nodes.example_node import analyze_node, respond_node
-from src.agents.planner import Planner, PlannerError
+from src.agents.planner import Planner, PlannerError, build_question
 from src.agents.state import AgentState
-from src.agents.validator import TaskPlanValidator
+from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
+from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import TaskPlan
 
@@ -47,6 +48,139 @@ class ExecutionBoundary(Protocol):
 
 
 StageCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+# Chỉ các field người dùng thực sự biết và có quyền cung cấp mới được đổi từ
+# validation failure thành một lượt hỏi bổ sung. ID nội bộ và dữ liệu thanh
+# toán authoritative tuyệt đối không nằm trong tập này.
+_USER_PROVIDED_FIELDS: frozenset[str] = frozenset(
+    {
+        "transaction_type",
+        "property_type",
+        "residential_area",
+        "max_price",
+        "project_id",
+        "viewing_date",
+        "viewing_time",
+        "interest_type",
+        "preferred_contact_time",
+        "consent",
+        "issue_type",
+        "description",
+        "location",
+        "preferred_date",
+        "preferred_time",
+        "move_date",
+        "move_time",
+        "needs_elevator",
+        "needs_loading_support",
+        "move_vehicle",
+        "full_name",
+        "apartment_code",
+        "plate_number",
+        "vehicle_type",
+        "booking_date",
+        "parking_zone",
+    }
+)
+
+_USER_FIELD_ORDER: tuple[str, ...] = (
+    "project_id",
+    "transaction_type",
+    "property_type",
+    "residential_area",
+    "max_price",
+    "viewing_date",
+    "viewing_time",
+    "interest_type",
+    "preferred_contact_time",
+    "consent",
+    "plate_number",
+    "vehicle_type",
+    "booking_date",
+    "parking_zone",
+    "issue_type",
+    "description",
+    "location",
+    "preferred_date",
+    "preferred_time",
+    "move_date",
+    "move_time",
+    "needs_elevator",
+    "needs_loading_support",
+    "move_vehicle",
+    "full_name",
+    "apartment_code",
+)
+
+
+def _missing_fields_for_user(
+    missing_fields: tuple[str, ...],
+    existing_context: dict[str, Any],
+) -> tuple[str, ...] | None:
+    """Đổi field contract sang thông tin mà người dùng hiểu và có thể nhập.
+
+    `vehicle_id` là ID nội bộ. Khi account đã có resident context nhưng chưa có
+    phương tiện, người dùng chỉ cần cung cấp biển số và loại xe; Planner sẽ tạo
+    bước register_vehicle rồi truyền ID bằng InputRef. Các ID nội bộ khác và
+    dữ liệu thanh toán không được biến thành câu hỏi cho người dùng.
+    """
+    public_fields: list[str] = []
+    for name in missing_fields:
+        if name == "vehicle_id":
+            if not existing_context.get("resident_id"):
+                return None
+            replacements = ("plate_number", "vehicle_type")
+        elif name in _USER_PROVIDED_FIELDS:
+            replacements = (name,)
+        else:
+            return None
+
+        for replacement in replacements:
+            if replacement not in public_fields:
+                public_fields.append(replacement)
+
+    ordered = [name for name in _USER_FIELD_ORDER if name in public_fields]
+    return tuple(ordered) or None
+
+
+# Khi không thể chuyển missing fields thành câu hỏi an toàn, người dùng nhận
+# một câu chung. Không nêu field, tool, status hay lý do kỹ thuật.
+CLARIFICATION_UNAVAILABLE_MESSAGE = (
+    "Mình chưa đủ cơ sở để hỏi thêm cho yêu cầu này. Bạn mô tả lại cụ thể hơn giúp mình nhé."
+)
+
+
+def needs_information_update(
+    missing_fields: tuple[str, ...] | None,
+    existing_context: dict[str, Any],
+) -> dict:
+    """Nguồn sự thật DUY NHẤT biến missing fields thành state hướng ra người dùng.
+
+    Cả hai đường vào NEEDS_INFORMATION đều phải đi qua đây:
+
+    1. Planner trả NEEDS_INFORMATION trực tiếp (`plan_node`).
+    2. Validator hạ READY xuống vì thiếu input (`validate_node`).
+
+    Nếu chỉ chuẩn hoá ở một nhánh thì nhánh kia vẫn đẩy được ID nội bộ
+    (`resident_id`, `vehicle_id`, `booking_id`) hay dữ liệu thanh toán
+    (`amount`, `currency`) ra UI. Prompt không được dùng làm lớp chặn duy nhất.
+
+    `question` luôn được dựng lại từ danh sách đã chuẩn hoá, không tái sử dụng
+    câu hỏi do LLM sinh ra: câu đó có thể nhắc tên field nội bộ ngay cả khi
+    danh sách field đã sạch.
+    """
+    public_fields = _missing_fields_for_user(tuple(missing_fields or ()), existing_context)
+    if public_fields is None:
+        # Không hỏi được thì từ chối an toàn, không render form rỗng cho user.
+        return {"clarification_error": CLARIFICATION_UNAVAILABLE_MESSAGE, "plan_validated": False}
+
+    return {
+        "planner_status": "NEEDS_INFORMATION",
+        "missing_fields": public_fields,
+        "question": build_question(public_fields),
+        "plan_validated": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -157,13 +291,19 @@ def build_planner_graph(
 
         # NEEDS_INFORMATION: không đưa `plan` vào state, tránh mọi khả năng một
         # nhánh sau này nhặt được plan chưa tồn tại.
-        await emit("NEEDS_INFORMATION", {"question": result.question})
-        return {
-            "planner_status": "NEEDS_INFORMATION",
-            "missing_fields": result.missing_fields,
-            "question": result.question,
-            "plan_validated": False,
-        }
+        #
+        # `result.missing_fields` và `result.question` là output LLM, KHÔNG được
+        # trả thẳng ra ngoài. Planner._clean_missing_fields() đã lọc một lượt,
+        # nhưng Graph vẫn phải tự bảo vệ: đây là ranh giới cuối trước UI.
+        update = needs_information_update(
+            result.missing_fields,
+            state.get("existing_context", {}),
+        )
+        if update.get("clarification_error"):
+            await emit("VALIDATION_FAILED")
+        else:
+            await emit("NEEDS_INFORMATION", {"question": update["question"]})
+        return update
 
     async def validate_node(state: AgentState) -> dict:
         """Cổng deterministic duy nhất trước khi thực thi."""
@@ -180,6 +320,21 @@ def build_planner_graph(
 
         try:
             TaskPlanValidator.validate(plan)
+        except MissingRequiredInputError as exc:
+            # Dùng chung policy với `plan_node` — hai nhánh không thể lệch nhau.
+            update = needs_information_update(
+                exc.missing_fields,
+                state.get("existing_context", {}),
+            )
+            if update.get("clarification_error"):
+                await emit("VALIDATION_FAILED")
+                # Hạ plan xuống draft ở cả nhánh này: plan đã trượt Validator
+                # thì không được để lại trong `plan` cho bất kỳ cạnh nào nhặt.
+                return {**update, "plan": None, "draft_plan": plan}
+
+            await emit("NEEDS_INFORMATION", {"question": update["question"]})
+            # Hạ plan xuống draft: chỉ để preview, execution guard không đọc.
+            return {**update, "plan": None, "draft_plan": plan}
         except ValueError as exc:
             # Message của Validator chỉ nêu vị trí vi phạm và tên pattern khớp,
             # không echo giá trị nhạy cảm — an toàn để đưa vào state.
@@ -207,6 +362,28 @@ def build_planner_graph(
                 plan,
                 state.get("workflow_id"),
             )
+        except PolicyInterruptionError as exc:
+            # Policy guard deterministic (quyền cư dân, duyệt thanh toán) chạy
+            # TRƯỚC executor thật, nên khi tới đây chưa có lời gọi dịch vụ nào
+            # cho phần bị chặn.
+            #
+            # Giữ nguyên workflow_id và partial_results: bỏ chúng đi thì tầng
+            # API không có báo giá để hiển thị, và người dùng bị hỏi có đồng ý
+            # trả một khoản tiền mà họ không nhìn thấy.
+            # Chờ người dùng duyệt không phải lỗi thực thi. Ghi nó thành lỗi
+            # khiến UI vừa hiện báo giá vừa nói workflow đã dừng giữa chừng.
+            if exc.code == "PAYMENT_APPROVAL_REQUIRED":
+                await emit("WAITING_APPROVAL")
+            else:
+                await emit("EXECUTION_FAILED")
+            update: dict = {"policy_error": exc.code}
+            if exc.workflow_id is not None:
+                update["workflow_id"] = exc.workflow_id
+            if exc.partial_results:
+                update["task_results"] = exc.partial_results
+            if exc.context:
+                update["policy_context"] = exc.context
+            return update
         except Exception as exc:  # noqa: BLE001 — không để raw exception thoát ra UI
             # Chỉ giữ tên loại: message của tầng thực thi có thể chứa payload,
             # connection string hay dữ liệu người dùng.

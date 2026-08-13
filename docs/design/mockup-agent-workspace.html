@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>P-118 · Agent Workspace — Mockup thiết kế</title>
+    <style>
+      /* ================================================================
+         MOCKUP TĨNH — không gọi API, dữ liệu là minh hoạ.
+         Xem docs/design/agent-workspace-redesign.md để biết phần tử nào
+         đã có backend, phần tử nào cần làm thêm.
+         ================================================================ */
+      :root {
+        --bg: #f7f7f9;
+        --surface: #ffffff;
+        --surface-2: #f4f4f7;
+        --surface-3: #ececf2;
+        --line: #e3e3ea;
+        --line-2: #d3d3de;
+
+        --ink: #17171f;
+        --ink-2: #55555f;
+        --ink-3: #8b8b98;
+
+        --brand: #4338ca;
+        --brand-ink: #322aa0;
+        --brand-soft: #eeecfb;
+        --brand-line: #c9c3f2;
+
+        --ok: #0a6c45;
+        --ok-soft: #e8f6ef;
+        --warn: #8a5300;
+        --warn-soft: #fdf3e2;
+        --warn-line: #efd39a;
+        --err: #a3231b;
+        --err-soft: #fdeeed;
+
+        --r: 10px;
+        --r-lg: 14px;
+        --shadow-1: 0 1px 2px rgba(16, 16, 32, 0.06);
+        --shadow-2: 0 6px 20px -6px rgba(16, 16, 32, 0.14);
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font: inherit; cursor: pointer; }
+      :focus-visible {
+        outline: 2px solid var(--brand);
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
+
+      /* --- Nhãn mockup ------------------------------------------------ */
+      .mock-banner {
+        background: #17171f; color: #fff; padding: 9px 20px;
+        font-size: 12.5px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+      }
+      .mock-banner strong { font-weight: 650; }
+      .mock-banner .k { display: inline-flex; align-items: center; gap: 5px; color: #c9c9d4; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+      .dot.have { background: #4ade80; }
+      .dot.ui { background: #60a5fa; }
+      .dot.todo { background: #fbbf24; }
+
+      .tag {
+        font-size: 10px; font-weight: 700; letter-spacing: .04em;
+        padding: 1px 5px; border-radius: 4px; vertical-align: 2px;
+        margin-left: 6px; white-space: nowrap;
+      }
+      .tag.have { background: #dcfce7; color: #14532d; }
+      .tag.ui   { background: #dbeafe; color: #1e3a8a; }
+      .tag.todo { background: #fef3c7; color: #78350f; }
+
+      /* --- Khung ------------------------------------------------------ */
+      .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: calc(100vh - 38px); }
+
+      .sidebar {
+        background: var(--surface); border-right: 1px solid var(--line);
+        padding: 16px 12px; display: flex; flex-direction: column; gap: 20px;
+      }
+      .brand { display: flex; align-items: center; gap: 9px; padding: 2px 6px 0; }
+      .brand-mark {
+        width: 30px; height: 30px; border-radius: 8px; background: var(--brand);
+        color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 12px;
+      }
+      .brand-name { font-weight: 650; font-size: 14.5px; letter-spacing: -0.01em; }
+      .brand-sub { font-size: 11.5px; color: var(--ink-3); }
+
+      .nav { display: flex; flex-direction: column; gap: 1px; }
+      .nav-label {
+        font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+        color: var(--ink-3); padding: 0 8px 6px;
+      }
+      .nav a {
+        display: flex; align-items: center; gap: 9px; padding: 7px 8px;
+        border-radius: 7px; color: var(--ink-2); text-decoration: none; font-size: 13.5px;
+      }
+      .nav a:hover { background: var(--surface-2); color: var(--ink); }
+      .nav a[aria-current="page"] { background: var(--brand-soft); color: var(--brand-ink); font-weight: 600; }
+      .nav .ico { width: 16px; text-align: center; font-size: 13px; flex: none; }
+      .nav .count {
+        margin-left: auto; background: var(--warn); color: #fff;
+        font-size: 11px; font-weight: 700; padding: 0 6px; border-radius: 999px; min-width: 19px; text-align: center;
+      }
+
+      .side-foot { margin-top: auto; }
+      .acct {
+        background: var(--surface-2); border-radius: var(--r); padding: 10px;
+        display: flex; gap: 9px; align-items: center;
+      }
+      .avatar {
+        width: 30px; height: 30px; border-radius: 50%; flex: none;
+        background: var(--brand-soft); color: var(--brand-ink);
+        display: grid; place-items: center; font-weight: 650; font-size: 12px;
+      }
+      .acct-name { font-size: 13px; font-weight: 600; }
+      .acct-meta { font-size: 11.5px; color: var(--ink-2); display: flex; align-items: center; gap: 4px; }
+
+      /* --- Topbar ----------------------------------------------------- */
+      .main { display: flex; flex-direction: column; min-width: 0; }
+      .topbar {
+        height: 56px; border-bottom: 1px solid var(--line); background: var(--surface);
+        display: flex; align-items: center; gap: 16px; padding: 0 24px;
+      }
+      .crumb { font-size: 13px; color: var(--ink-2); white-space: nowrap; }
+      .crumb b { color: var(--ink); font-weight: 600; }
+      .task-input {
+        margin-left: auto; display: flex; align-items: center; gap: 8px;
+        background: var(--surface-2); border: 1px solid var(--line-2);
+        border-radius: 8px; padding: 0 10px; height: 36px; width: min(420px, 42vw);
+      }
+      .task-input input {
+        border: 0; background: transparent; outline: none; flex: 1;
+        font-size: 13.5px; color: var(--ink);
+      }
+      .task-input input::placeholder { color: var(--ink-3); }
+      .task-input kbd {
+        font: 600 10.5px/1 ui-monospace, monospace; color: var(--ink-3);
+        border: 1px solid var(--line-2); border-radius: 4px; padding: 3px 5px; background: var(--surface);
+      }
+
+      .scroll { padding: 22px 24px 40px; overflow-y: auto; }
+      .wrap { max-width: 1100px; }
+
+      /* --- Khối chung -------------------------------------------------- */
+      .sec { margin-bottom: 26px; }
+      .sec-head {
+        display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px;
+      }
+      .sec-title {
+        font-size: 11.5px; font-weight: 700; letter-spacing: .07em;
+        text-transform: uppercase; color: var(--ink-3);
+      }
+      .sec-more { margin-left: auto; font-size: 12.5px; color: var(--brand-ink); text-decoration: none; }
+
+      .greet { margin-bottom: 22px; }
+      .greet h1 { margin: 0 0 5px; font-size: 22px; font-weight: 680; letter-spacing: -0.02em; }
+      .verify {
+        display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
+        background: var(--ok-soft); color: var(--ok); border: 1px solid #b8e2cd;
+        padding: 3px 9px; border-radius: 999px; font-weight: 550;
+      }
+      .verify.guest { background: var(--surface-2); color: var(--ink-2); border-color: var(--line-2); }
+
+      /* --- Dải cần xử lý ----------------------------------------------- */
+      .attention {
+        background: var(--warn-soft); border: 1px solid var(--warn-line);
+        border-left: 3px solid var(--warn);
+        border-radius: var(--r-lg); padding: 14px 16px; box-shadow: var(--shadow-1);
+      }
+      .attention-head {
+        display: flex; align-items: center; gap: 7px; margin-bottom: 10px;
+        font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--warn);
+      }
+      .att-title { font-size: 15px; font-weight: 640; margin-bottom: 3px; }
+      .att-body { font-size: 13.5px; color: var(--ink-2); margin-bottom: 4px; }
+      .amount {
+        font-size: 19px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink);
+        font-variant-numeric: tabular-nums;
+      }
+      .amount-note { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+      .att-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+
+      .btn {
+        border-radius: 8px; padding: 8px 14px; font-size: 13.5px; font-weight: 600;
+        border: 1px solid transparent;
+      }
+      .btn.primary { background: var(--brand); color: #fff; }
+      .btn.primary:hover { background: var(--brand-ink); }
+      .btn.ghost { background: var(--surface); border-color: var(--line-2); color: var(--ink-2); }
+      .btn.ghost:hover { background: var(--surface-2); }
+      .btn-link { margin-left: auto; font-size: 13px; color: var(--brand-ink); text-decoration: none; }
+
+      /* --- Hàng workflow ------------------------------------------------ */
+      .rows { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+      .row {
+        display: grid; grid-template-columns: 26px minmax(0,1fr) 190px 92px;
+        gap: 14px; align-items: center; padding: 13px 16px;
+        border-bottom: 1px solid var(--line); text-decoration: none; color: inherit;
+      }
+      .row:last-child { border-bottom: 0; }
+      .row:hover { background: var(--surface-2); }
+      .row-title { font-size: 14.5px; font-weight: 600; }
+      .row-step { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+      .row-meta { font-size: 12px; color: var(--ink-3); text-align: right; font-variant-numeric: tabular-nums; }
+
+      .mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+      .mark.run { background: var(--brand-soft); color: var(--brand-ink); }
+      .mark.ok { background: var(--ok-soft); color: var(--ok); }
+      .mark.wait { background: var(--warn-soft); color: var(--warn); }
+      .mark.err { background: var(--err-soft); color: var(--err); }
+
+      .bar { height: 5px; background: var(--surface-3); border-radius: 99px; overflow: hidden; }
+      .bar > i { display: block; height: 100%; background: var(--brand); border-radius: 99px; }
+      .bar.ok > i { background: var(--ok); }
+
+      .pill {
+        display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
+        padding: 2px 8px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap;
+      }
+      .pill.run { background: var(--brand-soft); color: var(--brand-ink); border-color: var(--brand-line); }
+      .pill.ok { background: var(--ok-soft); color: var(--ok); border-color: #b8e2cd; }
+      .pill.wait { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
+
+      /* --- Thẻ mục tiêu -------------------------------------------------- */
+      .goals { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+      .goal {
+        background: var(--surface); border: 1px solid var(--line); border-radius: var(--r);
+        padding: 13px 12px; text-align: left; display: flex; flex-direction: column; gap: 8px;
+        min-height: 92px;
+      }
+      .goal:hover { border-color: var(--brand-line); background: var(--brand-soft); }
+      .goal .gi {
+        width: 28px; height: 28px; border-radius: 7px; background: var(--brand-soft);
+        color: var(--brand-ink); display: grid; place-items: center; font-size: 13px;
+      }
+      .goal .gt { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+      .goal.locked { background: var(--surface-2); border-style: dashed; cursor: not-allowed; }
+      .goal.locked .gi { background: var(--surface-3); color: var(--ink-3); }
+      .goal.locked .gt { color: var(--ink-3); }
+      .goal.locked:hover { border-color: var(--line-2); background: var(--surface-2); }
+      .lock-note { font-size: 11px; color: var(--ink-3); display: flex; align-items: center; gap: 4px; }
+
+      /* --- Danh sách gọn ------------------------------------------------- */
+      .compact { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
+      .compact li {
+        display: flex; gap: 10px; align-items: baseline; padding: 10px 16px;
+        border-bottom: 1px solid var(--line); font-size: 13.5px;
+      }
+      .compact li:last-child { border-bottom: 0; }
+      .compact ul { list-style: none; margin: 0; padding: 0; }
+      .c-when { margin-left: auto; font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+      .c-note { color: var(--ink-2); }
+
+      /* --- View 2 --------------------------------------------------------- */
+      .wf-head {
+        background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+        padding: 18px 20px; margin-bottom: 18px;
+      }
+      .wf-top { display: flex; align-items: center; gap: 12px; }
+      .wf-title { font-size: 20px; font-weight: 670; letter-spacing: -0.02em; }
+      .objective {
+        margin: 10px 0 14px; padding: 9px 12px; background: var(--surface-2);
+        border-left: 2px solid var(--line-2); border-radius: 0 7px 7px 0;
+        font-size: 13.5px; color: var(--ink-2); font-style: italic;
+      }
+      .wf-progress { display: flex; align-items: center; gap: 12px; }
+      .wf-progress .bar { flex: 1; }
+      .wf-cur { font-size: 13.5px; color: var(--ink-2); }
+      .wf-cur b { color: var(--ink); font-weight: 600; }
+
+      .cols { display: grid; grid-template-columns: minmax(0,1fr) 380px; gap: 18px; align-items: start; }
+      .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+      .panel-head {
+        padding: 12px 16px; border-bottom: 1px solid var(--line);
+        font-size: 11.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3);
+      }
+      .panel-body { padding: 6px 0; }
+
+      ol.steps { list-style: none; margin: 0; padding: 0; }
+      ol.steps li { display: flex; gap: 12px; padding: 11px 16px; }
+      .s-mark {
+        width: 22px; height: 22px; border-radius: 50%; flex: none; margin-top: 1px;
+        display: grid; place-items: center; font-size: 11px; font-weight: 700;
+        background: var(--surface-3); color: var(--ink-3);
+      }
+      li.done .s-mark { background: var(--ok-soft); color: var(--ok); }
+      li.cur .s-mark { background: var(--brand-soft); color: var(--brand-ink); }
+      .s-name { font-size: 14px; font-weight: 550; }
+      li.cur .s-name { font-weight: 650; }
+      li.todo .s-name, li.future .s-name { color: var(--ink-3); }
+      .s-note { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+      .s-future {
+        font-size: 10.5px; font-weight: 700; letter-spacing: .04em; color: var(--ink-3);
+        border: 1px dashed var(--line-2); border-radius: 4px; padding: 1px 5px; margin-left: 7px; vertical-align: 1px;
+      }
+
+      ul.log { list-style: none; margin: 0; padding: 6px 0; }
+      ul.log li { display: flex; gap: 10px; padding: 8px 16px; font-size: 13px; color: var(--ink-2); }
+      ul.log .lm { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); margin-top: 7px; flex: none; }
+      ul.log li.now .lm { background: var(--brand); }
+      ul.log li.now { color: var(--ink); font-weight: 550; }
+
+      .legend {
+        margin-top: 10px; padding: 10px 14px; background: var(--surface-2);
+        border-radius: var(--r); font-size: 12px; color: var(--ink-2);
+      }
+
+      .approve-card {
+        background: var(--warn-soft); border: 1px solid var(--warn-line);
+        border-left: 3px solid var(--warn); border-radius: var(--r-lg);
+        padding: 16px 18px; margin-bottom: 18px;
+      }
+      .ro {
+        display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+        color: var(--ink-3); margin-top: 6px;
+      }
+
+      .view-sep {
+        margin: 46px 0 18px; padding: 12px 24px; background: #17171f; color: #fff;
+        font-size: 13px; font-weight: 600; letter-spacing: .02em;
+      }
+
+      @media (max-width: 1180px) {
+        .goals { grid-template-columns: repeat(3, 1fr); }
+        .cols { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 900px) {
+        .app { grid-template-columns: 1fr; }
+        .sidebar { flex-direction: row; align-items: center; overflow-x: auto; }
+        .side-foot { margin: 0; }
+        .goals { grid-template-columns: repeat(2, 1fr); }
+        .row { grid-template-columns: 26px 1fr; }
+        .row > :nth-child(3), .row > :nth-child(4) { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="mock-banner">
+      <strong>MOCKUP THIẾT KẾ</strong>
+      <span>Tĩnh, không gọi API. Dữ liệu là minh hoạ.</span>
+      <span class="k"><i class="dot have"></i> có backend</span>
+      <span class="k"><i class="dot ui"></i> thuần giao diện</span>
+      <span class="k"><i class="dot todo"></i> cần backend làm thêm</span>
+    </div>
+
+    <!-- ============================ VIEW 1 ============================ -->
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">P118</div>
+          <div>
+            <div class="brand-name">P-118</div>
+            <div class="brand-sub">Trợ lý dịch vụ cư dân</div>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Điều hướng chính">
+          <div class="nav-label">Không gian làm việc</div>
+          <a href="#" aria-current="page"><span class="ico">◇</span>Tổng quan</a>
+          <a href="#"><span class="ico">◐</span>Đang thực hiện</a>
+          <a href="#"><span class="ico">⏸</span>Chờ bạn xử lý<span class="count">1</span></a>
+          <a href="#"><span class="ico">✓</span>Đã hoàn thành</a>
+          <div class="nav-label" style="margin-top:14px">Tài khoản</div>
+          <a href="#"><span class="ico">▤</span>Dịch vụ</a>
+          <a href="#"><span class="ico">◉</span>Hồ sơ cư dân</a>
+        </nav>
+
+        <div class="side-foot">
+          <div class="acct">
+            <div class="avatar">LB</div>
+            <div>
+              <div class="acct-name">Lâm Thành Bảo</div>
+              <div class="acct-meta">✓ Căn hộ A1201</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div class="main">
+        <div class="topbar">
+          <div class="crumb"><b>Tổng quan</b></div>
+          <div class="task-input">
+            <span aria-hidden="true" style="color:var(--ink-3)">✎</span>
+            <input placeholder="Giao việc cho P-118…" aria-label="Giao việc cho P-118" />
+            <kbd>↵</kbd>
+          </div>
+        </div>
+
+        <div class="scroll">
+          <div class="wrap">
+            <div class="greet">
+              <h1>Chào Thành Bảo</h1>
+              <span class="verify">✓ Đã liên kết căn hộ A1201<span class="tag have">CÓ SẴN</span></span>
+            </div>
+
+            <!-- CẦN BẠN XỬ LÝ -->
+            <section class="sec" aria-label="Cần bạn xử lý">
+              <div class="attention">
+                <div class="attention-head">
+                  <span aria-hidden="true">▲</span> Cần bạn xử lý (1)
+                  <span class="tag ui">UI</span>
+                </div>
+                <div class="att-title">Đăng ký xe và chỗ đậu</div>
+                <div class="att-body">Đã giữ chỗ đậu xe tại Khu A.</div>
+                <div class="amount" aria-label="150.000 đồng">150.000 VND</div>
+                <div class="amount-note">
+                  Phí do hệ thống xác định · bạn không cần nhập số tiền
+                  <span class="tag have">CÓ SẴN</span>
+                </div>
+                <div class="att-actions">
+                  <button class="btn primary">Xác nhận thanh toán</button>
+                  <button class="btn ghost">Từ chối</button>
+                  <a class="btn-link" href="#">Xem chi tiết →</a>
+                </div>
+              </div>
+            </section>
+
+            <!-- ĐANG THỰC HIỆN -->
+            <section class="sec">
+              <div class="sec-head">
+                <span class="sec-title">Đang thực hiện</span>
+                <span class="tag todo">CẦN BACKEND: chưa có API liệt kê</span>
+                <a class="sec-more" href="#">Xem tất cả →</a>
+              </div>
+              <div class="rows">
+                <a class="row" href="#view2">
+                  <span class="mark run" aria-hidden="true">◐</span>
+                  <span>
+                    <span class="row-title">Đăng ký chuyển nhà</span>
+                    <span class="row-step">Đang đăng ký nhu cầu thang máy</span>
+                  </span>
+                  <span>
+                    <span class="bar"><i style="width:33%"></i></span>
+                    <span class="row-meta" style="display:block;margin-top:5px">2/6 bước</span>
+                  </span>
+                  <span style="text-align:right"><span class="pill run">◐ Đang chạy</span></span>
+                </a>
+                <a class="row" href="#">
+                  <span class="mark wait" aria-hidden="true">⏸</span>
+                  <span>
+                    <span class="row-title">Đăng ký xe và chỗ đậu</span>
+                    <span class="row-step">Đang chờ bạn xác nhận thanh toán</span>
+                  </span>
+                  <span>
+                    <span class="bar"><i style="width:66%"></i></span>
+                    <span class="row-meta" style="display:block;margin-top:5px">2/3 bước</span>
+                  </span>
+                  <span style="text-align:right"><span class="pill wait">⏸ Chờ bạn</span></span>
+                </a>
+              </div>
+            </section>
+
+            <!-- BẮT ĐẦU NHANH -->
+            <section class="sec">
+              <div class="sec-head">
+                <span class="sec-title">Bắt đầu nhanh</span>
+                <span class="tag ui">UI</span>
+              </div>
+              <div class="goals">
+                <button class="goal"><span class="gi" aria-hidden="true">↗</span><span class="gt">Đăng ký chuyển nhà</span></button>
+                <button class="goal"><span class="gi" aria-hidden="true">P</span><span class="gt">Đăng ký xe và chỗ đậu</span></button>
+                <button class="goal"><span class="gi" aria-hidden="true">⚒</span><span class="gt">Báo hỏng cần sửa</span></button>
+                <button class="goal"><span class="gi" aria-hidden="true">◎</span><span class="gt">Đặt lịch tham quan dự án</span></button>
+                <button class="goal"><span class="gi" aria-hidden="true">☎</span><span class="gt">Nhận tư vấn</span></button>
+              </div>
+              <div class="legend">
+                Bấm một mục là <b>giao việc luôn</b> — không phải điền lại yêu cầu.
+                Ô nhập tự do và các thẻ này là hai lối vào cùng một agent.
+              </div>
+            </section>
+
+            <!-- VỪA HOÀN THÀNH -->
+            <section class="sec">
+              <div class="sec-head">
+                <span class="sec-title">Vừa hoàn thành</span>
+                <span class="tag todo">CẦN BACKEND</span>
+                <a class="sec-more" href="#">Xem tất cả →</a>
+              </div>
+              <div class="compact">
+                <ul>
+                  <li>
+                    <span class="mark ok" aria-hidden="true">✓</span>
+                    <span><b>Báo hỏng điều hoà</b> <span class="c-note">· Đã tiếp nhận, hẹn kỹ thuật viên 09:00</span></span>
+                    <span class="c-when">Hôm nay</span>
+                  </li>
+                  <li>
+                    <span class="mark ok" aria-hidden="true">✓</span>
+                    <span><b>Đặt lịch tham quan dự án</b> <span class="c-note">· Đã xác nhận lịch xem nhà</span></span>
+                    <span class="c-when">Hôm qua</span>
+                  </li>
+                </ul>
+              </div>
+            </section>
+
+            <!-- HOẠT ĐỘNG -->
+            <section class="sec">
+              <div class="sec-head">
+                <span class="sec-title">Hoạt động gần đây</span>
+                <span class="tag have">CÓ SẴN: events[]</span>
+              </div>
+              <div class="compact">
+                <ul>
+                  <li><span class="c-note">Đã giữ chỗ đậu xe tại Khu A</span></li>
+                  <li><span class="c-note">Đã đăng ký phương tiện 51A-12345</span></li>
+                  <li><span class="c-note">Đã kiểm tra kế hoạch và dữ liệu bắt buộc</span></li>
+                </ul>
+              </div>
+              <div class="legend">
+                Không hiện giờ đồng hồ: <code>events[]</code> hiện chỉ có
+                <code>sequence</code>, chưa có timestamp thật.
+                <span class="tag todo">CẦN BACKEND</span>
+              </div>
+            </section>
+
+            <!-- TRẠNG THÁI KHÁCH -->
+            <section class="sec">
+              <div class="sec-head">
+                <span class="sec-title">Biến thể · tài khoản chưa liên kết căn hộ</span>
+                <span class="tag have">CÓ SẴN: account_state</span>
+              </div>
+              <div style="margin-bottom:10px">
+                <span class="verify guest">○ Chưa liên kết căn hộ</span>
+              </div>
+              <div class="goals">
+                <button class="goal"><span class="gi" aria-hidden="true">◎</span><span class="gt">Đặt lịch tham quan dự án</span></button>
+                <button class="goal"><span class="gi" aria-hidden="true">☎</span><span class="gt">Nhận tư vấn</span></button>
+                <button class="goal locked" aria-disabled="true">
+                  <span class="gi" aria-hidden="true">🔒</span><span class="gt">Đăng ký chuyển nhà</span>
+                  <span class="lock-note">Cần liên kết căn hộ</span>
+                </button>
+                <button class="goal locked" aria-disabled="true">
+                  <span class="gi" aria-hidden="true">🔒</span><span class="gt">Đăng ký xe và chỗ đậu</span>
+                  <span class="lock-note">Cần liên kết căn hộ</span>
+                </button>
+                <button class="goal locked" aria-disabled="true">
+                  <span class="gi" aria-hidden="true">🔒</span><span class="gt">Báo hỏng cần sửa</span>
+                  <span class="lock-note">Cần liên kết căn hộ</span>
+                </button>
+              </div>
+              <div class="legend">
+                Dịch vụ bị khoá <b>vẫn hiện</b>, không ẩn như bản cũ — người dùng
+                cần biết dịch vụ tồn tại và cần làm gì để mở. Dấu hiệu gồm cả
+                icon khoá, viền đứt và chữ, không chỉ màu.
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ VIEW 2 ============================ -->
+    <div class="view-sep" id="view2">VIEW 2 — Workflow đang chạy: “Đăng ký chuyển nhà”</div>
+
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">P118</div>
+          <div>
+            <div class="brand-name">P-118</div>
+            <div class="brand-sub">Trợ lý dịch vụ cư dân</div>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Điều hướng chính">
+          <div class="nav-label">Không gian làm việc</div>
+          <a href="#"><span class="ico">◇</span>Tổng quan</a>
+          <a href="#" aria-current="page"><span class="ico">◐</span>Đang thực hiện</a>
+          <a href="#"><span class="ico">⏸</span>Chờ bạn xử lý<span class="count">1</span></a>
+          <a href="#"><span class="ico">✓</span>Đã hoàn thành</a>
+          <div class="nav-label" style="margin-top:14px">Tài khoản</div>
+          <a href="#"><span class="ico">▤</span>Dịch vụ</a>
+          <a href="#"><span class="ico">◉</span>Hồ sơ cư dân</a>
+        </nav>
+        <div class="side-foot">
+          <div class="acct">
+            <div class="avatar">LB</div>
+            <div>
+              <div class="acct-name">Lâm Thành Bảo</div>
+              <div class="acct-meta">✓ Căn hộ A1201</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div class="main">
+        <div class="topbar">
+          <div class="crumb">Tổng quan / <b>Đăng ký chuyển nhà</b></div>
+          <div class="task-input">
+            <span aria-hidden="true" style="color:var(--ink-3)">✎</span>
+            <input placeholder="Giao việc cho P-118…" aria-label="Giao việc cho P-118" />
+            <kbd>↵</kbd>
+          </div>
+        </div>
+
+        <div class="scroll">
+          <div class="wrap">
+            <div class="wf-head">
+              <div class="wf-top">
+                <span class="wf-title">Đăng ký chuyển nhà</span>
+                <span class="pill run">◐ Đang thực hiện</span>
+                <span class="tag have">CÓ SẴN: status</span>
+              </div>
+
+              <div class="objective">
+                “Tôi muốn chuyển nhà ngày 20/12, cần thang máy và xe tải.”
+              </div>
+
+              <div class="wf-cur" style="margin-bottom:9px">
+                Bước hiện tại: <b>Đăng ký nhu cầu thang máy</b>
+              </div>
+              <div class="wf-progress">
+                <span class="bar"><i style="width:33%"></i></span>
+                <span class="row-meta">2/6 bước</span>
+              </div>
+              <div class="ro">
+                <span aria-hidden="true">◷</span> Không hiển thị thời gian dự kiến — hệ thống chưa có ước lượng thật.
+                <span class="tag todo">KHÔNG BỊA</span>
+              </div>
+            </div>
+
+            <!-- Thẻ duyệt thanh toán (mẫu tái dùng) -->
+            <div class="approve-card">
+              <div class="attention-head">
+                <span aria-hidden="true">⏸</span> Chờ bạn quyết định
+                <span class="tag have">CÓ SẴN: payment_quote</span>
+              </div>
+              <div class="att-body">Đã giữ chỗ đậu xe tại Khu A.</div>
+              <div class="amount" aria-label="150.000 đồng">Phí cần thanh toán: 150.000 VND</div>
+              <div class="ro">
+                <span aria-hidden="true">🔒</span> Số tiền và loại tiền do hệ thống cung cấp, chỉ đọc — bạn không nhập.
+              </div>
+              <div class="att-actions">
+                <button class="btn primary">Xác nhận thanh toán</button>
+                <button class="btn ghost">Từ chối</button>
+              </div>
+              <div class="legend" style="margin-top:12px;background:rgba(255,255,255,.6)">
+                Sau khi xác nhận, <b>chính workflow này chạy tiếp</b> — các bước đã
+                xong không chạy lại. Trước khi xác nhận, thanh toán không bao giờ
+                hiển thị là đã hoàn tất.
+              </div>
+            </div>
+
+            <div class="cols">
+              <div class="panel">
+                <div class="panel-head">Các bước <span class="tag have">CÓ SẴN: plan[] · tasks[]</span></div>
+                <div class="panel-body">
+                  <ol class="steps">
+                    <li class="done">
+                      <span class="s-mark" aria-hidden="true">✓</span>
+                      <span>
+                        <span class="s-name">Kiểm tra quyền cư dân</span>
+                        <span class="s-note">Đã xác nhận căn hộ A1201</span>
+                      </span>
+                    </li>
+                    <li class="done">
+                      <span class="s-mark" aria-hidden="true">✓</span>
+                      <span>
+                        <span class="s-name">Xác nhận ngày và khung giờ chuyển</span>
+                        <span class="s-note">20/12/2026 · 14:00</span>
+                      </span>
+                    </li>
+                    <li class="cur" aria-current="step">
+                      <span class="s-mark" aria-hidden="true">◐</span>
+                      <span>
+                        <span class="s-name">Đăng ký nhu cầu thang máy</span>
+                        <span class="s-note">Đang thực hiện</span>
+                      </span>
+                    </li>
+                    <li class="future">
+                      <span class="s-mark" aria-hidden="true">○</span>
+                      <span>
+                        <span class="s-name">Đăng ký phương tiện vận chuyển<span class="s-future">ĐỀ XUẤT</span></span>
+                        <span class="s-note">Chưa phải một bước riêng trong hệ thống hiện tại</span>
+                      </span>
+                    </li>
+                    <li class="future">
+                      <span class="s-mark" aria-hidden="true">○</span>
+                      <span>
+                        <span class="s-name">Gửi yêu cầu tới ban quản lý<span class="s-future">ĐỀ XUẤT</span></span>
+                        <span class="s-note">Chưa phải một bước riêng trong hệ thống hiện tại</span>
+                      </span>
+                    </li>
+                    <li class="todo">
+                      <span class="s-mark" aria-hidden="true">○</span>
+                      <span><span class="s-name">Hoàn tất</span></span>
+                    </li>
+                  </ol>
+                </div>
+              </div>
+
+              <div>
+                <div class="panel">
+                  <div class="panel-head">Hoạt động <span class="tag have">CÓ SẴN: events[]</span></div>
+                  <ul class="log">
+                    <li><span class="lm"></span>Đang lập kế hoạch thực hiện</li>
+                    <li><span class="lm"></span>Đã kiểm tra kế hoạch và dữ liệu bắt buộc</li>
+                    <li><span class="lm"></span>Đang kiểm tra quyền cư dân</li>
+                    <li class="now"><span class="lm"></span>Đang đăng ký lịch chuyển nhà</li>
+                  </ul>
+                </div>
+
+                <div class="legend">
+                  <b>ĐỀ XUẤT</b> = bước nghiệp vụ có ý nghĩa với người dùng nhưng
+                  hệ thống hiện chưa thực hiện riêng. Bước 2–5 thực chất là dữ
+                  liệu vào/ra của <i>một</i> lời gọi dịch vụ đặt lịch chuyển nhà.
+                  Đánh dấu rõ thay vì giả vờ đã chạy.
+                  <span class="tag todo">CẦN BACKEND nếu muốn tách thật</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Các trạng thái khác -->
+            <section class="sec" style="margin-top:26px">
+              <div class="sec-head"><span class="sec-title">Biến thể trạng thái khác</span></div>
+              <div class="rows">
+                <div class="row" style="cursor:default">
+                  <span class="mark wait" aria-hidden="true">✎</span>
+                  <span>
+                    <span class="row-title">Cần thêm thông tin</span>
+                    <span class="row-step">Thẻ nhập chèn ngay dưới header, không mở hộp thoại — người dùng cần thấy ngữ cảnh khi điền</span>
+                  </span>
+                  <span></span>
+                  <span style="text-align:right"><span class="tag have">CÓ SẴN</span></span>
+                </div>
+                <div class="row" style="cursor:default">
+                  <span class="mark ok" aria-hidden="true">✓</span>
+                  <span>
+                    <span class="row-title">Hoàn tất</span>
+                    <span class="row-step">Lịch chuyển nhà đã được đăng ký · 20/12/2026 14:00 · thang máy đã giữ chỗ</span>
+                  </span>
+                  <span></span>
+                  <span style="text-align:right"><span class="tag have">CÓ SẴN: summary</span></span>
+                </div>
+                <div class="row" style="cursor:default">
+                  <span class="mark err" aria-hidden="true">✕</span>
+                  <span>
+                    <span class="row-title">Không thành công</span>
+                    <span class="row-step">Khung giờ bạn chọn đã kín. Hãy chọn một khung giờ khác trong ngày 20/12.</span>
+                  </span>
+                  <span></span>
+                  <span style="text-align:right"><span class="tag have">CÓ SẴN: message</span></span>
+                </div>
+                <div class="row" style="cursor:default">
+                  <span class="mark wait" aria-hidden="true">○</span>
+                  <span>
+                    <span class="row-title">Chưa có việc nào</span>
+                    <span class="row-step">Đẩy “Bắt đầu nhanh” lên đầu, kèm một dòng nói P-118 làm được gì</span>
+                  </span>
+                  <span></span>
+                  <span style="text-align:right"><span class="tag ui">UI</span></span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

@@ -10,21 +10,36 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 
 from src.agents.graph import agent
-from src.common.projects import find_project_id, resolve_project_id
+from src.common.projects import PROJECTS, find_project_id, resolve_project_id
 from src.common.task_plan import TaskPlan
 from src.config import get_settings
 from src.models.schemas import (
     ChatRequest,
     ChatResponse,
+    DemoCapabilityItem,
+    DemoCapabilityListResponse,
     DemoDetailItem,
+    DemoPaymentDecisionRequest,
     DemoPlanTask,
+    DemoProjectListResponse,
     DemoTaskResult,
     DemoWorkflowContinueRequest,
     DemoWorkflowEvent,
+    DemoWorkflowListItem,
+    DemoWorkflowListResponse,
     DemoWorkflowRequest,
     DemoWorkflowResponse,
 )
-from src.orchestration.demo_service import read_demo_workflow, run_demo_workflow
+from src.orchestration.demo_service import (
+    ResumeError,
+    persist_pending_approval,
+    read_demo_workflow,
+    reject_payment,
+    resume_payment_after_approval,
+    run_demo_workflow,
+)
+from src.orchestration.deps import build_repository
+from src.orchestration.payment_approval import quote_from_results
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -36,15 +51,16 @@ _DATE_FIELDS = frozenset({"viewing_date", "booking_date", "preferred_date", "mov
 _TIME_FIELDS = frozenset({"viewing_time", "preferred_time", "move_time"})
 _BOOLEAN_FIELDS = frozenset({"consent", "needs_elevator", "needs_loading_support"})
 _FOLLOW_UP_VALIDATION_MESSAGES = {
-    "viewing_date": "Ngày xem phải tồn tại, theo định dạng YYYY-MM-DD hoặc DD/MM/YYYY và không ở quá khứ.",
-    "booking_date": "Ngày đặt chỗ phải tồn tại, theo định dạng YYYY-MM-DD hoặc DD/MM/YYYY và không ở quá khứ.",
-    "preferred_date": "Ngày bảo trì phải tồn tại, theo định dạng YYYY-MM-DD hoặc DD/MM/YYYY và không ở quá khứ.",
-    "move_date": "Ngày chuyển nhà phải tồn tại, theo định dạng YYYY-MM-DD hoặc DD/MM/YYYY và không ở quá khứ.",
+    "viewing_date": "Ngày tham quan chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
+    "booking_date": "Ngày đặt chỗ chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
+    "preferred_date": "Ngày bảo trì chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
+    "move_date": "Ngày chuyển nhà chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
     "viewing_time": "Giờ xem phải theo định dạng HH:MM và trong khoảng 08:00–17:30.",
     "preferred_time": "Giờ bảo trì phải theo định dạng HH:MM và trong khoảng 08:00–18:00.",
     "move_time": "Giờ chuyển nhà phải theo định dạng HH:MM và trong khoảng 07:00–20:00.",
-    "parking_zone": "Khu vực đỗ xe hiện chỉ hỗ trợ ZONE_A hoặc ZONE_B.",
+    "parking_zone": "Hãy chọn Khu A hoặc Khu B.",
     "plate_number": "Vui lòng nhập biển số xe, ví dụ 59A-12345.",
+    "vehicle_type": "Hãy cho biết phương tiện là ô tô hoặc xe máy.",
 }
 
 
@@ -64,10 +80,23 @@ def _extract_date(text: str) -> str | None:
 
 
 def _extract_time(text: str) -> str | None:
-    match = re.search(r"\b([01]?\d|2[0-3])[:;hH]([0-5]\d)\b", text)
-    if not match:
-        return None
-    return f"{int(match.group(1)):02d}:{match.group(2)}"
+    with_minutes = re.search(
+        r"(?<!\d)([01]?\d|2[0-3])\s*[:;hH]\s*([0-5]\d)(?!\d)",
+        text,
+    )
+    if with_minutes:
+        return f"{int(with_minutes.group(1)):02d}:{with_minutes.group(2)}"
+
+    # Trong tiếng Việt, "12h" và "12 giờ" có nghĩa chính xác là 12:00.
+    # Negative lookahead ngăn 12h99 bị cắt thành 12h rồi chấp nhận nhầm.
+    hour_only = re.search(
+        r"(?<!\d)([01]?\d|2[0-3])\s*(?:h|giờ)(?!\s*\d)",
+        text,
+        re.IGNORECASE,
+    )
+    if hour_only:
+        return f"{int(hour_only.group(1)):02d}:00"
+    return None
 
 
 def _extract_parking_zone(text: str) -> str | None:
@@ -76,8 +105,22 @@ def _extract_parking_zone(text: str) -> str | None:
 
 
 def _extract_plate_number(text: str) -> str | None:
-    match = re.search(r"\b(\d{2}[a-z]{1,2})[ .-]?(\d{3,5})\b", text, re.IGNORECASE)
+    # Contract chỉ yêu cầu chuỗi biển số; demo chấp nhận 3–6 chữ số phía sau
+    # để không tự áp một chuẩn đăng kiểm cụ thể lên dữ liệu mock.
+    match = re.search(r"\b(\d{2}[a-z]{1,2})[ .-]?(\d{3,6})\b", text, re.IGNORECASE)
     return f"{match.group(1).upper()}-{match.group(2)}" if match else None
+
+
+def _extract_vehicle_type(text: str) -> str | None:
+    """Chuẩn hoá cách gọi phương tiện phổ biến, không suy diễn từ câu mơ hồ."""
+    lowered = text.casefold()
+    motorcycle = r"\b(?:xe\s*máy|xemay|mô\s*tô|moto|motorcycle)\b"
+    car = r"\b(?:xe\s*hơi|xe\s*ô\s*tô|ô\s*tô|ôto|oto|car)\b"
+    if re.search(motorcycle, lowered):
+        return "motorcycle"
+    if re.search(car, lowered):
+        return "car"
+    return None
 
 
 def _is_allowed_schedule_date(value: str) -> bool:
@@ -110,11 +153,15 @@ def _extract_follow_up_answers(message: str, missing_fields: list[str]) -> tuple
             if value is not None and not _is_allowed_schedule_time(field, value):
                 value = None
         elif field == "project_id":
-            value = resolve_project_id(text)
+            # Câu trả lời thường gộp tên dự án + ngày + giờ. resolve chỉ nhận
+            # đúng toàn bộ tên; find tìm tên đóng nằm bên trong câu tự nhiên.
+            value = find_project_id(text) or resolve_project_id(text)
         elif field == "parking_zone":
             value = _extract_parking_zone(text)
         elif field == "plate_number":
             value = _extract_plate_number(text)
+        elif field == "vehicle_type":
+            value = _extract_vehicle_type(text)
         elif field in _BOOLEAN_FIELDS:
             lowered = text.casefold()
             value = True if any(word in lowered for word in ("có", "đồng ý", "yes")) else None
@@ -174,6 +221,23 @@ def _follow_up_validation_message(unresolved: list[str]) -> str:
 # Demo-only server-side identity context. Browser chỉ chọn persona, không được
 # tự gửi resident_id/apartment_id. Production phải thay bằng auth/session và
 # resident directory thật.
+# Câu duy nhất người dùng thấy khi policy guard chặn vì chưa liên kết căn hộ.
+# Không nêu tên tool, mã policy, raw status hay thuật ngữ schema.
+RESIDENT_ACCESS_REQUIRED_MESSAGE = (
+    "Dịch vụ này chỉ dành cho tài khoản đã liên kết căn hộ. "
+    "Bạn cần liên kết hoặc xác minh hồ sơ cư dân trước khi tiếp tục."
+)
+
+RESIDENT_DIRECTORY_UNAVAILABLE_MESSAGE = "Hiện chưa thể kiểm tra hồ sơ cư dân. Bạn vui lòng thử lại sau ít phút."
+
+# Đăng ký/liên kết hồ sơ cư dân nằm NGOÀI workflow của Agent. Câu này hướng
+# người dùng đi đúng đường, không gợi ý rằng trợ lý làm hộ được.
+RESIDENT_LINKING_OUTSIDE_AGENT_MESSAGE = (
+    "Việc đăng ký và xác minh hồ sơ cư dân được thực hiện ngoài trợ lý. "
+    "Bạn vui lòng hoàn tất liên kết căn hộ trong phần tài khoản, "
+    "sau đó quay lại để dùng các dịch vụ dành cho cư dân."
+)
+
 _DEMO_ACCOUNT_CONTEXTS: dict[str, dict[str, Any]] = {
     "prospect": {
         "account_id": "DEMO-PROSPECT",
@@ -191,19 +255,30 @@ _DEMO_ACCOUNT_CONTEXTS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Message CÔNG KHAI cho từng stage.
+#
+# Stage code vẫn giữ nguyên cho log nội bộ, nhưng message thì không được chứa
+# thuật ngữ kỹ thuật. Bản trước đưa nguyên văn "LLM đang phân tích",
+# "Agent đã tạo TaskPlan", "Validator đang kiểm tra dependency, allowlist",
+# "Executor đang gọi các dịch vụ" thẳng vào `events[].message` — tức là đúng
+# những từ mà người dùng cuối không có cách nào hiểu, và cũng là chi tiết nội
+# bộ không nên lộ ra ngoài.
 _STAGE_MESSAGES = {
-    "PLANNING": "LLM đang phân tích mục tiêu và chọn các dịch vụ cần thiết.",
-    "PLANNED": "Agent đã tạo TaskPlan có cấu trúc.",
-    "VALIDATING": "Validator đang kiểm tra dependency, allowlist và dữ liệu an toàn.",
-    "VALIDATED": "Kế hoạch đã hợp lệ và được phép chuyển sang thực thi.",
-    "EXECUTING": "Executor đang gọi các dịch vụ theo đúng thứ tự phụ thuộc.",
-    "TASK_RUNNING": "Executor đang thực hiện một tác vụ nghiệp vụ.",
-    "TASK_SUCCESS": "Một tác vụ nghiệp vụ đã hoàn thành.",
-    "TASK_FAILED": "Một tác vụ nghiệp vụ đã thất bại.",
-    "NEEDS_INFORMATION": "Agent cần thêm thông tin trước khi lập kế hoạch.",
-    "VALIDATION_FAILED": "Kế hoạch bị Validator từ chối.",
-    "EXECUTION_FAILED": "Workflow dừng trong quá trình thực thi.",
-    "FINISHED": "Workflow đã kết thúc và trạng thái đã được lưu.",
+    "PLANNING": "Đang chuẩn bị kế hoạch thực hiện.",
+    "PLANNED": "Đã xác định các bước cần thực hiện.",
+    "VALIDATING": "Đang kiểm tra thông tin và điều kiện thực hiện.",
+    "VALIDATED": "Kế hoạch đã sẵn sàng.",
+    "RESIDENT_CHECKING": "Đang kiểm tra liên kết cư dân với ban quản lý.",
+    "RESIDENT_VERIFIED": "Đã xác nhận tài khoản cư dân.",
+    "WAITING_APPROVAL": "Đang chờ bạn xác nhận thanh toán.",
+    "EXECUTING": "Đang thực hiện yêu cầu.",
+    "TASK_RUNNING": "Đang thực hiện một bước trong yêu cầu.",
+    "TASK_SUCCESS": "Đã hoàn thành một bước trong yêu cầu.",
+    "TASK_FAILED": "Một bước không thể hoàn thành.",
+    "NEEDS_INFORMATION": "Cần bạn bổ sung thêm thông tin.",
+    "VALIDATION_FAILED": "Thông tin chưa đủ điều kiện để thực hiện.",
+    "EXECUTION_FAILED": "Yêu cầu đã dừng lại giữa chừng.",
+    "FINISHED": "Yêu cầu đã hoàn tất.",
 }
 
 
@@ -212,12 +287,12 @@ def _event_message(stage: str, payload: dict[str, Any], plan: TaskPlan | None) -
     task = next((item for item in plan.tasks if item.task_id == task_id), None) if plan else None
     title = _TOOL_PRESENTATION.get(task.tool, ("tác vụ", ""))[0] if task else "tác vụ"
     if stage == "TASK_RUNNING":
-        return f"Agent đang thực hiện bước “{title}”."
+        return f"Đang {title.lower()}."
     if stage == "TASK_SUCCESS":
-        return f"Agent đã hoàn thành bước “{title}”."
+        return f"Đã {title.lower()}."
     if stage == "TASK_FAILED":
-        return f"Bước “{title}” không thể hoàn thành. Workflow sẽ dừng an toàn."
-    return _STAGE_MESSAGES.get(stage, "Agent đang xử lý workflow.")
+        return f"Không thể {title.lower()}. Yêu cầu dừng lại an toàn."
+    return _STAGE_MESSAGES.get(stage, "Đang xử lý yêu cầu.")
 
 
 def _append_job_event(job: dict[str, Any], stage: str, payload: dict[str, Any] | None = None) -> None:
@@ -372,18 +447,23 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
         candidates = [
             _detail("Biển số", plate),
             _detail("Loại xe", inputs.get("vehicle_type")),
-            _detail("Mã phương tiện", data.get("vehicle_id")),
         ]
     elif task.tool == "book_parking":
         zone = _text(data.get("parking_zone")) or _text(inputs.get("parking_zone"))
+        zone_label = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}.get(zone or "", zone)
         booking_date = _text(data.get("booking_date")) or _text(inputs.get("booking_date"))
-        place = " · ".join(value for value in (zone, booking_date) if value)
+        booking_fee = _money(data.get("amount"), data.get("currency"))
+        place = " · ".join(value for value in (zone_label, booking_date) if value)
         message = f"Đã đặt chỗ đỗ xe{f' ({place})' if place else ''}."
+        if booking_fee is not None:
+            # Đây là báo phí authoritative do Parking Provider trả về, không
+            # phải số tiền từ goal. Chỉ hiển thị; Payment vẫn cần approval.
+            message += f" Phí đặt chỗ: {booking_fee}."
         candidates = [
             _detail("Mã đặt chỗ", data.get("booking_id")),
-            _detail("Khu vực", zone),
+            _detail("Khu vực", zone_label),
             _detail("Ngày đặt", booking_date),
-            _detail("Phí đặt chỗ", _money(data.get("amount"), data.get("currency"))),
+            _detail("Phí đặt chỗ", booking_fee),
         ]
     elif task.tool == "pay_fee":
         payment_status = _text(data.get("payment_status"))
@@ -439,11 +519,11 @@ def _validation_guidance(error: str) -> str:
     lowered = error.casefold()
     guidance = []
     rules = (
-        ("booking_date", "chọn ngày đặt chỗ hợp lệ và không ở quá khứ"),
-        ("parking_zone", "chọn khu vực ZONE_A hoặc ZONE_B"),
+        ("booking_date", "chọn một ngày đặt chỗ từ hôm nay trở đi"),
+        ("parking_zone", "chọn Khu A hoặc Khu B"),
         ("plate_number", "bổ sung biển số xe"),
         ("vehicle_type", "chọn loại xe ô tô hoặc xe máy"),
-        ("viewing_date", "chọn ngày tham quan hợp lệ và không ở quá khứ"),
+        ("viewing_date", "chọn một ngày tham quan từ hôm nay trở đi"),
         ("viewing_time", "chọn giờ tham quan trong khoảng 08:00–17:30"),
     )
     for marker, instruction in rules:
@@ -579,17 +659,30 @@ async def _run_demo_job(
             resident_services_url=service_urls["resident_services"],
             contact_profile=job.get("contact_profile"),
         )
+        # Chờ duyệt thanh toán: ghi ngữ cảnh xuống PostgreSQL TRƯỚC khi trả
+        # response. Từ đây trở đi resume không còn phụ thuộc `_DEMO_JOBS`.
+        if state.get("policy_error") == "PAYMENT_APPROVAL_REQUIRED":
+            await persist_pending_approval(
+                workflow_id,
+                state.get("task_results") or {},
+                state.get("plan") or state.get("draft_plan") or job.get("plan"),
+            )
+
         response = _demo_response(state, approve_mock_payment)
         terminal_stage = "FINISHED"
         if response.status == "NEEDS_INFORMATION":
             terminal_stage = "NEEDS_INFORMATION"
+        elif response.status == "WAITING_APPROVAL":
+            terminal_stage = "WAITING_APPROVAL"
         elif response.status == "VALIDATION_ERROR":
             terminal_stage = "VALIDATION_FAILED"
         elif response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
             terminal_stage = "EXECUTION_FAILED"
         _append_job_event(job, terminal_stage)
         job["message"] = response.summary or response.question or job["message"]
-        job["response"] = response
+        # `_demo_response()` dựng view model từ AgentState nên không biết
+        # workflow_id. Gắn lại ngay khi cache, đừng để nhánh đọc phải tự đoán.
+        job["response"] = response.model_copy(update={"workflow_id": workflow_id})
     except Exception as exc:  # noqa: BLE001 - không để raw exception vào job public
         logger.warning("demo background workflow failed (%s)", type(exc).__name__)
         _append_job_event(job, "EXECUTION_FAILED")
@@ -657,7 +750,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
 def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflowResponse:
     """Chuyển AgentState thành view model chỉ chứa field nghiệp vụ allowlist."""
     plan = state.get("plan")
-    plan_view = _plan_view(plan)
+    # `draft_plan` chỉ phục vụ preview khi Validator phát hiện thiếu input.
+    # Executor vẫn chỉ nhận `plan` đã có plan_validated=True.
+    plan_view = _plan_view(plan or state.get("draft_plan"))
 
     if state.get("planning_error"):
         return DemoWorkflowResponse(
@@ -672,16 +767,62 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             missing_fields=list(state.get("missing_fields") or []),
             plan=plan_view,
         )
+    if state.get("clarification_error"):
+        # Còn thiếu input nhưng không hỏi được an toàn. Không render form rỗng,
+        # không nêu field nội bộ.
+        return DemoWorkflowResponse(
+            status="VALIDATION_ERROR",
+            summary=str(state["clarification_error"]),
+            plan=plan_view,
+        )
     if state.get("validation_error"):
         return DemoWorkflowResponse(
             status="VALIDATION_ERROR",
             summary=_validation_guidance(str(state["validation_error"])),
             plan=plan_view,
         )
+    policy_error = state.get("policy_error")
+    if policy_error == "RESIDENT_LINKING_OUTSIDE_AGENT":
+        return DemoWorkflowResponse(
+            status="EXECUTION_ERROR",
+            summary=RESIDENT_LINKING_OUTSIDE_AGENT_MESSAGE,
+            plan=plan_view,
+        )
+    if policy_error == "RESIDENT_ACCESS_REQUIRED":
+        return DemoWorkflowResponse(
+            status="EXECUTION_ERROR",
+            summary=RESIDENT_ACCESS_REQUIRED_MESSAGE,
+            plan=plan_view,
+        )
+    if policy_error == "RESIDENT_DIRECTORY_UNAVAILABLE":
+        return DemoWorkflowResponse(
+            status="EXECUTION_ERROR",
+            summary=RESIDENT_DIRECTORY_UNAVAILABLE_MESSAGE,
+            plan=plan_view,
+        )
+    if policy_error == "PAYMENT_APPROVAL_REQUIRED":
+        # Báo giá lấy từ booking ĐÃ persist (kết quả book_parking vừa chạy),
+        # không lấy từ goal hay browser.
+        quote = quote_from_results(state.get("task_results") or {})
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            workflow_id=state.get("workflow_id"),
+            summary=(
+                f"Đã giữ chỗ đỗ xe. Phí cần thanh toán: {quote.amount:,.0f} {quote.currency}.".replace(",", ".")
+                if quote is not None
+                else "Đã giữ chỗ đỗ xe. Bạn xác nhận thanh toán để mình hoàn tất nhé."
+            ),
+            payment_quote=quote.as_public_dict() if quote is not None else None,
+            plan=plan_view,
+        )
+    if policy_error is not None:
+        return DemoWorkflowResponse(status="EXECUTION_ERROR", plan=plan_view)
     if state.get("execution_error"):
-        contains_payment = plan is not None and any(task.tool == "pay_fee" for task in plan.tasks)
-        status = "PAYMENT_APPROVAL_REQUIRED" if contains_payment and not payment_approved else "EXECUTION_ERROR"
-        return DemoWorkflowResponse(status=status, plan=plan_view)
+        # KHÔNG suy ra "cần duyệt thanh toán" từ việc plan có chứa pay_fee:
+        # cách đó biến MỌI lỗi thực thi thành lời mời xác nhận thanh toán, và
+        # lỗi thật bị giấu hoàn toàn. Chờ duyệt là một tín hiệu tường minh —
+        # `policy_error == "PAYMENT_APPROVAL_REQUIRED"` — đã xử lý ở trên.
+        return DemoWorkflowResponse(status="EXECUTION_ERROR", plan=plan_view)
 
     task_results = state.get("task_results", {})
     task_views = []
@@ -888,6 +1029,10 @@ async def get_demo_workflow_status(workflow_id: str) -> DemoWorkflowResponse:
         response = job["response"]
         return response.model_copy(
             update={
+                # workflow_id phải bám theo path, kể cả khi response terminal
+                # được lấy từ job cache. Thiếu nó, UI mất pendingWorkflowId và
+                # lần submit kế tiếp rơi nhầm sang /start.
+                "workflow_id": workflow_id,
                 "stage": job["stage"],
                 "message": job["message"],
                 "persisted": record is not None,
@@ -900,12 +1045,18 @@ async def get_demo_workflow_status(workflow_id: str) -> DemoWorkflowResponse:
     stage = job["stage"] if job is not None else "FINISHED"
     message = job["message"] if job is not None else _STAGE_MESSAGES["FINISHED"]
     database_status = record["workflow"]["status"] if record is not None else None
-    status = database_status if database_status in {"SUCCESS", "FAILED"} else "RUNNING"
+    if database_status == "SUCCESS":
+        status = "SUCCESS"
+    elif database_status in {"FAILED", "CANCELLED"}:
+        status = "FAILED"
+    else:
+        status = "RUNNING"
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status=status,
         stage=stage,
         message=message,
+        summary=message if status in {"SUCCESS", "FAILED"} else None,
         persisted=record is not None,
         plan=_plan_view(plan),
         tasks=task_views,
@@ -941,3 +1092,197 @@ async def agent_status():
     """Kiểm tra trạng thái agent."""
     return {"status": "ready", "agent": "LangGraph Agent v1.0"}
     (DemoDetailItem,)
+
+
+@router.get("/projects", response_model=DemoProjectListResponse)
+async def list_supported_projects() -> DemoProjectListResponse:
+    """Danh mục dự án public cho UI/CLI; ID nội bộ không rời backend."""
+    return DemoProjectListResponse(projects=[project["project_name"] for project in PROJECTS])
+
+
+@router.get("/capabilities", response_model=DemoCapabilityListResponse)
+async def list_supported_capabilities() -> DemoCapabilityListResponse:
+    """Các mục tiêu public; không trả tên tool hoặc contract nội bộ."""
+    return DemoCapabilityListResponse(
+        capabilities=[
+            DemoCapabilityItem(
+                name="Đặt lịch tham quan dự án",
+                description="Chọn dự án, ngày và giờ muốn tham quan.",
+            ),
+            DemoCapabilityItem(
+                name="Đăng ký quan tâm / nhận tư vấn",
+                description="Gửi nhu cầu để bộ phận tư vấn liên hệ.",
+            ),
+            DemoCapabilityItem(
+                name="Tìm gợi ý bất động sản",
+                description="Lọc căn hộ hoặc phòng theo nhu cầu và ngân sách.",
+            ),
+            DemoCapabilityItem(
+                name="Đăng ký phương tiện và chỗ đỗ xe",
+                description="Liên kết phương tiện và đặt chỗ tại Khu A hoặc Khu B.",
+                requires_resident=True,
+            ),
+            DemoCapabilityItem(
+                name="Báo bảo trì / sửa chữa",
+                description="Tạo yêu cầu và hẹn lịch kỹ thuật viên.",
+                requires_resident=True,
+            ),
+            DemoCapabilityItem(
+                name="Đặt lịch chuyển nhà",
+                description="Đăng ký thời gian, thang máy và hỗ trợ vận chuyển.",
+                requires_resident=True,
+            ),
+            DemoCapabilityItem(
+                name="Thanh toán phí đỗ xe",
+                description="Xác nhận khoản phí do dịch vụ đặt chỗ báo.",
+                requires_resident=True,
+            ),
+        ]
+    )
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/payment-decision",
+    response_model=DemoWorkflowResponse,
+)
+async def decide_demo_payment(
+    workflow_id: str,
+    request: DemoPaymentDecisionRequest,
+) -> DemoWorkflowResponse:
+    """Duyệt hoặc từ chối thanh toán cho một workflow đang chờ.
+
+    Toàn bộ ngữ cảnh đọc từ PostgreSQL, nên endpoint này vẫn hoạt động sau khi
+    backend restart và `_DEMO_JOBS` đã trống.
+    """
+    # Response đang cache trong `_DEMO_JOBS` được dựng lúc workflow còn chờ
+    # duyệt. Sau quyết định, nó là ảnh cũ: nếu không bỏ đi, mọi lần poll tiếp
+    # theo vẫn trả "chờ xác nhận" dù database đã ghi SUCCESS, và giao diện mắc
+    # kẹt vĩnh viễn ở màn chờ. Bỏ cache để GET đọc lại trạng thái đã lưu.
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+
+    try:
+        if request.decision == "reject":
+            await reject_payment(workflow_id)
+            response = DemoWorkflowResponse(
+                workflow_id=workflow_id,
+                status="FAILED",
+                summary=(
+                    "Mình đã huỷ bước thanh toán. Chỗ đỗ xe vẫn được giữ ở trạng thái "
+                    "chưa thanh toán, bạn có thể quay lại thanh toán sau."
+                ),
+            )
+            if job is not None:
+                _append_job_event(job, "FINISHED")
+                job["message"] = response.summary
+            return response
+
+        outcome = await resume_payment_after_approval(
+            workflow_id,
+            payment_url=get_settings().payment_service_url,
+        )
+    except ResumeError as exc:
+        # Message của ResumeError được viết sẵn cho người dùng cuối: không chứa
+        # SQL, payload hay tên bảng.
+        status_code = 404 if exc.code == "NOT_FOUND" else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    result = outcome["result"]
+    quote = outcome["quote"]
+    if not result.success:
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="EXECUTION_ERROR",
+            summary="Thanh toán chưa thực hiện được. Bạn thử lại giúp mình nhé.",
+        )
+
+    amount = f"{quote.amount:,.0f}".replace(",", ".")
+    response = DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="SUCCESS",
+        summary=f"Đã thanh toán {amount} {quote.currency}. Chỗ đỗ xe của bạn đã được xác nhận.",
+    )
+    if job is not None:
+        _append_job_event(job, "FINISHED")
+        job["message"] = response.summary
+    return response
+
+
+# Trạng thái nào thuộc nhóm nào trên giao diện tổng quan.
+_ACTIVE_STATUSES = ("PENDING", "RUNNING")
+_ATTENTION_STATUSES = ("WAITING_APPROVAL",)
+_COMPLETED_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
+
+_LIST_FILTERS: dict[str, tuple[str, ...]] = {
+    "active": _ACTIVE_STATUSES + _ATTENTION_STATUSES,
+    "running": _ACTIVE_STATUSES,
+    "attention": _ATTENTION_STATUSES,
+    "completed": _COMPLETED_STATUSES,
+    "all": (),
+}
+
+_LIST_LIMIT_MAX = 50
+
+
+def _goal_to_title(goal: str | None) -> str:
+    """Tiêu đề ngắn cho danh sách.
+
+    Goal là câu người dùng nhập; cắt ngắn để danh sách đọc được, KHÔNG diễn
+    giải lại hay đoán ý.
+    """
+    text = (goal or "").strip()
+    if not text:
+        return "Yêu cầu dịch vụ"
+    return text if len(text) <= 70 else text[:69].rstrip() + "…"
+
+
+@router.get("/workflows/demo", response_model=DemoWorkflowListResponse)
+async def list_demo_workflows(
+    status: str = "active",
+    limit: int = 20,
+) -> DemoWorkflowListResponse:
+    """Danh sách workflow cho màn Tổng quan — đọc thẳng PostgreSQL.
+
+    GIỚI HẠN DEMO, ĐỌC KỸ: `workflows` hiện KHÔNG có cột chủ sở hữu, nên
+    endpoint này trả về workflow của TOÀN BỘ hệ thống chứ không phải của một
+    tài khoản. Nó chỉ dùng được cho demo một người. Trước khi có auth thật và
+    một cột account/resident trên `workflows`, đây KHÔNG phải endpoint an toàn
+    cho production.
+
+    Bù lại, nó không trả bất kỳ dữ liệu cá nhân nào: chỉ id, tiêu đề cắt từ
+    goal, trạng thái, số bước và mốc thời gian.
+    """
+    if status not in _LIST_FILTERS:
+        raise HTTPException(status_code=422, detail="Bộ lọc trạng thái không hợp lệ.")
+    if limit < 1 or limit > _LIST_LIMIT_MAX:
+        raise HTTPException(status_code=422, detail="Giới hạn số dòng không hợp lệ.")
+
+    repository = await build_repository(migrate=False)
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        statuses = _LIST_FILTERS[status] or None
+        rows = await repository.list_workflows(statuses=statuses, limit=limit)
+        step_tools = await repository.current_step_titles([str(row["workflow_id"]) for row in rows])
+    finally:
+        await pool.close()
+
+    items = []
+    for row in rows:
+        workflow_id = str(row["workflow_id"])
+        tool = step_tools.get(workflow_id)
+        items.append(
+            DemoWorkflowListItem(
+                workflow_id=workflow_id,
+                title=_goal_to_title(row.get("goal")),
+                status=row["status"],
+                # Tên bước hiện tại lấy từ bảng trình bày nghiệp vụ, không phải tên tool.
+                current_step=_TOOL_PRESENTATION.get(tool, (None, ""))[0] if tool else None,
+                completed_tasks=int(row.get("completed_tasks") or 0),
+                total_tasks=int(row.get("total_tasks") or 0),
+                needs_attention=row["status"] in _ATTENTION_STATUSES,
+                created_at=row["created_at"].isoformat() if row.get("created_at") else None,
+                updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
+            )
+        )
+    return DemoWorkflowListResponse(items=items)

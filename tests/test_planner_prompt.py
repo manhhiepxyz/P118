@@ -220,6 +220,11 @@ def test_prompt_has_decision_table_covering_key_scenarios() -> None:
     assert f'["{UNSUPPORTED_GOAL_FIELD}"]' in table
 
 
+def test_prompt_never_asks_user_for_internal_vehicle_id() -> None:
+    assert 'KHÔNG hỏi user "mã phương tiện"' in PROMPT
+    assert "plate_number và vehicle_type" in PROMPT
+
+
 def test_full_flow_example_uses_three_input_refs_from_booking_task() -> None:
     """Ví dụ A phải cho thấy pay_fee lấy đủ 3 field từ task book_parking."""
     example = PROMPT.split("### Ví dụ A", 1)[1].split("### Ví dụ B", 1)[0]

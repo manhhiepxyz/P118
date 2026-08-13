@@ -5,6 +5,24 @@ from collections import deque
 from datetime import date, time
 
 from src.common.task_plan import InputRef, TaskPlan
+from src.common.tool_contract import (
+    TOOL_CONTRACTS,
+    kinds_are_compatible,
+    output_spec,
+)
+
+
+class MissingRequiredInputError(ValueError):
+    """Plan hợp cấu trúc nhưng còn thiếu input bắt buộc.
+
+    `missing_fields` chỉ chứa tên field thuộc contract, không chứa dữ liệu do
+    người dùng hoặc LLM sinh. Graph có thể dùng tín hiệu có kiểu này để hỏi bổ
+    sung mà không phải phân tích chuỗi exception.
+    """
+
+    def __init__(self, missing_fields: tuple[str, ...]) -> None:
+        self.missing_fields = missing_fields
+        super().__init__(f"TaskPlan is missing required input fields: {list(missing_fields)}")
 
 
 class TaskPlanValidator:
@@ -168,6 +186,7 @@ class TaskPlanValidator:
         cls._reject_sensitive_content(plan)
 
         task_ids = [t.task_id for t in plan.tasks]
+        tasks_by_id = {t.task_id: t for t in plan.tasks}
 
         # 1. Unique task_ids
         seen: set[str] = set()
@@ -210,32 +229,27 @@ class TaskPlanValidator:
             cycle_nodes = [tid for tid, deg in in_degree.items() if deg > 0]
             raise ValueError(f"Dependency cycle detected among tasks: {cycle_nodes}")
 
+        # 5. Tool in ALLOWED_TOOLS (belt-and-suspenders; Pydantic already checks)
         for task in plan.tasks:
-            # 5. Tool in ALLOWED_TOOLS (belt-and-suspenders; Pydantic already checks)
             if task.tool not in cls.ALLOWED_TOOLS:
                 raise ValueError(f"Task '{task.task_id}' uses unknown tool '{task.tool}'")
 
-            # 6. Required inputs present for each tool
-            required = cls.REQUIRED_INPUTS.get(task.tool, frozenset())
-            present = frozenset(task.input.keys())
-            missing = required - present
-            if missing:
-                raise ValueError(
-                    f"Task '{task.task_id}' (tool='{task.tool}') is missing required input fields: {sorted(missing)}"
-                )
-
+        # 6. Kiểm tra các giá trị ĐÃ CÓ và InputRef trước. Nhờ vậy một plan vừa
+        # thiếu field vừa có reference/enum/ngày sai vẫn bị từ chối đúng lỗi cấu
+        # trúc; graph chỉ hỏi bổ sung khi phần hiện hữu đã an toàn.
+        for task in plan.tasks:
             cls._validate_schedule_values(task.tool, task.input)
             cls._validate_enum_values(task.tool, task.input)
 
             for key, value in task.input.items():
                 if isinstance(value, InputRef):
-                    # 7. InputRef.from_task exists in plan
+                    # InputRef.from_task exists in plan
                     if value.from_task not in task_id_set:
                         raise ValueError(
                             f"Task '{task.task_id}' input '{key}' references unknown task '{value.from_task}'"
                         )
 
-                    # 8. InputRef.from_task is in depends_on of that task
+                    # InputRef.from_task is in depends_on of that task
                     if value.from_task not in task.depends_on:
                         raise ValueError(
                             f"Task '{task.task_id}' input '{key}' references task "
@@ -243,13 +257,92 @@ class TaskPlanValidator:
                             f"depends_on of '{task.task_id}'"
                         )
 
+                    cls._validate_input_reference(task, key, value, tasks_by_id)
+
+            cls._validate_input_contract(task)
+
+        # 7. Required inputs present for each tool. Thu thập toàn bộ tên field
+        # còn thiếu để UI chỉ hỏi người dùng một lượt. Thứ tự deterministic theo
+        # task rồi theo tên field; không đưa task_id/giá trị LLM vào payload.
+        missing_fields: list[str] = []
+        for task in plan.tasks:
+            required = cls.REQUIRED_INPUTS.get(task.tool, frozenset())
+            present = frozenset(task.input.keys())
+            for field in sorted(required - present):
+                if field not in missing_fields:
+                    missing_fields.append(field)
+
+        if missing_fields:
+            raise MissingRequiredInputError(tuple(missing_fields))
+
         return plan
+
+    @classmethod
+    def _validate_input_contract(cls, task) -> None:
+        """Kiểm mọi input đã có mặt theo `TOOL_CONTRACTS`.
+
+        Chỉ kiểm giá trị literal. `InputRef` được kiểm riêng ở
+        `_validate_input_reference()` vì lúc validate chưa có giá trị thật.
+
+        Message chỉ nêu task, tên field và LUẬT bị vi phạm. Tuyệt đối không
+        echo giá trị: nó có thể là họ tên, số điện thoại, CCCD hoặc token mà
+        người dùng dán nhầm vào goal.
+        """
+        contract = TOOL_CONTRACTS.get(task.tool)
+        if contract is None:
+            return
+
+        # Input thừa: provider sẽ từ chối hoặc âm thầm bỏ qua, cả hai đều tệ.
+        # Cũng chặn luôn đường tuồn field lạ vào payload gửi ra ngoài.
+        for key in sorted(set(task.input) - set(contract.inputs)):
+            raise ValueError(f"Task '{task.task_id}' has unexpected input field '{key}' for tool '{task.tool}'")
+
+        for key in sorted(task.input):
+            value = task.input[key]
+            if isinstance(value, InputRef):
+                continue
+            violation = contract.inputs[key].check(value)
+            if violation is not None:
+                raise ValueError(f"Task '{task.task_id}' input '{key}' invalid: {violation}")
+
+    @classmethod
+    def _validate_input_reference(cls, task, key: str, ref: InputRef, tasks_by_id: dict) -> None:
+        """`InputRef` phải trỏ tới field mà tool nguồn THẬT SỰ trả về.
+
+        Trước đây chỉ kiểm task nguồn tồn tại và nằm trong `depends_on`, nên
+        `InputRef(from_task="T1", field="khong_ton_tai")` vẫn qua được Validator
+        rồi mới hỏng lúc Executor resolve — muộn hơn nhiều, và lỗi lúc đó mang
+        theo payload thật.
+        """
+        source_task = tasks_by_id.get(ref.from_task)
+        if source_task is None:
+            return
+
+        source_spec = output_spec(source_task.tool, ref.field)
+        if source_spec is None:
+            raise ValueError(
+                f"Task '{task.task_id}' input '{key}' references field '{ref.field}' "
+                f"which tool '{source_task.tool}' does not return"
+            )
+
+        contract = TOOL_CONTRACTS.get(task.tool)
+        target_spec = contract.inputs.get(key) if contract is not None else None
+        if target_spec is None:
+            return
+
+        if not kinds_are_compatible(source_spec, target_spec):
+            raise ValueError(
+                f"Task '{task.task_id}' input '{key}' expects {target_spec.kind} "
+                f"but '{source_task.tool}.{ref.field}' returns {source_spec.kind}"
+            )
 
     @classmethod
     def _validate_enum_values(cls, tool: str, input_data: dict) -> None:
         """Chặn literal enum ngoài contract mà không echo giá trị do LLM sinh."""
         for (rule_tool, field), allowed in cls.ENUM_INPUTS.items():
             if tool != rule_tool:
+                continue
+            if field not in input_data:
                 continue
             value = input_data.get(field)
             if isinstance(value, InputRef):

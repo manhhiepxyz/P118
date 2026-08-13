@@ -6,6 +6,7 @@ from src.api import routes
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
+from src.models.schemas import DemoWorkflowRequest
 
 
 @pytest.mark.asyncio
@@ -55,64 +56,146 @@ def _demo_plan(with_payment: bool = False) -> TaskPlan:
 
 @pytest.mark.asyncio
 async def test_demo_ui_is_served(client):
+    """/demo phải phục vụ Agent Workspace, không phải giao diện chat cũ."""
     response = await client.get("/demo")
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, max-age=0"
-    assert "P-118 · Workflow Demo" in response.text
-    assert "/api/v1/workflows/demo" in response.text
-    assert "Workflow Agent" in response.text
-    assert "Kết quả nghiệp vụ" in response.text
-    assert "Tài khoản demo" in response.text
-    assert "Hoàn tất trong" in response.text
-    assert "Xem chi tiết" in response.text
-    assert "ĐÃ XONG" in response.text
-    assert "Mock Payment API" not in response.text
-    assert "Thông tin Agent chưa có" in response.text
-    assert "TỰ ĐỘNG TẠO TỪ FORM" in response.text
-    assert 'data-service="resident"' not in response.text
-    assert 'data-service="property-search"' not in response.text
-    assert 'data-service="property-viewing"' in response.text
-    assert 'data-service="property-interest"' in response.text
-    assert 'data-service="vehicle"' in response.text
-    assert 'data-service="parking"' in response.text
-    assert 'data-service="payment"' in response.text
-    assert 'data-service="maintenance"' in response.text
-    assert 'data-service="moving"' in response.text
-    assert 'data-persona="prospect"' in response.text
-    assert 'data-persona="resident"' in response.text
-    assert "chưa có resident-property mapping" in response.text
-    assert "Sắp ra mắt" in response.text
-    assert "Đăng ký quan tâm / nhận tư vấn" in response.text
-    for project_name in (
-        "Vinhomes Sài Gòn Park",
-        "Vinhomes Global Gate Hạ Long",
-        "Vinhomes Hải Vân Bay",
-        "Vinhomes Pearl Bay",
-        "Vinhomes Green Paradise",
-        "Vinhomes Golden City",
-        "Vinhomes Ocean Park",
+    assert "P-118 · Trợ lý dịch vụ cư dân" in response.text
+
+    # Sidebar đủ 6 mục theo thiết kế đã duyệt.
+    for item in ("Tổng quan", "Đang thực hiện", "Chờ bạn xử lý", "Đã hoàn thành", "Dịch vụ", "Hồ sơ cư dân"):
+        assert item in response.text, item
+
+    # Ô giao việc nhỏ gọn trên topbar, KHÔNG phải composer chiếm màn hình.
+    assert "Giao việc cho P-118…" in response.text
+
+    # Workspace, không phải chatbot: không còn khung hội thoại nào.
+    markup = response.text.split("<script>")[0]
+    for chat_pattern in ('class="stream', "streamInner", "msg agent", "bubble", "typing"):
+        assert chat_pattern not in markup, chat_pattern
+
+    # Ngôn ngữ nghiệp vụ, không lộ thuật ngữ kỹ thuật ra markup.
+    for jargon in (
+        "PostgreSQL",
+        "InputRef",
+        "pay_fee",
+        "TaskPlan",
+        "Validator",
+        "Executor",
+        "Connector",
+        "Mock Payment API",
     ):
-        assert project_name in response.text
-    assert "dự án mã ${values.project_id}" not in response.text
-    assert 'addEventListener("click", () => executeWorkflow())' in response.text
-    assert "Khách & quyền ra vào" not in response.text
-    assert "Giữ chỗ / đăng ký sớm" in response.text
-    assert "Theo dõi hồ sơ / giao dịch" in response.text
-    assert "Agent chỉ thực hiện mục đã chọn và luôn giữ thứ tự 01 → 04" in response.text
-    assert "Resolve kết quả bước trước" in response.text
-    assert "pendingMissingFields" in response.text
-    assert "normalizeGoalText" in response.text
-    assert "align-self: flex-end" in response.text
+        assert jargon not in markup, jargon
+
+    # Enum thô chỉ được nằm trong bảng dịch của <script>.
+    for raw_enum in ("WAITING_APPROVAL", "NEEDS_INFORMATION", "VALIDATION_ERROR"):
+        assert raw_enum not in markup, raw_enum
+
+    # Enter không cướp phím giữa lúc gõ dấu tiếng Việt qua IME.
     assert "event.isComposing" in response.text
     assert 'autocomplete="off"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_reads_the_workflow_list_from_the_backend(client):
+    """Danh sách trên Tổng quan phải gọi API thật, không phải mảng cứng."""
+    response = await client.get("/demo")
+
+    assert "status=attention" in response.text
+    assert "status=running" in response.text
+    assert "status=completed" in response.text
+    # Không có dữ liệu workflow nhúng sẵn trong trang.
+    assert 'workflow_id: "wf-' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_gives_each_workflow_its_own_url(client):
+    """Refresh trang phải đọc lại workflow theo ID."""
+    response = await client.get("/demo")
+
+    assert "/demo?workflow_id=" in response.text
+    assert "history.pushState" in response.text
+    assert 'new URLSearchParams(location.search).get("workflow_id")' in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_quick_actions_send_a_goal_directly(client):
+    """Bấm mục tiêu là giao việc luôn, không bắt mô tả lại."""
+    response = await client.get("/demo")
+
+    for label in (
+        "Đăng ký xe và chỗ đậu",
+        "Đăng ký chuyển nhà",
+        "Báo hỏng cần sửa",
+        "Đặt lịch tham quan dự án",
+        "Nhận tư vấn",
+    ):
+        assert label in response.text, label
+    assert "startWorkflow(item.goal)" in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_locks_resident_services_without_hiding_them(client):
+    """Khoá bằng `hidden` thì người dùng không biết dịch vụ tồn tại."""
+    response = await client.get("/demo")
+
+    assert "Cần liên kết căn hộ" in response.text
+    assert 'card.setAttribute("aria-disabled", "true")' in response.text
+    assert "item.resident && !resident" in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_progress_is_counted_from_real_tasks(client):
+    """Tiến độ đếm từ tasks[], không phải animation giả lập."""
+    response = await client.get("/demo")
+
+    assert 'if (status === "SUCCESS") done += 1' in response.text
+    assert "Math.round((done / total) * 100)" in response.text
+    assert "setInterval" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_decision_body_contains_only_the_decision(client):
+    """Không gửi amount/currency/booking_id/khoá idempotency từ trình duyệt."""
+    response = await client.get("/demo")
+
+    assert "/payment-decision" in response.text
+    assert "JSON.stringify({ decision })" in response.text
+    decide = response.text.split("const decide = async (decision)")[1].split("};")[0]
+    for forbidden in ("amount", "currency", "booking_id", "idempotency"):
+        assert forbidden not in decide, forbidden
+    # Cả hai nút bị vô hiệu khi đang gửi: bấm hai lần là hai lệnh duyệt.
+    assert "approve.disabled = true" in response.text
+    assert "reject.disabled = true" in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_continue_never_sends_a_goal(client):
+    """Trả lời form bổ sung đi /continue với đúng fields."""
+    response = await client.get("/demo")
+
+    assert "/continue" in response.text
+    assert "JSON.stringify({ fields })" in response.text
+
+
+@pytest.mark.asyncio
+async def test_demo_ui_never_invents_business_data(client):
+    """Ngày/giờ để trống; select bắt đầu bằng lựa chọn rỗng."""
+    response = await client.get("/demo")
+
+    definitions = response.text.split("const FIELDS = {")[1].split("\n      };")[0]
+    for line in definitions.splitlines():
+        if '"date"' in line or '"time"' in line:
+            assert "value:" not in line, line.strip()
+
+    assert 'textContent: "Vui lòng chọn"' in response.text
+    assert "c.checkValidity()" in response.text
+
+    # Chỉ field của tài khoản mới được điền sẵn, và phải nói rõ.
+    prefilled = [ln.split(":")[0].strip() for ln in definitions.splitlines() if "value: ACCOUNT." in ln]
+    assert sorted(prefilled) == ["email", "full_name", "phone"]
     assert "Đã tự điền từ tài khoản · bạn có thể chỉnh" in response.text
-    assert "contact_profile: propertyContactProfile()" in response.text
-    assert "hasInvalidRequiredFields()" in response.text
-    assert "P-118 đang xử lý" in response.text
-    assert "thinking-dots" in response.text
-    assert "showProcessing(" in response.text
-    assert "hideProcessing()" in response.text
 
 
 def test_demo_needs_information_exposes_structured_missing_fields() -> None:
@@ -128,6 +211,28 @@ def test_demo_needs_information_exposes_structured_missing_fields() -> None:
     assert response.status == "NEEDS_INFORMATION"
     assert response.question == "Mình cần thêm giờ xem nhà."
     assert response.missing_fields == ["viewing_time"]
+
+
+def test_demo_needs_information_exposes_draft_plan_for_preview_only() -> None:
+    draft = TaskPlan(
+        goal="Đặt chỗ đậu xe.",
+        tasks=[Task(task_id="T1", tool="book_parking", depends_on=[], input={})],
+    )
+
+    response = routes._demo_response(
+        {
+            "planner_status": "NEEDS_INFORMATION",
+            "question": "Mình cần thêm thông tin.",
+            "missing_fields": ("booking_date",),
+            "plan": None,
+            "draft_plan": draft,
+            "plan_validated": False,
+        },
+        payment_approved=False,
+    )
+
+    assert [task.tool for task in response.plan] == ["book_parking"]
+    assert response.status == "NEEDS_INFORMATION"
 
 
 def test_account_context_never_selects_a_default_property_for_free_chat() -> None:
@@ -154,6 +259,26 @@ def test_follow_up_time_accepts_common_vietnamese_separators(value) -> None:
     assert routes._extract_time(value) == "13:40"
 
 
+@pytest.mark.parametrize("value", ["12h", "12 giờ", "lúc 12h", "12H"])
+def test_follow_up_time_accepts_an_hour_without_minutes_as_on_the_hour(value) -> None:
+    assert routes._extract_time(value) == "12:00"
+
+
+@pytest.mark.parametrize("value", ["12h99", "12h 99", "25h", "24 giờ"])
+def test_follow_up_time_does_not_truncate_an_invalid_hour_or_minute(value) -> None:
+    assert routes._extract_time(value) is None
+
+
+def test_follow_up_extracts_the_exact_viewing_answer_used_in_terminal() -> None:
+    answers, unresolved = routes._extract_follow_up_answers(
+        "22/8/2026,12h",
+        ["viewing_date", "viewing_time"],
+    )
+
+    assert answers == {"viewing_date": "2026-08-22", "viewing_time": "12:00"}
+    assert unresolved == []
+
+
 def test_follow_up_extracts_parking_zone_and_plate_from_one_answer() -> None:
     answers, unresolved = routes._extract_follow_up_answers(
         "Chọn khu A, biển số 59a 12345, ngày 20/12/2026.",
@@ -168,12 +293,79 @@ def test_follow_up_extracts_parking_zone_and_plate_from_one_answer() -> None:
     assert unresolved == []
 
 
+def test_follow_up_extracts_the_exact_vehicle_answer_used_in_terminal() -> None:
+    answers, unresolved = routes._extract_follow_up_answers(
+        "51A-202929, ôto, 29/8/2026, khu A",
+        ["plate_number", "vehicle_type", "booking_date", "parking_zone"],
+    )
+
+    assert answers == {
+        "plate_number": "51A-202929",
+        "vehicle_type": "car",
+        "booking_date": "2026-08-29",
+        "parking_zone": "ZONE_A",
+    }
+    assert unresolved == []
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("ô tô", "car"),
+        ("ôto", "car"),
+        ("oto", "car"),
+        ("xe hơi", "car"),
+        ("xe máy", "motorcycle"),
+        ("mô tô", "motorcycle"),
+        ("moto", "motorcycle"),
+    ],
+)
+def test_follow_up_normalizes_common_vietnamese_vehicle_names(value, expected) -> None:
+    assert routes._extract_vehicle_type(value) == expected
+
+
+def test_follow_up_extracts_project_date_and_time_from_one_natural_answer() -> None:
+    answers, unresolved = routes._extract_follow_up_answers(
+        "Vinhomes Ocean Park, ngày 29/8/2026 lúc 10:00",
+        ["project_id", "viewing_date", "viewing_time"],
+    )
+
+    assert answers == {
+        "project_id": "PRJ-007",
+        "viewing_date": "2026-08-29",
+        "viewing_time": "10:00",
+    }
+    assert unresolved == []
+
+
+@pytest.mark.asyncio
+async def test_projects_endpoint_returns_names_without_internal_ids(client) -> None:
+    response = await client.get("/api/v1/projects")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "Vinhomes Ocean Park" in payload["projects"]
+    assert "PRJ-001" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_capability_catalog_is_user_facing_and_marks_resident_services(client) -> None:
+    response = await client.get("/api/v1/capabilities")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert any(item["name"] == "Đặt lịch tham quan dự án" for item in body["capabilities"])
+    assert any(item["requires_resident"] for item in body["capabilities"])
+    assert "register_vehicle" not in response.text
+    assert "pay_fee" not in response.text
+
+
 def test_follow_up_does_not_silently_map_unsupported_zone() -> None:
     answers, unresolved = routes._extract_follow_up_answers("Zone C", ["parking_zone"])
 
     assert answers == {}
     assert unresolved == ["parking_zone"]
-    assert "ZONE_A hoặc ZONE_B" in routes._follow_up_validation_message(unresolved)
+    assert "Khu A hoặc Khu B" in routes._follow_up_validation_message(unresolved)
 
 
 def test_follow_up_rejects_past_date_and_outside_business_hours() -> None:
@@ -189,7 +381,7 @@ def test_follow_up_rejects_past_date_and_outside_business_hours() -> None:
 @pytest.mark.parametrize(
     ("field", "expected"),
     [
-        ("viewing_date", "không ở quá khứ"),
+        ("viewing_date", "từ hôm nay trở đi"),
         ("viewing_time", "08:00–17:30"),
         ("preferred_time", "08:00–18:00"),
         ("move_time", "07:00–20:00"),
@@ -291,6 +483,7 @@ async def test_demo_start_returns_immediately_then_status_returns_background_res
 
     async def _fake_job(workflow_id, goal, approve_mock_payment, service_urls, account_state):
         assert goal == "Đăng ký dữ liệu test"
+        # Request khai rõ persona; test này không dựa vào default nữa.
         assert account_state == "resident"
         routes._DEMO_JOBS[workflow_id]["stage"] = "FINISHED"
         routes._DEMO_JOBS[workflow_id]["message"] = "Đã hoàn tất."
@@ -308,7 +501,7 @@ async def test_demo_start_returns_immediately_then_status_returns_background_res
 
     started = await client.post(
         "/api/v1/workflows/demo/start",
-        json={"goal": "Đăng ký dữ liệu test"},
+        json={"goal": "Đăng ký dữ liệu test", "account_state": "resident"},
     )
 
     assert started.status_code == 202
@@ -515,7 +708,12 @@ async def test_demo_status_preserves_fast_intermediate_events(client, monkeypatc
         "TASK_SUCCESS",
         "FINISHED",
     ]
-    assert events[5]["message"] == "Agent đang thực hiện bước “Đăng ký cư dân”."
+    assert events[5]["message"] == "Đang đăng ký cư dân."
+
+    # Message công khai không được chứa thuật ngữ kỹ thuật ở BẤT KỲ stage nào.
+    joined = " ".join(event["message"] for event in events)
+    for jargon in ("LLM", "TaskPlan", "Validator", "Executor", "Connector", "PostgreSQL", "InputRef"):
+        assert jargon not in joined, jargon
 
 
 @pytest.mark.asyncio
@@ -638,7 +836,7 @@ def test_demo_response_presents_four_business_steps_in_vietnamese() -> None:
     assert response.summary == (
         "Đã đăng ký hồ sơ cư dân cho A1201 tại Ocean Park. "
         "Đã đăng ký phương tiện biển số TEST-123. "
-        "Đã đặt chỗ đỗ xe (ZONE_A · 2026-08-20). "
+        "Đã đặt chỗ đỗ xe (Khu A · 2026-08-20). Phí đặt chỗ: 150.000 VND. "
         "Đã thanh toán phí đặt chỗ thành công."
     )
     assert [task.title for task in response.tasks] == [
@@ -649,11 +847,11 @@ def test_demo_response_presents_four_business_steps_in_vietnamese() -> None:
     ]
     assert response.tasks[0].message == "Đã đăng ký hồ sơ cư dân cho A1201 tại Ocean Park."
     assert response.tasks[1].message == "Đã đăng ký phương tiện biển số TEST-123."
-    assert response.tasks[2].message == "Đã đặt chỗ đỗ xe (ZONE_A · 2026-08-20)."
+    assert response.tasks[2].message == ("Đã đặt chỗ đỗ xe (Khu A · 2026-08-20). Phí đặt chỗ: 150.000 VND.")
     assert response.tasks[3].message == "Đã thanh toán phí đặt chỗ thành công."
     assert {item.label: item.value for item in response.tasks[2].details} == {
         "Mã đặt chỗ": "BOOK-001",
-        "Khu vực": "ZONE_A",
+        "Khu vực": "Khu A",
         "Ngày đặt": "2026-08-20",
         "Phí đặt chỗ": "150.000 VND",
     }
@@ -737,8 +935,8 @@ def test_demo_response_explains_planning_and_validation_failures() -> None:
     assert planning.status == "PLANNING_ERROR"
     assert "mô tả lại" in planning.summary
     assert validation.status == "VALIDATION_ERROR"
-    assert "không ở quá khứ" in validation.summary
-    assert "ZONE_A hoặc ZONE_B" in validation.summary
+    assert "từ hôm nay trở đi" in validation.summary
+    assert "Khu A hoặc Khu B" in validation.summary
     assert "safe internal category" not in planning.model_dump_json()
 
 
@@ -746,11 +944,16 @@ def test_demo_response_explains_planning_and_validation_failures() -> None:
 async def test_demo_workflow_reports_payment_approval_required(client, monkeypatch):
     plan = _demo_plan(with_payment=True)
 
+    from src.common.results import StandardResult
+
     async def _run_demo_workflow(*args, **kwargs):
+        # Chờ duyệt là tín hiệu TƯỜNG MINH từ policy guard, kèm kết quả prefix.
         return {
             "planner_status": "READY",
             "plan": plan,
-            "execution_error": "Thực thi thất bại (PaymentApprovalRequiredError).",
+            "policy_error": "PAYMENT_APPROVAL_REQUIRED",
+            "workflow_id": "wf-approval",
+            "task_results": {"T2": StandardResult.ok({"booking_id": "BOOK-001", "amount": 150_000, "currency": "VND"})},
         }
 
     monkeypatch.setattr(routes, "run_demo_workflow", _run_demo_workflow)
@@ -761,7 +964,79 @@ async def test_demo_workflow_reports_payment_approval_required(client, monkeypat
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "PAYMENT_APPROVAL_REQUIRED"
+    body = response.json()
+    assert body["status"] == "WAITING_APPROVAL"
+    assert body["payment_quote"]["amount"] == 150_000
+
+
+@pytest.mark.asyncio
+async def test_background_payment_approval_is_not_reported_as_failure_or_finished(monkeypatch):
+    routes._DEMO_JOBS.clear()
+    workflow_id = "workflow-waiting-approval"
+    plan = _demo_plan(with_payment=True)
+    routes._DEMO_JOBS[workflow_id] = {
+        "stage": "PLANNING",
+        "message": routes._STAGE_MESSAGES["PLANNING"],
+        "plan": None,
+        "response": None,
+        "events": [],
+        "existing_context": {},
+        "contact_profile": {},
+    }
+
+    async def _run_demo_workflow(*args, **kwargs):
+        return {
+            "planner_status": "READY",
+            "plan": plan,
+            "policy_error": "PAYMENT_APPROVAL_REQUIRED",
+            "workflow_id": workflow_id,
+            "task_results": {"T2": StandardResult.ok({"booking_id": "BOOK-001", "amount": 150_000, "currency": "VND"})},
+        }
+
+    async def _persist(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(routes, "run_demo_workflow", _run_demo_workflow)
+    monkeypatch.setattr(routes, "persist_pending_approval", _persist)
+
+    await routes._run_demo_job(
+        workflow_id,
+        "Đặt chỗ và thanh toán",
+        False,
+        {"resident": "", "transport": "", "payment": "", "property": "", "resident_services": ""},
+        "resident",
+    )
+
+    events = routes._DEMO_JOBS[workflow_id]["events"]
+    assert events[-1]["stage"] == "WAITING_APPROVAL"
+    assert all(event["stage"] not in {"EXECUTION_FAILED", "FINISHED"} for event in events)
+
+
+@pytest.mark.asyncio
+async def test_execution_failure_is_not_disguised_as_a_payment_prompt(client, monkeypatch):
+    """Lỗi thực thi phải hiện đúng là lỗi, không thành lời mời thanh toán.
+
+    Bản cũ suy ra "cần duyệt thanh toán" chỉ vì plan có chứa `pay_fee`, nên MỌI
+    lỗi thực thi đều bị che. Một `TypeError` thật trong runtime từng hiện ra
+    thành "Chờ bạn xác nhận" và giấu hoàn toàn nguyên nhân.
+    """
+    plan_with_payment = _demo_plan(with_payment=True)
+
+    async def _run_demo_workflow(*args, **kwargs):
+        return {
+            "planner_status": "READY",
+            "plan": plan_with_payment,
+            "execution_error": "Thực thi thất bại (TypeError).",
+        }
+
+    monkeypatch.setattr(routes, "run_demo_workflow", _run_demo_workflow)
+
+    response = await client.post(
+        "/api/v1/workflows/demo",
+        json={"goal": "Thanh toán phí mock", "approve_mock_payment": False},
+    )
+
+    assert response.json()["status"] == "EXECUTION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -795,3 +1070,248 @@ async def test_demo_workflow_rejects_untrusted_request_shape(client, payload):
     response = await client.post("/api/v1/workflows/demo", json=payload)
 
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# A. workflow_id không được rơi mất trên đường poll
+#
+# Regression thật: người dùng chọn Khách → Tham quan → backend hỏi thêm → điền
+# form → bấm Tiếp tục → UI báo "Dữ liệu không hợp lệ: body.goal".
+#
+# Nguyên nhân: `_demo_response()` dựng view model từ AgentState nên không có
+# workflow_id (default None). Job cache giữ nguyên None, GET trả None, UI mất
+# pendingWorkflowId rồi gửi nhầm sang /start với goal=null.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_poll_keeps_path_workflow_id_for_needs_information(client):
+    workflow_id = "wf-needs-info"
+    cached = routes._demo_response(
+        {
+            "planner_status": "NEEDS_INFORMATION",
+            "question": "Mình cần thêm ngày xem nhà.",
+            "missing_fields": ("viewing_date",),
+        },
+        payment_approved=False,
+    )
+    # Chính là hình dạng response mà `_demo_response()` sinh ra: chưa có id.
+    assert cached.workflow_id is None
+
+    routes._DEMO_JOBS[workflow_id] = {
+        "stage": "NEEDS_INFORMATION",
+        "message": "Mình cần thêm ngày xem nhà.",
+        "plan": None,
+        "response": cached,
+        "events": [],
+    }
+    try:
+        response = await client.get(f"/api/v1/workflows/demo/{workflow_id}")
+    finally:
+        routes._DEMO_JOBS.pop(workflow_id, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "NEEDS_INFORMATION"
+    # Không có dòng này thì UI mất id và lần submit sau rơi sang /start.
+    assert payload["workflow_id"] == workflow_id
+
+
+@pytest.mark.asyncio
+async def test_poll_keeps_path_workflow_id_for_cached_error_response(client):
+    workflow_id = "wf-cached-error"
+    routes._DEMO_JOBS[workflow_id] = {
+        "stage": "VALIDATION_FAILED",
+        "message": "Không thể tiếp tục.",
+        "plan": None,
+        "response": routes._demo_response({"validation_error": "missing required input"}, payment_approved=False),
+        "events": [],
+    }
+    try:
+        response = await client.get(f"/api/v1/workflows/demo/{workflow_id}")
+    finally:
+        routes._DEMO_JOBS.pop(workflow_id, None)
+
+    assert response.json()["workflow_id"] == workflow_id
+
+
+@pytest.mark.asyncio
+async def test_request_validation_error_never_leaks_field_location(client):
+    """422 không được trả `body.goal` — chuỗi đó từng hiện thẳng trong khung chat."""
+    response = await client.post("/api/v1/workflows/demo/start", json={})
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "body.goal" not in detail
+    assert "goal" not in detail
+    assert "body" not in detail
+    assert detail == "Yêu cầu chưa hợp lệ. Bạn kiểm tra lại thông tin vừa nhập giúp mình nhé."
+
+
+# ---------------------------------------------------------------------------
+# B. Policy guard: quyền theo resident-property mapping
+# ---------------------------------------------------------------------------
+
+
+def test_resident_only_denial_speaks_business_language_only() -> None:
+    response = routes._demo_response({"policy_error": "RESIDENT_ACCESS_REQUIRED"}, payment_approved=False)
+
+    assert response.status == "EXECUTION_ERROR"
+    assert response.summary == routes.RESIDENT_ACCESS_REQUIRED_MESSAGE
+    # Không lộ tên tool, mã policy, thuật ngữ schema hay tên exception.
+    for leak in (
+        "book_parking",
+        "register_vehicle",
+        "pay_fee",
+        "create_maintenance_request",
+        "schedule_move",
+        "RESIDENT_ACCESS_REQUIRED",
+        "resident-property mapping",
+        "VERIFIED",
+        "NOT_LINKED",
+    ):
+        assert leak not in response.summary
+
+
+def test_prospect_context_cannot_prove_resident_mapping() -> None:
+    """Guard đọc context do server dựng, không đọc gì từ request body."""
+    prospect = routes._DEMO_ACCOUNT_CONTEXTS["prospect"]
+    resident = routes._DEMO_ACCOUNT_CONTEXTS["resident"]
+
+    assert prospect.get("resident_verification_status") != "VERIFIED"
+    assert "resident_id" not in prospect
+    assert resident["resident_verification_status"] == "VERIFIED"
+    assert resident["resident_id"]
+
+
+def test_account_state_defaults_to_the_least_privileged_persona() -> None:
+    """Fail-closed: quên khai account_state là MẤT quyền, không phải được thêm.
+
+    Default cũ là "resident", nên một request chỉ có `goal` được cấp thẳng
+    context cư dân đã xác thực (RES-001 / căn A1201) và chạm được tới pay_fee.
+    """
+    request = DemoWorkflowRequest(goal="Đăng ký chỗ đậu xe cho xe của tôi")
+
+    assert request.account_state == "prospect"
+    context = routes._DEMO_ACCOUNT_CONTEXTS[request.account_state]
+    assert context.get("resident_verification_status") != "VERIFIED"
+    assert "resident_id" not in context
+
+
+# ---------------------------------------------------------------------------
+# Payment decision API: browser chỉ gửi decision
+# ---------------------------------------------------------------------------
+
+
+def test_payment_decision_body_accepts_only_a_decision() -> None:
+    """Không nhận amount/currency/booking_id/idempotency key từ trình duyệt.
+
+    Nhận số tiền từ client là để người dùng tự định giá dịch vụ.
+    """
+    from pydantic import ValidationError
+
+    from src.models.schemas import DemoPaymentDecisionRequest
+
+    assert DemoPaymentDecisionRequest(decision="approve").decision == "approve"
+    assert DemoPaymentDecisionRequest(decision="reject").decision == "reject"
+
+    for forbidden in ("amount", "currency", "booking_id", "idempotency_key", "workflow_id"):
+        with pytest.raises(ValidationError):
+            DemoPaymentDecisionRequest(decision="approve", **{forbidden: "x"})
+
+    with pytest.raises(ValidationError):
+        DemoPaymentDecisionRequest(decision="maybe")
+
+
+@pytest.mark.asyncio
+async def test_successful_payment_decision_replaces_stale_waiting_stage(monkeypatch) -> None:
+    workflow_id = "workflow-decision-cache"
+    routes._DEMO_JOBS[workflow_id] = {
+        "stage": "WAITING_APPROVAL",
+        "message": "Đang chờ bạn xác nhận thanh toán.",
+        "events": [],
+        "response": routes.DemoWorkflowResponse(status="WAITING_APPROVAL"),
+    }
+
+    async def _reject(_workflow_id: str) -> None:
+        assert _workflow_id == workflow_id
+
+    monkeypatch.setattr(routes, "reject_payment", _reject)
+    try:
+        response = await routes.decide_demo_payment(
+            workflow_id,
+            routes.DemoPaymentDecisionRequest(decision="reject"),
+        )
+
+        job = routes._DEMO_JOBS[workflow_id]
+        assert response.status == "FAILED"
+        assert job["response"] is None
+        assert job["stage"] == "FINISHED"
+        assert "chờ" not in job["message"].casefold()
+    finally:
+        routes._DEMO_JOBS.pop(workflow_id, None)
+
+
+def test_awaiting_approval_response_carries_the_quote() -> None:
+    from src.common.results import StandardResult
+
+    response = routes._demo_response(
+        {
+            "policy_error": "PAYMENT_APPROVAL_REQUIRED",
+            "workflow_id": "wf-1",
+            "task_results": {"T2": StandardResult.ok({"booking_id": "BOOK-001", "amount": 150_000, "currency": "VND"})},
+        },
+        payment_approved=False,
+    )
+
+    assert response.status == "WAITING_APPROVAL"
+    assert response.workflow_id == "wf-1"
+    assert response.payment_quote == {
+        "booking_id": "BOOK-001",
+        "amount": 150_000,
+        "currency": "VND",
+        "description": "Phí đặt chỗ đỗ xe",
+    }
+    # Số tiền hiển thị đúng định dạng Việt Nam, không lộ thuật ngữ kỹ thuật.
+    assert "150.000 VND" in response.summary
+    for leak in ("pay_fee", "InputRef", "PostgreSQL", "AWAITING", "booking_id"):
+        assert leak not in response.summary
+
+
+def test_approval_decision_status_is_a_separate_axis_from_workflow_status() -> None:
+    """AWAITING/APPROVED/REJECTED mô tả QUYẾT ĐỊNH, không phải workflow.
+
+    Hai tập giá trị này cố tình khác nhau; test khoá lại để không ai gộp nhầm.
+    """
+    from src.common.enums import WorkflowStatus
+    from src.orchestration.payment_approval import APPROVED, AWAITING, REJECTED
+
+    decision_values = {AWAITING, APPROVED, REJECTED}
+    workflow_values = {status.value for status in WorkflowStatus}
+
+    assert decision_values.isdisjoint(workflow_values)
+
+
+def test_public_stage_messages_are_free_of_internal_vocabulary() -> None:
+    """Toàn bộ bảng message công khai, không chỉ những stage test khác chạm tới.
+
+    Bản trước đưa nguyên văn "LLM đang phân tích", "Agent đã tạo TaskPlan",
+    "Validator đang kiểm tra dependency, allowlist", "Executor đang gọi các
+    dịch vụ" vào `events[].message` — người dùng cuối không có cách nào hiểu,
+    và đó cũng là chi tiết nội bộ không nên lộ.
+    """
+    jargon = (
+        "LLM",
+        "TaskPlan",
+        "Validator",
+        "Executor",
+        "Connector",
+        "PostgreSQL",
+        "InputRef",
+        "dependency",
+        "allowlist",
+        "workflow",
+    )
+    for stage, message in routes._STAGE_MESSAGES.items():
+        for word in jargon:
+            assert word.lower() not in message.lower(), f"{stage}: {word}"

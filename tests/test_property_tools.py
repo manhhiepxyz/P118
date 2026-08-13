@@ -113,8 +113,25 @@ def test_project_actions_reject_a_property_unit_id(tool: str, input_data: dict) 
         tasks=[Task(task_id="T1", tool=tool, depends_on=[], input=input_data)],
     )
 
-    with pytest.raises(ValueError, match="missing required input"):
+    # Trước đây plan này bị chặn GIÁN TIẾP vì thiếu `project_id`. Contract mới
+    # từ chối thẳng `property_id` vì nó không thuộc input của tool cấp dự án —
+    # mạnh hơn: plan có đủ `project_id` mà vẫn kèm `property_id` cũng không lọt.
+    with pytest.raises(ValueError, match="unexpected input field 'property_id'"):
         TaskPlanValidator.validate(plan)
+
+    with_project = TaskPlan(
+        goal="Project workflow",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool=tool,
+                depends_on=[],
+                input={**input_data, "project_id": "PRJ-001"},
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="unexpected input field 'property_id'"):
+        TaskPlanValidator.validate(with_project)
 
 
 def test_schema_still_rejects_property_transaction_tool() -> None:

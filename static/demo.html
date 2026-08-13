@@ -3,876 +3,1072 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>P-118 · Workflow Demo — Trợ lý dịch vụ cư dân</title>
+    <title>P-118 · Trợ lý dịch vụ cư dân</title>
     <style>
       :root {
-        color-scheme: light;
-        --bg: #f5f7fb;
+        --bg: #f7f7f9;
         --surface: #ffffff;
-        --surface-2: #f8fafc;
-        --text: #172033;
-        --muted: #687386;
-        --line: #e4e8f0;
-        --blue: #377cf6;
-        --blue-soft: #eef5ff;
-        --green: #19a66a;
-        --green-soft: #eaf9f1;
-        --amber: #d98a13;
-        --amber-soft: #fff6df;
-        --red: #dc4c4c;
-        --red-soft: #fff0f0;
-        --shadow: 0 16px 40px rgba(29, 43, 75, 0.08);
+        --surface-2: #f4f4f7;
+        --surface-3: #ececf2;
+        --line: #e3e3ea;
+        --line-2: #d3d3de;
+
+        --ink: #17171f;
+        --ink-2: #55555f;
+        --ink-3: #8b8b98;
+
+        --brand: #4338ca;
+        --brand-ink: #322aa0;
+        --brand-soft: #eeecfb;
+        --brand-line: #c9c3f2;
+
+        --ok: #0a6c45;
+        --ok-soft: #e8f6ef;
+        --ok-line: #b8e2cd;
+        --warn: #8a5300;
+        --warn-soft: #fdf3e2;
+        --warn-line: #efd39a;
+        --err: #a3231b;
+        --err-soft: #fdeeed;
+        --err-line: #f0c4c1;
+
+        --r: 10px;
+        --r-lg: 14px;
+        --shadow-1: 0 1px 2px rgba(16, 16, 32, 0.06);
       }
 
       * { box-sizing: border-box; }
-      body { margin: 0; min-height: 100vh; color: var(--text); background: var(--bg); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      button, input, select, textarea { font: inherit; }
-      button { cursor: pointer; }
-
-      .app { display: grid; grid-template-columns: 340px minmax(0, 1fr); min-height: 100vh; }
-      .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 18px; padding: 20px 18px; border-right: 1px solid var(--line); background: rgba(255, 255, 255, 0.96); overflow-y: auto; }
-      .brand { display: flex; align-items: center; gap: 10px; }
-      .brand .btn { margin-left: auto; min-height: 32px; padding-inline: 10px; }
-      .brand-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; color: white; background: linear-gradient(145deg, #2469e8, #5b9cff); font-weight: 850; }
-      .brand-name { font-size: 14px; font-weight: 800; }
-      .brand-note { color: var(--muted); font-size: 10px; }
-      .side-label { margin: 0 0 9px; color: #8a94a5; font-size: 10px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
-
-      .account { padding: 13px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface-2); }
-      .account-head { display: flex; align-items: center; gap: 10px; }
-      .avatar { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; color: #1e5ac9; background: #deebff; font-size: 12px; font-weight: 850; }
-      .account-name { font-size: 13px; font-weight: 780; }
-      .linked { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; color: var(--green); font-size: 9px; font-weight: 750; }
-      .linked::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
-      .linked.unlinked { color: #a56a13; }
-      .linked.unlinked::before { background: #d7952d; }
-      .account-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 13px; }
-      .account-item span { display: block; color: #98a0ae; font-size: 9px; }
-      .account-item strong { display: block; margin-top: 3px; font-size: 11px; font-weight: 700; }
-      .account-actions { display: flex; gap: 7px; margin-top: 12px; }
-      .persona-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 12px; padding: 4px; border-radius: 11px; background: #e9edf4; }
-      .persona-switch button { min-height: 30px; border: 0; border-radius: 8px; color: #68758a; background: transparent; font-size: 9px; font-weight: 750; }
-      .persona-switch button.active { color: #245fc7; background: white; box-shadow: 0 2px 8px rgba(42,55,78,.09); }
-      .service-group { display: grid; gap: 8px; }
-      .service-group + .service-group { margin-top: 14px; }
-      .service-group-title { display: flex; justify-content: space-between; align-items: center; color: #647187; font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
-      .service-group-title span { color: #9aa4b3; font-size: 8px; font-weight: 650; letter-spacing: 0; text-transform: none; }
-      .service-block.coming { opacity: .66; }
-      .service-block.coming .service { position: relative; padding-right: 72px; cursor: default; }
-      .soon { position: absolute; top: 10px; right: 9px; padding: 3px 6px; border-radius: 999px; color: #7c8799; background: #eef1f5; font-size: 7px; font-weight: 800; white-space: nowrap; }
       [hidden] { display: none !important; }
-
-      .service-list { display: grid; gap: 8px; }
-      .service-block { overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: white; transition: 160ms ease; }
-      .service-block.open { border-color: #a9c7ff; background: var(--blue-soft); box-shadow: inset 0 0 0 1px rgba(55,124,246,.08); }
-      .service { display: grid; grid-template-columns: 18px 34px 1fr; align-items: center; gap: 9px; padding: 10px; border: 1px solid var(--line); border-radius: 13px; background: white; cursor: pointer; transition: 160ms ease; }
-      .service-block .service { border: 0; border-radius: 0; background: transparent; }
-      .service input { width: 16px; height: 16px; accent-color: var(--blue); }
-      .service-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; color: #3975dc; background: #edf4ff; font-size: 15px; }
-      .service-title { font-size: 11px; font-weight: 760; line-height: 1.25; }
-      .service-desc { margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.35; }
-      .dependency { display: none; margin-top: 8px; padding: 9px 10px; border-radius: 10px; color: #875916; background: var(--amber-soft); font-size: 9px; line-height: 1.45; }
-      .dependency.show { display: block; }
-      .service-fields { display: none; grid-template-columns: 1fr; gap: 8px; padding: 0 10px 11px; }
-      .service-block.open .service-fields { display: grid; }
-      .service-fields:empty { display: none !important; }
-      .service-fields .field.full { grid-column: 1 / -1; }
-      .service-note { grid-column: 1 / -1; padding: 8px 9px; border-radius: 9px; color: #526076; background: rgba(255,255,255,.75); font-size: 9px; line-height: 1.45; }
-      .combined-form { margin-top: 12px; padding: 12px; border: 1px solid #b9cff8; border-radius: 14px; background: #f6f9ff; }
-      .combined-form h3 { margin: 0; font-size: 11px; }
-      .combined-form > p { margin: 4px 0 11px; color: var(--muted); font-size: 9px; }
-      #combinedSections { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
-      .missing-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
-      .combined-section + .combined-section { margin-top: 12px; padding-top: 11px; border-top: 1px solid #dce6f7; }
-      .combined-section-title { margin-bottom: 8px; color: #315fba; font-size: 9px; font-weight: 800; }
-      .combined-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-      .side-progress { padding: 11px 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-2); }
-      .progress-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #59667a; font-size: 9px; }
-      .progress-line strong { color: var(--text); font-size: 10px; }
-
-      .workspace { min-width: 0; padding: 18px 22px 40px; }
-      .topbar-note { margin-top: 2px; color: var(--muted); font-size: 9px; }
-      .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 7px 10px; color: #526076; background: #f2f5f9; font-size: 9px; font-weight: 700; }
-      .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
-
-      .canvas { position: relative; max-width: 1440px; min-height: 410px; margin: auto; overflow: hidden; border: 1px solid var(--line); border-radius: 22px; background-color: #fbfcfe; background-image: radial-gradient(#dce2eb 1px, transparent 1px); background-size: 20px 20px; box-shadow: var(--shadow); }
-      .canvas::after { content: "READ-ONLY WORKFLOW"; position: absolute; right: 18px; bottom: 14px; color: #c1c8d3; font: 750 9px/1 ui-monospace, monospace; letter-spacing: .08em; }
-      .workflow-head { position: relative; z-index: 2; padding: 18px 22px 15px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.92); }
-      .goal-kicker { color: var(--blue); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-      .goal-text { margin: 6px 0 0; max-width: 720px; font-size: 16px; font-weight: 760; line-height: 1.45; }
-      .progress { height: 6px; margin-top: 7px; overflow: hidden; border-radius: 999px; background: #e8ecf2; }
-      .progress > div { width: 0; height: 100%; border-radius: inherit; background: var(--blue); transition: width 350ms ease; }
-
-      .canvas-body { position: relative; z-index: 1; padding: 32px 28px; }
-      .system-strip { display: flex; align-items: center; gap: 7px; margin-bottom: 28px; color: #7c8799; font-size: 9px; }
-      .system-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 999px; padding: 6px 8px; background: rgba(255,255,255,.8); }
-      .system-chip.active { color: #2364da; border-color: #a9c7ff; background: var(--blue-soft); }
-      .system-chip.done { color: var(--green); border-color: #b7e4ce; background: var(--green-soft); }
-      .agent-narration { margin: -15px 0 20px; padding: 10px 12px; border-left: 3px solid var(--blue); border-radius: 0 10px 10px 0; color: #38506f; background: rgba(238,245,255,.9); font-size: 10px; line-height: 1.5; }
-
-      .flow-scroll { overflow-x: auto; padding: 12px 4px 24px; }
-      .flow { display: flex; align-items: center; width: max-content; min-width: 100%; }
-      .node { position: relative; width: 210px; min-height: 154px; padding: 15px; border: 1px solid var(--line); border-radius: 17px; background: rgba(255,255,255,.96); box-shadow: 0 10px 25px rgba(37,49,77,.06); transition: 220ms ease; }
-      .node-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-      .node-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; color: #4d668e; background: #f1f4f8; }
-      .state { border-radius: 999px; padding: 5px 7px; color: #8490a2; background: #f1f3f6; font: 750 8px/1 ui-monospace, monospace; }
-      .node-title { margin-top: 13px; font-size: 13px; font-weight: 780; }
-      .node-action { margin-top: 6px; min-height: 32px; color: var(--muted); font-size: 9px; line-height: 1.5; }
-      .node-auto { margin-top: 8px; color: var(--amber); font-size: 8px; font-weight: 700; }
-      .node.running { border-color: #8eb8ff; box-shadow: 0 0 0 3px rgba(55,124,246,.09), 0 14px 30px rgba(55,124,246,.12); animation: breathe 1.4s ease-in-out infinite alternate; }
-      .node.running .node-icon, .node.running .state { color: #165cd3; background: var(--blue-soft); }
-      .node.success { border-color: #b4e3ca; }
-      .node.success .node-icon, .node.success .state { color: var(--green); background: var(--green-soft); }
-      .node.failed { border-color: #f0b4b4; }
-      .node.failed .node-icon, .node.failed .state { color: var(--red); background: var(--red-soft); }
-      .node.waiting-approval { border-color: #edca85; }
-      .node.waiting-approval .node-icon, .node.waiting-approval .state { color: var(--amber); background: var(--amber-soft); }
-      .node.cancelled { opacity: .55; }
-      @keyframes breathe { to { transform: translateY(-2px); } }
-      .connector { position: relative; flex: 0 0 52px; height: 2px; background: #d9dee7; }
-      .connector::after { content: ""; position: absolute; right: -1px; top: -4px; border-left: 7px solid #cbd2dd; border-top: 5px solid transparent; border-bottom: 5px solid transparent; }
-      .connector.active { overflow: hidden; background: #c8d9f7; }
-      .connector.active::before { content: ""; position: absolute; inset: 0; width: 45%; background: linear-gradient(90deg, transparent, var(--blue), transparent); animation: travel 1s linear infinite; }
-      .connector.parallel { height: 0; border-top: 2px dashed #9bb8ea; background: transparent; }
-      .connector.parallel::after { content: "PARALLEL"; top: -17px; right: 0; border: 0; color: #5e82c5; font-size: 7px; font-weight: 850; letter-spacing: .04em; }
-      @keyframes travel { from { transform: translateX(-100%); } to { transform: translateX(240%); } }
-
-      .empty { display: grid; place-items: center; min-height: 250px; color: var(--muted); text-align: center; }
-      .empty strong { display: block; color: #46536a; font-size: 14px; }
-      .empty span { display: block; margin-top: 8px; font-size: 10px; }
-      .example-flow { margin-top: 18px; color: #a4adba; font-size: 9px; }
-
-      .below { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; max-width: 1440px; margin: 16px auto 0; align-items: stretch; }
-      .panel { border: 1px solid var(--line); border-radius: 17px; background: white; box-shadow: 0 10px 28px rgba(29,43,75,.05); }
-      .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-      .panel-title { font-size: 11px; font-weight: 780; }
-      .panel-body { padding: 15px 16px; }
-
-      .field { display: grid; gap: 5px; }
-      .field label { color: #707b8c; font-size: 9px; font-weight: 650; }
-      .field input, .field select, .field textarea { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 10px; padding: 0 10px; outline: 0; color: var(--text); background: var(--surface-2); font-size: 10px; }
-      .field textarea { min-height: 72px; padding-block: 9px; resize: vertical; line-height: 1.45; }
-      .field input:focus, .field select:focus, .field textarea:focus { border-color: #8eb8ff; box-shadow: 0 0 0 3px rgba(55,124,246,.08); }
-      .field .required { color: var(--red); }
-      .field-help { margin-top: -2px; color: #8792a4; font-size: 8px; line-height: 1.35; }
-      .plan-list { display: grid; gap: 7px; }
-      .plan-item { display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 10px; background: var(--surface-2); font-size: 10px; }
-      .plan-number { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; color: #2163d5; background: #e8f1ff; font-size: 9px; font-weight: 800; }
-      .auto-note { margin-top: 9px; padding: 8px 9px; border-radius: 9px; color: #865d1f; background: var(--amber-soft); font-size: 9px; }
-      .chat-panel { display: flex; flex-direction: column; min-height: 178px; padding: 12px; border-color: #cad8ee; }
-      .conversation { display: flex; flex-direction: column; gap: 8px; width: min(760px, 100%); height: 210px; margin: 0 auto 9px; padding-right: 6px; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
-      .conversation .message { flex: 0 0 auto; }
-      .message { width: fit-content; max-width: min(620px, 88%); padding: 10px 12px; border-radius: 14px; font-size: 11px; line-height: 1.5; }
-      .message.assistant { align-self: flex-start; color: #273750; background: #eef4ff; border-bottom-left-radius: 4px; }
-      .message.user { align-self: flex-end; color: white; background: var(--blue); border-bottom-right-radius: 4px; }
-      .message.processing { display: flex; align-items: center; gap: 9px; min-width: 220px; }
-      .processing-copy { display: grid; gap: 2px; }
-      .processing-copy small { color: #70819a; font-size: 8px; }
-      .thinking-dots { display: inline-flex; gap: 3px; }
-      .thinking-dots i { width: 5px; height: 5px; border-radius: 50%; background: #4d83e4; animation: thinking 1.1s infinite ease-in-out; }
-      .thinking-dots i:nth-child(2) { animation-delay: .16s; }
-      .thinking-dots i:nth-child(3) { animation-delay: .32s; }
-      @keyframes thinking { 0%, 70%, 100% { transform: translateY(0); opacity: .35; } 35% { transform: translateY(-4px); opacity: 1; } }
-      .message-role { display: block; margin-bottom: 3px; font-size: 8px; font-weight: 800; letter-spacing: .06em; opacity: .7; text-transform: uppercase; }
-      .chat-dock { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; width: min(760px, 100%); margin: 0 auto; padding: 8px; border: 1px solid #cfd8e7; border-radius: 16px; background: var(--surface-2); box-shadow: 0 10px 25px rgba(37,49,77,.06); }
-      .chat-dock input { min-width: 0; border: 0; outline: 0; padding: 0 8px; color: var(--text); background: transparent; font-size: 11px; }
-      .chat-actions { display: flex; gap: 7px; }
-
-      .activity { display: grid; gap: 11px; max-height: 210px; overflow-y: auto; }
-      .activity-item { display: grid; grid-template-columns: 48px 8px 1fr; gap: 8px; align-items: start; font-size: 9px; }
-      .activity-time { color: #a0a8b5; font: 650 8px/1.4 ui-monospace, monospace; }
-      .activity-dot { width: 7px; height: 7px; margin-top: 2px; border-radius: 50%; background: #bdc5d1; }
-      .activity-item.success .activity-dot { background: var(--green); }
-      .activity-item.running .activity-dot { background: var(--blue); box-shadow: 0 0 0 4px rgba(55,124,246,.1); }
-      .activity-item.failed .activity-dot { background: var(--red); }
-      .storage-proof { margin-top: 12px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; color: #687386; background: var(--surface-2); font-size: 9px; line-height: 1.45; }
-      .storage-proof.saved { color: #126b45; border-color: #b8e2cc; background: var(--green-soft); }
-
-      .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-      .btn { min-height: 36px; border: 1px solid var(--line); border-radius: 10px; padding: 0 13px; color: #4d5a70; background: white; font-size: 10px; font-weight: 750; }
-      .btn:hover { border-color: #adc8f8; }
-      .btn.primary { color: white; border-color: var(--blue); background: var(--blue); box-shadow: 0 8px 18px rgba(55,124,246,.2); }
-      .btn.danger { color: var(--red); }
-      .btn:disabled { cursor: wait; opacity: .55; }
-
-      .approval { display: none; margin-top: 14px; padding: 14px; border: 1px solid #efcf91; border-radius: 13px; background: var(--amber-soft); }
-      .approval.show { display: block; }
-      .approval-title { font-size: 11px; font-weight: 800; }
-      .approval-text { margin-top: 6px; color: #795b2b; font-size: 9px; line-height: 1.5; }
-      .result { display: none; max-width: 1440px; margin: 16px auto 0; }
-      .result.show { display: block; }
-      .result-summary { font-size: 13px; font-weight: 720; line-height: 1.6; }
-      .result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 9px; margin-top: 12px; }
-      .result-step { padding: 11px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2); }
-      .result-step strong { display: block; font-size: 10px; }
-      .result-step span { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.5; }
-      .toast { position: fixed; right: 20px; bottom: 20px; z-index: 10; transform: translateY(20px); opacity: 0; padding: 11px 14px; border: 1px solid #b8e2cc; border-radius: 11px; color: #126b45; background: white; box-shadow: var(--shadow); font-size: 10px; transition: 200ms ease; pointer-events: none; }
-      .toast.show { transform: translateY(0); opacity: 1; }
-
-      @media (max-width: 980px) {
-        .app { grid-template-columns: 300px minmax(0, 1fr); }
-        .below { grid-template-columns: 1fr; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
       }
-      @media (max-width: 720px) {
-        .app { display: block; }
-        .sidebar { position: static; width: auto; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-        .workspace { padding: 12px; }
-        .service-fields { padding-left: 10px; }
-        .flow { flex-direction: column; align-items: stretch; width: auto; }
-        .node { width: 100%; }
-        .connector { width: 2px; height: 34px; margin: auto; flex-basis: 34px; }
-        .connector::after { right: -4px; top: auto; bottom: -1px; border-top: 7px solid #cbd2dd; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 0; }
-        .chat-dock { grid-template-columns: 1fr; }
-        .chat-actions { justify-content: flex-end; }
+      button { font: inherit; cursor: pointer; }
+      button:disabled { cursor: not-allowed; opacity: .55; }
+      input, select, textarea { font: inherit; color: inherit; }
+      :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 4px; }
+
+      .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); height: 100vh; }
+
+      /* ---------------- Sidebar ---------------- */
+      .sidebar {
+        background: var(--surface); border-right: 1px solid var(--line);
+        padding: 16px 12px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto;
+      }
+      .brand { display: flex; align-items: center; gap: 9px; padding: 2px 6px 0; }
+      .brand-mark {
+        width: 30px; height: 30px; border-radius: 8px; background: var(--brand);
+        color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 12px;
+      }
+      .brand-name { font-weight: 650; font-size: 14.5px; letter-spacing: -.01em; }
+      .brand-sub { font-size: 11.5px; color: var(--ink-3); }
+
+      .nav { display: flex; flex-direction: column; gap: 1px; }
+      .nav-label {
+        font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+        color: var(--ink-3); padding: 0 8px 6px;
+      }
+      .nav button {
+        display: flex; align-items: center; gap: 9px; padding: 7px 8px; width: 100%;
+        border: 0; border-radius: 7px; background: transparent;
+        color: var(--ink-2); font-size: 13.5px; text-align: left;
+      }
+      .nav button:hover { background: var(--surface-2); color: var(--ink); }
+      .nav button[aria-current="page"] { background: var(--brand-soft); color: var(--brand-ink); font-weight: 600; }
+      .nav .ico { width: 16px; text-align: center; font-size: 13px; flex: none; }
+      .nav .count {
+        margin-left: auto; background: var(--warn); color: #fff;
+        font-size: 11px; font-weight: 700; padding: 0 6px; border-radius: 999px; min-width: 19px; text-align: center;
+      }
+
+      .side-foot { margin-top: auto; }
+      .acct { background: var(--surface-2); border-radius: var(--r); padding: 10px; }
+      .acct-row { display: flex; gap: 9px; align-items: center; }
+      .avatar {
+        width: 30px; height: 30px; border-radius: 50%; flex: none;
+        background: var(--brand-soft); color: var(--brand-ink);
+        display: grid; place-items: center; font-weight: 650; font-size: 12px;
+      }
+      .acct-name { font-size: 13px; font-weight: 600; }
+      .acct-meta { font-size: 11.5px; color: var(--ink-2); }
+      .persona { display: flex; gap: 5px; margin-top: 9px; }
+      .persona button {
+        flex: 1; padding: 5px 6px; font-size: 11.5px; font-weight: 550;
+        border-radius: 6px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink-2);
+      }
+      .persona button[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+
+      /* ---------------- Main ---------------- */
+      .main { display: flex; flex-direction: column; min-width: 0; }
+      .topbar {
+        height: 56px; flex: none; border-bottom: 1px solid var(--line); background: var(--surface);
+        display: flex; align-items: center; gap: 16px; padding: 0 24px;
+      }
+      .crumb { font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .crumb b { color: var(--ink); font-weight: 600; }
+      .crumb button { border: 0; background: none; color: var(--brand-ink); padding: 0; font-size: 13px; }
+
+      .composer {
+        margin-left: auto; display: flex; align-items: center; gap: 8px;
+        background: var(--surface-2); border: 1px solid var(--line-2);
+        border-radius: 8px; padding: 0 10px; height: 36px; width: min(420px, 40vw);
+      }
+      .composer:focus-within { border-color: var(--brand); background: var(--surface); }
+      .composer input { border: 0; background: transparent; outline: none; flex: 1; font-size: 13.5px; }
+      .composer input::placeholder { color: var(--ink-3); }
+      .composer kbd {
+        font: 600 10.5px/1 ui-monospace, monospace; color: var(--ink-3);
+        border: 1px solid var(--line-2); border-radius: 4px; padding: 3px 5px; background: var(--surface);
+      }
+
+      .scroll { flex: 1; overflow-y: auto; padding: 22px 24px 44px; }
+      .wrap { max-width: 1100px; }
+
+      .sec { margin-bottom: 26px; }
+      .sec-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+      .sec-title { font-size: 11.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+
+      .greet { margin-bottom: 22px; }
+      .greet h1 { margin: 0 0 6px; font-size: 22px; font-weight: 680; letter-spacing: -.02em; }
+      .verify {
+        display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 550;
+        background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok-line);
+        padding: 3px 9px; border-radius: 999px;
+      }
+      .verify.guest { background: var(--surface-2); color: var(--ink-2); border-color: var(--line-2); }
+
+      /* ---------------- Cần bạn xử lý ---------------- */
+      .attention {
+        background: var(--warn-soft); border: 1px solid var(--warn-line);
+        border-left: 3px solid var(--warn); border-radius: var(--r-lg);
+        padding: 14px 16px; box-shadow: var(--shadow-1); margin-bottom: 12px;
+      }
+      .attention-head {
+        display: flex; align-items: center; gap: 7px; margin-bottom: 10px;
+        font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--warn);
+      }
+      .att-title { font-size: 15px; font-weight: 640; margin-bottom: 3px; }
+      .att-body { font-size: 13.5px; color: var(--ink-2); }
+      .amount { font-size: 19px; font-weight: 700; letter-spacing: -.01em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+      .ro { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--ink-3); margin-top: 5px; }
+      .att-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+      .btn { border-radius: 8px; padding: 8px 14px; font-size: 13.5px; font-weight: 600; border: 1px solid transparent; }
+      .btn.primary { background: var(--brand); color: #fff; }
+      .btn.primary:hover:not(:disabled) { background: var(--brand-ink); }
+      .btn.ghost { background: var(--surface); border-color: var(--line-2); color: var(--ink-2); }
+      .btn.ghost:hover:not(:disabled) { background: var(--surface-2); }
+
+      /* ---------------- Hàng workflow ---------------- */
+      .rows { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+      .row {
+        display: grid; grid-template-columns: 26px minmax(0,1fr) 180px 116px;
+        gap: 14px; align-items: center; padding: 13px 16px; width: 100%;
+        border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left;
+      }
+      .row:last-child { border-bottom: 0; }
+      .row:hover { background: var(--surface-2); }
+      .row-title { font-size: 14.5px; font-weight: 600; display: block; }
+      .row-step { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; display: block; }
+      .row-meta { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+      .mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+      .mark.run { background: var(--brand-soft); color: var(--brand-ink); }
+      .mark.ok { background: var(--ok-soft); color: var(--ok); }
+      .mark.wait { background: var(--warn-soft); color: var(--warn); }
+      .mark.err { background: var(--err-soft); color: var(--err); }
+      .mark.idle { background: var(--surface-3); color: var(--ink-3); }
+
+      .bar { height: 5px; background: var(--surface-3); border-radius: 99px; overflow: hidden; display: block; }
+      .bar > i { display: block; height: 100%; background: var(--brand); border-radius: 99px; transition: width .3s ease; }
+      .bar.ok > i { background: var(--ok); }
+
+      .pill {
+        display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
+        padding: 2px 8px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap;
+      }
+      .pill.run { background: var(--brand-soft); color: var(--brand-ink); border-color: var(--brand-line); }
+      .pill.ok { background: var(--ok-soft); color: var(--ok); border-color: var(--ok-line); }
+      .pill.wait { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
+      .pill.err { background: var(--err-soft); color: var(--err); border-color: var(--err-line); }
+      .pill.idle { background: var(--surface-2); color: var(--ink-2); border-color: var(--line-2); }
+
+      /* ---------------- Thẻ mục tiêu ---------------- */
+      .goals { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+      .goal {
+        background: var(--surface); border: 1px solid var(--line); border-radius: var(--r);
+        padding: 13px 12px; text-align: left; display: flex; flex-direction: column; gap: 8px; min-height: 92px;
+      }
+      .goal:hover:not(.locked) { border-color: var(--brand-line); background: var(--brand-soft); }
+      .goal .gi {
+        width: 28px; height: 28px; border-radius: 7px; background: var(--brand-soft);
+        color: var(--brand-ink); display: grid; place-items: center; font-size: 13px;
+      }
+      .goal .gt { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+      .goal.locked { background: var(--surface-2); border-style: dashed; cursor: not-allowed; }
+      .goal.locked .gi { background: var(--surface-3); color: var(--ink-3); }
+      .goal.locked .gt { color: var(--ink-3); }
+      .lock-note { font-size: 11px; color: var(--ink-3); display: flex; align-items: center; gap: 4px; }
+
+      .empty {
+        background: var(--surface); border: 1px dashed var(--line-2); border-radius: var(--r-lg);
+        padding: 22px; text-align: center; color: var(--ink-2); font-size: 13.5px;
+      }
+
+      /* ---------------- Workflow detail ---------------- */
+      .wf-head { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 18px 20px; margin-bottom: 18px; }
+      .wf-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .wf-title { font-size: 20px; font-weight: 670; letter-spacing: -.02em; }
+      .objective {
+        margin: 10px 0 14px; padding: 9px 12px; background: var(--surface-2);
+        border-left: 2px solid var(--line-2); border-radius: 0 7px 7px 0;
+        font-size: 13.5px; color: var(--ink-2); font-style: italic;
+      }
+      .wf-progress { display: flex; align-items: center; gap: 12px; }
+      .wf-progress .bar { flex: 1; }
+      .wf-cur { font-size: 13.5px; color: var(--ink-2); margin-bottom: 9px; }
+      .wf-cur b { color: var(--ink); font-weight: 600; }
+
+      .cols { display: grid; grid-template-columns: minmax(0,1fr) 360px; gap: 18px; align-items: start; }
+      .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+      .panel-head {
+        padding: 12px 16px; border-bottom: 1px solid var(--line);
+        font-size: 11.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3);
+      }
+
+      ol.steps { list-style: none; margin: 0; padding: 6px 0; }
+      ol.steps li { display: flex; gap: 12px; padding: 11px 16px; }
+      .s-mark {
+        width: 22px; height: 22px; border-radius: 50%; flex: none; margin-top: 1px;
+        display: grid; place-items: center; font-size: 11px; font-weight: 700;
+        background: var(--surface-3); color: var(--ink-3);
+      }
+      li.done .s-mark { background: var(--ok-soft); color: var(--ok); }
+      li.cur .s-mark { background: var(--brand-soft); color: var(--brand-ink); }
+      li.wait .s-mark { background: var(--warn-soft); color: var(--warn); }
+      li.err .s-mark { background: var(--err-soft); color: var(--err); }
+      .s-name { font-size: 14px; font-weight: 550; display: block; }
+      li.cur .s-name { font-weight: 650; }
+      li.todo .s-name { color: var(--ink-3); }
+      .s-note { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; display: block; }
+      .kv { margin: 7px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12.5px; }
+      .kv dt { color: var(--ink-3); }
+      .kv dd { margin: 0; color: var(--ink); }
+
+      ul.log { list-style: none; margin: 0; padding: 6px 0; }
+      ul.log li { display: flex; gap: 10px; padding: 8px 16px; font-size: 13px; color: var(--ink-2); }
+      ul.log .lm { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); margin-top: 7px; flex: none; }
+      ul.log li:last-child { color: var(--ink); font-weight: 550; }
+      ul.log li:last-child .lm { background: var(--brand); }
+
+      /* ---------------- Form bổ sung ---------------- */
+      .fields { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin-top: 12px; }
+      .field { display: flex; flex-direction: column; gap: 5px; }
+      .field.full { grid-column: 1 / -1; }
+      .field label { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+      .field input, .field select, .field textarea {
+        border: 1px solid var(--line-2); border-radius: 7px; padding: 8px 10px;
+        background: var(--surface); font-size: 13.5px; width: 100%;
+      }
+      .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--brand); outline: none; }
+      .field-hint { font-size: 11.5px; color: var(--ink-3); }
+
+      .toast {
+        position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+        background: var(--ink); color: #fff; padding: 9px 16px; border-radius: 8px;
+        font-size: 13px; box-shadow: 0 8px 24px -8px rgba(0,0,0,.4); z-index: 50;
+      }
+
+      .spinner {
+        width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent;
+        border-radius: 50%; display: inline-block; animation: spin .7s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      @media (max-width: 1180px) {
+        .goals { grid-template-columns: repeat(3, 1fr); }
+        .cols { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 900px) {
+        .app { grid-template-columns: 1fr; height: auto; }
+        .sidebar { flex-direction: row; align-items: center; gap: 14px; overflow-x: auto; }
+        .side-foot { margin: 0; }
+        .goals { grid-template-columns: repeat(2, 1fr); }
+        .fields { grid-template-columns: 1fr; }
+        .row { grid-template-columns: 26px 1fr; }
+        .row > :nth-child(3), .row > :nth-child(4) { display: none; }
       }
     </style>
   </head>
   <body>
     <div class="app">
+      <!-- ============================ Sidebar ============================ -->
       <aside class="sidebar">
-        <div class="brand"><div class="brand-mark">P</div><div><div class="brand-name">P-118</div><div class="brand-note">Trợ lý dịch vụ cư dân</div></div><button class="btn" id="newDemo" type="button">Làm mới</button></div>
-
-        <section>
-          <p class="side-label">Tài khoản demo</p>
-          <div class="account">
-            <div class="account-head"><div class="avatar">NA</div><div><div class="account-name">Nguyễn Văn A</div><div class="linked" id="mappingStatus">Đã xác minh cư dân</div></div></div>
-            <div class="account-grid">
-              <div class="account-item"><span>Căn hộ</span><strong id="accountApartment">A1201</strong></div>
-              <div class="account-item"><span>Vai trò</span><strong id="accountRole">Cư dân</strong></div>
-              <div class="account-item"><span>Liên kết</span><strong id="accountMapping">VERIFIED</strong></div>
-              <div class="account-item"><span>User ID</span><strong>USER-001</strong></div>
-            </div>
-            <div class="persona-switch" aria-label="Chọn trạng thái tài khoản demo"><button class="persona" data-persona="prospect" type="button">Chưa có nhà</button><button class="persona active" data-persona="resident" type="button">Đã là cư dân</button></div>
+        <div class="brand">
+          <div class="brand-mark">P118</div>
+          <div>
+            <div class="brand-name">P-118</div>
+            <div class="brand-sub">Trợ lý dịch vụ cư dân</div>
           </div>
-        </section>
+        </div>
 
-        <section>
-          <p class="side-label">Dịch vụ theo trạng thái tài khoản</p>
-          <!-- Thông tin Agent chưa có · TỰ ĐỘNG TẠO TỪ FORM trong dịch vụ tương ứng. -->
-          <div class="service-list">
-            <div class="service-group" id="residentServices">
-              <div class="service-group-title">Dịch vụ cư dân <span>Ưu tiên</span></div>
-              <!-- User-facing parking expands internally to data-service="vehicle" then data-service="parking". -->
-              <div class="service-block" data-service-block="parking"><label class="service"><input type="checkbox" data-service="parking" /><span class="service-icon">P</span><span><span class="service-title">Phương tiện & chỗ đậu xe</span><span class="service-desc">Đăng ký xe và vị trí đậu phù hợp.</span></span></label><div class="service-fields" data-fields-for="parking"></div></div>
-              <div class="service-block" data-service-block="payment"><label class="service"><input type="checkbox" data-service="payment" /><span class="service-icon">₫</span><span><span class="service-title">Phí & thanh toán</span><span class="service-desc">Thanh toán đúng báo giá đặt chỗ.</span></span></label><div class="service-fields" data-fields-for="payment"></div></div>
-              <div class="service-block coming"><div class="service"><span></span><span class="service-icon">◇</span><span><span class="service-title">Tiện ích chung</span><span class="service-desc">Đặt lịch tiện ích và khung giờ.</span></span><span class="soon">Sắp ra mắt</span></div></div>
-              <div class="service-block" data-service-block="maintenance"><label class="service"><input type="checkbox" data-service="maintenance" /><span class="service-icon">⚒</span><span><span class="service-title">Bảo trì / sửa chữa</span><span class="service-desc">Tạo yêu cầu và xếp lịch kỹ thuật viên.</span></span></label><div class="service-fields" data-fields-for="maintenance"></div></div>
-              <div class="service-block" data-service-block="moving"><label class="service"><input type="checkbox" data-service="moving" /><span class="service-icon">⇥</span><span><span class="service-title">Chuyển nhà / vận chuyển</span><span class="service-desc">Đăng ký khung giờ, thang máy và hỗ trợ.</span></span></label><div class="service-fields" data-fields-for="moving"></div></div>
+        <nav class="nav" aria-label="Điều hướng chính">
+          <div class="nav-label">Không gian làm việc</div>
+          <button type="button" data-view="overview" aria-current="page"><span class="ico" aria-hidden="true">◇</span>Tổng quan</button>
+          <button type="button" data-view="running"><span class="ico" aria-hidden="true">◐</span>Đang thực hiện</button>
+          <button type="button" data-view="attention">
+            <span class="ico" aria-hidden="true">⏸</span>Chờ bạn xử lý
+            <span class="count" id="attentionCount" hidden>0</span>
+          </button>
+          <button type="button" data-view="completed"><span class="ico" aria-hidden="true">✓</span>Đã hoàn thành</button>
+          <div class="nav-label" style="margin-top:14px">Tài khoản</div>
+          <button type="button" data-view="services"><span class="ico" aria-hidden="true">▤</span>Dịch vụ</button>
+          <button type="button" data-view="profile"><span class="ico" aria-hidden="true">◉</span>Hồ sơ cư dân</button>
+        </nav>
+
+        <div class="side-foot">
+          <div class="acct">
+            <div class="acct-row">
+              <div class="avatar" id="acctInitials">LB</div>
+              <div>
+                <div class="acct-name" id="acctName">Lâm Thành Bảo</div>
+                <div class="acct-meta" id="acctMeta">Căn hộ A1201</div>
+              </div>
             </div>
-            <div class="service-group" id="propertyServices">
-              <div class="service-group-title"><span id="propertyGroupTitle">Bất động sản · dịch vụ bổ sung</span></div>
-              <div class="service-block" data-service-block="property-viewing"><label class="service"><input type="checkbox" data-service="property-viewing" /><span class="service-icon">◷</span><span><span class="service-title">Đặt lịch tham quan</span><span class="service-desc">Đặt lịch tham quan dự án đã chọn.</span></span></label><div class="service-fields" data-fields-for="property-viewing"></div></div>
-              <div class="service-block" data-service-block="property-interest"><label class="service"><input type="checkbox" data-service="property-interest" /><span class="service-icon">♡</span><span><span class="service-title">Đăng ký quan tâm / nhận tư vấn</span><span class="service-desc">Gửi nhu cầu qua liên hệ account đã xác minh.</span></span></label><div class="service-fields" data-fields-for="property-interest"></div></div>
-              <div class="service-block coming"><div class="service"><span></span><span class="service-icon">⌂</span><span><span class="service-title">Giữ chỗ / đăng ký sớm</span><span class="service-desc">Khởi tạo yêu cầu giữ chỗ cho căn đã chọn.</span></span><span class="soon">Sắp ra mắt</span></div></div>
-              <div class="service-block coming"><div class="service"><span></span><span class="service-icon">▤</span><span><span class="service-title">Theo dõi hồ sơ / giao dịch</span><span class="service-desc">Theo dõi xác minh, thanh toán và thủ tục tiếp theo.</span></span><span class="soon">Sắp ra mắt</span></div></div>
+            <div class="persona" role="group" aria-label="Chế độ tài khoản demo">
+              <button type="button" data-persona="resident" aria-pressed="true">Cư dân</button>
+              <button type="button" data-persona="prospect" aria-pressed="false">Khách</button>
             </div>
           </div>
-          <div class="combined-form" id="combinedForm" hidden><h3>Chỉ còn thiếu các thông tin này</h3><p>Tên, số điện thoại và email đã được lấy từ tài khoản xác minh nên bạn không cần nhập lại.</p><div id="combinedSections"></div><div class="missing-actions"><button class="btn primary" id="continueMissing" type="button">Bổ sung và tiếp tục</button></div></div>
-          <!-- Agent chỉ thực hiện mục đã chọn và luôn giữ thứ tự 01 → 04 ở technical TaskPlan. -->
-          <div class="dependency" id="dependencyNote">Kế hoạch đã tự động bổ sung bước cần thiết trước dịch vụ bạn chọn.</div>
-        </section>
-
-        <section class="side-progress" aria-label="Tiến độ workflow">
-          <div class="progress-line"><strong id="workflowStatus">Chưa bắt đầu</strong><span id="progressText">0 / 0 bước</span><span id="estimate">Chưa có ước tính</span></div>
-          <div class="progress"><div id="progressBar"></div></div>
-        </section>
+        </div>
       </aside>
 
-      <main class="workspace">
-        <!-- Workflow Agent: heading intentionally omitted to keep the demo canvas compact. -->
+      <!-- ============================ Main ============================ -->
+      <div class="main">
+        <div class="topbar">
+          <div class="crumb" id="crumb"><b>Tổng quan</b></div>
+          <div class="composer">
+            <span aria-hidden="true" style="color:var(--ink-3)">✎</span>
+            <input id="goalInput" autocomplete="off" placeholder="Giao việc cho P-118…" aria-label="Giao việc cho P-118" />
+            <kbd aria-hidden="true">↵</kbd>
+          </div>
+        </div>
 
-        <section class="canvas">
-          <div class="workflow-head">
-            <div><div class="goal-kicker">Mục tiêu hiện tại</div><h1 class="goal-text" id="goalText">Chọn dịch vụ hoặc mô tả nhu cầu để P-118 tạo workflow.</h1></div>
+        <div class="scroll">
+          <!-- ---------------- Workspace Home ---------------- -->
+          <div class="wrap" id="homeView">
+            <div class="greet">
+              <h1 id="greeting">Chào Thành Bảo</h1>
+              <span class="verify" id="verifyPill">✓ Đã liên kết căn hộ A1201</span>
+            </div>
+
+            <section class="sec" id="attentionSection" hidden aria-live="polite" aria-label="Cần bạn xử lý">
+              <div class="sec-head"><span class="sec-title" id="attentionTitle">Cần bạn xử lý</span></div>
+              <div id="attentionList"></div>
+            </section>
+
+            <section class="sec" id="activeSection">
+              <div class="sec-head"><span class="sec-title" id="activeTitle">Đang thực hiện</span></div>
+              <div id="activeList"></div>
+            </section>
+
+            <section class="sec" id="goalSection">
+              <div class="sec-head"><span class="sec-title">Bắt đầu nhanh</span></div>
+              <div class="goals" id="goalCards"></div>
+            </section>
+
+            <section class="sec" id="completedSection" hidden>
+              <div class="sec-head"><span class="sec-title">Vừa hoàn thành</span></div>
+              <div id="completedList"></div>
+            </section>
           </div>
 
-          <div class="canvas-body">
-            <div class="system-strip"><span class="system-chip" id="plannerChip">LLM Planner</span><span>→</span><span class="system-chip" id="validatorChip">Validator</span><span>→</span><span class="system-chip" id="executorChip" title="Resolve kết quả bước trước rồi gọi Provider">Executor</span><span>→</span><span class="system-chip" id="databaseChip">PostgreSQL</span></div>
-            <div class="agent-narration" id="agentNarration">Agent đang chờ yêu cầu để bắt đầu lập kế hoạch.</div>
-            <div class="flow-scroll"><div id="workflowFlow" class="flow"><div class="empty"><div><strong>Workflow sẽ xuất hiện tại đây</strong><span>Chọn dịch vụ → Hoàn tất thông tin → Xác nhận kế hoạch → Theo dõi thực hiện</span><div class="example-flow">[ Tham quan ] hoặc [ Quyền cư dân ] → [ Phương tiện ] → [ Chỗ đậu xe ] → [ Thanh toán ]</div></div></div></div></div>
+          <!-- ---------------- Workflow detail ---------------- -->
+          <div class="wrap" id="detailView" hidden>
+            <div class="wf-head">
+              <div class="wf-top">
+                <span class="wf-title" id="wfTitle">Yêu cầu dịch vụ</span>
+                <span class="pill idle" id="wfStatus">Đang chuẩn bị</span>
+              </div>
+              <div class="objective" id="wfObjective" hidden></div>
+              <div class="wf-cur" id="wfCurrent" hidden></div>
+              <div class="wf-progress">
+                <span class="bar"><i id="wfBar" style="width:0%"></i></span>
+                <span class="row-meta" id="wfCount">Đang chuẩn bị</span>
+              </div>
+            </div>
+
+            <div id="wfAction"></div>
+
+            <div class="cols">
+              <div class="panel">
+                <div class="panel-head">Các bước</div>
+                <ol class="steps" id="wfSteps"></ol>
+              </div>
+              <div class="panel">
+                <div class="panel-head">Hoạt động</div>
+                <ul class="log" id="wfLog"></ul>
+              </div>
+            </div>
           </div>
-        </section>
-
-        <section class="below">
-          <article class="panel chat-panel">
-            <div class="conversation" id="conversation" aria-live="polite">
-              <div class="message assistant"><span class="message-role">P-118</span><span>Chào bạn! Hãy chọn dịch vụ ở bên trái hoặc mô tả điều bạn cần hỗ trợ.</span></div>
-            </div>
-            <div class="chat-dock"><input id="goalInput" autocomplete="off" placeholder="Nhắn thêm yêu cầu cho P-118..." /><div class="chat-actions"><button class="btn" id="cancelPlan" type="button">Hủy</button><button class="btn" id="previewPlan" type="button">Xem kế hoạch</button><button class="btn primary" id="sendGoal" type="button">Gửi và chạy ↑</button></div></div>
-            <div class="panel-body">
-              <div id="planPreview" hidden><div class="plan-list" id="planList"></div><div class="auto-note" id="autoNote" hidden></div><div class="actions"><button class="btn" id="editPlan" type="button">Chỉnh thông tin</button><button class="btn primary" id="startWorkflow" type="button">Bắt đầu thực hiện</button></div></div>
-              <div class="approval" id="approvalPanel"><div class="approval-title">Xác nhận thanh toán</div><div class="approval-text">Khoản phí do Parking Service trả về sẽ được dùng để thanh toán. Demo hiện xác nhận trước khi gửi workflow; HITL pause/resume đầy đủ là hạng mục tiếp theo.</div><div class="actions"><button class="btn danger" id="rejectPayment" type="button">Từ chối</button><button class="btn primary" id="confirmPayment" type="button">Xác nhận thanh toán</button></div></div>
-            </div>
-          </article>
-
-          <article class="panel">
-            <div class="panel-head"><div class="panel-title">Hoạt động gần đây</div><span class="pill" id="currentAction">Đang chờ</span></div>
-            <div class="panel-body"><div class="activity" id="activity"><div class="activity-item"><span class="activity-time">--:--:--</span><span class="activity-dot"></span><span>Chưa có hoạt động.</span></div></div><div class="storage-proof" id="storageProof">PostgreSQL: chưa có workflow được lưu.</div></div>
-          </article>
-        </section>
-
-        <section class="panel result" id="resultPanel">
-          <div class="panel-head"><div class="panel-title">Kết quả nghiệp vụ</div><span class="pill" id="resultBadge">SUCCESS</span></div>
-          <!-- Xem chi tiết hệ thống chỉ dành cho log nội bộ, không hiển thị cho cư dân. -->
-          <div class="panel-body"><div class="result-summary" id="resultSummary"></div><div class="result-grid" id="resultGrid"></div></div>
-        </section>
-      </main>
+        </div>
+      </div>
     </div>
-    <div class="toast" id="toast"></div>
 
     <script>
-      const services = [...document.querySelectorAll("[data-service]")];
-      const goalInput = document.getElementById("goalInput");
-      const workflowFlow = document.getElementById("workflowFlow");
-      const dependencyNote = document.getElementById("dependencyNote");
-      const approvalPanel = document.getElementById("approvalPanel");
-      const planPreview = document.getElementById("planPreview");
-      const planList = document.getElementById("planList");
-      const resultPanel = document.getElementById("resultPanel");
-      const activity = document.getElementById("activity");
-      const conversation = document.getElementById("conversation");
-      const state = { accountState: "resident", approved: false, submitting: false, startedAt: 0, timer: null, plan: [], latestResponse: null, workflowId: null, lastStage: null, eventSequence: 0, animatedTaskStatuses: {}, animatedTaskMessages: {}, pendingWorkflowId: null, pendingMissingFields: [], processingBubble: null };
-      const demoSuffix = Date.now().toString().slice(-7);
-      const demoBookingDate = new Date(Date.now() + (30 + Number(demoSuffix.slice(-3)) % 300) * 86400000).toISOString().slice(0, 10);
-      const accountProfile = { full_name: "Nguyễn Văn A", phone: "0948500414", email: "nguyenvana@example.com" };
+      // =================================================================
+      // Giao diện KHÔNG dựng TaskPlan và không giữ dữ liệu giả.
+      // Nó gửi mục tiêu, rồi hiển thị lại đúng những gì backend trả về.
+      // Mọi tiến độ đều đếm từ `tasks[]` thật.
+      // =================================================================
+      const API = "/api/v1/workflows/demo";
 
-      const definitions = {
-        project_id: { label: "Dự án quan tâm", options: [["Vinhomes Sài Gòn Park", "Vinhomes Sài Gòn Park"], ["Vinhomes Global Gate Hạ Long", "Vinhomes Global Gate Hạ Long"], ["Vinhomes Hải Vân Bay", "Vinhomes Hải Vân Bay"], ["Vinhomes Pearl Bay", "Vinhomes Pearl Bay"], ["Vinhomes Green Paradise", "Vinhomes Green Paradise"], ["Vinhomes Golden City", "Vinhomes Golden City"], ["Vinhomes Ocean Park", "Vinhomes Ocean Park"]] },
-        consultation_mode: { label: "Mục đích tham quan", options: [["buy", "Tư vấn mua"], ["rent", "Tư vấn thuê"]] },
-        usage_purpose: { label: "Mục đích sử dụng", options: [["residence", "Ở"], ["investment", "Đầu tư"], ["business", "Kinh doanh"]] },
-        full_name: { label: "Họ và tên", value: accountProfile.full_name, source: "account" },
-        phone: { label: "Số điện thoại", type: "tel", value: accountProfile.phone, pattern: "^\\+?[0-9 ]{9,15}$", source: "account" },
-        email: { label: "Email", type: "email", value: accountProfile.email, required: false, source: "account" },
-        contact_note: { label: "Thông tin muốn tư vấn thêm", type: "textarea", value: "", required: false, full: true },
-        viewing_date: { label: "Ngày xem", type: "date", value: demoBookingDate },
-        viewing_time: { label: "Giờ xem", type: "time", value: "10:00", min: "08:00", max: "17:30" },
-        interest_type: { label: "Nhu cầu", options: [["consultation", "Nhận tư vấn"], ["buy", "Mua"], ["rent", "Thuê"]] },
-        preferred_contact_time: { label: "Thời gian muốn được liên hệ", options: [["morning", "Buổi sáng"], ["afternoon", "Buổi chiều"], ["evening", "Buổi tối"]] },
-        consent: { label: "Đồng ý nhận liên hệ", options: [["true", "Tôi đồng ý"]] },
-        plate_number: { label: "Biển số xe", value: `59A-${demoSuffix}` },
-        vehicle_type: { label: "Loại phương tiện", options: [["car", "Ô tô"], ["motorcycle", "Xe máy"]] },
-        parking_zone: { label: "Khu vực đậu xe", options: [["ZONE_A", "Zone A"], ["ZONE_B", "Zone B"]] },
-        booking_date: { label: "Ngày bắt đầu", type: "date", value: demoBookingDate },
-        issue_type: { label: "Hạng mục", options: [["air_conditioning", "Điều hòa"], ["electrical", "Điện"], ["plumbing", "Nước / ống nước"], ["other", "Khác"]] },
-        description: { label: "Mô tả sự cố", value: "Điều hòa không mát" },
-        location: { label: "Vị trí", value: "Phòng khách" },
-        preferred_date: { label: "Ngày bảo trì", type: "date", value: demoBookingDate },
-        preferred_time: { label: "Giờ bảo trì", type: "time", value: "09:00", min: "08:00", max: "18:00" },
-        move_date: { label: "Ngày chuyển nhà", type: "date", value: demoBookingDate },
-        move_time: { label: "Giờ chuyển nhà", type: "time", value: "14:00", min: "07:00", max: "20:00" },
-        needs_elevator: { label: "Đăng ký thang máy", options: [["true", "Có"], ["false", "Không"]] },
-        needs_loading_support: { label: "Hỗ trợ bốc dỡ", options: [["true", "Có"], ["false", "Không"]] },
-        move_vehicle: { label: "Phương tiện", options: [["truck", "Xe tải"], ["van", "Xe van"], ["none", "Không cần xe"]] },
+      // Trạng thái → nhãn nghiệp vụ + tông màu + icon. Icon và chữ luôn đi
+      // cùng nhau: không dựa vào riêng màu để truyền đạt trạng thái.
+      const WORKFLOW_STATUS = {
+        PENDING:           ["Đang chuẩn bị", "idle", "◔"],
+        RUNNING:           ["Đang thực hiện", "run", "◐"],
+        WAITING_APPROVAL:  ["Chờ bạn xác nhận", "wait", "⏸"],
+        NEEDS_INFORMATION: ["Cần thêm thông tin", "wait", "✎"],
+        SUCCESS:           ["Hoàn tất", "ok", "✓"],
+        FAILED:            ["Không thành công", "err", "✕"],
+        CANCELLED:         ["Đã huỷ", "idle", "○"],
+        PLANNING_ERROR:    ["Chưa lập được kế hoạch", "err", "✕"],
+        VALIDATION_ERROR:  ["Chưa đủ điều kiện thực hiện", "err", "✕"],
+        EXECUTION_ERROR:   ["Có lỗi khi thực hiện", "err", "✕"],
       };
 
-      const serviceFields = {
-        "property-viewing": ["consultation_mode", "usage_purpose", "project_id", "full_name", "phone", "email", "viewing_date", "viewing_time", "contact_note"],
-        "property-interest": ["project_id", "full_name", "phone", "email", "interest_type", "preferred_contact_time", "consent", "contact_note"],
-        parking: ["plate_number", "vehicle_type", "parking_zone", "booking_date"],
-        payment: [],
-        maintenance: ["issue_type", "description", "location", "preferred_date", "preferred_time"],
-        moving: ["move_date", "move_time", "needs_elevator", "needs_loading_support", "move_vehicle"],
+      const TASK_STATUS = {
+        PENDING:          ["Đang chờ", "todo", "○"],
+        RUNNING:          ["Đang thực hiện", "cur", "◐"],
+        WAITING_APPROVAL: ["Chờ bạn xác nhận", "wait", "⏸"],
+        SUCCESS:          ["Hoàn tất", "done", "✓"],
+        FAILED:           ["Không thành công", "err", "✕"],
+        CANCELLED:        ["Đã huỷ", "todo", "○"],
+        NOT_RUN:          ["Chưa chạy", "todo", "○"],
       };
 
-      const tools = {
-        search_properties: { title: "Tìm bất động sản", icon: "⌕", action: "Lọc danh sách phù hợp; không tự chọn hoặc đặt cọc.", output: "properties · result_count" },
-        schedule_property_viewing: { title: "Đặt lịch tham quan", icon: "◷", action: "Đặt lịch tham quan dự án đã chọn.", output: "viewing_id · contact" },
-        register_property_interest: { title: "Đăng ký nhận tư vấn", icon: "♡", action: "Gửi nhu cầu qua account đã xác minh.", output: "interest_id · status" },
-        register_resident: { title: "Đăng ký cư dân / nhà", icon: "⌂", action: "Tạo hồ sơ cư dân cho căn hộ.", output: "resident_id" },
-        register_vehicle: { title: "Đăng ký phương tiện", icon: "▣", action: "Liên kết phương tiện với cư dân.", output: "vehicle_id" },
-        book_parking: { title: "Đặt chỗ đậu xe", icon: "P", action: "Kiểm tra khu vực và giữ chỗ phù hợp.", output: "booking_id · amount" },
-        pay_fee: { title: "Thanh toán phí", icon: "₫", action: "Thanh toán đúng báo giá đặt chỗ.", output: "payment_id" },
-        create_maintenance_request: { title: "Yêu cầu bảo trì", icon: "⚒", action: "Gửi yêu cầu và xếp lịch kỹ thuật viên.", output: "maintenance_id · status" },
-        schedule_move: { title: "Đặt lịch chuyển nhà", icon: "⇥", action: "Đăng ký khung giờ và nhu cầu hỗ trợ.", output: "move_request_id · slot" },
+      const TERMINAL = new Set([
+        "SUCCESS", "FAILED", "CANCELLED", "NEEDS_INFORMATION",
+        "WAITING_APPROVAL", "PLANNING_ERROR", "VALIDATION_ERROR", "EXECUTION_ERROR",
+      ]);
+
+      // Mỗi thẻ là MỘT mục tiêu gửi thẳng cho agent. Bấm là giao việc luôn,
+      // không bắt người dùng chọn dịch vụ rồi mô tả lại cùng nội dung.
+      const GOALS = [
+        { key: "parking", icon: "P", label: "Đăng ký xe và chỗ đậu", resident: true,
+          goal: "Tôi muốn đăng ký xe và đặt chỗ đậu xe. Hãy dùng thông tin đã có trong tài khoản và chỉ hỏi phần còn thiếu." },
+        { key: "moving", icon: "↗", label: "Đăng ký chuyển nhà", resident: true,
+          goal: "Tôi muốn đặt lịch chuyển nhà. Hãy dùng thông tin đã có trong tài khoản và chỉ hỏi phần còn thiếu." },
+        { key: "maintenance", icon: "⚒", label: "Báo hỏng cần sửa", resident: true,
+          goal: "Tôi muốn báo hỏng và đặt lịch bảo trì căn hộ. Hãy dùng thông tin đã có trong tài khoản và chỉ hỏi phần còn thiếu." },
+        { key: "viewing", icon: "◎", label: "Đặt lịch tham quan dự án", resident: false, contact: true,
+          goal: "Tôi muốn đặt lịch tham quan dự án. Hãy dùng thông tin đã có trong tài khoản và chỉ hỏi phần còn thiếu." },
+        { key: "consult", icon: "☎", label: "Nhận tư vấn", resident: false, contact: true,
+          goal: "Tôi muốn được tư vấn về dự án. Hãy dùng thông tin đã có trong tài khoản và chỉ hỏi phần còn thiếu." },
+      ];
+
+      const ACCOUNT = { full_name: "Lâm Thành Bảo", phone: "0901234567", email: "thanhbao@example.com" };
+      const PREFILL_HINT = "Đã tự điền từ tài khoản · bạn có thể chỉnh";
+
+      const isoToday = (offset) => {
+        const d = new Date();
+        d.setDate(d.getDate() + offset);
+        return d.toISOString().slice(0, 10);
       };
 
-      function selected(name) { return Boolean(document.querySelector(`[data-service="${name}"]`)?.checked); }
-      function timeNow() { return new Date().toLocaleTimeString("vi-VN", { hour12: false }); }
-      function toast(message) { const node = document.getElementById("toast"); node.textContent = message; node.classList.add("show"); setTimeout(() => node.classList.remove("show"), 2200); }
-      function addActivity(message, tone = "") {
-        if (activity.textContent.includes("Chưa có hoạt động")) activity.replaceChildren();
-        const row = document.createElement("div"); row.className = `activity-item ${tone}`;
-        row.innerHTML = `<span class="activity-time">${timeNow()}</span><span class="activity-dot"></span>`;
-        const text = document.createElement("span"); text.textContent = message; row.appendChild(text); activity.prepend(row);
-      }
-      function addMessage(message, role = "assistant") {
-        if (!message) return;
-        const bubble = document.createElement("div"); bubble.className = `message ${role}`;
-        const label = document.createElement("span"); label.className = "message-role"; label.textContent = role === "user" ? "Bạn" : "P-118";
-        const text = document.createElement("span"); text.textContent = message;
-        bubble.append(label, text); conversation.appendChild(bubble);
-        conversation.scrollTop = conversation.scrollHeight;
-      }
-      function showProcessing(message = "Đang phân tích yêu cầu...") {
-        if (state.processingBubble) state.processingBubble.remove();
-        const bubble = document.createElement("div"); bubble.className = "message assistant processing";
-        const dots = document.createElement("span"); dots.className = "thinking-dots"; dots.innerHTML = "<i></i><i></i><i></i>";
-        const copy = document.createElement("span"); copy.className = "processing-copy";
-        const role = document.createElement("span"); role.className = "message-role"; role.textContent = "P-118 đang xử lý";
-        const text = document.createElement("small"); text.textContent = message;
-        copy.append(role, text); bubble.append(dots, copy); conversation.appendChild(bubble);
-        state.processingBubble = bubble; conversation.scrollTop = conversation.scrollHeight;
-      }
-      function updateProcessing(message) {
-        if (!state.processingBubble) showProcessing(message);
-        else state.processingBubble.querySelector("small").textContent = message;
-        conversation.scrollTop = conversation.scrollHeight;
-      }
-      function hideProcessing() {
-        state.processingBubble?.remove(); state.processingBubble = null;
-      }
-      function userFacingQuestion(data) {
-        const question = data.question || "Mình cần thêm thông tin trước khi tiếp tục.";
-        const legacyPaymentQuestion = question.includes("số tiền") && question.includes("loại tiền tệ");
-        if (legacyPaymentQuestion) return "Mình chưa lấy được báo phí từ dịch vụ đặt chỗ. Bạn không cần nhập số tiền; vui lòng kiểm tra mã đặt chỗ hoặc thử lại sau.";
-        return question;
+      // Chỉ những field NGƯỜI DÙNG biết mới có mặt. Không có ID nội bộ, không
+      // có số tiền — backend đã lọc từ trước, và giao diện cũng không dựng
+      // input cho thứ nó không hiểu.
+      const FIELDS = {
+        project_id: { label: "Dự án quan tâm", options: [["Vinhomes Sài Gòn Park","Vinhomes Sài Gòn Park"],["Vinhomes Global Gate Hạ Long","Vinhomes Global Gate Hạ Long"],["Vinhomes Hải Vân Bay","Vinhomes Hải Vân Bay"],["Vinhomes Pearl Bay","Vinhomes Pearl Bay"],["Vinhomes Green Paradise","Vinhomes Green Paradise"],["Vinhomes Golden City","Vinhomes Golden City"],["Vinhomes Ocean Park","Vinhomes Ocean Park"]] },
+        interest_type: { label: "Nhu cầu của bạn", options: [["consultation","Nhận tư vấn"],["buy","Mua"],["rent","Thuê"]] },
+        preferred_contact_time: { label: "Thời gian tiện liên hệ", options: [["morning","Buổi sáng"],["afternoon","Buổi chiều"],["evening","Buổi tối"]] },
+        consent: { label: "Đồng ý nhận liên hệ", options: [["true","Tôi đồng ý"]] },
+        viewing_date: { label: "Ngày muốn xem", type: "date" },
+        viewing_time: { label: "Giờ muốn xem", type: "time", min: "08:00", max: "17:30", hint: "Trong khung 08:00–17:30" },
+        plate_number: { label: "Biển số xe", placeholder: "VD: 51A-12345" },
+        vehicle_type: { label: "Loại xe", options: [["car","Ô tô"],["motorcycle","Xe máy"]] },
+        parking_zone: { label: "Khu vực đậu xe", options: [["ZONE_A","Khu A"],["ZONE_B","Khu B"]] },
+        booking_date: { label: "Ngày muốn đặt chỗ", type: "date" },
+        issue_type: { label: "Hạng mục cần sửa", options: [["air_conditioning","Điều hòa"],["electrical","Điện"],["plumbing","Nước / ống nước"],["other","Khác"]] },
+        description: { label: "Mô tả sự cố", placeholder: "VD: điều hòa chạy nhưng không mát" },
+        location: { label: "Vị trí trong căn hộ", placeholder: "VD: phòng khách" },
+        preferred_date: { label: "Ngày muốn bảo trì", type: "date" },
+        preferred_time: { label: "Giờ muốn bảo trì", type: "time", min: "08:00", max: "18:00", hint: "Trong khung 08:00–18:00" },
+        move_date: { label: "Ngày chuyển nhà", type: "date" },
+        move_time: { label: "Giờ chuyển nhà", type: "time", min: "07:00", max: "20:00", hint: "Trong khung 07:00–20:00" },
+        needs_elevator: { label: "Cần đăng ký thang máy?", options: [["true","Có"],["false","Không"]] },
+        needs_loading_support: { label: "Cần hỗ trợ bốc dỡ?", options: [["true","Có"],["false","Không"]] },
+        move_vehicle: { label: "Phương tiện vận chuyển", options: [["truck","Xe tải"],["van","Xe van"],["none","Không cần xe"]] },
+        full_name: { label: "Họ và tên", value: ACCOUNT.full_name, hint: PREFILL_HINT },
+        phone: { label: "Số điện thoại", type: "tel", value: ACCOUNT.phone, hint: PREFILL_HINT },
+        email: { label: "Email", type: "email", value: ACCOUNT.email, required: false, hint: PREFILL_HINT },
+        contact_note: { label: "Bạn muốn được tư vấn thêm điều gì?", type: "textarea", required: false, full: true },
+      };
+
+      const state = {
+        accountState: "resident",
+        contactFlow: false,
+        workflowId: null,
+        pollTimer: null,
+        pollDelay: 1000,
+        busy: false,
+        goals: {},
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const money = (amount, currency) => `${Number(amount).toLocaleString("vi-VN")} ${currency}`;
+
+      function toast(text) {
+        document.querySelector(".toast")?.remove();
+        const el = document.createElement("div");
+        el.className = "toast";
+        el.setAttribute("role", "status");
+        el.textContent = text;
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), 3400);
       }
 
-      function normalizeGoalText(text) {
-        return text
-          .replace(/\b(\d{1,2})[\/]([0-1]?\d)[\/](\d{4})\b/g, (_, day, month, year) => `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`)
-          .replace(/\b([0-2]?\d)[;.h]([0-5]\d)\b/gi, (_, hour, minute) => `${hour.padStart(2, "0")}:${minute}`)
-          .trim();
+      async function api(path, options) {
+        const response = await fetch(path, options);
+        let data = null;
+        try { data = await response.json(); } catch { data = null; }
+        if (!response.ok) throw new Error((data && data.detail) || "Chưa xử lý được yêu cầu.");
+        return data;
       }
 
-      function userFacingSummary(summary) {
-        return (summary || "Workflow chưa hoàn tất.").replace("Vui lòng mở chi tiết để kiểm tra.", "Vui lòng kiểm tra lại thông tin và thử lại.");
-      }
-      function userFacingTaskMessage(task) {
-        const values = fieldValues();
-        const messages = {
-          VEHICLE_ALREADY_EXISTS: `Biển số ${values.plate_number || "này"} đã được đăng ký trong hệ thống. Hãy kiểm tra lại hoặc sử dụng phương tiện đã liên kết.`,
-          RESIDENT_ALREADY_EXISTS: `Căn hộ ${values.apartment_code || "này"} đã có hồ sơ cư dân. Hãy dùng tài khoản cư dân đã liên kết thay vì đăng ký lại.`,
-          NO_AVAILABILITY: `Khu vực đỗ xe đã hết chỗ cho ngày ${values.booking_date || "đã chọn"}. Hãy chọn ngày hoặc khu vực khác.`,
-          BOOKING_ALREADY_EXISTS: "Phương tiện này đã có chỗ đỗ trong ngày được chọn.",
-          DEPENDENCY_ERROR: `Bước “${task.title}” chưa được thực hiện vì bước trước đó không thành công.`,
-          INVALID_INPUT: `Thông tin của bước “${task.title}” chưa hợp lệ. Hãy kiểm tra lại dữ liệu đã nhập.`,
-        };
-        if (messages[task.error_code]) return messages[task.error_code];
-        return (task.message || "Bước này chưa thể hoàn thành.").replace(/\s*\(mã lỗi:\s*[^)]+\)\.?/i, ".");
-      }
-      function workflowResponseMessage(data) {
-        if (data.status === "NEEDS_INFORMATION") return userFacingQuestion(data);
-        if (data.status !== "FAILED") return userFacingSummary(data.summary);
-        const failedTasks = (data.tasks || []).filter(task => task.status === "FAILED");
-        const rootFailure = failedTasks.find(task => task.error_code !== "DEPENDENCY_ERROR") || failedTasks[0];
-        return rootFailure ? userFacingTaskMessage(rootFailure) : userFacingSummary(data.summary);
-      }
-
-      function applyPersona(persona, announce = true) {
-        state.accountState = persona;
-        const isResident = persona === "resident";
-        document.querySelectorAll(".persona").forEach(button => button.classList.toggle("active", button.dataset.persona === persona));
-        document.getElementById("residentServices").hidden = !isResident;
-        document.getElementById("mappingStatus").textContent = isResident ? "Đã xác minh cư dân" : "Chưa liên kết căn hộ";
-        document.getElementById("mappingStatus").classList.toggle("unlinked", !isResident);
-        document.getElementById("accountApartment").textContent = isResident ? "A1201" : "Chưa có";
-        document.getElementById("accountRole").textContent = isResident ? "Cư dân" : "Khách hàng";
-        document.getElementById("accountMapping").textContent = isResident ? "VERIFIED" : "NOT LINKED";
-        document.getElementById("propertyGroupTitle").textContent = isResident ? "Bất động sản · giao dịch thêm" : "Giao dịch bất động sản · ưu tiên";
-        services.forEach(input => { input.checked = false; });
-        state.approved = false;
-        renderForm(false);
-        if (announce) addActivity(isResident ? "Đã chuyển sang tài khoản cư dân có mapping xác minh." : "Đã chuyển sang tài khoản chưa có resident-property mapping.");
-      }
-
-      function ensureDependencies(changed) {
-        const parking = document.querySelector('[data-service="parking"]');
-        const payment = document.querySelector('[data-service="payment"]');
-        if (changed === "payment" && payment.checked && !parking.checked) { parking.checked = true; dependencyNote.classList.add("show"); }
-        if (!parking.checked) payment.checked = false;
-        if (!(payment.checked && parking.checked)) dependencyNote.classList.remove("show");
-      }
-
-      function requiredFields() {
-        const fields = [];
-        if (selected("property-viewing") || selected("property-interest")) fields.push("project_id", "full_name", "phone");
-        if (selected("property-viewing")) fields.push("consultation_mode", "usage_purpose", "viewing_date", "viewing_time");
-        if (selected("property-interest")) fields.push("interest_type", "preferred_contact_time", "consent");
-        if (selected("parking")) fields.push("plate_number", "vehicle_type", "parking_zone", "booking_date");
-        if (selected("maintenance")) fields.push("issue_type", "description", "location", "preferred_date", "preferred_time");
-        if (selected("moving")) fields.push("move_date", "move_time", "needs_elevator", "needs_loading_support", "move_vehicle");
-        return [...new Set(fields)];
-      }
-
-      function fieldNodes() { return [...document.querySelectorAll("[data-field]")]; }
-      function fieldValues() {
-        const values = {};
-        fieldNodes().forEach(node => {
-          const value = node.value.trim();
-          if (!(node.dataset.field in values) || value) values[node.dataset.field] = value;
-        });
-        return values;
-      }
-
-      function hasInvalidRequiredFields() {
-        return fieldNodes().some(node => node.dataset.required === "true" && (!node.value.trim() || !node.checkValidity()));
-      }
-
-      function propertyContactProfile() {
-        if (!selected("property-viewing") && !selected("property-interest")) return null;
-        const values = fieldValues();
-        const usageLabels = { residence: "Ở", investment: "Đầu tư", business: "Kinh doanh" };
-        const consultationLabels = { buy: "Mua", rent: "Thuê" };
-        const notes = [];
-        if (selected("property-viewing") && values.consultation_mode) notes.push(`Nhu cầu: ${consultationLabels[values.consultation_mode] || values.consultation_mode}`);
-        if (selected("property-viewing") && values.usage_purpose) notes.push(`Mục đích sử dụng: ${usageLabels[values.usage_purpose] || values.usage_purpose}`);
-        if (values.contact_note) notes.push(values.contact_note);
-        return {
-          full_name: values.full_name || accountProfile.full_name,
-          phone: values.phone || accountProfile.phone,
-          email: values.email || accountProfile.email,
-          note: notes.join(". ") || null,
-        };
-      }
-
-      function makeField(name, old) {
-        const def = definitions[name];
-        const field = document.createElement("div"); field.className = `field${def.full ? " full" : ""}`;
-        const label = document.createElement("label"); label.textContent = def.label;
-        const isRequired = def.required !== false;
-        if (isRequired) { const mark = document.createElement("span"); mark.className = "required"; mark.textContent = " *"; label.appendChild(mark); }
-        let input;
-        if (def.options) {
-          input = document.createElement("select");
-          def.options.forEach(([value, text]) => { const option = document.createElement("option"); option.value = value; option.textContent = text; input.appendChild(option); });
-        } else if (def.type === "textarea") {
-          input = document.createElement("textarea");
-        } else { input = document.createElement("input"); input.type = def.type || "text"; }
-        input.dataset.field = name; input.dataset.required = String(isRequired); input.required = isRequired;
-        input.value = old[name] ?? def.value ?? "";
-        if (def.pattern) input.pattern = def.pattern;
-        if (def.min) input.min = def.min;
-        if (def.max) input.max = def.max;
-        if (def.type === "date") input.min = new Date().toISOString().slice(0, 10);
-        input.readOnly = Boolean(def.readonly);
-        input.addEventListener("input", () => {
-          fieldNodes().filter(peer => peer !== input && peer.dataset.field === name).forEach(peer => { peer.value = input.value; });
-          planPreview.hidden = true;
-        });
-        field.append(label, input);
-        if (def.source === "account") {
-          const help = document.createElement("div"); help.className = "field-help"; help.textContent = "Đã tự điền từ tài khoản · bạn có thể chỉnh cho yêu cầu này."; field.appendChild(help);
-        }
-        return field;
-      }
-
-      function renderForm(preserve = true) {
-        Object.entries(serviceFields).forEach(([serviceName]) => {
-          const block = document.querySelector(`[data-service-block="${serviceName}"]`);
-          const container = document.querySelector(`[data-fields-for="${serviceName}"]`);
-          block.classList.remove("open");
-          container.replaceChildren();
-        });
-        const sections = document.getElementById("combinedSections"); sections.replaceChildren();
-        document.getElementById("combinedForm").hidden = true;
-        planPreview.hidden = true; approvalPanel.classList.remove("show"); resultPanel.classList.remove("show");
-        updatePreviewNodes();
-      }
-
-      function renderMissingFields(names) {
-        const supported = names.filter(name => definitions[name]);
-        const sections = document.getElementById("combinedSections");
-        sections.replaceChildren();
-        supported.forEach(name => sections.appendChild(makeField(name, {})));
-        const form = document.getElementById("combinedForm");
-        form.hidden = supported.length === 0;
-        if (supported.length) form.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }
-
-      function missingFieldPayload() {
-        const values = fieldValues();
-        return Object.fromEntries(state.pendingMissingFields.filter(name => name in values).map(name => [name, values[name]]));
-      }
-
-      function buildPlan() {
-        const plan = [];
-        if (selected("property-viewing")) plan.push({ tool: "schedule_property_viewing" });
-        if (selected("property-interest")) plan.push({ tool: "register_property_interest" });
-        if (selected("parking")) plan.push({ tool: "register_vehicle" }, { tool: "book_parking" });
-        if (selected("payment")) plan.push({ tool: "pay_fee" });
-        if (selected("maintenance")) plan.push({ tool: "create_maintenance_request" });
-        if (selected("moving")) plan.push({ tool: "schedule_move" });
-        return plan.map((item, index) => {
-          const taskId = `P${index + 1}`;
-          let dependsOn = [];
-          if (item.tool === "book_parking") dependsOn = [plan.findIndex(candidate => candidate.tool === "register_vehicle")].filter(value => value >= 0).map(value => `P${value + 1}`);
-          if (item.tool === "pay_fee") dependsOn = [plan.findIndex(candidate => candidate.tool === "book_parking")].filter(value => value >= 0).map(value => `P${value + 1}`);
-          return { ...item, task_id: taskId, depends_on: dependsOn };
-        });
-      }
-
-      function nodeElement(item, index, status = "PENDING", result) {
-        const meta = tools[item.tool];
-        const node = document.createElement("article");
-        const cls = status.toLowerCase().replace("_", "-"); node.className = `node ${cls}`;
-        const statusLabel = { PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS · ĐÃ XONG", FAILED: "FAILED", WAITING_APPROVAL: "WAITING APPROVAL", CANCELLED: "CANCELLED" }[status] || status;
-        node.innerHTML = `<div class="node-head"><span class="node-icon">${status === "SUCCESS" ? "✓" : meta.icon}</span><span class="state">${statusLabel}</span></div><div class="node-title">${meta.title}</div><div class="node-action"></div>`;
-        node.querySelector(".node-action").textContent = result?.message || meta.action;
-        if (item.auto) { const auto = document.createElement("div"); auto.className = "node-auto"; auto.textContent = "Tự động bổ sung do dependency"; node.appendChild(auto); }
+      function el(tag, props, ...children) {
+        const node = Object.assign(document.createElement(tag), props || {});
+        children.filter(Boolean).forEach((c) => node.append(c));
         return node;
       }
 
-      function renderNodes(plan, statuses = {}, results = {}) {
-        workflowFlow.replaceChildren();
-        if (!plan.length) {
-          const empty = document.createElement("div"); empty.className = "empty"; empty.innerHTML = "<div><strong>Workflow sẽ xuất hiện tại đây</strong><span>Chọn ít nhất một dịch vụ để P-118 tạo kế hoạch.</span></div>"; workflowFlow.appendChild(empty); return;
+      // =================================================================
+      // Điều hướng — chi tiết workflow có URL riêng; refresh đọc lại theo ID
+      // =================================================================
+      function stopPolling() {
+        if (state.pollTimer) { clearTimeout(state.pollTimer); state.pollTimer = null; }
+        state.pollDelay = 1000;
+      }
+
+      function markNav(view) {
+        document.querySelectorAll("[data-view]").forEach((b) =>
+          b.setAttribute("aria-current", b.dataset.view === view ? "page" : "false"));
+      }
+
+      function showHome(push = true) {
+        stopPolling();
+        state.workflowId = null;
+        $("homeView").hidden = false;
+        $("detailView").hidden = true;
+        $("crumb").replaceChildren(el("b", { textContent: "Tổng quan" }));
+        markNav("overview");
+        $("goalSection").hidden = false;
+        if (push) history.pushState({}, "", "/demo");
+        refreshHome();
+      }
+
+      function showDetail(workflowId, push = true) {
+        state.workflowId = workflowId;
+        $("homeView").hidden = true;
+        $("detailView").hidden = false;
+        const back = el("button", { type: "button", textContent: "Tổng quan" });
+        back.addEventListener("click", () => showHome());
+        $("crumb").replaceChildren(back, document.createTextNode(" / "), el("b", { textContent: "Chi tiết yêu cầu" }));
+        markNav("running");
+        if (push) history.pushState({ workflowId }, "", `/demo?workflow_id=${encodeURIComponent(workflowId)}`);
+        loadWorkflow(workflowId);
+      }
+
+      window.addEventListener("popstate", () => {
+        const id = new URLSearchParams(location.search).get("workflow_id");
+        if (id) showDetail(id, false); else showHome(false);
+      });
+
+      // =================================================================
+      // Workspace Home — dữ liệu thật từ GET /workflows/demo
+      // =================================================================
+      async function refreshHome() {
+        try {
+          const [attention, running, completed] = await Promise.all([
+            api(`${API}?status=attention&limit=10`),
+            api(`${API}?status=running&limit=10`),
+            api(`${API}?status=completed&limit=5`),
+          ]);
+          renderAttention(attention.items || []);
+          renderActive(running.items || [], "Đang thực hiện");
+          renderCompleted(completed.items || []);
+        } catch {
+          renderAttention([]);
+          $("activeList").replaceChildren(emptyBox("Chưa đọc được danh sách yêu cầu."));
         }
-        plan.forEach((item, index) => {
-          workflowFlow.appendChild(nodeElement(item, index, statuses[index] || "PENDING", results[index]));
-          if (index < plan.length - 1) {
-            const next = plan[index + 1];
-            const dependent = (next.depends_on || []).includes(item.task_id);
-            const connector = document.createElement("div");
-            connector.className = dependent ? (statuses[index] === "RUNNING" ? "connector active" : "connector") : "connector parallel";
-            workflowFlow.appendChild(connector);
-          }
+      }
+
+      const emptyBox = (text) => el("div", { className: "empty", textContent: text });
+
+      function renderAttention(items) {
+        const badge = $("attentionCount");
+        badge.hidden = items.length === 0;
+        badge.textContent = String(items.length);
+        $("attentionSection").hidden = items.length === 0;
+        $("attentionTitle").textContent = `Cần bạn xử lý (${items.length})`;
+
+        const host = $("attentionList");
+        host.replaceChildren();
+        items.forEach((item) => {
+          const open = el("button", { className: "btn primary", type: "button", textContent: "Mở để xử lý" });
+          open.addEventListener("click", () => showDetail(item.workflow_id));
+          host.appendChild(
+            el("div", { className: "attention" },
+              el("div", { className: "attention-head", textContent: "▲ Cần bạn xử lý" }),
+              el("div", { className: "att-title", textContent: item.title }),
+              el("div", { className: "att-body", textContent: "Yêu cầu này đang chờ quyết định của bạn." }),
+              el("div", { className: "att-actions" }, open)),
+          );
         });
       }
 
-      function updatePreviewNodes() {
-        state.plan = buildPlan(); renderNodes(state.plan);
-        const labels = state.plan.map(item => tools[item.tool].title.toLowerCase());
-        document.getElementById("goalText").textContent = labels.length ? `Thực hiện ${labels.join(", ")}.` : "Chọn dịch vụ hoặc mô tả nhu cầu để P-118 tạo workflow.";
-        document.getElementById("progressText").textContent = `0 / ${state.plan.length} bước`;
-        document.getElementById("progressBar").style.width = "0%";
-        document.getElementById("workflowStatus").textContent = state.plan.length ? "Kế hoạch nháp" : "Chưa bắt đầu";
-        document.getElementById("estimate").textContent = state.plan.length ? `Ước tính ~${15 + state.plan.length * 5}–${25 + state.plan.length * 8} giây` : "Chưa có ước tính";
-      }
+      function workflowRow(item) {
+        const [label, tone, icon] = WORKFLOW_STATUS[item.status] || WORKFLOW_STATUS.PENDING;
+        const total = item.total_tasks || 0;
+        const done = item.completed_tasks || 0;
 
-      function buildGoal() {
-        if (goalInput.value.trim()) return normalizeGoalText(goalInput.value.trim());
-        const actions = [];
-        if (selected("property-viewing")) actions.push("đặt lịch tham quan một dự án");
-        if (selected("property-interest")) actions.push("đăng ký nhận tư vấn cho cùng dự án đó");
-        if (selected("parking")) actions.push("đăng ký phương tiện và đặt chỗ đậu xe");
-        if (selected("payment")) actions.push("thanh toán khoản phí do dịch vụ đặt chỗ trả về");
-        if (selected("maintenance")) actions.push("tạo yêu cầu bảo trì cho căn hộ của tôi");
-        if (selected("moving")) actions.push("đặt lịch chuyển nhà");
-        return actions.length ? `Tôi muốn ${actions.join(", ")}. Hãy dùng thông tin đã có trong tài khoản và chỉ hỏi phần còn thiếu.` : "";
-      }
-
-      function showPlan() {
-        if (!state.plan.length) { toast("Hãy chọn ít nhất một dịch vụ."); return; }
-        if (hasInvalidRequiredFields()) { toast("Vui lòng kiểm tra các trường bắt buộc hoặc sai định dạng."); return; }
-        planList.replaceChildren();
-        state.plan.forEach((item, index) => { const row = document.createElement("div"); row.className = "plan-item"; row.innerHTML = `<span class="plan-number">${index + 1}</span><span>${tools[item.tool].title}${item.auto ? " · tự động bổ sung" : ""}</span>`; planList.appendChild(row); });
-        document.getElementById("autoNote").hidden = true;
-        planPreview.hidden = false;
-        addActivity("Đã tạo bản xem trước kế hoạch.");
-      }
-
-      function setChip(id, stateName) { document.getElementById(id).className = `system-chip ${stateName || ""}`; }
-      function renderStage(data) {
-        const stage = data.stage || "PLANNING";
-        const taskStage = stage.startsWith("TASK_");
-        const plannerDone = !["PLANNING"].includes(stage);
-        const validatorDone = ["VALIDATED", "EXECUTING", "FINISHED"].includes(stage) || taskStage;
-        setChip("plannerChip", stage === "PLANNING" ? "active" : plannerDone ? "done" : "");
-        setChip("validatorChip", stage === "VALIDATING" ? "active" : validatorDone ? "done" : "");
-        setChip("executorChip", stage === "EXECUTING" || taskStage ? "active" : stage === "FINISHED" ? "done" : "");
-        setChip("databaseChip", data.persisted ? "done" : "");
-        document.getElementById("agentNarration").textContent = data.message || "Agent đang xử lý workflow.";
-        document.getElementById("currentAction").textContent = data.message || "Đang xử lý";
-        updateProcessing(data.message || "Agent đang xử lý workflow.");
-        const storage = document.getElementById("storageProof");
-        storage.classList.toggle("saved", Boolean(data.persisted));
-        storage.textContent = data.persisted
-          ? `PostgreSQL: đã lưu workflow và ${(data.tasks || []).length} trạng thái tác vụ.`
-          : "PostgreSQL: đang chờ Executor khởi tạo bản ghi workflow.";
-        if (stage !== state.lastStage) {
-          addActivity(data.message || `Agent chuyển sang giai đoạn ${stage}.`, stage.includes("FAILED") ? "failed" : "running");
-          state.lastStage = stage;
-        }
-      }
-
-      function syncResponsePlan(data) {
-        const responsePlan = (data.plan || []).map(item => ({ tool: item.tool, task_id: item.task_id, depends_on: item.depends_on || [] }));
-        if (responsePlan.length) state.plan = responsePlan;
-      }
-
-      function renderAnimatedTaskState(data) {
-        syncResponsePlan(data);
-        const byId = new Map((data.tasks || []).map(item => [item.task_id, item]));
-        const statuses = {}; const results = {};
-        state.plan.forEach((item, index) => {
-          const taskId = data.plan?.[index]?.task_id;
-          const status = state.animatedTaskStatuses[taskId] || "PENDING";
-          statuses[index] = status;
-          results[index] = status === "RUNNING"
-            ? { message: state.animatedTaskMessages[taskId] }
-            : byId.get(taskId);
+        const bar = el("span", { className: `bar ${item.status === "SUCCESS" ? "ok" : ""}` },
+          el("i", { style: `width:${total ? Math.round((done / total) * 100) : 0}%` }));
+        const meta = el("span", {
+          className: "row-meta",
+          textContent: total ? `${done}/${total} bước` : "Đang chuẩn bị",
         });
-        renderNodes(state.plan, statuses, results);
-        const completed = Object.values(statuses).filter(value => value === "SUCCESS").length;
-        document.getElementById("progressText").textContent = `${completed} / ${state.plan.length} bước`;
-        document.getElementById("progressBar").style.width = `${state.plan.length ? completed / state.plan.length * 100 : 0}%`;
+        meta.style.cssText = "display:block;margin-top:5px";
+
+        const right = el("span", {}, el("span", { className: `pill ${tone}`, textContent: `${icon} ${label}` }));
+        right.style.textAlign = "right";
+
+        const row = el("button", { type: "button", className: "row" },
+          el("span", { className: `mark ${tone}`, textContent: icon, "aria-hidden": "true" }),
+          el("span", {},
+            el("span", { className: "row-title", textContent: item.title }),
+            el("span", { className: "row-step", textContent: item.current_step || label })),
+          el("span", {}, bar, meta),
+          right);
+        row.querySelector(".mark").setAttribute("aria-hidden", "true");
+        row.addEventListener("click", () => showDetail(item.workflow_id));
+        return row;
       }
 
-      async function replayWorkflowEvents(data) {
-        syncResponsePlan(data);
-        const unseen = (data.events || []).filter(event => event.sequence > state.eventSequence);
-        for (const event of unseen) {
-          renderStage({ ...data, stage: event.stage, message: event.message });
-          if (event.task_id && event.task_status) {
-            state.animatedTaskStatuses[event.task_id] = event.task_status;
-            state.animatedTaskMessages[event.task_id] = event.message;
-            renderAnimatedTaskState(data);
-          }
-          state.eventSequence = event.sequence;
-          await new Promise(resolve => setTimeout(resolve, event.stage.startsWith("TASK_") ? 650 : 400));
-        }
-      }
-
-      function renderLiveState(data) {
-        const responsePlan = (data.plan || []).map(item => ({ tool: item.tool, task_id: item.task_id, depends_on: item.depends_on || [] }));
-        if (responsePlan.length) state.plan = responsePlan;
-        const byId = new Map((data.tasks || []).map(item => [item.task_id, item]));
-        const statuses = {}; const results = {};
-        state.plan.forEach((item, index) => {
-          const taskId = data.plan?.[index]?.task_id;
-          const task = byId.get(taskId);
-          statuses[index] = task?.status || "PENDING";
-          results[index] = task;
-        });
-        renderNodes(state.plan, statuses, results);
-        const completed = Object.values(statuses).filter(value => value === "SUCCESS").length;
-        document.getElementById("progressText").textContent = `${completed} / ${state.plan.length} bước`;
-        document.getElementById("progressBar").style.width = `${state.plan.length ? completed / state.plan.length * 100 : 0}%`;
-        document.getElementById("workflowStatus").textContent = data.status === "PENDING" ? "Đang lập kế hoạch" : data.status === "RUNNING" ? "Đang thực hiện" : data.status;
-        renderStage(data);
-      }
-
-      async function pollWorkflow(workflowId) {
-        const terminal = new Set(["SUCCESS", "FAILED", "NEEDS_INFORMATION", "PLANNING_ERROR", "VALIDATION_ERROR", "PAYMENT_APPROVAL_REQUIRED", "EXECUTION_ERROR"]);
-        for (let attempt = 0; attempt < 180; attempt += 1) {
-          const response = await fetch(`/api/v1/workflows/demo/${workflowId}`, { cache: "no-store" });
-          const data = await response.json();
-          if (!response.ok) throw new Error("Không đọc được trạng thái workflow.");
-          state.latestResponse = data;
-          await replayWorkflowEvents(data);
-          document.getElementById("workflowStatus").textContent = data.status === "PENDING" ? "Đang lập kế hoạch" : data.status === "RUNNING" ? "Đang thực hiện" : data.status;
-          if (terminal.has(data.status)) { renderResponse(data); return; }
-          await new Promise(resolve => setTimeout(resolve, 750));
-        }
-        throw new Error("Workflow chạy quá thời gian chờ của giao diện.");
-      }
-
-      async function executeWorkflow(goalOverride = null, structuredFields = null) {
-        if (state.submitting) return;
-        const goal = goalOverride || buildGoal();
-        if (!goal) { toast("Chưa có mục tiêu để thực hiện."); return; }
-        if (selected("payment") && !state.approved) {
-          approvalPanel.classList.add("show");
-          renderNodes(state.plan, Object.fromEntries(state.plan.map((_, i) => [i, i === state.plan.length - 1 ? "WAITING_APPROVAL" : "PENDING"])));
-          addMessage("Workflow có bước thanh toán. Số tiền sẽ lấy từ báo giá của dịch vụ đặt chỗ, bạn không cần tự nhập. Vui lòng xác nhận để tiếp tục.");
-          addActivity("Đang chờ người dùng xác nhận bước thanh toán.", "running");
+      function renderActive(items, title) {
+        $("activeTitle").textContent = title;
+        const host = $("activeList");
+        if (!items.length) {
+          host.replaceChildren(emptyBox("Chưa có yêu cầu nào ở đây. Chọn một mục bên dưới hoặc mô tả việc bạn cần."));
           return;
         }
+        const box = el("div", { className: "rows" });
+        items.forEach((item) => box.appendChild(workflowRow(item)));
+        host.replaceChildren(box);
+      }
 
-        state.submitting = true;
-        const startButton = document.getElementById("startWorkflow"); startButton.disabled = true;
-        document.getElementById("sendGoal").disabled = true;
-        state.startedAt = Date.now(); state.lastStage = null; state.eventSequence = 0; state.animatedTaskStatuses = {}; state.animatedTaskMessages = {};
-        showProcessing("Đang phân tích yêu cầu và chuẩn bị kế hoạch...");
-        document.getElementById("workflowStatus").textContent = "Đang xử lý";
-        document.getElementById("currentAction").textContent = "Model đang lập kế hoạch";
-        document.getElementById("agentNarration").textContent = "Đang gửi yêu cầu tới Agent...";
-        clearInterval(state.timer);
-        state.timer = setInterval(() => { const seconds = Math.floor((Date.now() - state.startedAt) / 1000); document.getElementById("estimate").textContent = `Đã chạy ${seconds}s · ước tính, không phải countdown`; }, 1000);
+      function renderCompleted(items) {
+        $("completedSection").hidden = items.length === 0;
+        if (!items.length) return;
+        const box = el("div", { className: "rows" });
+        items.forEach((item) => box.appendChild(workflowRow(item)));
+        $("completedList").replaceChildren(box);
+      }
+
+      // =================================================================
+      // Thẻ mục tiêu — dịch vụ cư dân bị KHOÁ chứ không bị ẩn
+      // =================================================================
+      function renderGoals() {
+        const resident = state.accountState === "resident";
+        const host = $("goalCards");
+        host.replaceChildren();
+        GOALS.forEach((item) => {
+          const locked = item.resident && !resident;
+          const card = el("button", { type: "button", className: `goal${locked ? " locked" : ""}` },
+            el("span", { className: "gi", textContent: locked ? "🔒" : item.icon }),
+            el("span", { className: "gt", textContent: item.label }));
+          card.querySelector(".gi").setAttribute("aria-hidden", "true");
+
+          if (locked) {
+            card.setAttribute("aria-disabled", "true");
+            card.appendChild(el("span", { className: "lock-note", textContent: "Cần liên kết căn hộ" }));
+            card.addEventListener("click", () =>
+              toast("Dịch vụ này chỉ dành cho tài khoản đã liên kết căn hộ."));
+          } else {
+            card.addEventListener("click", () => {
+              state.contactFlow = Boolean(item.contact);
+              startWorkflow(item.goal);
+            });
+          }
+          host.appendChild(card);
+        });
+      }
+
+      function applyPersona() {
+        const resident = state.accountState === "resident";
+        $("acctName").textContent = resident ? ACCOUNT.full_name : "Khách tham quan";
+        $("acctInitials").textContent = resident ? "LB" : "K";
+        $("acctMeta").textContent = resident ? "Căn hộ A1201" : "Chưa liên kết căn hộ";
+        $("greeting").textContent = resident ? "Chào Thành Bảo" : "Chào bạn";
+        const pill = $("verifyPill");
+        pill.className = `verify${resident ? "" : " guest"}`;
+        pill.textContent = resident ? "✓ Đã liên kết căn hộ A1201" : "○ Chưa liên kết căn hộ";
+        renderGoals();
+      }
+
+      // =================================================================
+      // Giao việc
+      // =================================================================
+      async function startWorkflow(goal) {
+        if (state.busy) return;
+        state.busy = true;
         try {
-          const continuing = Boolean(state.pendingWorkflowId);
-          const endpoint = continuing ? `/api/v1/workflows/demo/${state.pendingWorkflowId}/continue` : "/api/v1/workflows/demo/start";
-          const payload = continuing
-            ? (structuredFields ? { fields: structuredFields } : { message: goal })
-            : { goal, approve_mock_payment: state.approved, account_state: state.accountState, project_name: null, contact_profile: propertyContactProfile() };
-          const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.detail || "Demo API không phản hồi.");
-          state.workflowId = data.workflow_id;
-          renderLiveState(data);
-          await pollWorkflow(data.workflow_id);
+          const data = await api(`${API}/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              goal,
+              approve_mock_payment: false,
+              account_state: state.accountState,
+              project_name: null,
+              contact_profile: contactProfile(),
+            }),
+          });
+          state.goals[data.workflow_id] = goal;
+          showDetail(data.workflow_id);
         } catch (error) {
-          hideProcessing();
-          ["plannerChip", "validatorChip", "executorChip", "databaseChip"].forEach(id => setChip(id, "")); document.getElementById("workflowStatus").textContent = "Không thể thực hiện"; document.getElementById("currentAction").textContent = "Đã dừng";
-          const safeMessage = error instanceof Error && error.message ? error.message : "Mình chưa thể kết nối tới dịch vụ. Bạn vui lòng thử lại.";
-          renderNodes(state.plan, { 0: "FAILED" }, { 0: { message: safeMessage } }); addMessage(safeMessage); addActivity("Workflow dừng trước khi thực thi.", "failed"); toast("Chưa thể tiếp tục workflow.");
-        } finally { clearInterval(state.timer); state.submitting = false; startButton.disabled = false; document.getElementById("sendGoal").disabled = false; }
-      }
-
-      function renderResponse(data) {
-        const responsePlan = (data.plan || []).map(item => ({ tool: item.tool, task_id: item.task_id, depends_on: item.depends_on || [] }));
-        if (responsePlan.length) state.plan = responsePlan;
-        renderStage(data);
-        hideProcessing();
-        const byId = new Map((data.tasks || []).map(item => [item.task_id, item]));
-        const statuses = {}; const results = {};
-        state.plan.forEach((item, index) => { const taskId = data.plan?.[index]?.task_id; const task = byId.get(taskId); statuses[index] = task?.status || (data.status === "PAYMENT_APPROVAL_REQUIRED" && item.tool === "pay_fee" ? "WAITING_APPROVAL" : "PENDING"); results[index] = task; });
-        renderNodes(state.plan, statuses, results);
-        const completed = Object.values(statuses).filter(value => value === "SUCCESS").length;
-        document.getElementById("progressText").textContent = `${completed} / ${state.plan.length} bước`;
-        document.getElementById("progressBar").style.width = `${state.plan.length ? completed / state.plan.length * 100 : 0}%`;
-        document.getElementById("workflowStatus").textContent = data.status === "SUCCESS" ? "Hoàn tất" : data.status === "NEEDS_INFORMATION" ? "Cần thêm thông tin" : "Chưa hoàn tất";
-        document.getElementById("currentAction").textContent = data.status === "SUCCESS" ? "Đã hoàn tất" : data.status === "NEEDS_INFORMATION" ? "Chờ phản hồi" : "Cần kiểm tra";
-        document.getElementById("estimate").textContent = `Hoàn tất trong ${Math.ceil((Date.now() - state.startedAt) / 1000)} giây`;
-        const responseMessage = workflowResponseMessage(data);
-        addMessage(responseMessage);
-        if (data.status === "NEEDS_INFORMATION") {
-          state.pendingWorkflowId = state.workflowId;
-          state.pendingMissingFields = data.missing_fields || [];
-          renderMissingFields(state.pendingMissingFields);
-          goalInput.placeholder = "Nhập thông tin còn thiếu rồi nhấn Enter...";
-          goalInput.focus();
-        } else {
-          state.pendingWorkflowId = null;
-          state.pendingMissingFields = [];
-          document.getElementById("combinedForm").hidden = true;
-          goalInput.placeholder = "Nhắn thêm yêu cầu cho P-118...";
+          toast(error.message);
+        } finally {
+          state.busy = false;
         }
-        if (data.status === "SUCCESS") addActivity("Workflow và các kết quả đã được lưu vào PostgreSQL.", "success"); else addActivity(responseMessage, data.status === "FAILED" ? "failed" : "running");
-        resultPanel.classList.add("show"); document.getElementById("resultBadge").textContent = data.status; document.getElementById("resultSummary").textContent = responseMessage;
-        const grid = document.getElementById("resultGrid"); grid.replaceChildren();
-        (data.tasks || []).forEach(task => { const card = document.createElement("div"); card.className = "result-step"; const title = document.createElement("strong"); title.textContent = task.title; const text = document.createElement("span"); text.textContent = task.status === "FAILED" ? userFacingTaskMessage(task) : task.message; card.append(title, text); grid.appendChild(card); });
       }
 
-      services.forEach(input => input.addEventListener("change", () => { ensureDependencies(input.dataset.service); state.approved = false; renderForm(); addActivity("Đã cập nhật các dịch vụ được chọn."); }));
-      document.querySelectorAll(".persona").forEach(button => button.addEventListener("click", () => applyPersona(button.dataset.persona)));
-      document.getElementById("previewPlan").addEventListener("click", showPlan);
-      document.getElementById("editPlan").addEventListener("click", () => { planPreview.hidden = true; });
-      document.getElementById("startWorkflow").addEventListener("click", () => executeWorkflow());
-      document.getElementById("continueMissing").addEventListener("click", () => {
-        if (hasInvalidRequiredFields()) return toast("Vui lòng kiểm tra các thông tin còn thiếu.");
-        const fields = missingFieldPayload();
-        const readable = state.pendingMissingFields.map(name => {
-          const node = document.querySelector(`[data-field="${name}"]`);
-          const value = node?.selectedOptions?.[0]?.textContent || node?.value || "";
-          return `${definitions[name]?.label || name}: ${value}`;
-        }).join(" · ");
-        addMessage(readable, "user");
-        executeWorkflow(null, fields);
-      });
-      document.getElementById("confirmPayment").addEventListener("click", () => { state.approved = true; approvalPanel.classList.remove("show"); toast("Đã xác nhận thanh toán."); addActivity("Người dùng đã xác nhận thanh toán.", "success"); executeWorkflow(); });
-      document.getElementById("rejectPayment").addEventListener("click", () => { approvalPanel.classList.remove("show"); renderNodes(state.plan, Object.fromEntries(state.plan.map((_, i) => [i, i === state.plan.length - 1 ? "CANCELLED" : "PENDING"]))); document.getElementById("workflowStatus").textContent = "Đã hủy thanh toán"; addActivity("Người dùng từ chối thanh toán.", "failed"); });
-      document.getElementById("cancelPlan").addEventListener("click", () => { services.forEach(input => input.checked = false); goalInput.value = ""; state.pendingWorkflowId = null; state.pendingMissingFields = []; renderForm(false); });
-      document.getElementById("sendGoal").addEventListener("click", () => {
-        if (!goalInput.value.trim() && !state.plan.length) return toast("Hãy chọn dịch vụ hoặc mô tả yêu cầu của bạn.");
-        if (hasInvalidRequiredFields()) return toast("Vui lòng kiểm tra các trường bắt buộc hoặc sai định dạng.");
-        const typedMessage = goalInput.value.trim();
-        const userMessage = typedMessage || `Thực hiện ${state.plan.map(item => tools[item.tool].title.toLowerCase()).join(", ")}.`;
-        const workflowGoal = typedMessage ? normalizeGoalText(typedMessage) : buildGoal();
-        goalInput.value = "";
-        addMessage(userMessage, "user");
-        addActivity(typedMessage ? "Đã nhận yêu cầu ngôn ngữ tự nhiên." : "Đã nhận yêu cầu từ các dịch vụ được chọn.");
-        executeWorkflow(workflowGoal);
-      });
-      goalInput.addEventListener("keydown", event => {
-        if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
-        event.preventDefault();
-        document.getElementById("sendGoal").click();
-      });
-      document.getElementById("newDemo").addEventListener("click", () => location.reload());
+      function contactProfile() {
+        if (!state.contactFlow) return null;
+        return { full_name: ACCOUNT.full_name, phone: ACCOUNT.phone, email: ACCOUNT.email };
+      }
 
-      applyPersona("resident", false);
+      // =================================================================
+      // Chi tiết workflow
+      // =================================================================
+      async function loadWorkflow(workflowId) {
+        try {
+          const data = await api(`${API}/${encodeURIComponent(workflowId)}`);
+          renderWorkflow(data);
+          if (TERMINAL.has(data.status)) {
+            stopPolling();
+          } else {
+            // Backend chưa có kênh realtime. Polling giãn dần để không dội
+            // request, và giao diện không gợi ý đây là cập nhật trực tiếp.
+            state.pollDelay = Math.min(state.pollDelay + 500, 5000);
+            state.pollTimer = setTimeout(() => loadWorkflow(workflowId), state.pollDelay);
+          }
+        } catch (error) {
+          stopPolling();
+          toast(error.message);
+        }
+      }
+
+      function renderWorkflow(data) {
+        const [label, tone, icon] = WORKFLOW_STATUS[data.status] || WORKFLOW_STATUS.PENDING;
+        const goal = state.goals[state.workflowId] || "";
+
+        $("wfTitle").textContent = goal
+          ? (goal.length > 70 ? `${goal.slice(0, 69)}…` : goal)
+          : "Yêu cầu dịch vụ";
+        const pill = $("wfStatus");
+        pill.className = `pill ${tone}`;
+        pill.textContent = `${icon} ${label}`;
+
+        const objective = $("wfObjective");
+        objective.hidden = !goal;
+        objective.textContent = goal ? `“${goal}”` : "";
+
+        renderSteps(data);
+        renderLog(data.events || []);
+        renderAction(data);
+      }
+
+      function renderSteps(data) {
+        const plan = data.plan || [];
+        const runtime = new Map((data.tasks || []).map((t) => [t.task_id, t]));
+        const blueprint = plan.length ? plan : (data.tasks || []);
+
+        const host = $("wfSteps");
+        host.replaceChildren();
+        let done = 0;
+        let current = null;
+
+        blueprint.forEach((entry) => {
+          const live = runtime.get(entry.task_id);
+          const status = live?.status || "PENDING";
+          const [statusLabel, cls, glyph] = TASK_STATUS[status] || TASK_STATUS.PENDING;
+          if (status === "SUCCESS") done += 1;
+          if (!current && (status === "RUNNING" || status === "WAITING_APPROVAL")) {
+            current = entry.title || live?.title;
+          }
+
+          const mark = el("span", { className: "s-mark" });
+          mark.setAttribute("aria-hidden", "true");
+          if (status === "RUNNING") mark.appendChild(el("span", { className: "spinner" }));
+          else mark.textContent = glyph;
+
+          const body = el("span", {},
+            el("span", { className: "s-name", textContent: entry.title || live?.title || "Bước xử lý" }),
+            el("span", { className: "s-note", textContent: live?.message || statusLabel }));
+
+          if (live?.details?.length) {
+            const dl = el("dl", { className: "kv" });
+            live.details.forEach((d) => {
+              dl.append(el("dt", { textContent: d.label }), el("dd", { textContent: d.value }));
+            });
+            body.appendChild(dl);
+          }
+
+          const li = el("li", { className: cls }, mark, body);
+          if (status === "RUNNING") li.setAttribute("aria-current", "step");
+          host.appendChild(li);
+        });
+
+        const total = blueprint.length;
+        $("wfBar").style.width = total ? `${Math.round((done / total) * 100)}%` : "0%";
+        $("wfCount").textContent = total ? `${done}/${total} bước` : "Đang chuẩn bị";
+
+        const cur = $("wfCurrent");
+        cur.hidden = !current;
+        if (current) {
+          cur.replaceChildren(document.createTextNode("Bước hiện tại: "), el("b", { textContent: current }));
+        }
+      }
+
+      function renderLog(events) {
+        const host = $("wfLog");
+        host.replaceChildren();
+        if (!events.length) {
+          host.appendChild(el("li", { textContent: "Chưa có hoạt động nào." }));
+          return;
+        }
+        // Chỉ hiện theo THỨ TỰ: `events[]` chưa có timestamp thật nên không
+        // bịa ra giờ đồng hồ.
+        events.forEach((event) => {
+          host.appendChild(el("li", {}, el("span", { className: "lm" }), document.createTextNode(event.message)));
+        });
+      }
+
+      // =================================================================
+      // Thẻ hành động
+      // =================================================================
+      function renderAction(data) {
+        const host = $("wfAction");
+        host.replaceChildren();
+        if (data.status === "WAITING_APPROVAL") host.appendChild(approvalCard(data));
+        else if (data.status === "NEEDS_INFORMATION") host.appendChild(missingCard(data));
+        else if (data.status === "SUCCESS") host.appendChild(resultCard(data));
+        else if (["FAILED", "CANCELLED", "PLANNING_ERROR", "VALIDATION_ERROR", "EXECUTION_ERROR"].includes(data.status)) {
+          host.appendChild(failureCard(data));
+        }
+      }
+
+      function approvalCard(data) {
+        const quote = data.payment_quote || null;
+        const approve = el("button", { className: "btn primary", type: "button", textContent: "Xác nhận thanh toán" });
+        const reject = el("button", { className: "btn ghost", type: "button", textContent: "Từ chối" });
+
+        // Body CHỈ có decision. Không gửi amount/currency/booking_id/khoá
+        // idempotency — backend đọc báo giá từ chỗ đã giữ trong hệ thống.
+        const decide = async (decision) => {
+          approve.disabled = true;
+          reject.disabled = true;
+          try {
+            await api(`${API}/${encodeURIComponent(state.workflowId)}/payment-decision`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ decision }),
+            });
+            loadWorkflow(state.workflowId);
+          } catch (error) {
+            approve.disabled = false;
+            reject.disabled = false;
+            toast(error.message);
+          }
+        };
+        approve.addEventListener("click", () => decide("approve"));
+        reject.addEventListener("click", () => decide("reject"));
+
+        const card = el("div", { className: "attention" },
+          el("div", { className: "attention-head", textContent: "⏸ Chờ bạn quyết định" }),
+          el("div", { className: "att-body", textContent: data.summary || "Yêu cầu này cần bạn xác nhận trước khi tiếp tục." }));
+
+        if (quote) {
+          const amount = el("div", { className: "amount", textContent: `Phí cần thanh toán: ${money(quote.amount, quote.currency)}` });
+          amount.setAttribute("aria-label", `${Number(quote.amount).toLocaleString("vi-VN")} đồng`);
+          card.append(amount, el("div", { className: "ro", textContent: "🔒 Số tiền do hệ thống xác định — bạn không cần nhập." }));
+        }
+        card.appendChild(el("div", { className: "att-actions" }, approve, reject));
+        return card;
+      }
+
+      function missingCard(data) {
+        const missing = data.missing_fields || [];
+        const card = el("div", { className: "attention" },
+          el("div", { className: "attention-head", textContent: "✎ Cần thêm thông tin" }),
+          el("div", { className: "att-body", textContent: data.question || "Mình cần thêm một chút thông tin." }));
+
+        const renderable = missing.filter((name) => FIELDS[name]);
+        if (!renderable.length) {
+          card.appendChild(el("div", { className: "ro", textContent: "Bạn mô tả thêm giúp mình nhé." }));
+          return card;
+        }
+
+        const form = el("div", { className: "fields" });
+        renderable.forEach((name) => form.appendChild(buildField(name)));
+
+        const submit = el("button", { className: "btn primary", type: "button", textContent: "Tiếp tục" });
+        submit.addEventListener("click", async () => {
+          const controls = [...form.querySelectorAll("[data-field]")];
+          const invalid = controls.find((c) => !c.checkValidity());
+          if (invalid) { invalid.reportValidity(); return; }
+          submit.disabled = true;
+          const fields = {};
+          controls.forEach((c) => { if (c.value !== "") fields[c.dataset.field] = c.value; });
+          try {
+            await api(`${API}/${encodeURIComponent(state.workflowId)}/continue`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ fields }),
+            });
+            loadWorkflow(state.workflowId);
+          } catch (error) {
+            submit.disabled = false;
+            toast(error.message);
+          }
+        });
+
+        card.append(form, el("div", { className: "att-actions" }, submit));
+        return card;
+      }
+
+      function buildField(name) {
+        const def = FIELDS[name];
+        const wrap = el("div", { className: `field${def.full ? " full" : ""}` },
+          el("label", { textContent: def.label, htmlFor: `f_${name}` }));
+
+        let control;
+        if (def.options) {
+          control = el("select");
+          // Không tự chọn option đầu: một lựa chọn chưa ai bấm mà đã nằm sẵn
+          // trong form chính là dữ liệu bịa.
+          const placeholder = el("option", { value: "", textContent: "Vui lòng chọn", disabled: true, selected: true });
+          control.appendChild(placeholder);
+          def.options.forEach(([value, text]) => control.appendChild(el("option", { value, textContent: text })));
+        } else if (def.type === "textarea") {
+          control = el("textarea", { rows: 2 });
+        } else {
+          control = el("input", { type: def.type || "text" });
+          if (def.placeholder) control.placeholder = def.placeholder;
+          if (def.min) control.min = def.min;
+          if (def.max) control.max = def.max;
+          if (def.type === "date") control.min = isoToday(0);
+        }
+        if (def.value) control.value = def.value;
+        control.id = `f_${name}`;
+        control.dataset.field = name;
+        control.setAttribute("autocomplete", "off");
+        if (def.required !== false) control.required = true;
+        wrap.appendChild(control);
+
+        if (def.hint) wrap.appendChild(el("div", { className: "field-hint", textContent: def.hint }));
+        return wrap;
+      }
+
+      function resultCard(data) {
+        const card = el("div", { className: "attention" },
+          el("div", { className: "attention-head", textContent: "✓ Hoàn tất" }),
+          el("div", { className: "att-body", textContent: data.summary || "Yêu cầu của bạn đã hoàn tất." }));
+        card.style.cssText = "background:var(--ok-soft);border-color:var(--ok-line);border-left-color:var(--ok)";
+        card.querySelector(".attention-head").style.color = "var(--ok)";
+        if (data.persisted) card.appendChild(el("div", { className: "ro", textContent: "✓ Đã lưu vào hệ thống" }));
+        return card;
+      }
+
+      function failureCard(data) {
+        const [label] = WORKFLOW_STATUS[data.status] || ["Không thành công"];
+        const card = el("div", { className: "attention" },
+          el("div", { className: "attention-head", textContent: `✕ ${label}` }),
+          el("div", { className: "att-body", textContent: data.summary || data.message || "Bạn thử lại hoặc mô tả rõ hơn giúp mình nhé." }));
+        card.style.cssText = "background:var(--err-soft);border-color:var(--err-line);border-left-color:var(--err)";
+        card.querySelector(".attention-head").style.color = "var(--err)";
+        return card;
+      }
+
+      // =================================================================
+      // Sự kiện
+      // =================================================================
+      $("goalInput").addEventListener("keydown", (event) => {
+        // event.isComposing: đang gõ tiếng Việt qua IME thì Enter là để chốt
+        // dấu, không phải để gửi.
+        if (event.isComposing || event.keyCode === 229) return;
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const value = event.target.value.trim();
+        if (!value) { toast("Bạn mô tả giúp mình việc cần làm nhé."); return; }
+        event.target.value = "";
+        state.contactFlow = false;
+        startWorkflow(value);
+      });
+
+      document.querySelectorAll("[data-persona]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.accountState = button.dataset.persona;
+          document.querySelectorAll("[data-persona]").forEach((other) =>
+            other.setAttribute("aria-pressed", String(other === button)));
+          applyPersona();
+        });
+      });
+
+      document.querySelectorAll("[data-view]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const view = button.dataset.view;
+          if (view === "services") {
+            showHome(false); markNav("services");
+            toast("Các dịch vụ hiển thị ở mục Bắt đầu nhanh.");
+            return;
+          }
+          if (view === "profile") {
+            showHome(false); markNav("profile");
+            toast(state.accountState === "resident"
+              ? "Tài khoản đã liên kết căn hộ A1201."
+              : "Tài khoản chưa liên kết căn hộ.");
+            return;
+          }
+          showHome(false);
+          markNav(view);
+          if (view === "overview") return;
+
+          $("attentionSection").hidden = true;
+          $("completedSection").hidden = true;
+          $("goalSection").hidden = true;
+          const titles = { running: "Đang thực hiện", attention: "Chờ bạn xử lý", completed: "Đã hoàn thành" };
+          try {
+            const data = await api(`${API}?status=${view}&limit=20`);
+            renderActive(data.items || [], titles[view]);
+          } catch (error) {
+            toast(error.message);
+          }
+        });
+      });
+
+      // Khởi tạo. URL có workflow_id thì mở thẳng chi tiết và đọc lại trạng
+      // thái từ hệ thống — refresh trang không làm mất việc đang chạy.
+      applyPersona();
+      const initialId = new URLSearchParams(location.search).get("workflow_id");
+      if (initialId) showDetail(initialId, false);
+      else showHome(false);
     </script>
   </body>
 </html>

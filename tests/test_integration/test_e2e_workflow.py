@@ -36,9 +36,7 @@ from src.connectors.transport import TransportConnector
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.executor.executor import Executor
 from src.services.mock.payment import payment_app
-from src.services.mock.payment import store as payment_store
 from src.services.mock.resident import resident_app
-from src.services.mock.transport import store as transport_store
 from src.services.mock.transport import transport_app
 
 _BASE_DATE = date(2030, 1, 1)
@@ -214,9 +212,14 @@ async def test_e2e_input_ref_chain_reaches_real_providers(e2e_pool: asyncpg.Pool
     booking_id = results["T3"].data["booking_id"]
     payment_id = results["T4"].data["payment_id"]
 
-    vehicle = transport_store.vehicles[vehicle_id]
-    booking = transport_store.bookings[booking_id]
-    payment = payment_store.payments[payment_id]
+    # Đọc từ PostgreSQL, không từ store RAM: Transport và Payment giờ persist
+    # thật, nên đây vừa là kiểm data propagation vừa là bằng chứng đã ghi DB.
+    async with e2e_pool.acquire() as conn:
+        vehicle = await conn.fetchrow("SELECT * FROM vehicles WHERE vehicle_id = $1", vehicle_id)
+        booking = await conn.fetchrow("SELECT * FROM parking_bookings WHERE booking_id = $1", booking_id)
+        payment = await conn.fetchrow("SELECT * FROM payments WHERE payment_id = $1", payment_id)
+
+    assert vehicle is not None and booking is not None and payment is not None
 
     # T1 → T2: provider nhận đúng resident_id thật, không phải InputRef marker.
     assert vehicle["resident_id"] == resident_id

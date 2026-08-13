@@ -90,7 +90,7 @@ class BookParkingRequest(BaseModel):
 # ---- pay_fee ----
 class PayFeeRequest(BaseModel):
     booking_id: str = Field(..., min_length=1)
-    amount: int = Field(..., ge=0, description="Số tiền nguyên, không âm")
+    amount: int = Field(..., gt=0, description="Số tiền nguyên, lớn hơn 0")
     currency: Currency
 
 

@@ -31,12 +31,18 @@ def _plan() -> TaskPlan:
 class _Executor:
     def __init__(self) -> None:
         self.calls: list[tuple[TaskPlan, str | None]] = []
+        self.finalize_flags: list[bool] = []
 
     async def execute(
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
+        *,
+        finalize: bool = True,
     ) -> tuple[str, dict[str, StandardResult]]:
+        # `finalize` thuộc contract: double phải nhận, nếu không nó che mất
+        # việc boundary thật có chuyển tiếp cờ hay không.
+        self.finalize_flags.append(finalize)
         self.calls.append((plan, workflow_id))
         return workflow_id or "workflow-created", {"T1": StandardResult.ok({"resident_id": "RES-001"})}
 
@@ -69,7 +75,7 @@ async def test_boundary_matches_graph_execute_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_validation_error_is_safe_and_does_not_execute() -> None:
-    secret = "sk-secret-user-value"
+    secret = "sk-secret-user-value"  # secret-fixture
     executor = _Executor()
 
     class _RejectingValidator:

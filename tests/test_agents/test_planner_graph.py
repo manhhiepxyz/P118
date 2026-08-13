@@ -13,8 +13,12 @@ from typing import Any
 
 import pytest
 
-from src.agents.graph import build_planner_graph
-from src.agents.planner import PlannerResult
+from src.agents.graph import (
+    CLARIFICATION_UNAVAILABLE_MESSAGE,
+    build_planner_graph,
+    needs_information_update,
+)
+from src.agents.planner import PlannerResult, build_question
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
@@ -287,7 +291,7 @@ async def test_needs_information_ends_without_executing() -> None:
     assert state["missing_fields"] == ("booking_date",)
     # Câu hỏi deterministic do code dựng, không phải văn bản LLM.
     assert state["question"] == result.question
-    assert "ngày đặt chỗ" in state["question"]
+    assert "ngày muốn đặt chỗ" in state["question"]
 
     assert boundary.calls == []
     assert "workflow_id" not in state
@@ -312,7 +316,7 @@ async def test_planner_error_ends_without_executing() -> None:
 
 @pytest.mark.asyncio
 async def test_unexpected_planner_exception_is_not_echoed() -> None:
-    secret = "sk-live-PLANNER-SECRET-123"
+    secret = "sk-live-PLANNER-SECRET-123"  # secret-fixture
     planner = FakePlanner(error=RuntimeError(f"boom api_key={secret}"))
     boundary = FakeExecutionBoundary()
 
@@ -330,18 +334,119 @@ async def test_unexpected_planner_exception_is_not_echoed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_missing_required_input_is_blocked_by_validator() -> None:
+async def test_missing_user_input_returns_needs_information_without_execution() -> None:
     planner = FakePlanner(PlannerResult(status="READY", plan=_plan_missing_required_input()))
     boundary = FakeExecutionBoundary()
 
     graph = build_planner_graph(planner, boundary)
     state = await graph.ainvoke({"goal": "Đăng ký cư dân giúp tôi.", "existing_context": {}})
 
-    assert "missing required input" in state["validation_error"]
+    assert state["planner_status"] == "NEEDS_INFORMATION"
+    assert state["missing_fields"] == ("residential_area",)
+    assert state["question"] == "Mình cần thêm thông tin để lập kế hoạch: tên khu đô thị. Bạn bổ sung giúp mình nhé?"
+    assert state["plan"] is None
+    assert "validation_error" not in state
     assert state["plan_validated"] is False
     assert boundary.calls == []
     assert "workflow_id" not in state
     assert "task_results" not in state
+
+
+@pytest.mark.asyncio
+async def test_missing_parking_inputs_ask_for_vehicle_details_not_internal_id() -> None:
+    plan = TaskPlan(
+        goal="Đặt chỗ đậu xe giúp tôi.",
+        tasks=[Task(task_id="T1", tool="book_parking", depends_on=[], input={})],
+    )
+    planner = FakePlanner(PlannerResult(status="READY", plan=plan))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke(
+        {
+            "goal": plan.goal,
+            "existing_context": {"resident_id": "RES-001"},
+        }
+    )
+
+    assert state["planner_status"] == "NEEDS_INFORMATION"
+    assert state["missing_fields"] == (
+        "plate_number",
+        "vehicle_type",
+        "booking_date",
+        "parking_zone",
+    )
+    assert state["plan"] is None
+    assert state["draft_plan"] is plan
+    assert "vehicle_id" not in state["missing_fields"]
+    assert "mã phương tiện" not in state["question"]
+    assert "Khu A hoặc Khu B" in state["question"]
+    assert boundary.calls == []
+
+
+@pytest.mark.asyncio
+async def test_system_owned_payment_input_is_not_requested_from_user() -> None:
+    plan = TaskPlan(
+        goal="Thanh toán phí.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="pay_fee",
+                depends_on=[],
+                input={"booking_id": "BOOK-001"},
+            )
+        ],
+    )
+    planner = FakePlanner(PlannerResult(status="READY", plan=plan))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": plan.goal, "existing_context": {}})
+
+    # amount/currency là dữ liệu hệ thống: không hỏi user, và cũng không rơi
+    # vào NEEDS_INFORMATION. Phải là từ chối an toàn có phân loại riêng.
+    assert state["clarification_error"] == CLARIFICATION_UNAVAILABLE_MESSAGE
+    assert "validation_error" not in state
+    assert state["plan_validated"] is False
+    assert state["planner_status"] == "READY"
+    assert "question" not in state
+    # Không có field nào được nêu ra để hỏi.
+    assert tuple(state.get("missing_fields") or ()) == ()
+    # Plan hỏng bị hạ xuống draft, không còn là plan chạy được.
+    assert state.get("plan") is None
+    for internal in ("amount", "currency", "booking_id"):
+        assert internal not in state["clarification_error"]
+    assert boundary.calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_input_does_not_hide_an_invalid_input_reference() -> None:
+    plan = TaskPlan(
+        goal="Đặt chỗ đậu xe giúp tôi.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="book_parking",
+                depends_on=[],
+                input={"vehicle_id": InputRef(from_task="T99", field="vehicle_id")},
+            )
+        ],
+    )
+    planner = FakePlanner(PlannerResult(status="READY", plan=plan))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke(
+        {
+            "goal": plan.goal,
+            "existing_context": {"resident_id": "RES-001"},
+        }
+    )
+
+    assert "references unknown task" in state["validation_error"]
+    assert state["planner_status"] == "READY"
+    assert "question" not in state
+    assert boundary.calls == []
 
 
 @pytest.mark.asyncio
@@ -370,7 +475,7 @@ async def test_plan_with_unknown_dependency_is_blocked_by_validator() -> None:
 
 @pytest.mark.asyncio
 async def test_validator_does_not_repair_a_bad_plan() -> None:
-    """Plan sai bị từ chối nguyên trạng, không bị 'chữa' rồi chạy tiếp."""
+    """Plan thiếu dữ liệu không bị tự điền hay đưa xuống execution boundary."""
     bad_plan = _plan_missing_required_input()
     planner = FakePlanner(PlannerResult(status="READY", plan=bad_plan))
     boundary = FakeExecutionBoundary()
@@ -378,8 +483,8 @@ async def test_validator_does_not_repair_a_bad_plan() -> None:
     graph = build_planner_graph(planner, boundary)
     state = await graph.ainvoke({"goal": "Đăng ký cư dân giúp tôi.", "existing_context": {}})
 
-    assert state["plan"] is bad_plan
-    assert state["plan"].tasks[0].input == {"full_name": "Lâm Thành Bảo", "apartment_code": "A1201"}
+    assert state["plan"] is None
+    assert bad_plan.tasks[0].input == {"full_name": "Lâm Thành Bảo", "apartment_code": "A1201"}
     assert boundary.calls == []
 
 
@@ -591,9 +696,10 @@ async def test_injected_plan_validated_flag_cannot_bypass_validator() -> None:
         }
     )
 
-    # plan_node ghi đè về False, validate_node giữ nguyên False vì plan sai.
+    # plan_node ghi đè về False; Validator chỉ chuyển sang hỏi bổ sung, không chạy.
     assert state["plan_validated"] is False
-    assert state["validation_error"]
+    assert state["planner_status"] == "NEEDS_INFORMATION"
+    assert state["missing_fields"] == ("residential_area",)
     assert boundary.calls == []
     assert "workflow_id" not in state
 
@@ -628,3 +734,122 @@ def test_compiled_topology_has_no_plan_to_execute_edge() -> None:
     # Đường duy nhất đi vào execute là từ validate.
     incoming = {source for source, target in edges if target == "execute"}
     assert incoming == {"validate"}
+
+
+# ---------------------------------------------------------------------------
+# Chuẩn hoá missing fields ở CẢ HAI nhánh vào NEEDS_INFORMATION
+#
+# `Planner._clean_missing_fields()` đã lọc một lượt, nhưng Graph là ranh giới
+# cuối trước UI nên phải tự bảo vệ. Các test dưới đây dùng FakePlanner để mô
+# phỏng đúng tình huống prompt bị bỏ qua hoặc model trả field nội bộ.
+# ---------------------------------------------------------------------------
+
+_INTERNAL_FIELDS = ("resident_id", "vehicle_id", "booking_id", "amount", "currency")
+
+
+@pytest.mark.asyncio
+async def test_planner_branch_translates_vehicle_id_into_user_answerable_fields() -> None:
+    planner = FakePlanner(PlannerResult(status="NEEDS_INFORMATION", missing_fields=("vehicle_id",)))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": "Đặt chỗ đậu xe.", "existing_context": {"resident_id": "RES-001"}})
+
+    assert state["planner_status"] == "NEEDS_INFORMATION"
+    assert state["missing_fields"] == ("plate_number", "vehicle_type")
+    assert "vehicle_id" not in state["missing_fields"]
+    # Không hỏi "mã phương tiện" và không nhắc tên field nội bộ trong câu hỏi.
+    assert "vehicle_id" not in state["question"]
+    assert boundary.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["resident_id", "booking_id", "amount", "currency"])
+async def test_planner_branch_never_asks_user_for_system_owned_field(field: str) -> None:
+    planner = FakePlanner(PlannerResult(status="NEEDS_INFORMATION", missing_fields=(field,)))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": "Làm giúp tôi.", "existing_context": {}})
+
+    # Không rơi vào NEEDS_INFORMATION → UI không có form rỗng để render.
+    assert state.get("planner_status") != "NEEDS_INFORMATION"
+    assert state["clarification_error"] == CLARIFICATION_UNAVAILABLE_MESSAGE
+    assert "question" not in state
+    assert tuple(state.get("missing_fields") or ()) == ()
+    assert field not in state["clarification_error"]
+    assert boundary.calls == []
+
+
+class _RawPlannerResult:
+    """Result duck-typed, cố tình BỎ QUA `PlannerResult.__post_init__`.
+
+    `PlannerResult` đã chặn field lạ và không cho truyền `question` tự do, nên
+    dùng nó thì không kiểm được lớp phòng thủ của Graph. Class này mô phỏng một
+    Planner khác (hoặc bản refactor tương lai) trả về dữ liệu chưa được lọc.
+    """
+
+    def __init__(self, missing_fields: tuple[str, ...], question: str | None = None) -> None:
+        self.status = "NEEDS_INFORMATION"
+        self.plan = None
+        self.missing_fields = missing_fields
+        self.question = question
+        self.is_ready = False
+
+
+@pytest.mark.asyncio
+async def test_planner_branch_rejects_unknown_field_without_echoing_it() -> None:
+    planner = FakePlanner(
+        _RawPlannerResult(
+            missing_fields=("__internal_debug_token",),
+            question="Cho mình xin __internal_debug_token nhé.",
+        )
+    )
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": "Làm giúp tôi.", "existing_context": {}})
+
+    assert state["clarification_error"] == CLARIFICATION_UNAVAILABLE_MESSAGE
+    # Câu hỏi do Planner sinh ra KHÔNG được đi tiếp ra ngoài.
+    assert "question" not in state
+    assert "__internal_debug_token" not in state["clarification_error"]
+    assert boundary.calls == []
+
+
+@pytest.mark.asyncio
+async def test_graph_rebuilds_question_instead_of_forwarding_planner_question() -> None:
+    """Field đã chuẩn hoá thì câu hỏi cũng phải được dựng lại theo field mới.
+
+    `PlannerResult.question` cho `vehicle_id` nói "phương tiện muốn dùng" —
+    tương ứng một ID nội bộ mà người dùng không có. Sau khi Graph đổi sang
+    plate_number + vehicle_type, câu hỏi cũ trở thành sai, nên không được
+    chuyển tiếp nguyên văn.
+    """
+    original = PlannerResult(status="NEEDS_INFORMATION", missing_fields=("vehicle_id",))
+    planner = FakePlanner(original)
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": "Đặt chỗ đậu xe.", "existing_context": {"resident_id": "RES-001"}})
+
+    assert state["missing_fields"] == ("plate_number", "vehicle_type")
+    assert state["question"] != original.question
+    assert state["question"] == build_question(("plate_number", "vehicle_type"))
+    assert boundary.calls == []
+
+
+def test_both_needs_information_branches_share_one_policy() -> None:
+    """Nhánh Planner và nhánh Validator dùng chung `needs_information_update`.
+
+    Nếu ai đó tách đôi policy, một nhánh sẽ lại đẩy được ID nội bộ ra UI.
+    """
+    context = {"resident_id": "RES-001"}
+    assert needs_information_update(("vehicle_id",), context)["missing_fields"] == (
+        "plate_number",
+        "vehicle_type",
+    )
+    for field in _INTERNAL_FIELDS:
+        if field == "vehicle_id":
+            continue
+        assert "clarification_error" in needs_information_update((field,), {})

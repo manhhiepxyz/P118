@@ -10,7 +10,7 @@ from src.agents.examples.plans import (
     PLAN_PARTIAL_BOOK_AND_PAY,
     PLAN_PARTIAL_BOOK_ONLY,
 )
-from src.agents.validator import TaskPlanValidator
+from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
 from src.common.task_plan import AllowedTool, InputRef, Task, TaskPlan
 
 # ---------------------------------------------------------------------------
@@ -255,6 +255,22 @@ def test_reject_missing_required_input_pay_fee() -> None:
     )
     with pytest.raises(ValueError, match="missing required input"):
         TaskPlanValidator.validate(plan)
+
+
+def test_missing_required_input_error_exposes_only_contract_field_names() -> None:
+    plan = _make_plan(
+        Task(
+            task_id="T1",
+            tool="book_parking",
+            depends_on=[],
+            input={},
+        )
+    )
+
+    with pytest.raises(MissingRequiredInputError) as exc_info:
+        TaskPlanValidator.validate(plan)
+
+    assert exc_info.value.missing_fields == ("booking_date", "parking_zone", "vehicle_id")
 
 
 # ---------------------------------------------------------------------------

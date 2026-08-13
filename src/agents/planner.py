@@ -4,8 +4,8 @@ Ranh giới:
   - LLM đề xuất kế hoạch; nó KHÔNG thực thi gì cả.
   - Output thực thi được duy nhất là `TaskPlan` trong `src/common/task_plan.py`.
     Module này không định nghĩa schema kế hoạch riêng.
-  - Planner CHƯA thay thế `TaskPlanValidator`. Plan trả về từ đây vẫn phải qua
-    Validator trước khi tới execution boundary — nối ở lượt sau.
+  - Planner KHÔNG thay thế `TaskPlanValidator`. Planner graph luôn đưa plan qua
+    Validator trước khi tới execution boundary.
   - Planner không gọi tầng thực thi.
 
 Bảo mật:
@@ -19,10 +19,11 @@ Bảo mật:
     tới `book_parking`, hoặc từ `existing_context` do backend dựng. Số tiền
     người dùng tự khai trong goal không phải nguồn authoritative.
 
-CHƯA làm trong vòng này — HITL:
+Ranh giới HITL:
   `pay_fee` là action tài chính và PHẢI qua approval ở runtime trước khi
   Executor gọi Payment API. Planner chỉ lập kế hoạch; nó không phải là chỗ
-  cưỡng chế approval. Policy Engine và HITL là hạng mục riêng, chưa implement.
+  cưỡng chế approval. `PaymentApprovalBoundary` và payment-decision API thực
+  hiện việc dừng/tiếp tục này ngoài quyền quyết định của LLM.
   Việc Planner trả READY cho một plan có `pay_fee` KHÔNG có nghĩa là được phép
   thanh toán ngay.
 """
@@ -62,18 +63,18 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "property_type": "loại bất động sản (apartment hoặc room)",
     "max_price": "ngân sách tối đa",
     "project_id": "tên dự án trong danh sách được hỗ trợ; tên khu vực chung chưa đủ",
-    "viewing_date": "ngày xem nhà theo định dạng YYYY-MM-DD",
-    "viewing_time": "giờ xem nhà theo định dạng HH:MM",
-    "interest_type": "nhu cầu tư vấn (buy, rent hoặc consultation)",
-    "preferred_contact_time": "thời gian muốn được liên hệ (morning, afternoon hoặc evening)",
+    "viewing_date": "ngày muốn tham quan",
+    "viewing_time": "giờ muốn tham quan",
+    "interest_type": "nhu cầu mua, thuê hay chỉ nhận tư vấn",
+    "preferred_contact_time": "buổi muốn được liên hệ",
     "consent": "đồng ý để bộ phận tư vấn liên hệ",
     "issue_type": "hạng mục cần bảo trì",
     "description": "mô tả sự cố",
     "location": "vị trí cần sửa chữa",
-    "preferred_date": "ngày muốn bảo trì theo định dạng YYYY-MM-DD",
-    "preferred_time": "giờ muốn bảo trì theo định dạng HH:MM",
-    "move_date": "ngày chuyển nhà theo định dạng YYYY-MM-DD",
-    "move_time": "giờ chuyển nhà theo định dạng HH:MM",
+    "preferred_date": "ngày muốn bảo trì",
+    "preferred_time": "giờ muốn bảo trì",
+    "move_date": "ngày muốn chuyển nhà",
+    "move_time": "giờ muốn chuyển nhà",
     "needs_elevator": "có cần đăng ký thang máy hay không",
     "needs_loading_support": "có cần hỗ trợ bốc dỡ hay không",
     "move_vehicle": "phương tiện chuyển nhà (none, van hoặc truck)",
@@ -82,10 +83,10 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "residential_area": "tên khu đô thị",
     "resident_id": "mã cư dân",
     "plate_number": "biển số xe",
-    "vehicle_type": "loại xe (car hoặc motorcycle)",
-    "vehicle_id": "mã phương tiện",
-    "booking_date": "ngày đặt chỗ hợp lệ, không ở quá khứ, theo định dạng YYYY-MM-DD",
-    "parking_zone": "khu vực đỗ xe (ZONE_A hoặc ZONE_B)",
+    "vehicle_type": "loại xe (ô tô hoặc xe máy)",
+    "vehicle_id": "phương tiện muốn dùng",
+    "booking_date": "ngày muốn đặt chỗ",
+    "parking_zone": "khu vực đỗ xe (Khu A hoặc Khu B)",
     "booking_id": "mã đặt chỗ",
     "amount": "số tiền",
     "currency": "loại tiền tệ",
@@ -233,7 +234,16 @@ class _StructuredLLM(Protocol):
 
 
 class _SupportsStructuredOutput(Protocol):
-    def with_structured_output(self, schema: Any) -> _StructuredLLM: ...
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> _StructuredLLM: ...
+
+
+# Phụ lục chỉ dùng cho `json_mode`. Không mô tả schema ở đây: schema đã được
+# truyền qua `with_structured_output`, và output vẫn được validate bằng
+# `_PlannerResponse` như mọi provider khác.
+_JSON_MODE_INSTRUCTION = (
+    "Trả lời bằng một object JSON hợp lệ duy nhất, đúng schema đã cho. "
+    "Không bọc trong code fence, không thêm chữ nào ngoài JSON."
+)
 
 
 class _PlannerResponse(BaseModel):
@@ -423,10 +433,33 @@ class Planner:
         result = await planner.plan(goal, existing_context={})
     """
 
-    def __init__(self, llm: _SupportsStructuredOutput) -> None:
+    def __init__(
+        self,
+        llm: _SupportsStructuredOutput,
+        *,
+        structured_output_method: str | None = None,
+    ) -> None:
         # `with_structured_output` buộc LLM trả object đúng schema: không cần
-        # code fence, không tự json.loads(), không parse text thủ công.
-        self._structured_llm = llm.with_structured_output(_PlannerResponse)
+        # code fence, không tự json.loads(), không parse text thủ công. Dù đi
+        # đường nào, output CUỐI CÙNG vẫn được validate bằng `_PlannerResponse`
+        # — không có nhánh nào bỏ qua Pydantic để dễ chạy hơn.
+        #
+        # `structured_output_method` cho caller chọn cơ chế khi provider không
+        # hỗ trợ mặc định. DeepSeek V4 Flash chạy thinking mode nên từ chối
+        # forced `tool_choice` ("Thinking mode does not support this
+        # tool_choice"), và `json_schema` thì báo "response_format type is
+        # unavailable now"; `json_mode` là đường còn lại và vẫn parse qua
+        # Pydantic như mọi provider khác.
+        # `json_mode` của OpenAI-compatible API từ chối request nếu prompt
+        # không chứa chữ "json": "Prompt must contain the word 'json' in some
+        # form to use 'response_format' of type 'json_object'". Chỉ thêm chỉ
+        # dẫn cho đúng nhánh này để prompt của các provider khác không đổi.
+        self._json_mode_hint = structured_output_method == "json_mode"
+
+        if structured_output_method is None:
+            self._structured_llm = llm.with_structured_output(_PlannerResponse)
+        else:
+            self._structured_llm = llm.with_structured_output(_PlannerResponse, method=structured_output_method)
 
     async def plan(
         self,
@@ -445,8 +478,11 @@ class Planner:
             raise PlannerError("Planner cần một mục tiêu không rỗng.")
 
         context = existing_context or {}
+        system_prompt = PLANNER_SYSTEM_PROMPT
+        if self._json_mode_hint:
+            system_prompt = f"{PLANNER_SYSTEM_PROMPT}\n\n{_JSON_MODE_INSTRUCTION}"
         messages = [
-            ("system", PLANNER_SYSTEM_PROMPT),
+            ("system", system_prompt),
             ("human", self._build_user_message(goal, context)),
         ]
 
@@ -660,7 +696,12 @@ class Planner:
         for name in raw_fields:
             if name not in seen:
                 seen.add(name)
-                cleaned.append(name)
+                # vehicle_id là ID nội bộ. Nếu account chưa có phương tiện,
+                # hỏi dữ liệu người dùng hiểu được để tạo register_vehicle.
+                replacements = ("plate_number", "vehicle_type") if name == "vehicle_id" else (name,)
+                for replacement in replacements:
+                    if replacement not in cleaned:
+                        cleaned.append(replacement)
 
         if not cleaned:
             raise _InconsistentResponseError(
