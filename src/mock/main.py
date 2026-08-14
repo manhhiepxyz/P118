@@ -11,12 +11,23 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.mock.errors import install_error_handler
-from src.mock.routers import apartment_owners, parking, payments, residents, vehicles
+from src.mock.routers import (
+    apartment_owners,
+    consultations,
+    parking,
+    payments,
+    residents,
+    shuttles,
+    tours,
+    vehicles,
+)
 
 app = FastAPI(
     title="P-118 Mock Services",
-    description="Dịch vụ giả lập theo shared_contracts.md — Resident, Vehicle, Parking, Payment.",
-    version="0.2.0",
+    description=(
+        "Dịch vụ giả lập theo shared_contracts.md — Resident, Vehicle, Parking, Payment, Tour, Shuttle, Consultation."
+    ),
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -34,6 +45,9 @@ app.include_router(vehicles.router)
 app.include_router(parking.router)
 app.include_router(payments.router)
 app.include_router(apartment_owners.router)
+app.include_router(tours.router)
+app.include_router(shuttles.router)
+app.include_router(consultations.router)
 
 
 @app.get("/health", tags=["meta"])

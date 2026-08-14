@@ -21,8 +21,11 @@ from typing import Any
 import asyncpg
 
 from src.config import get_settings
+from src.connectors.consultation import ConsultationConnector
 from src.connectors.payment import PaymentConnector
 from src.connectors.resident import ResidentConnector
+from src.connectors.shuttle import ShuttleConnector
+from src.connectors.tour import TourConnector
 from src.connectors.transport import TransportConnector
 from src.db.migrations import run_migrations
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
@@ -34,21 +37,31 @@ def build_connectors(
     resident_url: str = "http://localhost:8001",
     transport_url: str = "http://localhost:8002",
     payment_url: str = "http://localhost:8003",
+    tour_url: str = "http://localhost:8005",
+    shuttle_url: str = "http://localhost:8006",
+    consultation_url: str = "http://localhost:8007",
 ) -> list[Any]:
-    """Dựng 3 Connector thật trỏ tới Mock Provider.
+    """Dựng 6 Connector thật trỏ tới Mock Provider.
 
     Args:
-        resident_url : Base URL Resident service (mặc định cổng 8001)
-        transport_url: Base URL Transport service (mặc định cổng 8002)
-        payment_url  : Base URL Payment service (mặc định cổng 8003)
+        resident_url    : Base URL Resident service (mặc định cổng 8001)
+        transport_url   : Base URL Transport service (mặc định cổng 8002)
+        payment_url     : Base URL Payment service (mặc định cổng 8003)
+        tour_url        : Base URL Tour service (mặc định cổng 8005)
+        shuttle_url     : Base URL Shuttle service (mặc định cổng 8006)
+        consultation_url: Base URL Consultation service (mặc định cổng 8007)
 
     Returns:
-        List 3 Connector: [ResidentConnector, TransportConnector, PaymentConnector]
+        List 6 Connector: [ResidentConnector, TransportConnector,
+        PaymentConnector, TourConnector, ShuttleConnector, ConsultationConnector]
     """
     return [
         ResidentConnector(base_url=resident_url),
         TransportConnector(base_url=transport_url),
         PaymentConnector(base_url=payment_url),
+        TourConnector(base_url=tour_url),
+        ShuttleConnector(base_url=shuttle_url),
+        ConsultationConnector(base_url=consultation_url),
     ]
 
 
@@ -73,13 +86,23 @@ async def build_execution_boundary(
     resident_url: str = "http://localhost:8001",
     transport_url: str = "http://localhost:8002",
     payment_url: str = "http://localhost:8003",
+    tour_url: str = "http://localhost:8005",
+    shuttle_url: str = "http://localhost:8006",
+    consultation_url: str = "http://localhost:8007",
 ) -> tuple[ValidatedExecutionBoundary, PostgreSQLWorkflowStateRepository]:
     """Dựng boundary tương thích trực tiếp với Planner graph.
 
     Repository được trả kèm để caller quản lý vòng đời pool khi cần. Boundary
     chỉ trả tuple chuẩn của ``Executor.execute``; không tạo wrapper result mới.
     """
-    connectors, repository = await build_runtime(resident_url, transport_url, payment_url)
+    connectors, repository = await build_runtime(
+        resident_url,
+        transport_url,
+        payment_url,
+        tour_url,
+        shuttle_url,
+        consultation_url,
+    )
     executor = Executor(connectors, repository)
     return ValidatedExecutionBoundary(executor), repository
 
@@ -88,12 +111,22 @@ async def build_runtime(
     resident_url: str = "http://localhost:8001",
     transport_url: str = "http://localhost:8002",
     payment_url: str = "http://localhost:8003",
+    tour_url: str = "http://localhost:8005",
+    shuttle_url: str = "http://localhost:8006",
+    consultation_url: str = "http://localhost:8007",
 ) -> tuple[list[Any], PostgreSQLWorkflowStateRepository]:
     """Dựng toàn bộ runtime: connectors + repository.
 
     Returns:
         (connectors, repository) để dựng Executor hoặc test từng tầng.
     """
-    connectors = build_connectors(resident_url, transport_url, payment_url)
+    connectors = build_connectors(
+        resident_url,
+        transport_url,
+        payment_url,
+        tour_url,
+        shuttle_url,
+        consultation_url,
+    )
     repository = await build_repository()
     return connectors, repository

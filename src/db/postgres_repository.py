@@ -16,6 +16,7 @@ Các fix so với draft ban đầu (v0.3.0):
 from __future__ import annotations
 
 import logging
+from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -26,6 +27,7 @@ from src.db.audit_repository import AuditRepository
 from src.db.capacity_repository import BookingAlreadyExistsError as BookingAlreadyExistsError
 from src.db.capacity_repository import CapacityRepository
 from src.db.capacity_repository import NoAvailabilityError as NoAvailabilityError
+from src.db.user_repository import UserRepository
 from src.db.workflow_repository import WorkflowRepository
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,7 @@ class PostgreSQLWorkflowStateRepository:
         self.workflows = WorkflowRepository(pool)
         self.capacity = CapacityRepository(pool)
         self.audit = AuditRepository(pool)
+        self.users = UserRepository(pool)
 
     # ------------------------------------------------------------------
     # Workflow CRUD
@@ -81,12 +84,42 @@ class PostgreSQLWorkflowStateRepository:
         """Trả dict gồm workflow metadata + danh sách tasks."""
         return await self.workflows.get_workflow(workflow_id)
 
+    async def list_workflows(self, page: int = 1, limit: int = 10) -> dict:
+        """Liệt kê workflow (summary) — dùng cho GET /workflows."""
+        return await self.workflows.list_workflows(page, limit)
+
+    async def update_workflow_task_plan(self, workflow_id: str, plan: Any) -> None:
+        """Snapshot task_plan (draft/approved) vào cột JSONB của workflow."""
+        await self.workflows.update_workflow_task_plan(workflow_id, plan)
+
+    async def close(self) -> None:
+        """Đóng pool asyncpg — gọi ở lifespan shutdown."""
+        await self._pool.close()
+
     async def archive_workflow(self, workflow_id: str) -> None:
         """
         [fix] Soft delete — đặt archived_at thay vì DELETE.
         Giữ nguyên execution_logs và approval_decisions (audit trail).
         """
         await self.workflows.archive_workflow(workflow_id)
+
+    # ------------------------------------------------------------------
+    # Auth — users
+    # ------------------------------------------------------------------
+
+    async def create_user(
+        self, username: str, password_hash: str, role: str = "resident", email: str | None = None
+    ) -> dict:
+        """Tạo tài khoản đăng nhập; trả user không kèm password_hash."""
+        return await self.users.create_user(username, password_hash, role, email)
+
+    async def get_user_by_username(self, username: str) -> dict | None:
+        """Tra user theo username — bao gồm password_hash (chỉ dùng nội bộ)."""
+        return await self.users.get_user_by_username(username)
+
+    async def get_user_by_id(self, user_id: str) -> dict | None:
+        """Tra user theo id — bao gồm password_hash (chỉ dùng nội bộ)."""
+        return await self.users.get_user_by_id(user_id)
 
     # ------------------------------------------------------------------
     # Task CRUD

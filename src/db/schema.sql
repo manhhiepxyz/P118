@@ -1,9 +1,19 @@
 -- =============================================================
 -- P-118 — Database Schema
--- Version: v0.3.0
--- Updated: 2026-08-05
+-- Version: v0.5.0
+-- Updated: 2026-08-14
 -- Owner: Hoàng Anh (src/db/)
 -- =============================================================
+-- Changelog v0.5.0:
+--   [add] tour_slot_config / tour_bookings / tour_capacity: đặt lịch tham quan
+--         dự án căn hộ (demo) — service book_tour
+--   [add] shuttle_bookings: đặt xe tham quan (demo) — service book_shuttle
+--   [add] consultations: đăng ký tư vấn mua (ở/kinh doanh/đầu tư) + thuê
+--         (demo) — service register_consultation
+-- Changelog v0.4.0:
+--   [add] users: auth (login/register + RBAC) — scrypt password_hash
+--         không seed bằng SQL (scrypt hash không tính được trong SQL);
+--         admin đầu tiên tạo bằng scripts/create_admin.py
 -- Changelog v0.3.0:
 --   [fix] parking_capacity: bỏ booked_count denormalized,
 --         tính COUNT(*) + SELECT FOR UPDATE trong transaction
@@ -131,6 +141,87 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_paid_booking
 
 
 -- =============================================================
+-- NHÓM 1b: DEMO SERVICES (đặt lịch tham quan / đặt xe / tư vấn)
+-- =============================================================
+-- [add] v0.5.0 — Dịch vụ demo sau Gate 2, mock API tự quản lý (giống NHÓM 1).
+-- KHÔNG phải workflow state; Executor/Repository không ghi vào đây.
+-- =============================================================
+
+-- Cấu hình sức chứa slot tham quan theo (residential_area, tour_slot).
+-- Seed rõ ràng trong seed.sql (giống zone_capacity_config cho parking).
+CREATE TABLE IF NOT EXISTS tour_slot_config (
+    residential_area VARCHAR(100) NOT NULL,
+    tour_slot        VARCHAR(20)  NOT NULL
+                         CHECK (tour_slot IN ('MORNING', 'AFTERNOON')),
+    capacity         INTEGER      NOT NULL CHECK (capacity > 0),
+    PRIMARY KEY (residential_area, tour_slot)
+);
+
+-- Đặt lịch tham quan dự án căn hộ.
+-- resident_id NULL = khách tham quan (không phải cư dân).
+CREATE TABLE IF NOT EXISTS tour_bookings (
+    tour_id          VARCHAR(20)  PRIMARY KEY,          -- TOUR-001…
+    resident_id      VARCHAR(20)
+                         REFERENCES residents(resident_id),
+    residential_area VARCHAR(100) NOT NULL,
+    tour_date        DATE         NOT NULL,
+    tour_slot        VARCHAR(20)  NOT NULL
+                         CHECK (tour_slot IN ('MORNING', 'AFTERNOON')),
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    -- Một resident không đặt trùng (resident_id, tour_date, tour_slot).
+    -- NULL resident_id (khách) không bị ràng buộc này — Postgres UNIQUE coi
+    -- NULL khác nhau; sức chứa slot là guard chính cho khách.
+    CONSTRAINT uq_tour_bookings_res_date_slot UNIQUE (resident_id, tour_date, tour_slot)
+);
+
+-- [add] Sức chứa slot tham quan theo ngày — đọc COUNT(*) + SELECT FOR UPDATE
+-- trong transaction (giống parking_capacity). Không dùng booked_count denormalized.
+CREATE TABLE IF NOT EXISTS tour_capacity (
+    residential_area VARCHAR(100) NOT NULL,
+    tour_date        DATE         NOT NULL,
+    tour_slot        VARCHAR(20)  NOT NULL
+                         CHECK (tour_slot IN ('MORNING', 'AFTERNOON')),
+    capacity         INTEGER      NOT NULL CHECK (capacity > 0),
+    PRIMARY KEY (residential_area, tour_date, tour_slot)
+);
+
+-- Đặt xe tham quan dự án.
+-- Một lịch tham quan (tour_id) chỉ đặt 1 xe.
+CREATE TABLE IF NOT EXISTS shuttle_bookings (
+    shuttle_id      VARCHAR(20)  PRIMARY KEY,           -- SHUTTLE-001…
+    tour_id         VARCHAR(20)  NOT NULL
+                        REFERENCES tour_bookings(tour_id),
+    tour_date       DATE         NOT NULL,
+    passenger_count INTEGER      NOT NULL
+                        CHECK (passenger_count BETWEEN 1 AND 30),
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_shuttle_bookings_tour UNIQUE (tour_id)
+);
+
+-- Đăng ký tư vấn bất động sản.
+-- consultation_type: BUY (mua) / RENT (thuê).
+-- buy_sub_type (chỉ khi BUY): RESIDE (ở) / BUSINESS (kinh doanh) / INVEST (đầu tư).
+CREATE TABLE IF NOT EXISTS consultations (
+    consultation_id   VARCHAR(20)  PRIMARY KEY,         -- CONS-001…
+    resident_id       VARCHAR(20)
+                          REFERENCES residents(resident_id),
+    consultation_type VARCHAR(20)  NOT NULL
+                          CHECK (consultation_type IN ('BUY', 'RENT')),
+    buy_sub_type      VARCHAR(20)
+                          CHECK (buy_sub_type IN ('RESIDE', 'BUSINESS', 'INVEST')),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    -- Một resident chỉ đăng ký 1 tư vấn cho mỗi loại.
+    CONSTRAINT uq_consultations_resident_type UNIQUE (resident_id, consultation_type)
+);
+
+
+-- =============================================================
 -- NHÓM 2: WORKFLOW ENGINE STATE
 -- =============================================================
 -- Executor ghi/đọc qua WorkflowStateRepository Protocol.
@@ -250,3 +341,35 @@ CREATE TABLE IF NOT EXISTS approval_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_approval_decisions_workflow
     ON approval_decisions(workflow_id);
+
+
+-- =============================================================
+-- NHÓM 5: AUTH
+-- =============================================================
+-- [add] v0.4.0 — Tài khoản đăng nhập (login/register) + phân quyền.
+--   - role: 'resident' (mặc định khi register) | 'admin' (tạo bằng
+--     scripts/create_admin.py)
+--   - password_hash: chuỗi 'scrypt:N:r:p:salt_b64:hash_b64' (stdlib
+--     hashlib.scrypt, salt random 16 bytes). KHÔNG seed bằng SQL vì
+--     scrypt không tính được trong SQL.
+--   - archived_at: soft delete — user bị xoá vẫn giữ audit trail
+--     (decided_by / execution_logs).
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS users (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    username      VARCHAR(50)  NOT NULL,                  -- lowercase ở tầng app
+    email         VARCHAR(255),
+    password_hash TEXT         NOT NULL,                  -- scrypt:N:r:p:salt_b64:hash_b64
+    role          VARCHAR(20)  NOT NULL DEFAULT 'resident'
+                      CHECK (role IN ('resident', 'admin')),
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    archived_at   TIMESTAMPTZ  DEFAULT NULL,
+
+    CONSTRAINT uq_users_username UNIQUE (username)
+);
+
+-- Email unique chỉ khi có giá trị (nhiều user có thể bỏ trống email)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email
+    ON users(email) WHERE email IS NOT NULL;

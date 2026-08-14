@@ -78,6 +78,56 @@ PLAN_PARTIAL_BOOK_ONLY = TaskPlan(
 )
 
 # ---------------------------------------------------------------------------
+# Demo flow: tour → shuttle (tham quan + xe đưa đón)
+# book_tour → book_shuttle (tour_id truyền qua InputRef)
+# ---------------------------------------------------------------------------
+
+PLAN_TOUR_SHUTTLE = TaskPlan(
+    goal=("Đặt lịch tham quan dự án Vinhomes Ocean Park buổi sáng ngày 2026-08-20 và đặt xe tham quan cho 4 người."),
+    tasks=[
+        Task(
+            task_id="T1",
+            tool="book_tour",
+            depends_on=[],
+            input={
+                "residential_area": "Vinhomes Ocean Park",
+                "tour_date": "2026-08-20",
+                "tour_slot": "MORNING",
+            },
+        ),
+        Task(
+            task_id="T2",
+            tool="book_shuttle",
+            depends_on=["T1"],
+            input={
+                "tour_id": InputRef(from_task="T1", field="tour_id"),
+                "tour_date": InputRef(from_task="T1", field="tour_date"),
+                "passenger_count": 4,
+            },
+        ),
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# Demo flow: đăng ký tư vấn mua căn hộ để ở
+# ---------------------------------------------------------------------------
+
+PLAN_CONSULTATION = TaskPlan(
+    goal="Đăng ký tư vấn mua căn hộ để ở tại Vinhomes.",
+    tasks=[
+        Task(
+            task_id="T1",
+            tool="register_consultation",
+            depends_on=[],
+            input={
+                "consultation_type": "BUY",
+                "buy_sub_type": "RESIDE",
+            },
+        ),
+    ],
+)
+
+# ---------------------------------------------------------------------------
 # Partial goal 2: user already has vehicle_id — book_parking then pay_fee
 # ---------------------------------------------------------------------------
 

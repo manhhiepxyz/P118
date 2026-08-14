@@ -70,9 +70,11 @@ class FakeLLM:
     def __init__(self, response: Any = None, error: Exception | None = None) -> None:
         self._structured = _FakeStructuredLLM(response, error)
         self.structured_output_schema: Any = None
+        self.structured_output_method: str | None = None
 
-    def with_structured_output(self, schema: Any) -> _FakeStructuredLLM:
+    def with_structured_output(self, schema: Any, *, method: str | None = None) -> _FakeStructuredLLM:
         self.structured_output_schema = schema
+        self.structured_output_method = method
         return self._structured
 
     @property
@@ -86,7 +88,7 @@ class SequencedFakeLLM:
     def __init__(self, outcomes: list[Any]) -> None:
         self._structured = _SequencedStructuredLLM(outcomes)
 
-    def with_structured_output(self, schema: Any) -> _SequencedStructuredLLM:
+    def with_structured_output(self, schema: Any, *, method: str | None = None) -> _SequencedStructuredLLM:
         return self._structured
 
     @property

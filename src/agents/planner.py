@@ -70,6 +70,12 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "booking_id": "mã đặt chỗ",
     "amount": "số tiền",
     "currency": "loại tiền tệ",
+    "tour_date": "ngày tham quan theo định dạng YYYY-MM-DD",
+    "tour_slot": "khung giờ tham quan (MORNING hoặc AFTERNOON)",
+    "tour_id": "mã lịch tham quan",
+    "passenger_count": "số người đi xe tham quan (1-30)",
+    "consultation_type": "loại tư vấn (BUY hoặc RENT)",
+    "buy_sub_type": "phân loại tư vấn mua (RESIDE, BUSINESS hoặc INVEST)",
 }
 
 # `Literal` không được kiểm tra lúc chạy — giữ bản runtime để `PlannerResult`
@@ -406,7 +412,14 @@ class Planner:
     def __init__(self, llm: _SupportsStructuredOutput) -> None:
         # `with_structured_output` buộc LLM trả object đúng schema: không cần
         # code fence, không tự json.loads(), không parse text thủ công.
-        self._structured_llm = llm.with_structured_output(_PlannerResponse)
+        #
+        # method="function_calling": langchain-openai >= 0.3 mặc định chuyển
+        # sang structured-output strict (`json_schema`), và mode này TỪ CHỐI
+        # schema `_PlannerResponse` vì `Task.input` là dict tự do (không khai
+        # `additionalProperties: false` được cho object lồng). Kết quả là
+        # `POST /workflow/start` (chỉ goal) trả 502 BadRequestError. Chọn
+        # function_calling để giữ khả năng trả object lồng với dict tự do.
+        self._structured_llm = llm.with_structured_output(_PlannerResponse, method="function_calling")
 
     async def plan(
         self,

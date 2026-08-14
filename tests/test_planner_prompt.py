@@ -254,7 +254,7 @@ def test_prompt_has_self_check_before_output() -> None:
     assert "amount, currency" in checklist  # nhắc đúng cặp hay sai nhất
     assert "InputRef" in checklist
     assert "pay_fee" in checklist
-    assert "4 tool" in checklist
+    assert "7 tool" in checklist
 
 
 # ---------------------------------------------------------------------------

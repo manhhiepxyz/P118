@@ -259,12 +259,12 @@ Logs tự động submit lên grading server mỗi khi `git push`.
 ### Khởi động full stack
 
 ```bash
-# 1. Khởi động PostgreSQL + 3 Mock Provider + Backend
+# 1. Khởi động PostgreSQL + 6 Mock Provider + Backend
 docker compose up -d
 
 # 2. Kiểm tra health (chờ tất cả healthy)
 docker compose ps
-for p in 8000 8001 8002 8003; do curl -s http://localhost:$p/health; done
+for p in 8000 8001 8002 8003 8005 8006 8007; do curl -s http://localhost:$p/health; done
 ```
 
 | Service | Cổng | Mô tả |
@@ -273,6 +273,9 @@ for p in 8000 8001 8002 8003; do curl -s http://localhost:$p/health; done
 | Mock Resident | 8001 | `POST /api/residents` |
 | Mock Transport | 8002 | `POST /api/vehicles` + `POST /api/parking/bookings` |
 | Mock Payment | 8003 | `POST /api/payments` |
+| Mock Tour | 8005 | `POST /api/tours/bookings` |
+| Mock Shuttle | 8006 | `POST /api/shuttles/bookings` |
+| Mock Consultation | 8007 | `POST /api/consultations` |
 | PostgreSQL | 5432 | Workflow state persistence |
 
 ### Smoke test deterministic của runtime
@@ -312,6 +315,31 @@ ruff format --check src/ tests/
 ### Debug lỗi liên tầng
 
 Khi test fail, xem [docs/integration-debug-guide.md](docs/integration-debug-guide.md) để phân loại lỗi thuộc Planner / Executor / Connector / Provider / DB / Docker.
+
+---
+
+## Demo services (Gate 3)
+
+3 dịch vụ demo mới (mock dữ liệu + DB, chưa nối vào AI workflow engine):
+
+| Service | Tool | Cổng | Endpoint chính |
+| --- | --- | --- | --- |
+| Đặt lịch tham quan | `book_tour` | 8005 | `POST /api/tours/bookings` |
+| Đặt xe tham quan | `book_shuttle` | 8006 | `POST /api/shuttles/bookings` |
+| Đăng ký tư vấn | `register_consultation` | 8007 | `POST /api/consultations` |
+
+Tư vấn gồm **tư vấn mua** (`BUY` — `RESIDE` ở / `BUSINESS` kinh doanh / `INVEST` đầu tư) và
+**tư vấn thuê** (`RENT`). Mỗi dịch vụ có 2 lớp: provider độc lập (cổng 8005–8007) và router
+monolith (gộp trong `src.mock.main:app`, cổng 8010 — cross-check nghiệp vụ). Chi tiết hợp đồng
+xem [docs/shared_contracts.md](docs/shared_contracts.md).
+
+Chạy test hành trình demo (đặt lịch → đặt xe → đăng ký tư vấn, xác minh dữ liệu qua cả
+API mock lẫn service layer DB):
+
+```bash
+TEST_DATABASE_URL=postgresql://p118:p118pass@localhost:5432/p118_test_db \
+  pytest tests/test_demo/ -v
+```
 
 ---
 

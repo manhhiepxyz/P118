@@ -1,4 +1,29 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_api/ -v)",
+      "Bash(ruff check *)",
+      "Bash(python -m ruff --version)",
+      "Bash(python -m ruff check src/api/ src/db/ src/main.py tests/test_api/)",
+      "Bash(python -m ruff format src/api/ src/db/ src/main.py tests/test_api/)",
+      "Bash(python -m pytest tests/test_api/ -q)",
+      "Bash(python -m pytest tests/test_db/ -q)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://postgres:root@localhost:5432/p118_test_db\" python -m pytest tests/test_db/ -q)",
+      "Bash(python -m ruff check src/api/ src/db/ tests/test_api/ tests/test_db/)",
+      "Bash(python -m pytest tests/test_api/test_workflow_routes.py tests/test_api/test_auth_routes.py -q)",
+      "Bash(python -m pytest tests/test_api/test_auth_routes.py -q)",
+      "Bash(python -m pytest tests/test_api/test_workflow_routes.py -q)",
+      "Bash(git -C d:/AI20KLab/P-118 diff --stat)",
+      "Bash(python -m pytest tests/test_db/test_repository.py -q -k \"list_workflows\")",
+      "Bash(TEST_DATABASE_URL=\"postgresql://postgres:root@localhost:5432/p118_test_db\" python -m pytest tests/test_db/test_repository.py -q -k \"list_workflows\")",
+      "Bash(TEST_DATABASE_URL=\"postgresql://postgres:root@localhost:5432/p118_test_db\" python -m pytest tests/test_db/test_repository.py -q)",
+      "Bash(python -m ruff format --check src/api/ src/db/ tests/test_api/ tests/test_db/)",
+      "Bash(python -m ruff format src/api/ src/db/ tests/test_api/ tests/test_db/)",
+      "Bash(rm -f .qa_flow.mjs)",
+      "Bash(taskkill //PID 29584 //F)",
+      "Bash(netstat -ano)"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {

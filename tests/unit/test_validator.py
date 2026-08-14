@@ -645,7 +645,7 @@ def test_example_plans_still_valid_after_sweep() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Regression: the Planner contract is exactly four tools
+# Regression: the Planner contract is exactly seven tools
 #
 # Ownership verification is an external VerificationGuard concern that runs
 # BEFORE the workflow — it must never reappear as a TaskPlan tool.
@@ -657,12 +657,15 @@ EXPECTED_TOOLS = frozenset(
         "register_vehicle",
         "book_parking",
         "pay_fee",
+        "book_tour",
+        "book_shuttle",
+        "register_consultation",
     }
 )
 
 
-def test_planner_contract_is_exactly_four_tools() -> None:
-    """Schema, validator allowlist and required-input table must agree on 4 tools."""
+def test_planner_contract_is_exactly_seven_tools() -> None:
+    """Schema, validator allowlist and required-input table must agree on 7 tools."""
     assert frozenset(typing.get_args(AllowedTool)) == EXPECTED_TOOLS
     assert TaskPlanValidator.ALLOWED_TOOLS == EXPECTED_TOOLS
     assert frozenset(TaskPlanValidator.REQUIRED_INPUTS) == EXPECTED_TOOLS

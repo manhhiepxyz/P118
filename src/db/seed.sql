@@ -51,3 +51,18 @@ ON CONFLICT (apartment_code, residential_area) DO UPDATE
     SET owner_name  = EXCLUDED.owner_name,
         id_number   = EXCLUDED.id_number,
         verified_at = NOW();
+
+-- =============================================================
+-- Sức chứa slot tham quan dự án (demo — v0.5.0).
+-- Khớp DEFAULT_TOUR_SLOTS trong src/mock/store.py.
+-- Service layer dùng ON CONFLICT DO NOTHING khi tạo tour_capacity per-date.
+-- =============================================================
+
+INSERT INTO tour_slot_config (residential_area, tour_slot, capacity)
+VALUES
+    ('Vinhomes Ocean Park', 'MORNING',   3),
+    ('Vinhomes Ocean Park', 'AFTERNOON', 3),
+    ('Vinhomes Smart City', 'MORNING',   3),
+    ('Vinhomes Smart City', 'AFTERNOON', 3)
+ON CONFLICT (residential_area, tour_slot) DO UPDATE
+    SET capacity = EXCLUDED.capacity;

@@ -29,6 +29,9 @@ AllowedTool = Literal[
     "register_vehicle",
     "book_parking",
     "pay_fee",
+    "book_tour",
+    "book_shuttle",
+    "register_consultation",
 ]
 
 

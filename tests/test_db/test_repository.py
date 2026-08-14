@@ -16,6 +16,7 @@ Tiêu chí Module DoD (team-plan.md):
 
 from __future__ import annotations
 
+import json
 import uuid as uuid_module
 
 import asyncpg
@@ -23,7 +24,7 @@ import pytest
 
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
 from src.common.results import StandardResult
-from src.common.task_plan import InputRef
+from src.common.task_plan import InputRef, Task, TaskPlan
 from src.db import (
     BookingAlreadyExistsError,
     NoAvailabilityError,
@@ -84,11 +85,176 @@ async def test_update_workflow_status(db_pool):
     assert result["workflow"]["status"] == "RUNNING"
 
 
+# ---------------------------------------------------------------------------
+# Review-AI-Plan: task_plan snapshot roundtrip
+# ---------------------------------------------------------------------------
+
+
+def _sample_plan() -> TaskPlan:
+    """Plan 2 bước — booking_id/amount/currency của pay_fee là InputRef tới T1."""
+    return TaskPlan(
+        goal="Đăng ký cư dân, xe, đặt chỗ đậu xe và thanh toán phí.",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="register_resident",
+                depends_on=[],
+                input={"full_name": "Nguyễn Văn An", "apartment_code": "A1201", "residential_area": "KĐT Vinhomes"},
+            ),
+            Task(
+                task_id="T2",
+                tool="book_parking",
+                depends_on=["T1"],
+                input={
+                    "vehicle_id": "VEH-001",
+                    "booking_date": "2026-08-14",
+                    "parking_zone": "ZONE_A",
+                },
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_persists_task_plan(db_pool):
+    """create_workflow nhận key `task_plan` → persist JSONB; đọc lại parse được."""
+    repo = make_repo(db_pool)
+    plan = _sample_plan()
+
+    wf_id = await repo.create_workflow(
+        {
+            "id": str(uuid_module.uuid4()),
+            "goal": plan.goal,
+            "status": "PENDING",
+            "task_plan": plan,
+        }
+    )
+
+    result = await repo.get_workflow(wf_id)
+    raw = result["workflow"]["task_plan"]
+    # Pool không đăng ký JSONB codec → asyncpg trả dạng str; route tự parse.
+    assert isinstance(raw, str)
+    parsed = json.loads(raw)
+    assert parsed["goal"] == plan.goal
+    assert len(parsed["tasks"]) == 2
+    assert parsed["tasks"][0]["task_id"] == "T1"
+
+
+@pytest.mark.asyncio
+async def test_update_workflow_task_plan_snapshot(db_pool):
+    """update_workflow_task_plan ghi đè task_plan — InputRef giữ nguyên qua roundtrip."""
+    repo = make_repo(db_pool)
+    wf_id = await repo.create_workflow({"goal": "Test"})
+
+    plan = TaskPlan(
+        goal="Đăng ký cư dân và thanh toán phí",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="register_resident",
+                depends_on=[],
+                input={"full_name": "Nguyễn Văn An", "apartment_code": "A1201", "residential_area": "KĐT Vinhomes"},
+            ),
+            Task(
+                task_id="T2",
+                tool="book_parking",
+                depends_on=["T1"],
+                input={"vehicle_id": "VEH-001", "booking_date": "2026-08-14", "parking_zone": "ZONE_A"},
+            ),
+            Task(
+                task_id="T3",
+                tool="pay_fee",
+                depends_on=["T2"],
+                input={
+                    "booking_id": InputRef(from_task="T2", field="booking_id"),
+                    "amount": InputRef(from_task="T2", field="amount"),
+                    "currency": InputRef(from_task="T2", field="currency"),
+                },
+            ),
+        ],
+    )
+    await repo.update_workflow_task_plan(wf_id, plan)
+
+    result = await repo.get_workflow(wf_id)
+    raw = result["workflow"]["task_plan"]
+    parsed = json.loads(raw)
+    assert parsed["goal"] == "Đăng ký cư dân và thanh toán phí"
+    pay = next(t for t in parsed["tasks"] if t["tool"] == "pay_fee")
+    # InputRef serialize thành {"from_task", "field"} — không bị mất.
+    assert pay["input"]["booking_id"] == {"from_task": "T2", "field": "booking_id"}
+    assert pay["input"]["amount"] == {"from_task": "T2", "field": "amount"}
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_on_conflict_does_not_clobber_task_plan(db_pool):
+    """Regression R3: Executor's create_workflow (ON CONFLICT) chỉ update goal.
+
+    Nếu /execute snapshot task_plan trước khi boundary.execute chạy, sau đó
+    Executor gọi create_workflow cùng id → task_plan đã duyệt KHÔNG bị ghi đè
+    bởi bản cũ.
+    """
+    repo = make_repo(db_pool)
+    wf_id = await repo.create_workflow({"goal": "Ban đầu", "status": "PENDING"})
+    plan = _sample_plan()
+    await repo.update_workflow_task_plan(wf_id, plan)
+
+    # Executor gọi lại create_workflow với cùng id — không kèm task_plan.
+    # ON CONFLICT chỉ update goal/updated_at; status và task_plan giữ nguyên.
+    await repo.create_workflow({"id": wf_id, "goal": "Ban đầu", "status": "RUNNING"})
+
+    result = await repo.get_workflow(wf_id)
+    assert result["workflow"]["status"] == "PENDING"  # không bị ghi đè
+    parsed = json.loads(result["workflow"]["task_plan"])
+    assert parsed["goal"] == "Đăng ký cư dân, xe, đặt chỗ đậu xe và thanh toán phí."
+
+
 @pytest.mark.asyncio
 async def test_get_workflow_not_found_raises(db_pool):
     repo = make_repo(db_pool)
     with pytest.raises(ValueError, match="not found"):
         await repo.get_workflow("00000000-0000-0000-0000-000000000000")
+
+
+# ---------------------------------------------------------------------------
+# Tests: list_workflows (summary + pagination)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_workflows_returns_summary_excluding_archived(db_pool):
+    repo = make_repo(db_pool)
+    wf_a = await repo.create_workflow({"goal": "A", "status": "PENDING"})
+    wf_b = await repo.create_workflow({"goal": "B", "status": "SUCCESS"})
+    await repo.archive_workflow(wf_a)
+
+    result = await repo.list_workflows(page=1, limit=10)
+    assert result["total"] == 1  # archived A bị loại
+    assert len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["workflow_id"] == wf_b
+    assert item["goal"] == "B"
+    assert item["status"] == "SUCCESS"
+    # Summary không chứa task_plan/archived_at.
+    assert "task_plan" not in item
+    assert "archived_at" not in item
+
+
+@pytest.mark.asyncio
+async def test_list_workflows_pagination(db_pool):
+    repo = make_repo(db_pool)
+    ids = []
+    for i in range(3):
+        ids.append(await repo.create_workflow({"goal": f"W{i}"}))
+
+    page1 = await repo.list_workflows(page=1, limit=2)
+    page2 = await repo.list_workflows(page=2, limit=2)
+
+    assert page1["total"] == 3
+    assert len(page1["items"]) == 2
+    assert len(page2["items"]) == 1
+    # Không trùng lặp giữa 2 trang (ORDER BY created_at DESC, workflow_id).
+    got = [it["workflow_id"] for it in page1["items"]] + [it["workflow_id"] for it in page2["items"]]
+    assert set(got) == set(ids)
 
 
 # ---------------------------------------------------------------------------

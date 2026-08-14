@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./data/app.db"
 
+    # Auth (JWT-like HMAC token — stdlib only, xem src/api/auth.py)
+    jwt_secret: str = ""  # JWT_SECRET trong .env — rỗng thì tạo token 500
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 1440  # 24h — demo, không cần refresh token
+
     # Vector Store
     chroma_persist_dir: str = "./data/chroma"
 

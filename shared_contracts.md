@@ -491,6 +491,69 @@ book_parking internal input
 
 ---
 
+## 11b. Demo Services (đặt lịch tham quan / đặt xe / tư vấn) — Gate 3
+
+> Thêm 14/08/2026 bởi Hoàng Anh. 3 dịch vụ demo **chưa nối vào AI workflow engine**
+> (Planner/Executor/Connector). KHÔNG thêm vào Tool Allowlist §3 — chỉ mock dữ liệu
+> + DB để demo. Khi tích hợp sau phải qua §17 Change Control.
+
+### 11b.1 Tool & nội dung hợp đồng
+
+| Tool (định danh demo) | Mô tả | Required input | Output |
+|---|---|---|---|
+| `book_tour` | Đặt lịch tham quan dự án căn hộ | `residential_area`, `tour_date`, `tour_slot` | `tour_id` |
+| `book_shuttle` | Đặt xe tham quan căn hộ | `tour_id`, `tour_date`, `passenger_count` | `shuttle_id` |
+| `register_consultation` | Đăng ký tư vấn (mua/thuê) | `consultation_type`, `buy_sub_type?` | `consultation_id` |
+
+- `tour_slot`: enum `MORNING` | `AFTERNOON`.
+- `consultation_type`: `BUY` (tư vấn mua) | `RENT` (tư vấn thuê).
+- `buy_sub_type` (chỉ khi `BUY`, bắt buộc): `RESIDE` (ở) | `BUSINESS` (kinh doanh) | `INVEST` (đầu tư).
+- `passenger_count`: integer 1–30; sức chứa xe tham quan 30 khách/ngày.
+- `resident_id` là tuỳ chọn trên cả 3 tool — NULL = khách (chưa là cư dân).
+- Sức chứa slot tham quan (cấu hình `tour_slot_config`, seed mặc định 3/slot):
+  mỗi cư dân 1 đặt lịch/slot; sức chứa slot là guard chính, khách cũng đếm.
+
+### 11b.2 Endpoint (Mock API)
+
+| Method | Path | Tool | 201 data |
+|---|---|---|---|
+| `POST` | `/api/tours/bookings` | `book_tour` | `{tour_id, residential_area, tour_date, tour_slot}` |
+| `GET` | `/api/tours/bookings/{tour_id}` | — | `{tour_id, residential_area, tour_date, tour_slot}` |
+| `POST` | `/api/shuttles/bookings` | `book_shuttle` | `{shuttle_id, tour_id, tour_date, passenger_count}` |
+| `GET` | `/api/shuttles/bookings/{shuttle_id}` | — | `{shuttle_id, tour_id, tour_date, passenger_count}` |
+| `POST` | `/api/consultations` | `register_consultation` | `{consultation_id, consultation_type, buy_sub_type}` |
+| `GET` | `/api/consultations/{consultation_id}` | — | `{consultation_id, consultation_type, buy_sub_type}` |
+
+### 11b.3 Error codes (mock-string space)
+
+> Các mã này **không** nằm trong enum `ErrorCode` của `src/common/enums.py`
+> (sở hữu Mạnh Hiệp). Định nghĩa riêng trong mock layer + map theo bảng dưới.
+> `NO_AVAILABILITY` (đã có trong contract) dùng cho mọi "hết chỗ" thật.
+
+| Code | HTTP | Nghĩa |
+|---|---|---|
+| `TOUR_SLOT_NOT_FOUND` | 404 | Khu + khung giờ không được offer |
+| `TOUR_NOT_FOUND` | 404 | Lịch tham quan không tồn tại |
+| `TOUR_ALREADY_BOOKED` | 409 | Cư dân đặt trùng (resident_id, tour_date, tour_slot) |
+| `SLOT_FULL` | 409 | Chỉ dùng khi inject `?fail=` (mock) — thật dùng `NO_AVAILABILITY` |
+| `SHUTTLE_NOT_FOUND` | 404 | Xe tham quan không tồn tại |
+| `SHUTTLE_ALREADY_BOOKED` | 409 | Lịch tham quan đã có xe |
+| `CONSULTATION_NOT_FOUND` | 404 | Đăng ký tư vấn không tồn tại |
+| `CONSULTATION_ALREADY_EXISTS` | 409 | Cư dân đã đăng ký loại tư vấn này |
+| `RESIDENT_NOT_FOUND` | 404 | `resident_id` tham chiếu không tồn tại (dùng chung §8) |
+
+### 11b.4 Hai lớp triển khai (deviation có chủ đích)
+
+| Lớp | Cross-check | Ví dụ |
+|---|---|---|
+| Provider độc lập (8005–8007, docker) | **Không** — hub thuần | `book_shuttle` không verify `tour_id` tồn tại (giống standalone `pay_fee` không verify `booking_id`) |
+| Monolith (`src.mock.main:app`, 8010) | **Có** | `book_shuttle` verify `tour_id`; `book_tour`/`register_consultation` verify `resident_id` |
+
+Khác biệt này cố ý giống cách standalone `payment.py` bỏ qua `booking_id` trong khi
+monolith `payments.py` check — do mỗi provider độc lập không có dữ liệu của provider khác.
+
+---
+
 ## 12. Mock API Endpoints
 
 > Mock API endpoints — chỉ dùng cho phát triển nội bộ.
@@ -501,10 +564,16 @@ book_parking internal input
 | `POST` | `/api/vehicles` | Đăng ký phương tiện |
 | `POST` | `/api/parking/bookings` | Đặt chỗ đậu xe |
 | `POST` | `/api/payments` | Thanh toán phí |
+| `POST` | `/api/tours/bookings` | Đặt lịch tham quan dự án (demo §11b) |
+| `POST` | `/api/shuttles/bookings` | Đặt xe tham quan (demo §11b) |
+| `POST` | `/api/consultations` | Đăng ký tư vấn (demo §11b) |
 | `GET` | `/api/residents/{resident_id}` | Tra cứu cư dân |
 | `GET` | `/api/vehicles/{vehicle_id}` | Tra cứu phương tiện |
 | `GET` | `/api/parking/bookings/{booking_id}` | Tra cứu đặt chỗ |
 | `GET` | `/api/payments/{payment_id}` | Tra cứu giao dịch |
+| `GET` | `/api/tours/bookings/{tour_id}` | Tra cứu lịch tham quan (demo §11b) |
+| `GET` | `/api/shuttles/bookings/{shuttle_id}` | Tra cứu xe tham quan (demo §11b) |
+| `GET` | `/api/consultations/{consultation_id}` | Tra cứu đăng ký tư vấn (demo §11b) |
 
 > Real Connector có thể gọi endpoint hoàn toàn khác. Không yêu cầu API thật phải dùng các path này.
 
@@ -626,7 +695,65 @@ Primary owner đề xuất thay đổi. Các thay đổi ảnh hưởng interfac
 
 ---
 
-## 16. Change Control
+## 16. Auth (đăng nhập / đăng ký / phân quyền)
+
+> Thêm 14/08/2026 bởi Hoàng Anh. Extension vào contract API (đã thông báo qua
+> PR — mọi thay đổi interface auth phải cập nhật mục này theo §Change Control).
+
+### Vai trò (RBAC)
+
+Hai vai trò, lưu cột `users.role`:
+
+| Role | Tạo bằng | Quyền |
+|---|---|---|
+| `resident` | `POST /auth/register` (mặc định) | Mọi endpoint nghiệp vụ `/api/v1` |
+| `admin` | `scripts/create_admin.py` (manual) | Như resident + (tương lai) endpoint quản trị |
+
+Mọi endpoint nghiệp vụ hiện tại yêu cầu đăng nhập (Bearer token). Không có
+endpoint admin-only trong phạm vi hiện tại — `require_roles("admin")` là hook
+sẵn cho sau Demo Day.
+
+### Endpoint
+
+| Method | Path | Body | Response | Auth |
+|---|---|---|---|---|
+| POST | `/api/v1/auth/register` | `{username, password, email?}` | `201 UserResponse` / `409` / `422` | — |
+| POST | `/api/v1/auth/login` | `{username, password}` | `200 TokenResponse` / `401` / `422` | — |
+| GET | `/api/v1/auth/me` | — | `200 UserResponse` / `401` | Bearer |
+
+**UserResponse:** `{id, username, email, role, created_at}` — KHÔNG chứa
+`password_hash`.
+**TokenResponse:** `{access_token, token_type:"bearer", expires_in, user}`.
+
+### Bảo mật / quy ước
+
+- Password hash: stdlib `hashlib.scrypt` (salt 16B mỗi user), lưu
+  `users.password_hash` dạng `scrypt:N:r:p:salt_b64:hash_b64`. Không lưu
+  plaintext; không trả hash qua API.
+- Access token: JWT-shaped HS256 (header.payload.signature) tự dựng bằng
+  stdlib (`hmac` + `hashlib` + `base64`). Payload: `sub` (user UUID),
+  `username`, `role`, `iat`, `exp`. TTL mặc định 24h (`JWT_EXPIRE_MINUTES`);
+  không refresh token.
+- `JWT_SECRET` bắt buộc trong `.env` (rỗng → tạo token 500). Không commit
+  secret thật; `.env.example` chỉ có placeholder.
+- Trả về: `401` thiếu/sai/hết hạn token, sai username/password (cùng message
+  chống username enumeration); `403` role không đủ (`require_roles`);
+  `409` username trùng khi register; `503` runtime/user repo chưa khởi tạo.
+- Username chuẩn hoá lowercase ở register/login (không cho `Admin`/`admin`
+  cùng tồn tại).
+
+### Bảo vệ route
+
+| Route | Auth |
+|---|---|
+| `/health` | public |
+| `/api/v1/auth/*` | register/login public; `/me` Bearer |
+| `/api/v1/chat`, `/api/v1/status` | Bearer (mọi role) |
+| `/api/v1/workflow/*` | Bearer (mọi role) |
+
+---
+
+## 17. Change Control
 
 1. Không sửa contract trong code mà không cập nhật file này.
 2. Khi đổi field, status hoặc error code, cập nhật: `shared_contracts.md` → schema/model → tests.
@@ -637,7 +764,7 @@ Primary owner đề xuất thay đổi. Các thay đổi ảnh hưởng interfac
 
 ---
 
-## 17. AI Usage Instruction
+## 18. AI Usage Instruction
 
 **English:**
 

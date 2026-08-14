@@ -14,6 +14,9 @@ class TaskPlanValidator:
             "register_vehicle",
             "book_parking",
             "pay_fee",
+            "book_tour",
+            "book_shuttle",
+            "register_consultation",
         }
     )
 
@@ -22,6 +25,9 @@ class TaskPlanValidator:
         "register_vehicle": frozenset({"resident_id", "plate_number", "vehicle_type"}),
         "book_parking": frozenset({"vehicle_id", "booking_date", "parking_zone"}),
         "pay_fee": frozenset({"booking_id", "amount", "currency"}),
+        "book_tour": frozenset({"residential_area", "tour_date", "tour_slot"}),
+        "book_shuttle": frozenset({"tour_id", "tour_date", "passenger_count"}),
+        "register_consultation": frozenset({"consultation_type"}),
     }
 
     FORBIDDEN_INPUT_KEYS: frozenset[str] = frozenset(

@@ -17,11 +17,16 @@
 
 -- Reset toàn bộ dữ liệu demo (TRUNCATE RESTART IDENTITY reset cả BIGSERIAL sequence).
 -- CASCADE xử lý chuỗi FK trong 1 lệnh. Chạy lại script = demo data reset về đúng trạng thái.
+-- KHÔNG truncate bảng cấu hình (tour_slot_config, zone_capacity_config) — seed.sql lo.
 TRUNCATE TABLE
     approval_decisions,
     execution_logs,
     workflow_tasks,
     workflows,
+    consultations,
+    shuttle_bookings,
+    tour_capacity,
+    tour_bookings,
     payments,
     parking_bookings,
     parking_capacity,
@@ -66,6 +71,37 @@ VALUES
     ('PAY-001', 'BOOK-001', 150000, 'VND', 'PAID'),
     ('PAY-002', 'BOOK-002', 100000, 'VND', 'PAID')
 ON CONFLICT (payment_id) DO NOTHING;
+
+-- =============================================================
+-- NHÓM 1b: DEMO SERVICES (đặt lịch tham quan / đặt xe / tư vấn — v0.5.0)
+-- =============================================================
+
+-- Đặt lịch tham quan: TOUR-001 (cư dân RES-001), TOUR-002 (khách, resident_id NULL).
+INSERT INTO tour_bookings (tour_id, resident_id, residential_area, tour_date, tour_slot)
+VALUES
+    ('TOUR-001', 'RES-001', 'Vinhomes Ocean Park', '2026-08-20', 'MORNING'),
+    ('TOUR-002', NULL,      'Vinhomes Ocean Park', '2026-08-20', 'AFTERNOON')
+ON CONFLICT (tour_id) DO NOTHING;
+
+-- Sức chứa per-date cho 2 ngày demo.
+INSERT INTO tour_capacity (residential_area, tour_date, tour_slot, capacity)
+VALUES
+    ('Vinhomes Ocean Park', '2026-08-20', 'MORNING',   3),
+    ('Vinhomes Ocean Park', '2026-08-20', 'AFTERNOON', 3)
+ON CONFLICT (residential_area, tour_date, tour_slot) DO NOTHING;
+
+-- Đặt xe tham quan cho lịch TOUR-001.
+INSERT INTO shuttle_bookings (shuttle_id, tour_id, tour_date, passenger_count)
+VALUES
+    ('SHUTTLE-001', 'TOUR-001', '2026-08-20', 4)
+ON CONFLICT (shuttle_id) DO NOTHING;
+
+-- Đăng ký tư vấn: RES-001 mua (đầu tư), RES-002 thuê.
+INSERT INTO consultations (consultation_id, resident_id, consultation_type, buy_sub_type)
+VALUES
+    ('CONS-001', 'RES-001', 'BUY',  'INVEST'),
+    ('CONS-002', 'RES-002', 'RENT', NULL)
+ON CONFLICT (consultation_id) DO NOTHING;
 
 -- =============================================================
 -- NHÓM 2: WORKFLOW STATE

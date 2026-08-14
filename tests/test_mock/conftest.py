@@ -3,8 +3,11 @@
 import pytest
 
 from src.mock.store import store
+from src.services.mock.consultation import store as consultation_store
 from src.services.mock.payment import store as payment_store
 from src.services.mock.resident import store as resident_store
+from src.services.mock.shuttle import store as shuttle_store
+from src.services.mock.tour import store as tour_store
 from src.services.mock.transport import store as transport_store
 
 
@@ -12,7 +15,7 @@ from src.services.mock.transport import store as transport_store
 def reset_store():
     """Reset store singleton trước mỗi test để đảm bảo cô lập.
 
-    Reset cả store chung (src.mock) lẫn 3 store riêng của provider độc lập
+    Reset cả store chung (src.mock) lẫn 6 store riêng của provider độc lập
     (src/services/mock/*). Các store rời nhau nên không xung đột; reset store
     rỗng là no-op.
     """
@@ -20,4 +23,7 @@ def reset_store():
     resident_store.reset()
     transport_store.reset()
     payment_store.reset()
+    tour_store.reset()
+    shuttle_store.reset()
+    consultation_store.reset()
     yield
