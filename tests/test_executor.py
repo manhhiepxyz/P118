@@ -58,6 +58,49 @@ class ConcurrentProbeConnector(Connector):
         return StandardResult.ok({"tool": tool_name})
 
 
+class TransientThenSuccessConnector(Connector):
+    """Connector trả lỗi retryable N-1 lần rồi thành công lần N."""
+
+    def __init__(self, tool_name: str, success_after: int):
+        self._tool_name = tool_name
+        self._success_after = success_after
+        self.call_count = 0
+
+    @property
+    def tool_names(self) -> list[str]:
+        return [self._tool_name]
+
+    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+        self.call_count += 1
+        if self.call_count < self._success_after:
+            return StandardResult.fail(
+                ErrorCode.SERVICE_TIMEOUT,
+                f"timeout attempt {self.call_count}",
+                retryable=True,
+            )
+        return StandardResult.ok({"call_count": self.call_count})
+
+
+class AlwaysFailRetryableConnector(Connector):
+    """Connector luôn trả lỗi retryable."""
+
+    def __init__(self, tool_name: str):
+        self._tool_name = tool_name
+        self.call_count = 0
+
+    @property
+    def tool_names(self) -> list[str]:
+        return [self._tool_name]
+
+    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+        self.call_count += 1
+        return StandardResult.fail(
+            ErrorCode.SERVICE_UNAVAILABLE,
+            "service unavailable",
+            retryable=True,
+        )
+
+
 @pytest.fixture
 def repository() -> InMemoryWorkflowStateRepository:
     return InMemoryWorkflowStateRepository()
@@ -489,6 +532,107 @@ class TestExecutor:
 
         workflow = await repository.get_workflow(workflow_id)
         assert workflow["status"] == WorkflowStatus.FAILED.value
+
+    @pytest.mark.asyncio
+    async def test_retry_on_transient_then_succeeds(self, repository):
+        """Lỗi retryable được retry rồi thành công."""
+        connector = TransientThenSuccessConnector("book_parking", success_after=3)
+        executor = Executor([connector], repository)
+
+        plan = TaskPlan(
+            goal="Book parking",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="book_parking",
+                    depends_on=[],
+                    input={"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
+                ),
+            ],
+        )
+        workflow_id, results = await executor.execute(plan)
+
+        assert connector.call_count == 3
+        assert results["T1"].success is True
+        workflow = await repository.get_workflow(workflow_id)
+        assert workflow["status"] == WorkflowStatus.SUCCESS.value
+
+        task = await repository.get_task(workflow_id, "T1")
+        assert task["status"] == TaskStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_business_error(self, repository):
+        """Lỗi nghiệp vụ không retry (chỉ 1 attempt)."""
+        fail_connector = MockConnector("book_parking", create_no_availability_response())
+        executor = Executor([fail_connector], repository)
+
+        plan = TaskPlan(
+            goal="Book parking",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="book_parking",
+                    depends_on=[],
+                    input={"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
+                ),
+            ],
+        )
+        workflow_id, results = await executor.execute(plan)
+
+        assert fail_connector.call_count == 1
+        assert results["T1"].success is False
+        assert results["T1"].error_code == ErrorCode.NO_AVAILABILITY
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_returns_last_failure(self, repository):
+        """Retry hết lượt vẫn FAILED, giữ error_code cuối."""
+        connector = AlwaysFailRetryableConnector("book_parking")
+        executor = Executor([connector], repository)
+
+        plan = TaskPlan(
+            goal="Book parking",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="book_parking",
+                    depends_on=[],
+                    input={"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
+                ),
+            ],
+        )
+        workflow_id, results = await executor.execute(plan)
+
+        assert connector.call_count == 3
+        assert results["T1"].success is False
+        assert results["T1"].error_code == ErrorCode.SERVICE_UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_retryable_failure_callback_receives_retryable_true(self, repository):
+        """on_failure nhận retryable=True cho lỗi retryable (sau khi hết attempts)."""
+        captured: dict = {"retryable": None, "call_count": 0}
+
+        def on_failure(workflow_id, task_id, error_code, message, retryable):
+            captured["retryable"] = retryable
+            captured["call_count"] += 1
+
+        connector = AlwaysFailRetryableConnector("book_parking")
+        executor = Executor([connector], repository, on_failure=on_failure)
+
+        plan = TaskPlan(
+            goal="Book parking",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="book_parking",
+                    depends_on=[],
+                    input={"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
+                ),
+            ],
+        )
+        await executor.execute(plan)
+
+        assert captured["retryable"] is True
+        assert captured["call_count"] == 1
 
 
 class TestExecutorEdgeCases:

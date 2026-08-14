@@ -439,6 +439,7 @@
         PLANNING_ERROR:    ["Chưa lập được kế hoạch", "err", "✕"],
         VALIDATION_ERROR:  ["Chưa đủ điều kiện thực hiện", "err", "✕"],
         EXECUTION_ERROR:   ["Có lỗi khi thực hiện", "err", "✕"],
+        CHAT:              ["Trò chuyện", "ok", "💬"],
       };
 
       const TASK_STATUS = {
@@ -454,6 +455,7 @@
       const TERMINAL = new Set([
         "SUCCESS", "FAILED", "CANCELLED", "NEEDS_INFORMATION",
         "WAITING_APPROVAL", "PLANNING_ERROR", "VALIDATION_ERROR", "EXECUTION_ERROR",
+        "CHAT",
       ]);
 
       // Mỗi thẻ là MỘT mục tiêu gửi thẳng cho agent. Bấm là giao việc luôn,
@@ -514,6 +516,7 @@
         accountState: "resident",
         contactFlow: false,
         workflowId: null,
+        sessionId: null,
         pollTimer: null,
         pollDelay: 1000,
         busy: false,
@@ -594,10 +597,13 @@
       // =================================================================
       async function refreshHome() {
         try {
+          // Lọc theo session hiện tại: tổng quan chỉ hiện workflow của thread
+          // mình, không phải toàn hệ thống (demo single-user vẫn an toàn).
+          const sessionQuery = state.sessionId ? `&session_id=${encodeURIComponent(state.sessionId)}` : "";
           const [attention, running, completed] = await Promise.all([
-            api(`${API}?status=attention&limit=10`),
-            api(`${API}?status=running&limit=10`),
-            api(`${API}?status=completed&limit=5`),
+            api(`${API}?status=attention&limit=10${sessionQuery}`),
+            api(`${API}?status=running&limit=10${sessionQuery}`),
+            api(`${API}?status=completed&limit=5${sessionQuery}`),
           ]);
           renderAttention(attention.items || []);
           renderActive(running.items || [], "Đang thực hiện");
@@ -740,6 +746,9 @@
             }),
           });
           state.goals[data.workflow_id] = goal;
+          // Session server-side: server tự sinh session_id. Lưu lại để tổng
+          // quan lọc theo thread của mình (persona switch = thread mới).
+          state.sessionId = data.session_id || state.sessionId;
           showDetail(data.workflow_id);
         } catch (error) {
           toast(error.message);
@@ -871,6 +880,10 @@
         else if (data.status === "SUCCESS") host.appendChild(resultCard(data));
         else if (["FAILED", "CANCELLED", "PLANNING_ERROR", "VALIDATION_ERROR", "EXECUTION_ERROR"].includes(data.status)) {
           host.appendChild(failureCard(data));
+        }
+        else if (data.status === "CHAT") {
+          host.appendChild(el("div", { className: "card" },
+            el("p", { textContent: data.message || "Mình đây. Bạn cần hỗ trợ gì?" })));
         }
       }
 
@@ -1024,7 +1037,18 @@
 
       document.querySelectorAll("[data-persona]").forEach((button) => {
         button.addEventListener("click", () => {
-          state.accountState = button.dataset.persona;
+          // Persona switch = session mới (thread mới). Session server-side ghim
+          // persona lần đầu; đổi persona giữa thread cũ là không thể, nên phải
+          // reset thread — yêu cầu tiếp theo sẽ tạo session mới với persona mới.
+          if (state.accountState !== button.dataset.persona) {
+            state.accountState = button.dataset.persona;
+            state.sessionId = null;
+            state.workflowId = null;
+            state.goals = {};
+            stopPolling();
+            showHome(false);
+            toast("Đã chuyển tài khoản. Cuộc hội thoại mới sẽ dùng tài khoản này.");
+          }
           document.querySelectorAll("[data-persona]").forEach((other) =>
             other.setAttribute("aria-pressed", String(other === button)));
           applyPersona();

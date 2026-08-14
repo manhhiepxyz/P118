@@ -125,7 +125,7 @@ class _Boundary:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def execute(self, plan, workflow_id=None, *, finalize=True):
+    async def execute(self, plan, workflow_id=None, *, finalize=True, parent_workflow_id=None, session_id=None):
         self.calls += 1
         return workflow_id or "workflow", {}
 

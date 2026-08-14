@@ -23,7 +23,7 @@ from typing import Any
 
 import asyncpg
 
-from src.common.enums import TaskStatus
+from src.common.enums import ErrorCode, TaskStatus
 from src.config import get_settings
 from src.connectors.payment import PaymentConnector
 from src.connectors.property import PropertyConnector
@@ -89,6 +89,7 @@ async def build_execution_boundary(
     resident_services_url: str = "http://localhost:8006",
     contact_profile: dict[str, Any] | None = None,
     on_task_progress: Callable[[str, str, TaskStatus], Awaitable[None]] | None = None,
+    on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
 ) -> tuple[ValidatedExecutionBoundary, PostgreSQLWorkflowStateRepository]:
     """Dựng boundary tương thích trực tiếp với Planner graph.
 
@@ -103,7 +104,7 @@ async def build_execution_boundary(
         resident_services_url,
         contact_profile=contact_profile,
     )
-    executor = Executor(connectors, repository, on_progress=on_task_progress)
+    executor = Executor(connectors, repository, on_progress=on_task_progress, on_failure=on_failure)
     return ValidatedExecutionBoundary(executor), repository
 
 

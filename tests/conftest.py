@@ -1,4 +1,12 @@
+import os
 from unittest.mock import AsyncMock
+
+# Tắt rate limiter trong test suite để các test API không bị 429 do share bucket.
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+# Tắt zombie sweep: list endpoints test không có PostgreSQL thật, sweep sẽ mở
+# pool vào database thật và làm hỏng cô lập. Lazy sweep vẫn được test riêng
+# trong tests/test_sweeper.py bằng cách bật flag lên.
+os.environ.setdefault("ZOMBIE_SWEEP_ENABLED", "false")
 
 import pytest
 import pytest_asyncio

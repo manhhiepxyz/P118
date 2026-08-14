@@ -1,3 +1,5 @@
+from typing import Any
+
 from langchain_openai import ChatOpenAI
 
 from src.config import Settings, get_settings
@@ -33,12 +35,16 @@ def _require_deepseek_model(value: str) -> str:
     return value.strip()
 
 
-def get_llm(settings: Settings | None = None) -> ChatOpenAI:
+def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = None) -> ChatOpenAI:
     """Tạo LangChain chat model theo provider đã cấu hình.
 
     OpenRouter và DeepSeek đều dùng API tương thích OpenAI, nên cùng dùng
     ``ChatOpenAI`` với base URL riêng. Không provider nào được tạo ở import
     time; caller chủ động gọi factory này khi cần.
+
+    `callbacks` (kw-only, backward-compatible): langchain callback để theo dõi
+    usage (Phase D — `LlmUsageLogger`). Mọi caller cũ dùng positional settings
+    nên không bị ảnh hưởng.
 
     KHÔNG có fallback. Trước đây mọi provider không phải "openrouter" đều rơi
     xuống nhánh OpenAI ở cuối hàm — nghĩa là gõ nhầm tên provider sẽ âm thầm
@@ -54,6 +60,7 @@ def get_llm(settings: Settings | None = None) -> ChatOpenAI:
             api_key=_require_key(settings.deepseek_api_key, "DEEPSEEK_API_KEY"),
             base_url=settings.deepseek_base_url,
             temperature=settings.llm_temperature,
+            callbacks=callbacks,
         )
 
     if provider == "openrouter":
@@ -62,6 +69,7 @@ def get_llm(settings: Settings | None = None) -> ChatOpenAI:
             api_key=_require_key(settings.openrouter_api_key, "OPENROUTER_API_KEY"),
             base_url=settings.openrouter_base_url,
             temperature=settings.llm_temperature,
+            callbacks=callbacks,
         )
 
     if provider == "openai":
@@ -69,6 +77,7 @@ def get_llm(settings: Settings | None = None) -> ChatOpenAI:
             model=settings.model_name,
             api_key=_require_key(settings.openai_api_key, "OPENAI_API_KEY"),
             temperature=settings.llm_temperature,
+            callbacks=callbacks,
         )
 
     # `Settings.llm_provider` là Literal nên Pydantic đã chặn giá trị lạ. Nhánh

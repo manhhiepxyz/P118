@@ -15,12 +15,13 @@ import httpx
 
 from src.agents.graph import build_planner_graph
 from src.agents.planner import Planner
-from src.common.enums import TaskStatus, WorkflowStatus
+from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import TaskPlan
 from src.connectors.payment import PaymentConnector
 from src.db.parking_payment_repository import payment_idempotency_key
+from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.deps import build_execution_boundary, build_repository
 from src.orchestration.payment_approval import (
     APPROVED,
@@ -171,6 +172,8 @@ class ResidentAccessBoundary:
         workflow_id: str | None = None,
         *,
         finalize: bool = True,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         if any(task.tool in self._LINKING_TOOLS for task in plan.tasks):
             raise ResidentLinkingOutsideAgentError("Resident linking happens outside the agent.")
@@ -195,9 +198,15 @@ class ResidentAccessBoundary:
                     raise ResidentAccessRequiredError("Verified resident mapping is required.")
             if self._on_stage is not None:
                 await self._on_stage("RESIDENT_VERIFIED", {})
-        # Chuyển tiếp `finalize` — guard này không có quyền quyết định workflow
-        # đã xong hay chưa.
-        return await self._boundary.execute(plan, workflow_id, finalize=finalize)
+        # Chuyển tiếp `finalize` và session chain — guard này không có quyền
+        # quyết định workflow đã xong hay chưa.
+        return await self._boundary.execute(
+            plan,
+            workflow_id,
+            finalize=finalize,
+            parent_workflow_id=parent_workflow_id,
+            session_id=session_id,
+        )
 
 
 class PaymentApprovalBoundary:
@@ -224,6 +233,9 @@ class PaymentApprovalBoundary:
         self,
         prefix_plan: TaskPlan,
         workflow_id: str | None,
+        *,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         """Chạy phần trước thanh toán mà KHÔNG chốt trạng thái workflow.
 
@@ -232,7 +244,13 @@ class PaymentApprovalBoundary:
         nên một fallback im lặng sẽ khiến prefix lại finalize workflow đúng như
         bug ban đầu. Cờ nằm trong Protocol; mọi boundary phải chuyển tiếp.
         """
-        return await self._boundary.execute(prefix_plan, workflow_id, finalize=False)
+        return await self._boundary.execute(
+            prefix_plan,
+            workflow_id,
+            finalize=False,
+            parent_workflow_id=parent_workflow_id,
+            session_id=session_id,
+        )
 
     async def execute(
         self,
@@ -240,10 +258,18 @@ class PaymentApprovalBoundary:
         workflow_id: str | None = None,
         *,
         finalize: bool = True,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         payment_task_ids = {task.task_id for task in plan.tasks if task.tool == "pay_fee"}
         if not payment_task_ids or self._payment_approved:
-            return await self._boundary.execute(plan, workflow_id, finalize=finalize)
+            return await self._boundary.execute(
+                plan,
+                workflow_id,
+                finalize=finalize,
+                parent_workflow_id=parent_workflow_id,
+                session_id=session_id,
+            )
 
         # Trước đây chặn TOÀN BỘ plan: với chuỗi register_vehicle → book_parking
         # → pay_fee, user bị hỏi "đồng ý thanh toán?" khi còn chưa được giữ chỗ
@@ -265,7 +291,12 @@ class PaymentApprovalBoundary:
 
         if prefix_plan is not None:
             # finalize=False: đây mới là một phần plan, workflow chưa xong.
-            executed_id, partial_results = await self._execute_prefix(prefix_plan, resolved_workflow_id)
+            executed_id, partial_results = await self._execute_prefix(
+                prefix_plan,
+                resolved_workflow_id,
+                parent_workflow_id=parent_workflow_id,
+                session_id=session_id,
+            )
             resolved_workflow_id = resolved_workflow_id or executed_id
 
             # Chỉ được hỏi duyệt thanh toán khi TOÀN BỘ phần trước thanh toán
@@ -328,6 +359,9 @@ async def run_demo_workflow(
     property_url: str = "http://localhost:8005",
     resident_services_url: str = "http://localhost:8006",
     contact_profile: dict[str, Any] | None = None,
+    parent_workflow_id: str | None = None,
+    session_id: str | None = None,
+    on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
 ) -> dict[str, Any]:
     """Chạy LLM thật xuyên Planner graph và Runtime, rồi đóng DB pool."""
 
@@ -345,6 +379,8 @@ async def run_demo_workflow(
     boundary_kwargs: dict[str, Any] = {"on_task_progress": on_task_progress}
     if contact_profile:
         boundary_kwargs["contact_profile"] = contact_profile
+    if on_failure is not None:
+        boundary_kwargs["on_failure"] = on_failure
     runtime_boundary, repository = await build_execution_boundary(
         resident_url,
         transport_url,
@@ -354,9 +390,18 @@ async def run_demo_workflow(
         **boundary_kwargs,
     )
     resident_verifier = ResidentDirectoryClient(resident_url)
+    # Theo dõi token/cost (Phase D): set contextvar cho mọi lần LLM trong workflow
+    # này, gắn LlmUsageLogger làm callback của ChatOpenAI. flush() trong finally
+    # ghi xuống `llm_usage` (best-effort, không raise). workflow_id có thể None
+    # lúc plan — chấp nhận, ghi NULL.
+    usage_logger = LlmUsageLogger()
+    usage_token = usage_context(workflow_id=workflow_id or None, stage="plan")
     try:
         trusted_context = dict(existing_context or {})
-        planner = Planner(get_llm(), structured_output_method=structured_output_method())
+        planner = Planner(
+            get_llm(callbacks=[usage_logger]),
+            structured_output_method=structured_output_method(),
+        )
         resident_boundary = ResidentAccessBoundary(
             runtime_boundary,
             trusted_context,
@@ -364,12 +409,20 @@ async def run_demo_workflow(
             on_stage=on_stage,
         )
         guarded_boundary = PaymentApprovalBoundary(resident_boundary, approve_mock_payment, repository=repository)
-        graph = build_planner_graph(planner, guarded_boundary, on_stage=on_stage)
+        graph = build_planner_graph(
+            planner,
+            guarded_boundary,
+            on_stage=on_stage,
+            parent_workflow_id=parent_workflow_id,
+            session_id=session_id,
+        )
         initial_state: dict[str, Any] = {"goal": goal, "existing_context": trusted_context}
         if workflow_id is not None:
             initial_state["workflow_id"] = workflow_id
         return await graph.ainvoke(initial_state)
     finally:
+        reset_usage_context(usage_token)
+        await usage_logger.flush()
         await resident_verifier.aclose()
         await repository._pool.close()  # noqa: SLF001 - composition root sở hữu pool
 

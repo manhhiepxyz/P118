@@ -5,6 +5,8 @@ File: src/executor/executor.py
 """
 
 import asyncio
+import random
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -15,6 +17,13 @@ from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.base import Connector
 
+# Inline retry policy cho lỗi transient. Business errors (NO_AVAILABILITY,
+# PAYMENT_FAILED...) không retry. Chỉ SERVICE_TIMEOUT và SERVICE_UNAVAILABLE.
+_MAX_ATTEMPTS = 3
+_RETRY_BASE_DELAY_SECONDS = 1.0
+_RETRY_MAX_DELAY_SECONDS = 10.0
+_RETRY_JITTER_RATIO = 0.1
+
 
 class Executor:
     """Executor thực thi TaskPlan theo thứ tự phụ thuộc.
@@ -22,6 +31,7 @@ class Executor:
     - Chạy task khi dependency đã SUCCESS
     - Truyền data từ task trước sang task sau
     - Gọi repository sau mỗi task
+    - Retry lỗi transient (timeout/connect) với exponential backoff + jitter
     """
 
     def __init__(
@@ -100,18 +110,24 @@ class Executor:
         workflow_id: str | None = None,
         *,
         finalize: bool = True,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         """Thực thi TaskPlan.
 
         Args:
             plan: TaskPlan cần thực thi
             workflow_id: ID workflow (tạo mới nếu None)
+            parent_workflow_id: ID workflow cha (dùng cho /continue)
+            session_id: ID session/chat thread (tạo mới nếu None)
 
         Returns:
             Tuple (workflow_id, completed_results)
         """
         if workflow_id is None:
             workflow_id = str(uuid.uuid4())
+        if session_id is None:
+            session_id = workflow_id
 
         # Khởi tạo workflow trong repository.
         # Repository trả về ID đã thực sự persist — có thể KHÁC id truyền vào
@@ -123,6 +139,8 @@ class Executor:
                 "goal": plan.goal,
                 "status": WorkflowStatus.PENDING.value,
                 "task_plan": plan.model_dump(mode="json"),
+                "parent_workflow_id": parent_workflow_id,
+                "session_id": session_id,
             }
         )
         if persisted_id:
@@ -182,6 +200,7 @@ class Executor:
                 await self._emit_progress(workflow_id, task.task_id, TaskStatus.RUNNING)
 
             async def run_task(task: Task) -> StandardResult:
+                """Execute task với retry cho lỗi transient."""
                 try:
                     resolved_input = self._resolve_input(task, completed_results)
                 except ValueError as exc:
@@ -194,14 +213,52 @@ class Executor:
                         f"Không có Connector cho tool: {task.tool}",
                         retryable=False,
                     )
-                try:
-                    return await connector.execute(task.tool, resolved_input)
-                except Exception:  # noqa: BLE001 - cô lập lỗi của một nhánh song song
-                    return StandardResult.fail(
-                        ErrorCode.INTERNAL_SERVICE_ERROR,
-                        "Connector gặp lỗi không mong đợi",
-                        retryable=False,
-                    )
+                connector_name = type(connector).__name__
+
+                result: StandardResult | None = None
+                for attempt in range(1, _MAX_ATTEMPTS + 1):
+                    start = time.monotonic()
+                    try:
+                        result = await connector.execute(task.tool, resolved_input)
+                    except Exception:  # noqa: BLE001 - cô lập lỗi của một nhánh song song
+                        result = StandardResult.fail(
+                            ErrorCode.INTERNAL_SERVICE_ERROR,
+                            "Connector gặp lỗi không mong đợi",
+                            retryable=False,
+                        )
+                    duration_ms = int((time.monotonic() - start) * 1000)
+
+                    # Best-effort audit log cho mỗi attempt. Logging không được phép
+                    # làm hỏng workflow hoặc che khuất kết quả thật.
+                    try:
+                        await self.repository.log_execution(
+                            workflow_id=workflow_id,
+                            task_id=task.task_id,
+                            attempt_number=attempt,
+                            connector_name=connector_name,
+                            http_status=None,
+                            raw_error_code=None,
+                            standard_result=result,
+                            duration_ms=duration_ms,
+                        )
+                    except Exception:  # noqa: BLE001 - logging nằm ngoài critical path
+                        pass
+
+                    # Success hoặc lỗi không retryable → trả về ngay.
+                    if result.success or not result.is_retryable:
+                        return result
+
+                    # Còn attempts thì backoff trước khi thử lại.
+                    if attempt < _MAX_ATTEMPTS:
+                        delay = min(
+                            _RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+                            _RETRY_MAX_DELAY_SECONDS,
+                        )
+                        jitter = random.uniform(0, delay * _RETRY_JITTER_RATIO)
+                        await asyncio.sleep(delay + jitter)
+
+                # Đã hết attempts, trả lỗi của lần cuối.
+                return result  # type: ignore[return-value]
 
             wave_results = await asyncio.gather(*(run_task(task) for task in ready_tasks))
             for task, result in zip(ready_tasks, wave_results, strict=True):

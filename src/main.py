@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -6,15 +7,39 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+from src.api.middleware import RateLimitMiddleware
 from src.api.routes import router
 from src.config import get_settings
+from src.orchestration.sweeper import sweep_zombie_workflows
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     print(f"Starting {settings.app_name} in {settings.app_env} mode")
+    sweep_task = None
+    if settings.zombie_sweep_enabled:
+        # Loop nền dọn workflow mồ côi (payment approval hết hạn, RUNNING không
+        # còn process). Lazy trigger ở list endpoints vẫn là đường chính cho
+        # demo; loop này đảm bảo chạy kể cả khi không ai poll. Best-effort:
+        # lỗi của một lần sweep không được làm chết loop.
+        async def _sweep_forever() -> None:
+            while True:
+                try:
+                    await sweep_zombie_workflows()
+                except Exception:  # noqa: BLE001 - vòng sweep không được chết
+                    print("zombie sweep error", exc_info=True)
+                await asyncio.sleep(settings.zombie_sweep_interval_seconds)
+
+        sweep_task = asyncio.create_task(_sweep_forever())
+        print("Zombie sweep loop started")
     yield
+    if sweep_task is not None:
+        sweep_task.cancel()
+        try:
+            await sweep_task
+        except asyncio.CancelledError:
+            pass
     print("Shutting down...")
 
 
@@ -43,11 +68,18 @@ async def safe_request_validation_error(_request, _exc: RequestValidationError) 
 
 settings = get_settings()
 app.add_middleware(
+    RateLimitMiddleware,
+    requests_per_minute=settings.rate_limit_per_minute,
+    burst=settings.rate_limit_burst,
+    enabled=settings.rate_limit_enabled,
+)
+
+app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins.split(","),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(router, prefix="/api/v1")

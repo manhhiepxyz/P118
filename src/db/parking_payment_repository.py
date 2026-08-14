@@ -477,6 +477,62 @@ async def get_payment(pool: asyncpg.Pool, payment_id: str) -> Payment | None:
     )
 
 
+async def cancel_booking(pool: asyncpg.Pool, booking_id: str) -> bool:
+    """Release capacity: xoá booking CHỈ khi chưa có payment PAID.
+
+    Chính sách (Phase C ranee): booking đã được thanh toán không bao giờ bị xoá
+    mặc định — gọi `refund_payment` trước rồi mới `cancel_booking`. FK order:
+    payments → parking_bookings, nên xoá booking trước phải dọn payment con.
+
+    Idempotent: lần hai xoá 0 row → trả False. Trả True nếu booking được xoá.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Xoá payment KHÔNG PAID trước (FK payments → parking_bookings).
+            # Payment PAID bị chặn ở câu DELETE dưới → booking PAID không chạm.
+            await conn.execute(
+                """
+                DELETE FROM payments
+                WHERE booking_id = $1
+                  AND payment_status <> 'PAID'
+                """,
+                booking_id,
+            )
+            tag = await conn.execute(
+                """
+                DELETE FROM parking_bookings
+                WHERE booking_id = $1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM payments p
+                      WHERE p.booking_id = parking_bookings.booking_id
+                        AND p.payment_status = 'PAID'
+                  )
+                """,
+                booking_id,
+            )
+    return tag.endswith(" 1") or tag.endswith("1")
+
+
+async def refund_payment(pool: asyncpg.Pool, booking_id: str) -> bool:
+    """Flip payment PAID → REFUNDED (mock provider-side). Idempotent.
+
+    `uq_payments_paid_booking` là partial index CHỈ trên payment_status='PAID',
+    nên flip sang REFUNDED không đụng constraint: booking có thể được trả lại
+    đúng một lần. Trả True nếu có payment PAID được hoàn.
+    """
+    async with pool.acquire() as conn:
+        tag = await conn.execute(
+            """
+            UPDATE payments
+            SET payment_status = 'REFUNDED', updated_at = NOW()
+            WHERE booking_id = $1
+              AND payment_status = 'PAID'
+            """,
+            booking_id,
+        )
+    return tag.endswith(" 1") or tag.endswith("1")
+
+
 def payment_idempotency_key(workflow_id: str, task_id: str) -> str:
     """Khoá deterministic: cùng workflow + cùng task luôn ra cùng một khoá.
 

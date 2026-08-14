@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     cors_origins: str = "http://localhost:3000"
 
+    # Rate limiter — CHỈ áp cho POST route tiêu thụ LLM; GET polling miễn trừ.
+    rate_limit_per_minute: int = Field(default=20, ge=1)
+    rate_limit_burst: int = Field(default=10, ge=1)
+    rate_limit_enabled: bool = True
+
     # LLM
     # `Literal` là allowlist provider. Giá trị ngoài danh sách bị Pydantic từ
     # chối ngay lúc nạp cấu hình, không âm thầm rơi về một provider mặc định.
@@ -54,6 +59,16 @@ class Settings(BaseSettings):
 
     # Vector Store
     chroma_persist_dir: str = "./data/chroma"
+
+    # Reconciliation (release-on-failure + zombie sweep) — Phase B
+    # `payment_approval_ttl_hours`: yêu cầu thanh toán không được quyết định
+    # trong thời gian này sẽ bị coi là hết hạn (expire → CANCELLED + release).
+    # `zombie_sweep_*`: quét workflow mồ côi (RUNNING/PENDING không còn process
+    # sống) khi poll danh sách; tắt trong test để tránh sweep đụng DB thật.
+    payment_approval_ttl_hours: int = 24
+    zombie_sweep_enabled: bool = True
+    zombie_sweep_interval_seconds: int = 300
+    zombie_running_ttl_hours: float = 0.5
 
 
 @lru_cache

@@ -107,10 +107,20 @@ class WorkflowRepository:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                INSERT INTO workflows (workflow_id, goal, status, task_plan)
-                VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4)
+                INSERT INTO workflows
+                    (workflow_id, goal, status, task_plan, parent_workflow_id, session_id)
+                VALUES (
+                    COALESCE($1, gen_random_uuid()),
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    COALESCE(NULLIF($6, ''), gen_random_uuid()::text)
+                )
                 ON CONFLICT (workflow_id) DO UPDATE
                     SET goal = EXCLUDED.goal,
+                        parent_workflow_id = EXCLUDED.parent_workflow_id,
+                        session_id = EXCLUDED.session_id,
                         -- Snapshot ĐÃ CÓ thì giữ nguyên, không cho ghi đè.
                         --
                         -- Orchestration ghi canonical plan ĐẦY ĐỦ trước khi
@@ -134,6 +144,8 @@ class WorkflowRepository:
                 workflow_data.get("goal"),
                 status,
                 _json_dumps(workflow_data.get("task_plan")),
+                _uuid(workflow_data["parent_workflow_id"]) if workflow_data.get("parent_workflow_id") else None,
+                workflow_data.get("session_id") or "",
             )
             workflow_id = str(row["workflow_id"])
             logger.info("created workflow %s", workflow_id)
@@ -339,3 +351,71 @@ class WorkflowRepository:
                 [_uuid(w) for w in workflow_ids],
             )
         return {str(row["workflow_id"]): row["tool"] for row in rows}
+
+    async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
+        """Persist repair hints của một workflow.
+
+        hints: {task_id: {"error_code": str, "message": str}}.
+        Ghi đè hints cũ của workflow để tránh duplicate/two-source: bảng con
+        chỉ cần giữ snapshot mới nhất. `workflows.status` vẫn FAILED — không đổi.
+        """
+        if not hints:
+            return
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM workflow_repair_hints WHERE workflow_id = $1",
+                    _uuid(workflow_id),
+                )
+                for task_id, hint in hints.items():
+                    await conn.execute(
+                        """
+                        INSERT INTO workflow_repair_hints
+                            (workflow_id, task_id, error_code, message)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        _uuid(workflow_id),
+                        task_id,
+                        hint["error_code"],
+                        hint["message"],
+                    )
+
+    async def get_repair_hints(self, workflow_id: str) -> list[dict]:
+        """Đọc repair hints, mới nhất trước."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT task_id, error_code, message, created_at
+                FROM workflow_repair_hints
+                WHERE workflow_id = $1
+                ORDER BY created_at DESC, id DESC
+                """,
+                _uuid(workflow_id),
+            )
+        return [dict(row) for row in rows]
+
+    async def list_workflows_by_session(self, session_id: str) -> list[dict]:
+        """Liệt kê workflow cùng session_id, sắp xếp từ cũ đến mới."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    w.workflow_id,
+                    w.goal,
+                    w.status,
+                    w.parent_workflow_id,
+                    w.session_id,
+                    w.created_at,
+                    w.updated_at,
+                    COUNT(t.id) FILTER (WHERE t.task_id IS NOT NULL) AS total_tasks,
+                    COUNT(t.id) FILTER (WHERE t.status = 'SUCCESS')   AS completed_tasks
+                FROM workflows w
+                LEFT JOIN workflow_tasks t ON t.workflow_id = w.workflow_id
+                WHERE w.session_id = $1
+                  AND w.archived_at IS NULL
+                GROUP BY w.workflow_id
+                ORDER BY w.created_at ASC
+                """,
+                session_id,
+            )
+        return [dict(row) for row in rows]

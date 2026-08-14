@@ -250,3 +250,26 @@ CREATE TABLE IF NOT EXISTS approval_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_approval_decisions_workflow
     ON approval_decisions(workflow_id);
+
+
+-- =============================================================
+-- NHÓM 5: REPAIR HINTS
+-- =============================================================
+-- Lỗi nghiệp vụ repairable (FAILED nhưng user có thể đổi input để chạy tiếp).
+-- workflows.status vẫn FAILED; bảng con này nhận diện trạng thái con
+-- "FAILED nhưng repairable". Chỉ lưu error_code + message generic (KHÔNG có
+-- field) — missing_fields sinh tại render từ error_code + task.tool.
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS workflow_repair_hints (
+    id          BIGSERIAL    PRIMARY KEY,
+    workflow_id UUID         NOT NULL
+                    REFERENCES workflows(workflow_id),
+    task_id     VARCHAR(20)  NOT NULL,
+    error_code  VARCHAR(60)  NOT NULL,
+    message     VARCHAR(500) NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_repair_hints_wf
+    ON workflow_repair_hints(workflow_id);

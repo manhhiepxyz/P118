@@ -21,6 +21,7 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
     def __init__(self):
         self._workflows: dict[str, dict] = {}
         self._tasks: dict[str, dict] = {}  # key: f"{workflow_id}:{task_id}"
+        self._repair_hints: dict[str, dict[str, dict]] = {}  # workflow_id -> {task_id: hint}
 
     async def create_workflow(self, workflow_data: dict) -> str:
         """Tạo workflow mới, trả về workflow_id."""
@@ -30,8 +31,22 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         workflow_data["status"] = WorkflowStatus.PENDING.value
         workflow_data["created_at"] = datetime.now(UTC).isoformat()
         workflow_data["updated_at"] = workflow_data["created_at"]
+        # Session chain: giữ nguyên nếu caller truyền.
+        if "parent_workflow_id" in workflow_data:
+            workflow_data.setdefault("parent_workflow_id", None)
+        if "session_id" not in workflow_data or workflow_data["session_id"] is None:
+            workflow_data.setdefault("session_id", workflow_id)
         self._workflows[workflow_id] = workflow_data
         return workflow_id
+
+    async def list_workflows_by_session(self, session_id: str) -> list[dict]:
+        """Lấy tất cả workflow cùng session_id, sắp xếp từ cũ đến mới."""
+        matching = [
+            wf for wf in self._workflows.values()
+            if wf.get("session_id") == session_id
+        ]
+        matching.sort(key=lambda wf: wf.get("created_at") or "")
+        return matching
 
     async def update_workflow_status(
         self,
@@ -115,6 +130,80 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
     async def get_completed_task_ids(self, workflow_id: str) -> list[str]:
         """Lấy danh sách task_id đã SUCCESS (dùng cho Replanner)."""
         return [task["id"] for task in await self.list_tasks(workflow_id) if task["status"] == TaskStatus.SUCCESS.value]
+
+    async def save_repair_hints(
+        self,
+        workflow_id: str,
+        hints: dict[str, dict],
+    ) -> None:
+        """Persist repair hints (in-memory)."""
+        self._repair_hints[workflow_id] = {
+            task_id: {
+                "error_code": hint["error_code"],
+                "message": hint["message"],
+            }
+            for task_id, hint in hints.items()
+        }
+
+    async def get_repair_hints(self, workflow_id: str) -> list[dict]:
+        """Đọc repair hints (in-memory)."""
+        hints = self._repair_hints.get(workflow_id, {})
+        return [
+            {
+                "task_id": task_id,
+                "error_code": hint["error_code"],
+                "message": hint["message"],
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            for task_id, hint in hints.items()
+        ]
+
+    async def log_execution(
+        self,
+        workflow_id: str,
+        task_id: str,
+        attempt_number: int,
+        connector_name: str | None,
+        http_status: int | None,
+        raw_error_code: str | None,
+        standard_result: StandardResult,
+        duration_ms: int | None,
+    ) -> None:
+        """Ghi audit mỗi lần Connector gọi API (kể cả retry)."""
+        key = f"{workflow_id}:{task_id}"
+        logs = self._tasks.setdefault(key, {}).setdefault("execution_logs", [])
+        # Giữ cả nested standard_result (cho metrics) lẫn các fields flatten
+        # (backward compatibility cho tests/test_execution_logging.py).
+        logs.append({
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "attempt_number": attempt_number,
+            "connector_name": connector_name,
+            "http_status": http_status,
+            "raw_error_code": raw_error_code,
+            "standard_result": {
+                "success": standard_result.success,
+                "data": standard_result.data,
+                "error_code": standard_result.error_code.value if standard_result.error_code else None,
+                "message": standard_result.message,
+                "retryable": standard_result.retryable,
+            },
+            "success": standard_result.success,
+            "data": standard_result.data,
+            "error_code": standard_result.error_code.value if standard_result.error_code else None,
+            "message": standard_result.message,
+            "retryable": standard_result.retryable,
+            "duration_ms": duration_ms,
+            "created_at": datetime.now(UTC).isoformat(),
+        })
+
+    async def list_execution_logs(self, limit: int = 10_000) -> list[dict]:
+        """Đọc tất cả execution logs (in-memory), mới nhất trước."""
+        rows: list[dict] = []
+        for task in self._tasks.values():
+            rows.extend(task.get("execution_logs", []))
+        rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        return rows[:limit]
 
     # Helper methods for testing
     def clear(self) -> None:

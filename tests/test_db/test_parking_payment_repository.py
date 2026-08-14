@@ -18,10 +18,12 @@ import pytest_asyncio
 from src.db.parking_payment_repository import (
     ZONE_PRICES,
     BookingError,
+    cancel_booking,
     create_booking,
     create_payment,
     get_booking,
     payment_idempotency_key,
+    refund_payment,
 )
 
 # `db_pool` (tests/test_db/conftest.py) đã lo TEST_DATABASE_URL qua
@@ -262,3 +264,83 @@ async def test_error_messages_never_leak_the_payload_or_connection_string(pool) 
     assert "999" not in message
     assert "postgresql://" not in message
     assert "p118pass" not in message
+
+
+# ---------------------------------------------------------------------------
+# Release-on-failure (Phase B): cancel_booking + refund_payment
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_unpaid_booking_releases_capacity(pool) -> None:
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+
+    assert await cancel_booking(pool, booking.booking_id) is True
+
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_paid_booking_is_refused(pool) -> None:
+    """Booking đã PAID không bị xoá — phải refund trước (Phase C ranee)."""
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    await create_payment(
+        pool,
+        booking_id=booking.booking_id,
+        amount=booking.amount,
+        currency="VND",
+        idempotency_key=payment_idempotency_key("wf-cancel-paid", "T3"),
+    )
+
+    assert await cancel_booking(pool, booking.booking_id) is False
+
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_is_idempotent(pool) -> None:
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+
+    assert await cancel_booking(pool, booking.booking_id) is True
+    assert await cancel_booking(pool, booking.booking_id) is False  # lần hai xoá 0 row
+
+
+@pytest.mark.asyncio
+async def test_refund_flips_paid_to_refunded_and_is_idempotent(pool) -> None:
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    payment = await create_payment(
+        pool,
+        booking_id=booking.booking_id,
+        amount=booking.amount,
+        currency="VND",
+        idempotency_key=payment_idempotency_key("wf-refund", "T3"),
+    )
+
+    assert await refund_payment(pool, booking.booking_id) is True
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM payments WHERE payment_id = $1", payment.payment_id)
+        assert row["payment_status"] == "REFUNDED"
+
+    # Idempotent: lần hai không còn PAID để flip → False.
+    assert await refund_payment(pool, booking.booking_id) is False
+
+
+@pytest.mark.asyncio
+async def test_refund_then_cancel_releases_a_paid_booking(pool) -> None:
+    """Trình tự release đầy đủ: refund PAID → cancel booking → capacity về."""
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    await create_payment(
+        pool,
+        booking_id=booking.booking_id,
+        amount=booking.amount,
+        currency="VND",
+        idempotency_key=payment_idempotency_key("wf-refund-cancel", "T3"),
+    )
+
+    assert await refund_payment(pool, booking.booking_id) is True
+    assert await cancel_booking(pool, booking.booking_id) is True
+
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 0

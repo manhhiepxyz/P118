@@ -33,7 +33,15 @@ class _RecordingBoundary:
         self.executed_tools: list[str] = []
         self.finalize_flags: list[bool] = []
 
-    async def execute(self, plan: TaskPlan, workflow_id: str | None = None, *, finalize: bool = True):
+    async def execute(
+        self,
+        plan: TaskPlan,
+        workflow_id: str | None = None,
+        *,
+        finalize: bool = True,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
+    ):
         # `finalize` thuộc Protocol: double phải nhận, nếu không nó che mất
         # việc boundary thật có chuyển tiếp cờ hay không.
         self.finalize_flags.append(finalize)
@@ -127,6 +135,8 @@ async def test_failed_prefix_is_returned_without_requesting_payment_approval() -
             workflow_id: str | None = None,
             *,
             finalize: bool = True,
+            parent_workflow_id: str | None = None,
+            session_id: str | None = None,
         ) -> tuple[str, dict[str, StandardResult]]:
             return workflow_id or "wf-failed", {
                 "T1": StandardResult.fail(

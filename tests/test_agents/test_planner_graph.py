@@ -63,6 +63,9 @@ class FakeExecutionBoundary:
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
+        *,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         self.calls.append(plan)
         self.workflow_ids.append(workflow_id)

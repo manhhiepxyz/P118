@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_dockerfile_uses_non_root_accessible_virtualenv() -> None:
-    dockerfile = (ROOT / "Dockerfile").read_text()
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "python -m venv /opt/venv" in dockerfile
     assert "ENV PATH=/opt/venv/bin:$PATH" in dockerfile
@@ -18,7 +18,7 @@ def test_dockerfile_uses_non_root_accessible_virtualenv() -> None:
 
 
 def test_smoke_cli_does_not_offer_misleading_goal_or_reusable_seed() -> None:
-    script = (ROOT / "scripts/smoke_runtime.py").read_text()
+    script = (ROOT / "scripts/smoke_runtime.py").read_text(encoding="utf-8")
 
     assert 'add_argument("--goal"' not in script
     assert 'add_argument("--seed"' not in script

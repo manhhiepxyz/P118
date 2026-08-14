@@ -265,6 +265,7 @@ class TransportConnector(Connector):
             "VALIDATION_ERROR": ErrorCode.INVALID_INPUT,
             "VEHICLE_EXISTS": ErrorCode.VEHICLE_ALREADY_EXISTS,
             "NO_AVAILABILITY": ErrorCode.NO_AVAILABILITY,
+            "BOOKING_ALREADY_EXISTS": ErrorCode.BOOKING_ALREADY_EXISTS,
             "VEHICLE_NOT_FOUND": ErrorCode.VEHICLE_NOT_FOUND,
             "INVALID_DATA": ErrorCode.INVALID_INPUT,
             "SERVICE_UNAVAILABLE": ErrorCode.SERVICE_UNAVAILABLE,

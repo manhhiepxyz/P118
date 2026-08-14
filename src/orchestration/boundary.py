@@ -74,10 +74,18 @@ class ValidatedExecutionBoundary:
         workflow_id: str | None = None,
         *,
         finalize: bool = True,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         try:
             validated_plan = self._validator.validate(plan)
         except ValueError:
             raise PlanRejectedError("TaskPlan validation failed.") from None
 
-        return await self._executor.execute(validated_plan, workflow_id, finalize=finalize)
+        return await self._executor.execute(
+            validated_plan,
+            workflow_id,
+            finalize=finalize,
+            parent_workflow_id=parent_workflow_id,
+            session_id=session_id,
+        )

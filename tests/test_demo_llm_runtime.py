@@ -37,11 +37,13 @@ class _Boundary:
         workflow_id: str | None = None,
         *,
         finalize: bool = True,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         # `finalize` thuộc Protocol của execution boundary: double phải nhận,
         # nếu không nó che mất việc boundary thật có chuyển tiếp cờ hay không.
         self.finalize_flags.append(finalize)
-        self.calls.append((plan, workflow_id))
+        self.calls.append((plan, workflow_id, parent_workflow_id, session_id))
         return "workflow-1", {"T1": StandardResult.ok({"id": "result-1"})}
 
 
@@ -75,7 +77,7 @@ async def test_approved_payment_plan_delegates_to_runtime() -> None:
 
     workflow_id, results = await boundary.execute(plan, "workflow-supplied")
 
-    assert inner.calls == [(plan, "workflow-supplied")]
+    assert inner.calls == [(plan, "workflow-supplied", None, None)]
     assert workflow_id == "workflow-1"
     assert results["T1"].success is True
 
@@ -88,7 +90,7 @@ async def test_non_payment_plan_does_not_require_payment_approval() -> None:
 
     await boundary.execute(plan)
 
-    assert inner.calls == [(plan, None)]
+    assert inner.calls == [(plan, None, None, None)]
 
 
 @pytest.mark.asyncio
@@ -116,7 +118,7 @@ async def test_resident_service_uses_server_verified_mapping() -> None:
 
     await boundary.execute(plan, "workflow-resident")
 
-    assert inner.calls == [(plan, "workflow-resident")]
+    assert inner.calls == [(plan, "workflow-resident", None, None)]
 
 
 @pytest.mark.asyncio
@@ -140,7 +142,7 @@ async def test_resident_service_calls_authoritative_directory_before_execution()
 
     assert verifier.calls == ["RES-001"]
     assert stages == ["RESIDENT_CHECKING", "RESIDENT_VERIFIED"]
-    assert inner.calls == [(plan, "workflow-resident")]
+    assert inner.calls == [(plan, "workflow-resident", None, None)]
 
 
 @pytest.mark.asyncio
@@ -239,18 +241,20 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
                 "task_results": {"T1": StandardResult.ok({"resident_id": "RES-001"})},
             }
 
-    monkeypatch.setattr(demo_service, "get_llm", lambda: llm)
+    monkeypatch.setattr(demo_service, "get_llm", lambda **_: llm)
     monkeypatch.setattr(demo_service, "Planner", lambda received, **_kwargs: planner if received is llm else None)
 
-    async def _build_boundary(*urls: str, on_task_progress=None):
+    async def _build_boundary(*urls: str, on_task_progress=None, on_failure=None):
         assert on_task_progress is not None
         events.append(("runtime", urls))
         return runtime_boundary, _Repository()
 
-    def _build_graph(received_planner, received_boundary, *, on_stage=None):
+    def _build_graph(received_planner, received_boundary, *, on_stage=None, **kwargs):
         assert received_planner is planner
         assert isinstance(received_boundary, demo_service.PaymentApprovalBoundary)
         assert on_stage is None
+        assert kwargs.get("parent_workflow_id") is None
+        assert kwargs.get("session_id") is None
         events.append("graph_built")
         return _Graph()
 

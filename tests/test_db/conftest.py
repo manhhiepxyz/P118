@@ -51,6 +51,10 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
             TRUNCATE TABLE
                 approval_decisions,
                 execution_logs,
+                llm_usage,
+                payment_approvals,
+                sessions,
+                workflow_repair_hints,
                 workflow_tasks,
                 workflows,
                 payments,

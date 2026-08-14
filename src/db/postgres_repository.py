@@ -125,6 +125,17 @@ class PostgreSQLWorkflowStateRepository:
         """Danh sách task_id đã SUCCESS (Replanner dùng cho idempotency)."""
         return await self.workflows.get_completed_task_ids(workflow_id)
 
+    async def list_workflows_by_session(self, session_id: str) -> list[dict]:
+        return await self.workflows.list_workflows_by_session(session_id)
+
+    async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
+        """Persist repair hints cho workflow FAILED repairable."""
+        await self.workflows.save_repair_hints(workflow_id, hints)
+
+    async def get_repair_hints(self, workflow_id: str) -> list[dict]:
+        """Đọc repair hints của workflow."""
+        return await self.workflows.get_repair_hints(workflow_id)
+
     # ------------------------------------------------------------------
     # Capacity check (fix race condition — SELECT FOR UPDATE)
     # ------------------------------------------------------------------
@@ -216,6 +227,21 @@ class PostgreSQLWorkflowStateRepository:
             standard_result=standard_result,
             duration_ms=duration_ms,
         )
+
+    async def list_execution_logs(self, limit: int = 10_000) -> list[dict]:
+        """Đọc execution logs để aggregate metrics."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT connector_name, attempt_number, duration_ms,
+                       standard_result, created_at
+                FROM execution_logs
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     # HITL — Approval Decisions

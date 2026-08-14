@@ -59,6 +59,9 @@ class DemoWorkflowRequest(BaseModel):
     account_state: Literal["prospect", "resident"] = "prospect"
     project_name: str | None = Field(default=None, min_length=2, max_length=100)
     contact_profile: DemoContactProfile | None = None
+    # Client có thể gửi session_id để nối tiếp cuộc hội thoại. Không gửi thì
+    # backend tự sinh mới.
+    session_id: str | None = Field(default=None, max_length=100)
 
     @field_validator("goal")
     @classmethod
@@ -194,6 +197,13 @@ class DemoPaymentDecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
 
 
+class DemoSessionListResponse(BaseModel):
+    """Danh sách workflow trong cùng một session/chat thread."""
+
+    session_id: str
+    workflows: list[DemoWorkflowListItem] = Field(default_factory=list)
+
+
 class DemoWorkflowResponse(BaseModel):
     status: Literal[
         "PENDING",
@@ -214,6 +224,7 @@ class DemoWorkflowResponse(BaseModel):
         "VALIDATION_ERROR",
         "PAYMENT_APPROVAL_REQUIRED",
         "EXECUTION_ERROR",
+        "CHAT",
     ]
     stage: (
         Literal[
@@ -232,6 +243,7 @@ class DemoWorkflowResponse(BaseModel):
             "VALIDATION_FAILED",
             "EXECUTION_FAILED",
             "FINISHED",
+            "CHAT",
         ]
         | None
     ) = None
@@ -247,3 +259,5 @@ class DemoWorkflowResponse(BaseModel):
     plan: list[DemoPlanTask] = Field(default_factory=list)
     tasks: list[DemoTaskResult] = Field(default_factory=list)
     events: list[DemoWorkflowEvent] = Field(default_factory=list)
+    session_id: str | None = None
+    parent_workflow_id: str | None = None

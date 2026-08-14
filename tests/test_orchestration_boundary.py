@@ -39,11 +39,13 @@ class _Executor:
         workflow_id: str | None = None,
         *,
         finalize: bool = True,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         # `finalize` thuộc contract: double phải nhận, nếu không nó che mất
         # việc boundary thật có chuyển tiếp cờ hay không.
         self.finalize_flags.append(finalize)
-        self.calls.append((plan, workflow_id))
+        self.calls.append((plan, workflow_id, parent_workflow_id, session_id))
         return workflow_id or "workflow-created", {"T1": StandardResult.ok({"resident_id": "RES-001"})}
 
 
@@ -68,7 +70,7 @@ async def test_boundary_matches_graph_execute_contract() -> None:
     workflow_id, task_results = await boundary.execute(original, "workflow-supplied")
 
     assert validator.calls == [original]
-    assert executor.calls == [(validated, "workflow-supplied")]
+    assert executor.calls == [(validated, "workflow-supplied", None, None)]
     assert workflow_id == "workflow-supplied"
     assert task_results["T1"].success is True
 

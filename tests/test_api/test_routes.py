@@ -54,6 +54,12 @@ def _demo_plan(with_payment: bool = False) -> TaskPlan:
     return TaskPlan(goal="Dữ liệu test", tasks=tasks)
 
 
+async def _no_session(session_id):
+    """Giả lập DB không có session (trả None) — dùng cho route test không chạy
+    PostgreSQL thật (tests/conftest.py client fixture không có test DB)."""
+    return None
+
+
 @pytest.mark.asyncio
 async def test_demo_ui_is_served(client):
     """/demo phải phục vụ Agent Workspace, không phải giao diện chat cũ."""
@@ -416,7 +422,7 @@ async def test_continue_workflow_maps_answer_into_context_without_rewriting_goal
     }
     captured = {}
 
-    async def _fake_run(workflow_id, goal, approved, urls, account_state):
+    async def _fake_run(workflow_id, goal, approved, urls, account_state, **kwargs):
         job = routes._DEMO_JOBS[workflow_id]
         captured.update(
             workflow_id=workflow_id,
@@ -424,6 +430,8 @@ async def test_continue_workflow_maps_answer_into_context_without_rewriting_goal
             approved=approved,
             account_state=account_state,
             context=job["existing_context"],
+            session_id=kwargs.get("session_id"),
+            parent_workflow_id=kwargs.get("parent_workflow_id"),
         )
 
     monkeypatch.setattr(routes, "_run_demo_job", _fake_run)
@@ -463,7 +471,7 @@ async def test_continue_workflow_accepts_partial_answer_then_planner_can_ask_rem
     }
     captured = {}
 
-    async def _fake_run(workflow_id, goal, approved, urls, account_state):
+    async def _fake_run(workflow_id, goal, approved, urls, account_state, **kwargs):
         captured.update(routes._DEMO_JOBS[workflow_id]["existing_context"])
 
     monkeypatch.setattr(routes, "_run_demo_job", _fake_run)
@@ -481,7 +489,7 @@ async def test_continue_workflow_accepts_partial_answer_then_planner_can_ask_rem
 async def test_demo_start_returns_immediately_then_status_returns_background_result(client, monkeypatch):
     routes._DEMO_JOBS.clear()
 
-    async def _fake_job(workflow_id, goal, approve_mock_payment, service_urls, account_state):
+    async def _fake_job(workflow_id, goal, approve_mock_payment, service_urls, account_state, **kwargs):
         assert goal == "Đăng ký dữ liệu test"
         # Request khai rõ persona; test này không dựa vào default nữa.
         assert account_state == "resident"
@@ -1315,3 +1323,122 @@ def test_public_stage_messages_are_free_of_internal_vocabulary() -> None:
     for stage, message in routes._STAGE_MESSAGES.items():
         for word in jargon:
             assert word.lower() not in message.lower(), f"{stage}: {word}"
+
+
+# --- Phase A: session server-side (identity) -------------------------------
+#
+# Browser không được quyết định quyền. Persona ghim ở lần /start đầu; persona
+# switch = session mới; /continue đọc quyền từ session, không từ body.
+
+
+@pytest.mark.asyncio
+async def test_second_start_with_new_persona_returns_new_session_id(client, monkeypatch) -> None:
+    """Persona switch phải tạo session mới — thread mới, KHÔNG nối tiếp session cũ.
+
+    Server tự sinh session_id ở mỗi /start; account_state body chỉ là persona
+    mong muốn CHO LẦN TẠO session đó. Chuyển persona không được tái sử dụng
+    session_id của cuộc hội thoại trước (nếu không lần /continue sau đọc session
+    cũ — ghim persona CŨ — là leo thang hoặc khóa nhầm quyền).
+    """
+    routes._DEMO_JOBS.clear()
+    captured = []
+
+    async def _fake_job(workflow_id, goal, approve_mock_payment, service_urls, account_state, **kwargs):
+        captured.append(account_state)
+
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
+
+    first = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.", "account_state": "resident"},
+    )
+    second = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.", "account_state": "prospect"},
+    )
+    await asyncio.sleep(0)
+
+    first_sid = first.json()["session_id"]
+    second_sid = second.json()["session_id"]
+    assert first_sid and second_sid
+    assert first_sid != second_sid
+    assert captured == ["resident", "prospect"]
+
+
+@pytest.mark.asyncio
+async def test_continue_never_uses_body_account_state(client, monkeypatch) -> None:
+    """/continue KHÔNG tin `account_state` từ body — quyền lấy từ session server-side.
+
+    Đây là test chống leo thang: job được tạo ở persona resident (browser gửi
+    account_state="resident" lúc /start), nhưng session server-side KHÔNG tồn tại
+    trong DB test → `_load_session` trả None → fail-closed về prospect. Nếu code
+    đọc quyền từ job cache (`_DEMO_JOBS[].account_state`) thì nó sẽ lấy "resident"
+    — test này khoá rằng quyền PHẢI đến từ session, không từ nơi browser có thể
+    chạm vào.
+
+    (Body /continue không cho phép account_state — `extra="forbid"` — nên đây là
+    phòng thủ thứ hai: ngay cả khi schema nới lỏng, backend vẫn không đọc nó.)
+    """
+    routes._DEMO_JOBS.clear()
+    workflow_id = "workflow-session-ghost"
+    routes._DEMO_JOBS[workflow_id] = {
+        "stage": "NEEDS_INFORMATION",
+        "message": "Thiếu giờ xem.",
+        "plan": None,
+        "events": [],
+        "goal": "Đặt lịch tham quan PRJ-001.",
+        # Browser đã gửi resident ở /start — nhưng session server-side không tồn
+        # tại, nên đây phải bị bỏ qua.
+        "account_state": "resident",
+        "approve_mock_payment": False,
+        "existing_context": {"project_id": "PRJ-001"},
+        "response": routes.DemoWorkflowResponse(
+            status="NEEDS_INFORMATION",
+            question="Thiếu giờ xem.",
+            missing_fields=["viewing_time"],
+        ),
+        "session_id": "sess-that-was-never-persisted",
+    }
+    captured = {}
+
+    async def _fake_run(workflow_id, goal, approved, urls, account_state, **kwargs):
+        captured["account_state"] = account_state
+
+    monkeypatch.setattr(routes, "_load_session", _no_session)
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_run)
+    response = await client.post(
+        f"/api/v1/workflows/demo/{workflow_id}/continue",
+        json={"message": "13:40"},
+    )
+    await asyncio.sleep(0)
+
+    assert response.status_code == 202
+    assert captured["account_state"] == "prospect"
+
+
+@pytest.mark.asyncio
+async def test_session_persist_failure_is_nonfatal(client, monkeypatch) -> None:
+    """DB lỗi lúc ghim session KHÔNG được làm hỏng workflow.
+
+    Session chỉ ảnh hưởng quyền của các lần đọc sau; nếu không ghim được thì
+    fail-closed về prospect. Workflow vẫn phải chạy bình thường.
+    """
+    routes._DEMO_JOBS.clear()
+    calls = []
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("DB down")
+
+    async def _fake_job(workflow_id, goal, approve_mock_payment, service_urls, account_state, **kwargs):
+        calls.append(("job", account_state))
+
+    monkeypatch.setattr(routes, "_persist_session", _boom)
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
+    response = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.", "account_state": "resident"},
+    )
+    await asyncio.sleep(0)
+
+    assert response.status_code == 202
+    assert calls == [("job", "resident")]

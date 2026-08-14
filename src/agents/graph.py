@@ -44,6 +44,9 @@ class ExecutionBoundary(Protocol):
         self,
         plan: TaskPlan,
         workflow_id: str | None = None,
+        *,
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, StandardResult]]: ...
 
 
@@ -242,6 +245,9 @@ def build_planner_graph(
     planner: Planner,
     execution_boundary: ExecutionBoundary,
     on_stage: StageCallback | None = None,
+    *,
+    parent_workflow_id: str | None = None,
+    session_id: str | None = None,
 ) -> StateGraph:
     """Dựng graph Planner → Validator → Execution.
 
@@ -361,6 +367,8 @@ def build_planner_graph(
             workflow_id, task_results = await execution_boundary.execute(
                 plan,
                 state.get("workflow_id"),
+                parent_workflow_id=parent_workflow_id or state.get("parent_workflow_id"),
+                session_id=session_id or state.get("session_id"),
             )
         except PolicyInterruptionError as exc:
             # Policy guard deterministic (quyền cư dân, duyệt thanh toán) chạy

@@ -7,12 +7,15 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
-from src.agents.graph import agent
+from src.api.small_talk import SmallTalk, SpeechType, answer_capability_question, classify
+from src.common.enums import ErrorCode
+from src.common.failure_messages import task_failure_message
 from src.common.projects import PROJECTS, find_project_id, resolve_project_id
 from src.common.task_plan import TaskPlan
 from src.config import get_settings
+from src.db.session_repository import create_session, get_session
 from src.models.schemas import (
     ChatRequest,
     ChatResponse,
@@ -22,6 +25,7 @@ from src.models.schemas import (
     DemoPaymentDecisionRequest,
     DemoPlanTask,
     DemoProjectListResponse,
+    DemoSessionListResponse,
     DemoTaskResult,
     DemoWorkflowContinueRequest,
     DemoWorkflowEvent,
@@ -30,6 +34,7 @@ from src.models.schemas import (
     DemoWorkflowRequest,
     DemoWorkflowResponse,
 )
+from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
     ResumeError,
     persist_pending_approval,
@@ -40,6 +45,8 @@ from src.orchestration.demo_service import (
 )
 from src.orchestration.deps import build_repository
 from src.orchestration.payment_approval import quote_from_results
+from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
+from src.orchestration.sweeper import sweep_zombie_workflows
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -254,6 +261,71 @@ _DEMO_ACCOUNT_CONTEXTS: dict[str, dict[str, Any]] = {
         "account_contact_status": "VERIFIED",
     },
 }
+
+
+def _context_for_session(session: dict[str, Any] | None) -> dict[str, Any]:
+    """Derive trusted context từ row session đã ghim, KHÔNG từ body request.
+
+    `account_state` + `resident_id` đến từ bảng `sessions` (ghi ở lần `/start`
+    đầu). Không có session hoặc không phải resident → fail-closed về prospect
+    (ít đặc quyền nhất). Đây là lớp "LLM đề xuất, code quyết định" cho quyền:
+    browser chỉ CHỌN persona lúc tạo session, không thay đổi được sau đó.
+    """
+    if session is None or session.get("account_state") != "resident":
+        return dict(_DEMO_ACCOUNT_CONTEXTS["prospect"])
+    context = dict(_DEMO_ACCOUNT_CONTEXTS["resident"])
+    resident_id = session.get("resident_id")
+    if resident_id:
+        context["resident_id"] = resident_id
+    return context
+
+
+async def _load_session(session_id: str | None) -> dict[str, Any] | None:
+    """Đọc row session từ PostgreSQL; trả None nếu không có hoặc DB lỗi.
+
+    Mở pool qua composition root (pattern `_read_repair_hints`), đóng trong
+    finally. DB lỗi KHÔNG được raise vào route — fail-closed về prospect.
+    """
+    if not session_id:
+        return None
+    repository = await build_repository(migrate=False)
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        return await get_session(pool, session_id)
+    except Exception:  # noqa: BLE001 - DB tạm lỗi không được lộ ra route
+        logger.warning("load session failed for %r", session_id)
+        return None
+    finally:
+        await pool.close()
+
+
+async def _persist_session(
+    session_id: str | None,
+    account_state: str,
+) -> None:
+    """Ghim session server-side. Best-effort, KHÔNG raise ra caller.
+
+    Chạy bên trong `_run_demo_job` — nơi đã có async context và được test
+    monkeypatch. DB lỗi không được làm hỏng workflow: nếu không ghim được thì
+    session chỉ đơn giản là không tồn tại và `_context_for_session` fail-closed
+    về prospect ở mọi lần đọc sau.
+    """
+    if not session_id:
+        return
+    try:
+        repository = await build_repository(migrate=False)
+        pool = repository._pool  # noqa: SLF001
+        try:
+            await create_session(
+                pool,
+                session_id=session_id,
+                account_state=account_state,
+                resident_id="RES-001" if account_state == "resident" else None,
+            )
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - ghim session không được làm hỏng workflow
+        logger.warning("session persist failed for %r; running unbound", session_id)
 
 # Message CÔNG KHAI cho từng stage.
 #
@@ -636,8 +708,18 @@ async def _run_demo_job(
     approve_mock_payment: bool,
     service_urls: dict[str, str],
     account_state: str,
+    *,
+    session_id: str | None = None,
+    parent_workflow_id: str | None = None,
 ) -> None:
     job = _DEMO_JOBS[workflow_id]
+    repair_manager = RepairManager()
+
+    # Ghim session server-side: persona của workflow này vào bảng `sessions`.
+    # `account_state` ở đây là giá trị đã quyết định ở /start (và /continue giờ
+    # truyền giá trị đọc từ session cũ). DB lỗi không được làm hỏng workflow —
+    # không ghim được thì các lần đọc sau fail-closed về prospect.
+    await _persist_session(session_id, account_state)
 
     async def on_stage(stage: str, payload: dict[str, Any]) -> None:
         plan = payload.get("plan")
@@ -658,6 +740,9 @@ async def _run_demo_job(
             property_url=service_urls["property"],
             resident_services_url=service_urls["resident_services"],
             contact_profile=job.get("contact_profile"),
+            session_id=session_id,
+            parent_workflow_id=parent_workflow_id,
+            on_failure=repair_manager,
         )
         # Chờ duyệt thanh toán: ghi ngữ cảnh xuống PostgreSQL TRƯỚC khi trả
         # response. Từ đây trở đi resume không còn phụ thuộc `_DEMO_JOBS`.
@@ -667,6 +752,14 @@ async def _run_demo_job(
                 state.get("task_results") or {},
                 state.get("plan") or state.get("draft_plan") or job.get("plan"),
             )
+
+        # Repair Loop: gom hint từ RepairManager, merge vào state trước khi
+        # render, rồi persist xuống DB. Executor.on_failure là sync callback nên
+        # persist phải xảy ra ở đây (nơi có async context).
+        repair_hints = repair_manager.hints_for(workflow_id)
+        if repair_hints:
+            state["repair_hints"] = repair_hints
+            await _persist_repair_hints(workflow_id, repair_hints)
 
         response = _demo_response(state, approve_mock_payment)
         terminal_stage = "FINISHED"
@@ -683,6 +776,13 @@ async def _run_demo_job(
         # `_demo_response()` dựng view model từ AgentState nên không biết
         # workflow_id. Gắn lại ngay khi cache, đừng để nhánh đọc phải tự đoán.
         job["response"] = response.model_copy(update={"workflow_id": workflow_id})
+
+        # Release-on-failure (Phase B): workflow FAILED do máy, không repairable
+        # (không có repair hint) → dọn side-effect giữ chỗ/thanh toán. FAILED có
+        # repair hint là repairable — user sẽ /continue sửa input, release sẽ phá
+        # thứ repair định tiếp tục nên KHÔNG chạy. Guard `not repair_hints`.
+        if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"} and not repair_hints:
+            await release_on_failure(workflow_id)
     except Exception as exc:  # noqa: BLE001 - không để raw exception vào job public
         logger.warning("demo background workflow failed (%s)", type(exc).__name__)
         _append_job_event(job, "EXECUTION_FAILED")
@@ -693,6 +793,9 @@ async def _run_demo_job(
             stage="EXECUTION_FAILED",
             message=f"Workflow unavailable ({type(exc).__name__}).",
         )
+        # Job crash cũng là FAILED giữ booking — release luôn, không có repair
+        # hint để cân nhắc.
+        await release_on_failure(workflow_id)
 
 
 def _keep_demo_task(task: asyncio.Task[None]) -> None:
@@ -700,51 +803,124 @@ def _keep_demo_task(task: asyncio.Task[None]) -> None:
     task.add_done_callback(_DEMO_TASKS.discard)
 
 
+async def _read_repair_hints(workflow_id: str) -> list[dict]:
+    """Đọc repair hints từ DB; trả [] nếu không có hoặc DB lỗi."""
+    repository = await build_repository(migrate=False)
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        return await repository.get_repair_hints(workflow_id)
+    except Exception:  # noqa: BLE001 - poll không được lộ connection detail
+        return []
+    finally:
+        await pool.close()
+
+
+async def _persist_repair_hints(workflow_id: str, repair_hints: dict[str, RepairHint]) -> None:
+    """Persist hint generic {error_code, message} — KHÔNG có field/input echo."""
+    repository = await build_repository(migrate=False)
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        await repository.save_repair_hints(
+            workflow_id,
+            {
+                task_id: {
+                    "error_code": hint.error_code.value,
+                    "message": hint.message,
+                }
+                for task_id, hint in repair_hints.items()
+            },
+        )
+    finally:
+        await pool.close()
+
+
+async def _load_parent_success_context(workflow_id: str) -> dict[str, Any]:
+    """Bơm kết quả SUCCESS của parent workflow vào context của child.
+
+    Child workflow nhận goal mới + context cũ; kết quả các task đã SUCCESS
+    của parent được merge vào existing_context để Planner tạo InputRef hợp lệ
+    thay vì chạy lại từ đầu.
+    """
+    context: dict[str, Any] = {}
+    try:
+        record = await read_demo_workflow(workflow_id)
+        if record is None:
+            return context
+        for row in record.get("tasks", []):
+            if row.get("status") != "SUCCESS":
+                continue
+            result_data = row.get("result_data") or {}
+            if not isinstance(result_data, dict):
+                continue
+            for key, value in result_data.items():
+                # Ưu tiên giữ giá trị mới nhất (child sẽ override nếu cần).
+                if value is not None:
+                    context[key] = value
+    except Exception:  # noqa: BLE001 - đây là enrichment, không được làm hỏng continue
+        pass
+    return context
+
+
+def _build_repair_state_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Dựng state cần thiết cho `_demo_response` khi poll/continue từ DB.
+
+    Trả state với repair_hints generic + plan từ workflow.task_plan để
+    `_demo_response` có thể map error_code + task.tool → missing_fields.
+    """
+    plan = _plan_from_job_or_record(None, record)
+    tasks = {row["task_id"]: row for row in record.get("tasks", [])}
+    task_results: dict[str, Any] = {}
+    for task_id, row in tasks.items():
+        if row.get("status") == "SUCCESS":
+            task_results[task_id] = SimpleNamespace(
+                success=True,
+                data=row.get("result_data") or {},
+            )
+    return {
+        "plan": plan,
+        "task_results": task_results,
+        "repair_hints": {
+            row["task_id"]: RepairHint(
+                error_code=ErrorCode(row["error_code"]),
+                message=row["message"],
+                task_id=row["task_id"],
+            )
+            for row in record.get("repair_hints", [])
+        },
+    }
+
+
 def _task_failure_message(task: Any, title: str, code: str) -> str:
-    """Đổi mã lỗi provider thành thông báo nghiệp vụ, không lộ raw exception."""
-    inputs = task.input
-    if code == "RESIDENT_ALREADY_EXISTS":
-        apartment = _text(inputs.get("apartment_code"))
-        subject = f"Căn hộ {apartment}" if apartment else "Căn hộ này"
-        return f"{subject} đã có hồ sơ cư dân. Hãy sử dụng tài khoản cư dân đã liên kết."
-    if code == "VEHICLE_ALREADY_EXISTS":
-        plate = _text(inputs.get("plate_number"))
-        subject = f"Biển số {plate}" if plate else "Biển số này"
-        return f"{subject} đã được đăng ký. Hãy sử dụng phương tiện đã liên kết hoặc kiểm tra lại biển số."
-    if code == "NO_AVAILABILITY":
-        if task.tool == "schedule_property_viewing":
-            viewing_date = _text(inputs.get("viewing_date"))
-            viewing_time = _text(inputs.get("viewing_time"))
-            slot = " ".join(value for value in (viewing_date, viewing_time) if value)
-            suffix = f" {slot}" if slot else " này"
-            return f"Khung giờ tham quan{suffix} không còn trống. Hãy chọn thời gian khác."
-        booking_date = _text(inputs.get("booking_date"))
-        suffix = f" cho ngày {booking_date}" if booking_date else ""
-        return f"Khu vực đỗ xe đã hết chỗ{suffix}. Hãy chọn ngày hoặc khu vực khác."
-    if code == "BOOKING_ALREADY_EXISTS":
-        return "Phương tiện này đã có chỗ đỗ trong ngày được chọn."
-    if code == "DEPENDENCY_ERROR":
-        return f"Bước “{title}” chưa được thực hiện vì bước trước đó không thành công."
-    if code == "INVALID_INPUT":
-        return f"Thông tin của bước “{title}” chưa hợp lệ. Hãy kiểm tra lại dữ liệu đã nhập."
-    return f"Không thể hoàn thành bước “{title}”. Vui lòng thử lại."
+    """Ủy quyền sang module dùng chung — Repair Loop và API dùng một nguồn."""
+    return task_failure_message(task, title, code)
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
-    """Chat với AI agent."""
-    try:
-        result = await agent.ainvoke({"query": request.message})
-        return ChatResponse(
-            response=result.get("response", ""),
-            analysis=result.get("analysis", ""),
-        )
-    except Exception as exc:
-        # Không echo raw exception: SDK/driver có thể chứa credential hoặc PII.
-        raise HTTPException(
-            status_code=500,
-            detail=f"Agent unavailable ({type(exc).__name__}).",
-        ) from None
+async def chat(http_request: Request, request: ChatRequest) -> ChatResponse:
+    """Chat nhẹ — speech lane deterministic; service goal được hướng dẫn."""
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="Tin nhắn không được để trống.")
+
+    small_talk = classify(message)
+    if isinstance(small_talk, SmallTalk):
+        if small_talk.speech_type == SpeechType.CAPABILITY:
+            base_url = str(http_request.base_url).rstrip("/")
+            capability = await answer_capability_question(
+                message,
+                base_url=base_url,
+                account_state="prospect",
+            )
+            reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
+        else:
+            reply = small_talk.reply
+        return ChatResponse(response=reply, analysis="")
+
+    # Service goal — không chạy qua agent echo query; hướng dẫn dùng workflow demo.
+    return ChatResponse(
+        response="Bạn hãy mô tả mục tiêu cụ thể (ví dụ: đặt chỗ đỗ xe, đặt lịch tham quan) để mình bắt đầu một kế hoạch.",
+        analysis="",
+    )
 
 
 def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflowResponse:
@@ -753,6 +929,32 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
     # `draft_plan` chỉ phục vụ preview khi Validator phát hiện thiếu input.
     # Executor vẫn chỉ nhận `plan` đã có plan_validated=True.
     plan_view = _plan_view(plan or state.get("draft_plan"))
+
+    # Repair Loop: nếu có repair hint (từ on_failure trong workflow vừa chạy,
+    # hoặc được dựng lại từ DB khi poll/continue), map error_code + task.tool
+    # sang missing_fields deterministic. Không tự đổi input — chỉ hỏi lại user.
+    repair_hints = state.get("repair_hints") or {}
+    if repair_hints and plan is not None:
+        # Lấy hint đầu tiên (thứ tự dict: task_id → hint). Mỗi lần chỉ hỏi 1
+        # field để user không bị quá tải; nếu còn lỗi, vòng tiếp theo lại hỏi.
+        first_hint = next(iter(repair_hints.values()))
+        task = next(
+            (t for t in plan.tasks if t.task_id == first_hint.task_id),
+            None,
+        )
+        if task is not None:
+            missing_fields = repair_missing_fields(
+                task.tool,
+                first_hint.error_code,
+                dict(task.input),
+            )
+            if missing_fields:
+                return DemoWorkflowResponse(
+                    status="NEEDS_INFORMATION",
+                    question=_follow_up_validation_message(missing_fields),
+                    missing_fields=missing_fields,
+                    plan=plan_view,
+                )
 
     if state.get("planning_error"):
         return DemoWorkflowResponse(
@@ -881,9 +1083,60 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
     response_model=DemoWorkflowResponse,
     status_code=202,
 )
-async def start_demo_workflow(request: DemoWorkflowRequest) -> DemoWorkflowResponse:
-    """Trả workflow_id ngay; workflow tiếp tục chạy trong background task."""
+async def start_demo_workflow(http_request: Request, request: DemoWorkflowRequest) -> DemoWorkflowResponse:
+    """Trả workflow_id ngay; workflow tiếp tục chạy trong background task.
+
+    Session server-side: server tự sinh `session_id` (KHÔNG tin `request.session_id`
+    từ body). `account_state` body là "persona mong muốn" CHỈ ở lần tạo session;
+    `_run_demo_job` ghim persona xuống bảng `sessions`. Mọi lần sau (`/continue`,
+    list) đọc từ session, không từ body — chặn leo thang đặc quyền giữa chuỗi.
+    """
+    # Speech lane: greeting/acknowledgement/capability → trả CHAT ngay, 0 LLM.
+    small_talk = classify(request.goal)
+    if isinstance(small_talk, SmallTalk):
+        workflow_id = str(uuid4())
+        session_id = str(uuid4())
+        if small_talk.speech_type == SpeechType.CAPABILITY:
+            base_url = str(http_request.base_url).rstrip("/")
+            capability = await answer_capability_question(
+                request.goal,
+                base_url=base_url,
+                account_state=request.account_state,
+            )
+            reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
+        else:
+            reply = small_talk.reply
+        _DEMO_JOBS[workflow_id] = {
+            "stage": "CHAT",
+            "message": reply,
+            "plan": None,
+            "response": DemoWorkflowResponse(
+                workflow_id=workflow_id,
+                status="CHAT",
+                stage="CHAT",
+                message=reply,
+                session_id=session_id,
+            ),
+            "events": [],
+            "goal": request.goal,
+            "account_state": request.account_state,
+            "approve_mock_payment": request.approve_mock_payment,
+            "existing_context": dict(_DEMO_ACCOUNT_CONTEXTS[request.account_state]),
+            "contact_profile": {},
+            "session_id": session_id,
+            "parent_workflow_id": None,
+        }
+        _append_job_event(_DEMO_JOBS[workflow_id], "CHAT")
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="CHAT",
+            stage="CHAT",
+            message=reply,
+            session_id=session_id,
+        )
+
     workflow_id = str(uuid4())
+    session_id = str(uuid4())
     settings = get_settings()
     context = dict(_DEMO_ACCOUNT_CONTEXTS[request.account_state])
     if request.project_name is not None:
@@ -908,6 +1161,8 @@ async def start_demo_workflow(request: DemoWorkflowRequest) -> DemoWorkflowRespo
         "contact_profile": request.contact_profile.model_dump(exclude_none=True)
         if request.contact_profile is not None
         else {},
+        "session_id": session_id,
+        "parent_workflow_id": None,
     }
     _append_job_event(_DEMO_JOBS[workflow_id], "PLANNING")
     task = asyncio.create_task(
@@ -923,6 +1178,7 @@ async def start_demo_workflow(request: DemoWorkflowRequest) -> DemoWorkflowRespo
                 "resident_services": settings.resident_services_service_url,
             },
             request.account_state,
+            session_id=session_id,
         )
     )
     _keep_demo_task(task)
@@ -931,6 +1187,7 @@ async def start_demo_workflow(request: DemoWorkflowRequest) -> DemoWorkflowRespo
         status="PENDING",
         stage="PLANNING",
         message=_STAGE_MESSAGES["PLANNING"],
+        session_id=session_id,
     )
 
 
@@ -941,6 +1198,7 @@ async def start_demo_workflow(request: DemoWorkflowRequest) -> DemoWorkflowRespo
 )
 async def continue_demo_workflow(
     workflow_id: str,
+    http_request: Request,
     request: DemoWorkflowContinueRequest,
 ) -> DemoWorkflowResponse:
     """Tiếp tục goal gốc bằng field đã map deterministic ở backend."""
@@ -952,12 +1210,68 @@ async def continue_demo_workflow(
         raise HTTPException(status_code=409, detail="Workflow không chờ thêm thông tin.")
 
     goal = previous["goal"]
+    # Quyền (account_state) đọc từ session server-side (ghim ở /start), KHÔNG từ
+    # body hay `_DEMO_JOBS`. Context nghiệp vụ giữ nguyên từ job parent — nó đã
+    # được dựng lúc /start từ persona tại thời điểm tạo session, và chỉ chứa
+    # delta của riêng parent (project_id…) + base persona. Không session (DB lỗi
+    # lúc ghim) → fail-closed về prospect cho quyết định quyền.
+    session_id = previous.get("session_id") or workflow_id
+    session = await _load_session(session_id)
+    account_state = (session or {}).get("account_state", "prospect")
     context = dict(previous["existing_context"])
+    # Bơm kết quả SUCCESS của parent từ DB (nếu parent đã persist). Giúp child
+    # không chạy lại các bước đã xong.
+    context.update(await _load_parent_success_context(workflow_id))
+    parent_workflow_id = workflow_id
     missing_fields = response.missing_fields
     if missing_fields == ["supported_goal"]:
         if request.message is None:
             raise HTTPException(status_code=422, detail=_follow_up_validation_message(missing_fields))
         goal = request.message.strip()
+        # Speech lane: nếu user đổi goal thành greeting/acknowledgement/capability,
+        # trả CHAT thay vì chạy workflow vô nghĩa.
+        small_talk = classify(goal)
+        if isinstance(small_talk, SmallTalk):
+            new_workflow_id = str(uuid4())
+            if small_talk.speech_type == SpeechType.CAPABILITY:
+                base_url = str(http_request.base_url).rstrip("/")
+                capability = await answer_capability_question(
+                    goal,
+                    base_url=base_url,
+                    account_state=account_state,
+                )
+                reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
+            else:
+                reply = small_talk.reply
+            _DEMO_JOBS[new_workflow_id] = {
+                "stage": "CHAT",
+                "message": reply,
+                "plan": None,
+                "response": DemoWorkflowResponse(
+                    workflow_id=new_workflow_id,
+                    status="CHAT",
+                    stage="CHAT",
+                    message=reply,
+                    session_id=session_id,
+                ),
+                "events": [],
+                "goal": goal,
+                "account_state": account_state,
+                "approve_mock_payment": previous["approve_mock_payment"],
+                "existing_context": dict(previous["existing_context"]),
+                "contact_profile": dict(previous.get("contact_profile", {})),
+                "session_id": session_id,
+                "parent_workflow_id": parent_workflow_id,
+            }
+            _append_job_event(_DEMO_JOBS[new_workflow_id], "CHAT")
+            return DemoWorkflowResponse(
+                workflow_id=new_workflow_id,
+                status="CHAT",
+                stage="CHAT",
+                message=reply,
+                session_id=session_id,
+                parent_workflow_id=parent_workflow_id,
+            )
     elif "payment_quote" in missing_fields:
         raise HTTPException(status_code=409, detail="Hệ thống chưa lấy được báo phí; người dùng không thể tự nhập.")
     else:
@@ -987,10 +1301,12 @@ async def continue_demo_workflow(
         "response": None,
         "events": [],
         "goal": goal,
-        "account_state": previous["account_state"],
+        "account_state": account_state,
         "approve_mock_payment": previous["approve_mock_payment"],
         "existing_context": context,
         "contact_profile": dict(previous.get("contact_profile", {})),
+        "session_id": session_id,
+        "parent_workflow_id": parent_workflow_id,
     }
     _append_job_event(_DEMO_JOBS[new_workflow_id], "PLANNING")
     task = asyncio.create_task(
@@ -999,7 +1315,9 @@ async def continue_demo_workflow(
             goal,
             previous["approve_mock_payment"],
             service_urls,
-            previous["account_state"],
+            account_state,
+            session_id=session_id,
+            parent_workflow_id=parent_workflow_id,
         )
     )
     _keep_demo_task(task)
@@ -1008,6 +1326,8 @@ async def continue_demo_workflow(
         status="PENDING",
         stage="PLANNING",
         message=_STAGE_MESSAGES["PLANNING"],
+        session_id=session_id,
+        parent_workflow_id=parent_workflow_id,
     )
 
 
@@ -1020,6 +1340,8 @@ async def get_demo_workflow_status(workflow_id: str) -> DemoWorkflowResponse:
     job = _DEMO_JOBS.get(workflow_id)
     try:
         record = await read_demo_workflow(workflow_id)
+        if record is not None:
+            record["repair_hints"] = await _read_repair_hints(workflow_id)
     except Exception:  # noqa: BLE001 - DB tạm lỗi không được lộ connection detail
         record = None
     if job is None and record is None:
@@ -1041,6 +1363,22 @@ async def get_demo_workflow_status(workflow_id: str) -> DemoWorkflowResponse:
         )
 
     plan = _plan_from_job_or_record(job, record)
+
+    # Repair Loop survive restart: nếu DB FAILED nhưng có repair hint, dựng
+    # state từ DB + plan để `_demo_response` map sang NEEDS_INFORMATION + fields.
+    if record is not None and record.get("workflow", {}).get("status") in {"FAILED", "CANCELLED"} and record.get("repair_hints"):
+        repair_state = _build_repair_state_from_record(record)
+        if repair_state["repair_hints"]:
+            return _demo_response(repair_state, payment_approved=False).model_copy(
+                update={
+                    "workflow_id": workflow_id,
+                    "stage": "NEEDS_INFORMATION",
+                    "message": _STAGE_MESSAGES["NEEDS_INFORMATION"],
+                    "persisted": True,
+                    "events": _public_events(job),
+                }
+            )
+
     task_views = _polling_task_views(plan, record)
     stage = job["stage"] if job is not None else "FINISHED"
     message = job["message"] if job is not None else _STAGE_MESSAGES["FINISHED"]
@@ -1064,14 +1402,62 @@ async def get_demo_workflow_status(workflow_id: str) -> DemoWorkflowResponse:
     )
 
 
+@router.get(
+    "/workflows/demo/session/{session_id}",
+    response_model=DemoSessionListResponse,
+)
+async def list_demo_workflows_by_session(session_id: str) -> DemoSessionListResponse:
+    """Lịch sử một cuộc hội thoại: tất cả workflow cùng session_id.
+
+    Giới hạn demo: không kiểm tra ownership; endpoint này chỉ phục vụ demo
+    single-user cho đến khi có auth/session thật.
+
+    Lazy zombie sweep (Phase B): poll danh sách cũng là nơi dọn workflow mồ côi
+    (payment approval hết hạn, RUNNING không còn process). Live workflow trong
+    `_DEMO_JOBS` được loại khỏi danh sách sweep.
+    """
+    await sweep_zombie_workflows(live_ids=set(_DEMO_JOBS))
+    repository = await build_repository(migrate=False)
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        rows = await repository.list_workflows_by_session(session_id)
+    finally:
+        await pool.close()
+
+    items = []
+    for row in rows:
+        workflow_id = str(row["workflow_id"])
+        items.append(
+            DemoWorkflowListItem(
+                workflow_id=workflow_id,
+                title=_goal_to_title(row.get("goal")),
+                status=row["status"],
+                current_step=None,
+                completed_tasks=int(row.get("completed_tasks") or 0),
+                total_tasks=int(row.get("total_tasks") or 0),
+                needs_attention=row["status"] in _ATTENTION_STATUSES,
+                created_at=row["created_at"].isoformat() if row.get("created_at") else None,
+                updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
+            )
+        )
+    return DemoSessionListResponse(session_id=session_id, workflows=items)
+
+
 @router.post("/workflows/demo", response_model=DemoWorkflowResponse)
 async def demo_workflow(request: DemoWorkflowRequest) -> DemoWorkflowResponse:
-    """Chạy Gate 2 E2E demo; browser không được tự gửi trusted context."""
+    """Chạy Gate 2 E2E demo; browser không được tự gửi trusted context.
+
+    Endpoint đồng bộ này KHÔNG tạo session (session chỉ tạo ở `/start`). Quyền
+    đọc từ session server-side nếu body mang `session_id`; không có → fail-closed
+    về prospect (khớp default `account_state`). KHÔNG tin `request.account_state`.
+    """
     settings = get_settings()
+    session = await _load_session(request.session_id)
+    context = _context_for_session(session)
     try:
         state = await run_demo_workflow(
             request.goal,
-            existing_context=_DEMO_ACCOUNT_CONTEXTS[request.account_state],
+            existing_context=context,
             approve_mock_payment=request.approve_mock_payment,
             resident_url=settings.resident_service_url,
             transport_url=settings.transport_service_url,
@@ -1241,14 +1627,18 @@ def _goal_to_title(goal: str | None) -> str:
 async def list_demo_workflows(
     status: str = "active",
     limit: int = 20,
+    session_id: str | None = None,
 ) -> DemoWorkflowListResponse:
     """Danh sách workflow cho màn Tổng quan — đọc thẳng PostgreSQL.
 
     GIỚI HẠN DEMO, ĐỌC KỸ: `workflows` hiện KHÔNG có cột chủ sở hữu, nên
-    endpoint này trả về workflow của TOÀN BỘ hệ thống chứ không phải của một
-    tài khoản. Nó chỉ dùng được cho demo một người. Trước khi có auth thật và
-    một cột account/resident trên `workflows`, đây KHÔNG phải endpoint an toàn
-    cho production.
+    endpoint này mặc định trả workflow của TOÀN BỘ hệ thống — chỉ an toàn cho
+    demo một người. Trước khi có auth thật và một cột account/resident trên
+    `workflows`, đây KHÔNG phải endpoint an toàn cho production.
+
+    Session scope: khi truyền `session_id` (demo.html truyền `state.sessionId`),
+    endpoint lọc về đúng thread của session đó — chặn đọc workflow của người
+    khác qua tổng quan. Không truyền → giữ hành vi cũ (demo single-user).
 
     Bù lại, nó không trả bất kỳ dữ liệu cá nhân nào: chỉ id, tiêu đề cắt từ
     goal, trạng thái, số bước và mốc thời gian.
@@ -1258,11 +1648,18 @@ async def list_demo_workflows(
     if limit < 1 or limit > _LIST_LIMIT_MAX:
         raise HTTPException(status_code=422, detail="Giới hạn số dòng không hợp lệ.")
 
+    # Lazy zombie sweep (Phase B): poll overview là trigger dọn workflow mồ côi.
+    # Live workflow trong `_DEMO_JOBS` không bị sweep.
+    await sweep_zombie_workflows(live_ids=set(_DEMO_JOBS))
+
     repository = await build_repository(migrate=False)
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
-        statuses = _LIST_FILTERS[status] or None
-        rows = await repository.list_workflows(statuses=statuses, limit=limit)
+        if session_id:
+            rows = await repository.list_workflows_by_session(session_id)
+        else:
+            statuses = _LIST_FILTERS[status] or None
+            rows = await repository.list_workflows(statuses=statuses, limit=limit)
         step_tools = await repository.current_step_titles([str(row["workflow_id"]) for row in rows])
     finally:
         await pool.close()
