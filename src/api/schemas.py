@@ -79,7 +79,7 @@ class WorkflowStatusResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 # Role: dùng str thay enum để khỏi đụng src/common (sở hữu Mạnh Hiệp/Thành Bảo).
-UserRole = Literal["resident", "admin"]
+UserRole = Literal["customer", "admin"]
 
 
 class RegisterRequest(BaseModel):
@@ -141,3 +141,27 @@ class WorkflowListResponse(BaseModel):
     total: int
     page: int
     limit: int
+
+
+class AdminResidentLinkRequest(BaseModel):
+    """Admin/provider gán hoặc cập nhật liên kết tài khoản ↔ cư dân.
+
+    KHÔNG nhận `apartment_code`/`residential_area`: dữ liệu căn hộ đọc từ bản
+    ghi `residents` qua `resident_id`. Nhận từ body nghĩa là tạo ra một nguồn
+    sự thật thứ hai về việc ai ở căn nào, và hai nguồn thì sớm muộn cũng lệch.
+
+    Không có endpoint tương ứng cho customer: không ai được tự khẳng định mình
+    sở hữu một căn hộ.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resident_id: str = Field(..., min_length=1, max_length=20)
+    verification_status: Literal["PENDING", "VERIFIED", "REJECTED"]
+
+
+class AdminResidentLinkResponse(BaseModel):
+    """Xác nhận tối thiểu. Không trả tên, căn hộ hay bất kỳ PII nào."""
+
+    user_id: str
+    verification_status: Literal["PENDING", "VERIFIED", "REJECTED"]

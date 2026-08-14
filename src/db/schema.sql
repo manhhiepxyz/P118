@@ -402,8 +402,9 @@ CREATE INDEX IF NOT EXISTS idx_workflow_repair_hints_wf
 -- NHÓM 6: AUTH
 -- =============================================================
 -- [add] v0.4.0 — Tài khoản đăng nhập (login/register) + phân quyền.
---   - role: 'resident' (mặc định khi register) | 'admin' (tạo bằng
---     scripts/create_admin.py)
+--   - role: 'customer' (mặc định khi register) | 'admin' (tạo bằng
+--     scripts/create_admin.py). role là VAI TRÒ TÀI KHOẢN, KHÔNG phải quyền
+--     cư dân — quyền đó nằm ở bảng user_resident_links.
 --   - password_hash: chuỗi 'scrypt:N:r:p:salt_b64:hash_b64' (stdlib
 --     hashlib.scrypt, salt random 16 bytes). KHÔNG seed bằng SQL vì
 --     scrypt không tính được trong SQL.
@@ -416,8 +417,8 @@ CREATE TABLE IF NOT EXISTS users (
     username      VARCHAR(50)  NOT NULL,                  -- lowercase ở tầng app
     email         VARCHAR(255),
     password_hash TEXT         NOT NULL,                  -- scrypt:N:r:p:salt_b64:hash_b64
-    role          VARCHAR(20)  NOT NULL DEFAULT 'resident'
-                      CHECK (role IN ('resident', 'admin')),
+    role          VARCHAR(20)  NOT NULL DEFAULT 'customer'
+                      CONSTRAINT ck_users_role CHECK (role IN ('customer', 'admin')),
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     archived_at   TIMESTAMPTZ  DEFAULT NULL,

@@ -84,6 +84,15 @@ class PostgreSQLWorkflowStateRepository:
         """Trả dict gồm workflow metadata + danh sách tasks."""
         return await self.workflows.get_workflow(workflow_id)
 
+    async def get_workflow_owner(self, workflow_id: str) -> str | None:
+        """Chủ sở hữu workflow, đọc thẳng PostgreSQL.
+
+        Đọc từ database chứ không từ `_DEMO_JOBS`: cache RAM trống sau mỗi lần
+        restart, và một guard quyền chỉ hoạt động khi tiến trình còn sống thì
+        không phải guard.
+        """
+        return await self.workflows.get_workflow_owner(workflow_id)
+
     async def list_workflows_page(self, page: int = 1, limit: int = 10) -> dict:
         """Liệt kê workflow (summary) — dùng cho GET /workflows."""
         return await self.workflows.list_workflows_page(page, limit)
@@ -153,8 +162,14 @@ class PostgreSQLWorkflowStateRepository:
     async def consume_clarification(self, workflow_id: str) -> dict | None:
         return await self.workflows.consume_clarification(workflow_id)
 
-    async def list_workflows(self, *, statuses: tuple[str, ...] | None = None, limit: int = 20) -> list[dict]:
-        return await self.workflows.list_workflows(statuses=statuses, limit=limit)
+    async def list_workflows(
+        self,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        limit: int = 20,
+        owner_user_id: str | None = None,
+    ) -> list[dict]:
+        return await self.workflows.list_workflows(statuses=statuses, limit=limit, owner_user_id=owner_user_id)
 
     async def current_step_titles(self, workflow_ids: list[str]) -> dict[str, str]:
         return await self.workflows.current_step_titles(workflow_ids)
@@ -167,8 +182,8 @@ class PostgreSQLWorkflowStateRepository:
         """Danh sách task_id đã SUCCESS (Replanner dùng cho idempotency)."""
         return await self.workflows.get_completed_task_ids(workflow_id)
 
-    async def list_workflows_by_session(self, session_id: str) -> list[dict]:
-        return await self.workflows.list_workflows_by_session(session_id)
+    async def list_workflows_by_session(self, session_id: str, *, owner_user_id: str | None = None) -> list[dict]:
+        return await self.workflows.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
 
     async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
         """Persist repair hints cho workflow FAILED repairable."""

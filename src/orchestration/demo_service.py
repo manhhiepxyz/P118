@@ -91,6 +91,21 @@ class _ResidentVerifier(Protocol):
         ...
 
 
+class _ResourceOwnershipVerifier(Protocol):
+    """Kiểm tài nguyên nghiệp vụ có thuộc cư dân đang thao tác không.
+
+    Xác minh "anh là cư dân đã liên kết" chưa đủ. `book_parking` nhận
+    `vehicle_id` và `pay_fee` nhận `booking_id`; nếu hai ID đó không được đối
+    chiếu với cư dân hiện tại thì một tài khoản đã xác minh vẫn đặt chỗ cho xe
+    của căn hộ khác, hoặc thanh toán hoá đơn của người khác — chỉ cần đoán
+    đúng một mã.
+    """
+
+    async def vehicle_belongs_to(self, resident_id: str, vehicle_id: str) -> bool: ...
+
+    async def booking_belongs_to(self, resident_id: str, booking_id: str) -> bool: ...
+
+
 class ResidentDirectoryClient:
     """Precondition client ngoài TaskPlan; LLM không thể bỏ qua hay gọi lại.
 
@@ -159,11 +174,13 @@ class ResidentAccessBoundary:
         context: dict[str, Any],
         *,
         verifier: _ResidentVerifier | None = None,
+        resource_verifier: _ResourceOwnershipVerifier | None = None,
         on_stage: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self._boundary = boundary
         self._context = context
         self._verifier = verifier
+        self._resource_verifier = resource_verifier
         self._on_stage = on_stage
 
     async def execute(
@@ -196,6 +213,8 @@ class ResidentAccessBoundary:
             for task in plan.tasks:
                 if task.tool == "register_vehicle" and task.input.get("resident_id") != resident_id:
                     raise ResidentAccessRequiredError("Verified resident mapping is required.")
+
+            await self._reject_resources_owned_by_others(plan, resident_id)
             if self._on_stage is not None:
                 await self._on_stage("RESIDENT_VERIFIED", {})
         # Chuyển tiếp `finalize` và session chain — guard này không có quyền
@@ -207,6 +226,74 @@ class ResidentAccessBoundary:
             parent_workflow_id=parent_workflow_id,
             session_id=session_id,
         )
+
+    # Field mang ID tài nguyên nghiệp vụ, kèm cách kiểm quyền sở hữu tương ứng.
+    # Chỉ literal mới cần kiểm: InputRef trỏ tới task trong CÙNG plan, và tài
+    # nguyên do chính plan này tạo ra thì đã thuộc về cư dân hiện tại —
+    # `register_vehicle` phía trên đã ép resident_id đúng, còn TaskPlanValidator
+    # đã ép InputRef phải nằm trong `depends_on`.
+    _OWNED_RESOURCE_INPUTS: tuple[tuple[str, str, str], ...] = (
+        ("book_parking", "vehicle_id", "vehicle_belongs_to"),
+        ("pay_fee", "booking_id", "booking_belongs_to"),
+    )
+
+    async def _reject_resources_owned_by_others(self, plan: TaskPlan, resident_id: str) -> None:
+        """Chặn plan thao tác lên tài nguyên của cư dân khác.
+
+        Đây là lỗ hổng còn lại sau khi đã kiểm "user có phải cư dân đã xác minh
+        không": câu trả lời có, nhưng cư dân NÀO thì `vehicle_id`/`booking_id`
+        trong plan mới quyết định. Không đối chiếu, một tài khoản hợp lệ vẫn
+        đặt được chỗ đỗ cho xe của căn hộ khác và thanh toán được hoá đơn của
+        họ — LLM không cần bị lừa, chỉ cần một ID đoán đúng lọt vào goal.
+
+        Chỉ kiểm giá trị LITERAL. Một `InputRef` là tham chiếu tới output của
+        task khác trong cùng plan; giá trị thật chưa tồn tại lúc này, và
+        provenance của nó đã được TaskPlanValidator ràng qua `depends_on`. Kiểm
+        InputRef ở đây sẽ chặn nhầm chuỗi hợp lệ register_vehicle → book_parking
+        → pay_fee, tức là chặn đúng luồng nghiệp vụ chính.
+
+        Plan trộn literal của người khác với InputRef hợp lệ vẫn bị chặn: vòng
+        lặp duyệt từng task, một literal sai là đủ để từ chối cả plan.
+        """
+        if self._resource_verifier is None:
+            return
+
+        for task in plan.tasks:
+            for tool, field, check_name in self._OWNED_RESOURCE_INPUTS:
+                if task.tool != tool:
+                    continue
+                value = task.input.get(field)
+                # InputRef (dict/InputRef object) → bỏ qua, xem docstring.
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                check = getattr(self._resource_verifier, check_name)
+                if not await check(resident_id, value):
+                    # Message KHÔNG chứa ID vừa bị từ chối. Echo lại nó biến
+                    # guard này thành công cụ dò: gửi ID bất kỳ, đọc thông báo,
+                    # biết ID đó có tồn tại hay không.
+                    raise ResidentAccessRequiredError("Verified resident mapping is required.")
+
+
+class PostgresResourceOwnership:
+    """Đối chiếu quyền sở hữu tài nguyên trên PostgreSQL.
+
+    Đọc thẳng database chứ không hỏi provider qua HTTP: đây là quyết định về
+    quyền, và nó phải đúng ngay cả khi provider tạm không phản hồi. Một guard
+    quyền mà "provider lỗi thì cho qua" thì không phải guard.
+    """
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    async def vehicle_belongs_to(self, resident_id: str, vehicle_id: str) -> bool:
+        from src.db.resident_link_repository import vehicle_belongs_to
+
+        return await vehicle_belongs_to(self._pool, vehicle_id, resident_id)
+
+    async def booking_belongs_to(self, resident_id: str, booking_id: str) -> bool:
+        from src.db.resident_link_repository import booking_belongs_to
+
+        return await booking_belongs_to(self._pool, booking_id, resident_id)
 
 
 class PaymentApprovalBoundary:
@@ -390,6 +477,10 @@ async def run_demo_workflow(
         **boundary_kwargs,
     )
     resident_verifier = ResidentDirectoryClient(resident_url)
+    # Quyền sở hữu tài nguyên đọc từ chính pool nghiệp vụ. Không mở pool riêng:
+    # một guard chạy trên mỗi lần execute mà tự mở/đóng kết nối sẽ là chỗ nghẽn
+    # đầu tiên khi có tải.
+    resource_verifier = PostgresResourceOwnership(repository._pool)  # noqa: SLF001
     # Theo dõi token/cost (Phase D): set contextvar cho mọi lần LLM trong workflow
     # này, gắn LlmUsageLogger làm callback của ChatOpenAI. flush() trong finally
     # ghi xuống `llm_usage` (best-effort, không raise). workflow_id có thể None
@@ -406,6 +497,7 @@ async def run_demo_workflow(
             runtime_boundary,
             trusted_context,
             verifier=resident_verifier,
+            resource_verifier=resource_verifier,
             on_stage=on_stage,
         )
         guarded_boundary = PaymentApprovalBoundary(resident_boundary, approve_mock_payment, repository=repository)

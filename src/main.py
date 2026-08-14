@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
 from src.api.middleware import RateLimitMiddleware
 from src.api.routes import router
@@ -87,6 +88,8 @@ app.include_router(router, prefix="/api/v1")
 # Auth router của nhánh Hoàng Anh. Bị rơi khi đổi nền tích hợp sang gate2
 # (main.py giải xung đột theo phía gate2) — mọi endpoint /auth/* trả 404.
 app.include_router(auth_router, prefix="/api/v1")
+# Đường DUY NHẤT ghi user_resident_links. Chặn bằng require_roles("admin").
+app.include_router(admin_router, prefix="/api/v1")
 
 _DEMO_HTML = Path(__file__).resolve().parents[1] / "static" / "demo.html"
 

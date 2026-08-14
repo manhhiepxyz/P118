@@ -27,6 +27,7 @@ from src.common.failure_messages import task_failure_message
 from src.common.projects import PROJECTS, find_project_id, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
 from src.config import get_settings
+from src.db.resident_link_repository import get_verified_identity
 from src.db.session_repository import create_session, get_session
 from src.models.schemas import (
     ChatRequest,
@@ -265,12 +266,13 @@ _DEMO_ACCOUNT_CONTEXTS: dict[str, dict[str, Any]] = {
         "resident_verification_status": "NOT_LINKED",
         "account_contact_status": "VERIFIED",
     },
+    # KHUNG, không phải dữ liệu. Danh tính thật (`resident_id`,
+    # `apartment_code`, `residential_area`) được điền từ `user_resident_links`
+    # cộng bảng `residents`. Trước đây RES-001/A1201 nằm cứng ở đây, nên mọi
+    # tài khoản được coi là resident đều thao tác trên CÙNG một căn hộ — dữ
+    # liệu của người này hiện ra dưới phiên của người kia.
     "resident": {
         "account_id": "DEMO-RESIDENT",
-        "resident_id": "RES-001",
-        "apartment_id": "A1201",
-        "apartment_code": "A1201",
-        "residential_area": "Vinhomes Ocean Park",
         "resident_verification_status": "VERIFIED",
         "account_contact_status": "VERIFIED",
     },
@@ -294,11 +296,16 @@ def _context_for_session(session: dict[str, Any] | None) -> dict[str, Any]:
     return context
 
 
-async def _load_session(session_id: str | None) -> dict[str, Any] | None:
-    """Đọc row session từ PostgreSQL; trả None nếu không có hoặc DB lỗi.
+async def _load_session(session_id: str | None, *, user_id: str | None = None) -> dict[str, Any] | None:
+    """Đọc row session CỦA `user_id`; trả None nếu không có, không thuộc, hoặc DB lỗi.
 
     Mở pool qua composition root (pattern `_read_repair_hints`), đóng trong
     finally. DB lỗi KHÔNG được raise vào route — fail-closed về prospect.
+
+    Phạm vi theo user được ép NGAY TRONG SQL. Kiểm chủ sở hữu workflow cha rồi
+    coi session là hệ quả sẽ dựa vào giả định "dữ liệu luôn nhất quán" — và
+    một guard quyền không được đứng trên giả định đó. Session của người khác
+    trả None, tức là fail-closed về prospect, giống hệt session không tồn tại.
     """
     if not session_id:
         return None
@@ -311,7 +318,7 @@ async def _load_session(session_id: str | None) -> dict[str, Any] | None:
     try:
         repository = await build_repository(migrate=False)
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
-        return await get_session(pool, session_id)
+        return await get_session(pool, session_id, user_id=user_id)
     except Exception:  # noqa: BLE001 - DB tạm lỗi không được lộ ra route
         # Log generic: session_id là định danh phiên, không cần đưa vào log để
         # chẩn đoán một sự cố hạ tầng.
@@ -326,6 +333,9 @@ async def _load_session(session_id: str | None) -> dict[str, Any] | None:
 async def _persist_session(
     session_id: str | None,
     account_state: str,
+    *,
+    user_id: str | None = None,
+    resident_id: str | None = None,
 ) -> None:
     """Ghim session server-side. Best-effort, KHÔNG raise ra caller.
 
@@ -344,7 +354,12 @@ async def _persist_session(
                 pool,
                 session_id=session_id,
                 account_state=account_state,
-                resident_id="RES-001" if account_state == "resident" else None,
+                # `resident_id` đến từ liên kết đã VERIFIED của chính user này.
+                # Trước đây chỗ này ghi cứng "RES-001", nên mọi phiên resident
+                # đều trỏ về cùng một căn hộ — dữ liệu của người này hiện ra
+                # dưới phiên của người kia.
+                resident_id=resident_id,
+                user_id=user_id,
             )
         finally:
             await pool.close()
@@ -753,6 +768,7 @@ async def _run_demo_job(
         goal=goal,
         session_id=session_id or job.get("session_id"),
         parent_workflow_id=parent_workflow_id or job.get("parent_workflow_id"),
+        owner_user_id=job.get("owner_user_id"),
     )
 
     repair_manager = RepairManager()
@@ -761,7 +777,12 @@ async def _run_demo_job(
     # `account_state` ở đây là giá trị đã quyết định ở /start (và /continue giờ
     # truyền giá trị đọc từ session cũ). DB lỗi không được làm hỏng workflow —
     # không ghim được thì các lần đọc sau fail-closed về prospect.
-    await _persist_session(session_id, account_state)
+    await _persist_session(
+        session_id,
+        account_state,
+        user_id=job.get("owner_user_id"),
+        resident_id=job.get("existing_context", {}).get("resident_id"),
+    )
 
     async def on_stage(stage: str, payload: dict[str, Any]) -> None:
         plan = payload.get("plan")
@@ -966,6 +987,7 @@ async def _ensure_workflow_shell(
     goal: str,
     session_id: str | None,
     parent_workflow_id: str | None,
+    owner_user_id: str | None = None,
 ) -> bool:
     """Tạo row `workflows` TRƯỚC khi Planner chạy. Trả True nếu đã có row.
 
@@ -992,6 +1014,10 @@ async def _ensure_workflow_shell(
                 "task_plan": None,
                 "session_id": session_id,
                 "parent_workflow_id": parent_workflow_id,
+                # Chủ sở hữu ghi ngay từ shell, tức là TRƯỚC khi Planner chạy.
+                # Ghi muộn hơn sẽ có một khoảng workflow tồn tại mà chưa ai sở
+                # hữu, và mọi guard đọc trong khoảng đó đều thấy owner NULL.
+                "owner_user_id": owner_user_id,
             }
         )
         return True
@@ -1291,12 +1317,75 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
     )
 
 
+async def _trusted_account_context(user: dict) -> tuple[str, dict[str, Any]]:
+    """Dựng ngữ cảnh tin cậy từ token → user_resident_links → residents.
+
+    Trả `("prospect", ...)` cho mọi trường hợp không phải VERIFIED: chưa liên
+    kết, đang chờ duyệt, đã bị từ chối. Ba trạng thái đó khác nhau về mặt vận
+    hành nhưng giống hệt nhau về mặt quyền, và gộp lại ở đây khiến không nhánh
+    nào có thể vô tình mở quyền cho hai cái đầu.
+
+    Admin KHÔNG được cộng thêm quyền cư dân: role và resident link là hai trục
+    độc lập. Một tài khoản vận hành không phải chủ căn hộ nào.
+    """
+    repository = await build_repository(migrate=False)
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        identity = await get_verified_identity(pool, user["id"])
+    finally:
+        await pool.close()
+
+    if identity is None:
+        return "prospect", dict(_DEMO_ACCOUNT_CONTEXTS["prospect"])
+
+    # Chỉ các field do server tra được mới vào context. Không có đường nào cho
+    # giá trị từ prompt hay TaskPlan chảy vào đây.
+    context = dict(_DEMO_ACCOUNT_CONTEXTS["resident"])
+    context.update(
+        {
+            "resident_id": identity.resident_id,
+            "apartment_code": identity.apartment_code,
+            "residential_area": identity.residential_area,
+            "full_name": identity.full_name,
+        }
+    )
+    return "resident", context
+
+
+async def _require_workflow_owner(workflow_id: str, user: dict) -> None:
+    """404 nếu workflow không thuộc về `user`.
+
+    404 chứ không phải 403: 403 xác nhận workflow đó có tồn tại, và với ID đoán
+    được thì riêng việc xác nhận đã là rò rỉ. Người không sở hữu phải thấy đúng
+    thứ họ thấy khi ID hoàn toàn không tồn tại.
+
+    Owner đọc từ PostgreSQL, KHÔNG từ `_DEMO_JOBS`: cache RAM trống sau restart,
+    và khi đó mọi workflow sẽ trông như vô chủ.
+
+    Row legacy (`owner_user_id IS NULL`, tạo trước Phase B) cũng trả 404 cho
+    customer. Dữ liệu vẫn còn để truy vết, nhưng không rơi vào tay tài khoản nào.
+    """
+    repository = await build_repository(migrate=False)
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        owner = await repository.get_workflow_owner(workflow_id)
+    finally:
+        await pool.close()
+
+    if owner is None or str(owner) != str(user["id"]):
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+
+
 @router.post(
     "/workflows/demo/start",
     response_model=DemoWorkflowResponse,
     status_code=202,
 )
-async def start_demo_workflow(http_request: Request, request: DemoWorkflowRequest) -> DemoWorkflowResponse:
+async def start_demo_workflow(
+    http_request: Request,
+    request: DemoWorkflowRequest,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
     """Trả workflow_id ngay; workflow tiếp tục chạy trong background task.
 
     Session server-side: server tự sinh `session_id` (KHÔNG tin `request.session_id`
@@ -1307,6 +1396,9 @@ async def start_demo_workflow(http_request: Request, request: DemoWorkflowReques
     # Speech lane: greeting/acknowledgement/capability → trả CHAT ngay, 0 LLM.
     small_talk = classify(request.goal)
     if isinstance(small_talk, SmallTalk):
+        # Câu trả lời "bạn làm được gì" cũng phải theo quyền thật: liệt kê dịch
+        # vụ cư dân cho người chưa liên kết là hứa một việc sẽ bị từ chối ngay sau đó.
+        small_talk_state, small_talk_context = await _trusted_account_context(user)
         workflow_id = str(uuid4())
         session_id = str(uuid4())
         if small_talk.speech_type == SpeechType.CAPABILITY:
@@ -1314,7 +1406,7 @@ async def start_demo_workflow(http_request: Request, request: DemoWorkflowReques
             capability = await answer_capability_question(
                 request.goal,
                 base_url=base_url,
-                account_state=request.account_state,
+                account_state=small_talk_state,
             )
             reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
         else:
@@ -1332,9 +1424,9 @@ async def start_demo_workflow(http_request: Request, request: DemoWorkflowReques
             ),
             "events": [],
             "goal": request.goal,
-            "account_state": request.account_state,
-            "approve_mock_payment": request.approve_mock_payment,
-            "existing_context": dict(_DEMO_ACCOUNT_CONTEXTS[request.account_state]),
+            "account_state": small_talk_state,
+            "approve_mock_payment": False,
+            "existing_context": small_talk_context,
             "contact_profile": {},
             "session_id": session_id,
             "parent_workflow_id": None,
@@ -1351,7 +1443,9 @@ async def start_demo_workflow(http_request: Request, request: DemoWorkflowReques
     workflow_id = str(uuid4())
     session_id = str(uuid4())
     settings = get_settings()
-    context = dict(_DEMO_ACCOUNT_CONTEXTS[request.account_state])
+    # Quyền suy ra từ token + PostgreSQL, KHÔNG từ body. Đây là điểm mà một
+    # dòng JSON `"account_state": "resident"` từng đủ để mở toàn bộ dịch vụ cư dân.
+    account_state, context = await _trusted_account_context(user)
     if request.project_name is not None:
         selected_project_id = resolve_project_id(request.project_name)
         if selected_project_id is None:
@@ -1368,12 +1462,15 @@ async def start_demo_workflow(http_request: Request, request: DemoWorkflowReques
         "response": None,
         "events": [],
         "goal": request.goal,
-        "account_state": request.account_state,
-        "approve_mock_payment": request.approve_mock_payment,
+        "account_state": account_state,
+        "owner_user_id": user["id"],
+        # Workflow LUÔN bắt đầu chưa được duyệt thanh toán. Một boolean trong
+        # body có thể pre-approve nghĩa là /payment-decision thành tuỳ chọn —
+        # mà bước duyệt tồn tại chính vì nó không được phép là tuỳ chọn.
+        "approve_mock_payment": False,
         "existing_context": context,
-        "contact_profile": request.contact_profile.model_dump(exclude_none=True)
-        if request.contact_profile is not None
-        else {},
+        # Thông tin liên hệ lấy từ tài khoản/provider, không từ browser.
+        "contact_profile": {},
         "session_id": session_id,
         "parent_workflow_id": None,
     }
@@ -1382,7 +1479,8 @@ async def start_demo_workflow(http_request: Request, request: DemoWorkflowReques
         _run_demo_job(
             workflow_id,
             request.goal,
-            request.approve_mock_payment,
+            # Không pre-approve. Mọi thanh toán đi qua /payment-decision.
+            False,
             {
                 "resident": settings.resident_service_url,
                 "transport": settings.transport_service_url,
@@ -1390,7 +1488,7 @@ async def start_demo_workflow(http_request: Request, request: DemoWorkflowReques
                 "property": settings.property_service_url,
                 "resident_services": settings.resident_services_service_url,
             },
-            request.account_state,
+            account_state,
             session_id=session_id,
         )
     )
@@ -1413,8 +1511,13 @@ async def continue_demo_workflow(
     workflow_id: str,
     http_request: Request,
     request: DemoWorkflowContinueRequest,
+    user: dict = Depends(get_current_user),
 ) -> DemoWorkflowResponse:
     """Tiếp tục goal gốc bằng field đã map deterministic ở backend."""
+    # Kiểm quyền TRƯỚC khi chạm `_DEMO_JOBS`. Đọc cache trước rồi mới kiểm sẽ
+    # để lộ qua thời gian phản hồi và qua thông báo lỗi rằng workflow đó có tồn
+    # tại hay không.
+    await _require_workflow_owner(workflow_id, user)
     previous = _DEMO_JOBS.get(workflow_id)
     response = previous.get("response") if previous is not None else None
 
@@ -1453,7 +1556,7 @@ async def continue_demo_workflow(
     # delta của riêng parent (project_id…) + base persona. Không session (DB lỗi
     # lúc ghim) → fail-closed về prospect cho quyết định quyền.
     session_id = pending_session_id or workflow_id
-    session = await _load_session(session_id)
+    session = await _load_session(session_id, user_id=user["id"])
     account_state = (session or {}).get("account_state", "prospect")
     context = dict(pending_context)
     # Bơm kết quả SUCCESS của parent từ DB (nếu parent đã persist). Giúp child
@@ -1597,8 +1700,12 @@ async def continue_demo_workflow(
     "/workflows/demo/{workflow_id}",
     response_model=DemoWorkflowResponse,
 )
-async def get_demo_workflow_status(workflow_id: str) -> DemoWorkflowResponse:
+async def get_demo_workflow_status(
+    workflow_id: str,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
     """Kết hợp stage của Agent với task status thật đọc từ PostgreSQL."""
+    await _require_workflow_owner(workflow_id, user)
     job = _DEMO_JOBS.get(workflow_id)
 
     # HAI error boundary tách rời. Trước đây cả hai lần đọc nằm chung một try,
@@ -1713,11 +1820,23 @@ async def get_demo_workflow_status(workflow_id: str) -> DemoWorkflowResponse:
     "/workflows/demo/session/{session_id}",
     response_model=DemoSessionListResponse,
 )
-async def list_demo_workflows_by_session(session_id: str) -> DemoSessionListResponse:
-    """Lịch sử một cuộc hội thoại: tất cả workflow cùng session_id.
+async def list_demo_workflows_by_session(
+    session_id: str,
+    user: dict = Depends(get_current_user),
+) -> DemoSessionListResponse:
+    """Lịch sử một cuộc hội thoại: workflow cùng session_id CỦA CHÍNH user này.
 
-    Giới hạn demo: không kiểm tra ownership; endpoint này chỉ phục vụ demo
-    single-user cho đến khi có auth/session thật.
+    `session_id` là giá trị client biết và gửi lại được, nên nó chỉ là khoá
+    nhóm — không phải bằng chứng về quyền. Lọc theo mỗi nó nghĩa là ai cầm được
+    session của người khác thì đọc được toàn bộ thread của họ.
+
+    Lọc NGAY TRONG SQL, không đọc hết rồi bỏ bớt ở Python: lọc ở tầng trên vẫn
+    kéo mọi row của người khác lên khỏi database, và `limit` thì đã áp trước
+    khi lọc.
+
+    Session của người khác và session không tồn tại trả về CÙNG một kết quả
+    (danh sách rỗng). Khác nhau ở bất kỳ điểm nào cũng đủ để dò xem một session
+    có thật hay không.
 
     Lazy zombie sweep (Phase B): poll danh sách cũng là nơi dọn workflow mồ côi
     (payment approval hết hạn, RUNNING không còn process). Live workflow trong
@@ -1727,7 +1846,7 @@ async def list_demo_workflows_by_session(session_id: str) -> DemoSessionListResp
     repository = await build_repository(migrate=False)
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
-        rows = await repository.list_workflows_by_session(session_id)
+        rows = await repository.list_workflows_by_session(session_id, owner_user_id=user["id"])
     finally:
         await pool.close()
 
@@ -1750,34 +1869,17 @@ async def list_demo_workflows_by_session(session_id: str) -> DemoSessionListResp
     return DemoSessionListResponse(session_id=session_id, workflows=items)
 
 
-@router.post("/workflows/demo", response_model=DemoWorkflowResponse)
-async def demo_workflow(request: DemoWorkflowRequest) -> DemoWorkflowResponse:
-    """Chạy Gate 2 E2E demo; browser không được tự gửi trusted context.
-
-    Endpoint đồng bộ này KHÔNG tạo session (session chỉ tạo ở `/start`). Quyền
-    đọc từ session server-side nếu body mang `session_id`; không có → fail-closed
-    về prospect (khớp default `account_state`). KHÔNG tin `request.account_state`.
-    """
-    settings = get_settings()
-    session = await _load_session(request.session_id)
-    context = _context_for_session(session)
-    try:
-        state = await run_demo_workflow(
-            request.goal,
-            existing_context=context,
-            approve_mock_payment=request.approve_mock_payment,
-            resident_url=settings.resident_service_url,
-            transport_url=settings.transport_service_url,
-            payment_url=settings.payment_service_url,
-            property_url=settings.property_service_url,
-            resident_services_url=settings.resident_services_service_url,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Workflow demo unavailable ({type(exc).__name__}).",
-        ) from None
-    return _demo_response(state, request.approve_mock_payment)
+# `POST /workflows/demo` (biến thể đồng bộ) ĐÃ BỊ XOÁ — Phase B.
+#
+# Nó không đòi xác thực nhưng vẫn gọi LLM và chạy runtime thật. "Chạy ở quyền
+# thấp nhất" không cứu được điều đó: bất kỳ ai chạm tới cổng vẫn tiêu thụ được
+# quota LLM, vẫn tạo được lịch xem nhà và phiếu quan tâm, và workflow sinh ra
+# không gắn với chủ sở hữu nào nên nằm ngoài mọi kiểm tra quyền lẫn audit của
+# nhánh async.
+#
+# Không caller nào cần nó: `static/demo.html` chỉ GET danh sách rồi POST
+# `/start`, `/continue`, `/payment-decision`; frontend React không tham chiếu.
+# Đường chính thức là `POST /workflows/demo/start` — có auth, có owner, có session.
 
 
 @router.get("/status")
@@ -1841,6 +1943,7 @@ async def list_supported_capabilities() -> DemoCapabilityListResponse:
 async def decide_demo_payment(
     workflow_id: str,
     request: DemoPaymentDecisionRequest,
+    user: dict = Depends(get_current_user),
 ) -> DemoWorkflowResponse:
     """Duyệt hoặc từ chối thanh toán cho một workflow đang chờ.
 
@@ -1851,6 +1954,11 @@ async def decide_demo_payment(
     # duyệt. Sau quyết định, nó là ảnh cũ: nếu không bỏ đi, mọi lần poll tiếp
     # theo vẫn trả "chờ xác nhận" dù database đã ghi SUCCESS, và giao diện mắc
     # kẹt vĩnh viễn ở màn chờ. Bỏ cache để GET đọc lại trạng thái đã lưu.
+    # Kiểm quyền TRƯỚC khi đọc báo giá hoặc trạng thái. Đọc trước rồi mới kiểm
+    # sẽ tạo side-channel: thông báo lỗi và thời gian phản hồi khác nhau tuỳ
+    # workflow của người khác đang ở trạng thái nào.
+    await _require_workflow_owner(workflow_id, user)
+
     job = _DEMO_JOBS.get(workflow_id)
     if job is not None:
         job["response"] = None
@@ -1935,6 +2043,7 @@ async def list_demo_workflows(
     status: str = "active",
     limit: int = 20,
     session_id: str | None = None,
+    user: dict = Depends(get_current_user),
 ) -> DemoWorkflowListResponse:
     """Danh sách workflow cho màn Tổng quan — đọc thẳng PostgreSQL.
 
@@ -1963,10 +2072,13 @@ async def list_demo_workflows(
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         if session_id:
-            rows = await repository.list_workflows_by_session(session_id)
+            # Session phải thuộc chính user này. `session_id` là giá trị client
+            # biết và gửi lại được, nên nó không phải bằng chứng về quyền. Lọc
+            # trong SQL, không đọc hết rồi lọc ở Python.
+            rows = await repository.list_workflows_by_session(session_id, owner_user_id=user["id"])
         else:
             statuses = _LIST_FILTERS[status] or None
-            rows = await repository.list_workflows(statuses=statuses, limit=limit)
+            rows = await repository.list_workflows(statuses=statuses, limit=limit, owner_user_id=user["id"])
         step_tools = await repository.current_step_titles([str(row["workflow_id"]) for row in rows])
     finally:
         await pool.close()

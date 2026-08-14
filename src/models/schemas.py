@@ -49,19 +49,21 @@ class DemoWorkflowRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(..., min_length=1, max_length=5000)
-    approve_mock_payment: bool = False
-    # Fail-closed. Default cũ là "resident", nên một request chỉ có `goal` được
-    # cấp thẳng quyền cư dân đã xác thực — quên khai là leo thang đặc quyền.
-    # Mặc định prospect: quên khai thì mất quyền, không phải được thêm quyền.
+    # Các field sau ĐÃ BỊ LOẠI KHỎI CONTRACT (Phase B):
     #
-    # Đây vẫn chỉ là persona demo do browser gửi. PRODUCTION phải lấy quyền từ
-    # auth/session và resident directory, KHÔNG tin field này trong request body.
-    account_state: Literal["prospect", "resident"] = "prospect"
+    #   account_state        — quyền suy ra từ token + user_resident_links
+    #   resident_id          — lấy từ liên kết đã VERIFIED, không ai tự khai
+    #   verification_status  — do admin/provider ghi, không do người dùng
+    #   owner_user_id        — lấy từ token
+    #   existing_context     — dựng server-side
+    #   approve_mock_payment — thanh toán chỉ duyệt qua /payment-decision
+    #   contact_profile      — lấy từ tài khoản/provider, không từ browser
+    #   session_id           — server sinh; client biết được thì client đổi được
+    #
+    # `extra="forbid"` biến mọi request còn gửi chúng thành 422. Giữ field lại
+    # rồi bỏ qua sẽ tệ hơn: caller vẫn gửi, vẫn tin nó có tác dụng, và không ai
+    # phát hiện cho tới khi quyền không khớp kỳ vọng.
     project_name: str | None = Field(default=None, min_length=2, max_length=100)
-    contact_profile: DemoContactProfile | None = None
-    # Client có thể gửi session_id để nối tiếp cuộc hội thoại. Không gửi thì
-    # backend tự sinh mới.
-    session_id: str | None = Field(default=None, max_length=100)
 
     @field_validator("goal")
     @classmethod

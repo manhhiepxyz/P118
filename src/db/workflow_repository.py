@@ -11,8 +11,16 @@ from pydantic_core import to_jsonable_python
 logger = logging.getLogger(__name__)
 
 
-def _uuid(workflow_id: str) -> UUID:
-    return UUID(workflow_id)
+def _uuid(value: Any) -> UUID:
+    """Chuẩn hoá về `uuid.UUID`.
+
+    asyncpg TRẢ VỀ UUID object cho cột UUID, nhưng hàm này trước chỉ nhận str —
+    nên truyền thẳng `user["id"]` vừa đọc từ database sẽ nổ `AttributeError`.
+    Chấp nhận cả hai dạng để nơi gọi không phải nhớ giá trị đang ở dạng nào.
+    """
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -108,14 +116,15 @@ class WorkflowRepository:
             row = await conn.fetchrow(
                 """
                 INSERT INTO workflows
-                    (workflow_id, goal, status, task_plan, parent_workflow_id, session_id)
+                    (workflow_id, goal, status, task_plan, parent_workflow_id, session_id, owner_user_id)
                 VALUES (
                     COALESCE($1, gen_random_uuid()),
                     $2,
                     $3,
                     $4,
                     $5,
-                    COALESCE(NULLIF($6, ''), gen_random_uuid()::text)
+                    COALESCE(NULLIF($6, ''), gen_random_uuid()::text),
+                    $7
                 )
                 ON CONFLICT (workflow_id) DO UPDATE
                     -- Idempotent VÀ không phá dữ liệu shell đã ghi.
@@ -126,7 +135,12 @@ class WorkflowRepository:
                     -- nếu lấy thẳng EXCLUDED thì parent bị set NULL còn
                     -- session_id bị thay bằng một UUID ngẫu nhiên (xem
                     -- COALESCE ở VALUES), tức là mất liên kết phiên.
-                    SET goal = COALESCE(EXCLUDED.goal, workflows.goal),
+                    -- `owner_user_id` chỉ được GHI MỘT LẦN, lúc tạo. Executor
+                    -- gọi lại create_workflow mà không truyền owner, và quan
+                    -- trọng hơn: cho phép ghi đè owner nghĩa là ai gọi sau
+                    -- cùng thì sở hữu workflow — đúng thứ IDOR cần.
+                    SET owner_user_id = COALESCE(workflows.owner_user_id, EXCLUDED.owner_user_id),
+                        goal = COALESCE(EXCLUDED.goal, workflows.goal),
                         parent_workflow_id = COALESCE(
                             EXCLUDED.parent_workflow_id, workflows.parent_workflow_id
                         ),
@@ -156,10 +170,33 @@ class WorkflowRepository:
                 _json_dumps(workflow_data.get("task_plan")),
                 _uuid(workflow_data["parent_workflow_id"]) if workflow_data.get("parent_workflow_id") else None,
                 workflow_data.get("session_id") or "",
+                _uuid(workflow_data["owner_user_id"]) if workflow_data.get("owner_user_id") else None,
             )
             workflow_id = str(row["workflow_id"])
             logger.info("created workflow %s", workflow_id)
             return workflow_id
+
+    async def get_workflow_owner(self, workflow_id: str) -> str | None:
+        """`owner_user_id` của workflow, hoặc None nếu không có/là legacy.
+
+        `workflow_id` sai định dạng cũng trả None, không raise: nơi gọi là guard
+        quyền, và ở đó "không xác định được chủ" phải thành 404. Để ValueError
+        bay ra sẽ thành 500 kèm traceback — vừa lộ giá trị vừa cho người gọi
+        biết ID của họ khác loại với ID có thật.
+        """
+        try:
+            key = _uuid(workflow_id)
+        except (ValueError, AttributeError, TypeError):
+            return None
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT owner_user_id FROM workflows WHERE workflow_id = $1",
+                key,
+            )
+        if row is None or row["owner_user_id"] is None:
+            return None
+        return str(row["owner_user_id"])
 
     async def get_workflow(self, workflow_id: str) -> dict:
         async with self._pool.acquire() as conn:
@@ -358,7 +395,13 @@ class WorkflowRepository:
             )
             return [r["task_id"] for r in rows]
 
-    async def list_workflows(self, *, statuses: tuple[str, ...] | None, limit: int) -> list[dict]:
+    async def list_workflows(
+        self,
+        *,
+        statuses: tuple[str, ...] | None,
+        limit: int,
+        owner_user_id: str | None = None,
+    ) -> list[dict]:
         """Liệt kê workflow kèm số task đã xong — đọc thẳng PostgreSQL.
 
         Chỉ trả cột cần cho danh sách. KHÔNG trả `task_plan`: snapshot đó chứa
@@ -366,9 +409,20 @@ class WorkflowRepository:
         đi ra danh sách tổng quan.
 
         `archived_at IS NULL` — workflow đã lưu trữ không hiện ở tổng quan.
+
+        `owner_user_id` lọc NGAY TRONG SQL, không đọc hết rồi lọc ở Python: khi
+        lọc ở tầng trên, `limit` đã được áp trước bộ lọc, nên danh sách của một
+        người có thể rỗng chỉ vì workflow của người khác chiếm hết chỗ — và tệ
+        hơn, mọi row của người khác vẫn đã được đọc lên khỏi database.
+
+        Row legacy (`owner_user_id IS NULL`) KHÔNG khớp: dữ liệu cũ giữ lại để
+        truy vết nhưng không hiện cho tài khoản nào.
         """
         where = ["w.archived_at IS NULL"]
         params: list[object] = []
+        if owner_user_id is not None:
+            params.append(_uuid(owner_user_id))
+            where.append(f"w.owner_user_id = ${len(params)}")
         if statuses:
             params.append(list(statuses))
             where.append(f"w.status = ANY(${len(params)}::varchar[])")
@@ -455,11 +509,20 @@ class WorkflowRepository:
             )
         return [dict(row) for row in rows]
 
-    async def list_workflows_by_session(self, session_id: str) -> list[dict]:
-        """Liệt kê workflow cùng session_id, sắp xếp từ cũ đến mới."""
+    async def list_workflows_by_session(
+        self,
+        session_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[dict]:
+        """Liệt kê workflow cùng session_id, sắp xếp từ cũ đến mới.
+
+        `owner_user_id` lọc trong SQL. `session_id` là giá trị client biết và
+        gửi lại được, nên nó KHÔNG phải bằng chứng về quyền — chỉ là khoá nhóm.
+        """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                     w.workflow_id,
                     w.goal,
@@ -473,11 +536,12 @@ class WorkflowRepository:
                 FROM workflows w
                 LEFT JOIN workflow_tasks t ON t.workflow_id = w.workflow_id
                 WHERE w.session_id = $1
+                  {"AND w.owner_user_id = $2" if owner_user_id is not None else ""}
                   AND w.archived_at IS NULL
                 GROUP BY w.workflow_id
                 ORDER BY w.created_at ASC
                 """,
-                session_id,
+                *([session_id, _uuid(owner_user_id)] if owner_user_id is not None else [session_id]),
             )
         return [dict(row) for row in rows]
 

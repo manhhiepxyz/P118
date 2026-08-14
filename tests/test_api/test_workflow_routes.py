@@ -54,7 +54,7 @@ def _full_plan() -> TaskPlan:
                 depends_on=["T2"],
                 input={
                     "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                    "booking_date": "2026-08-14",
+                    "booking_date": "2030-08-14",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -262,7 +262,7 @@ async def test_execute_with_body_plan_runs_boundary(client, workflow_env):
 
     plan = _full_plan()
     # Mô phỏng user sửa: đổi booking_date.
-    plan.tasks[2].input["booking_date"] = "2026-08-15"
+    plan.tasks[2].input["booking_date"] = "2030-08-15"
     res = await client.post(f"/api/v1/workflow/{wf_id}/execute", json={"plan": plan.model_dump(mode="json")})
     assert res.status_code == 200
     body = res.json()
@@ -272,11 +272,11 @@ async def test_execute_with_body_plan_runs_boundary(client, workflow_env):
     assert len(boundary.calls) == 1
     called_plan, called_wf_id = boundary.calls[0]
     assert called_wf_id == wf_id
-    assert called_plan.tasks[2].input["booking_date"] == "2026-08-15"
+    assert called_plan.tasks[2].input["booking_date"] == "2030-08-15"
     # Plan đã duyệt được snapshot (R3).
     assert len(repo.updated_task_plans) == 1
     snapshot = repo.updated_task_plans[0][1]
-    assert next(t for t in snapshot["tasks"] if t["task_id"] == "T3")["input"]["booking_date"] == "2026-08-15"
+    assert next(t for t in snapshot["tasks"] if t["task_id"] == "T3")["input"]["booking_date"] == "2030-08-15"
 
 
 @pytest.mark.asyncio

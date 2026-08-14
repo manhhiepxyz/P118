@@ -30,7 +30,8 @@ FAKE_USER: dict = {
     "id": "00000000-0000-0000-0000-000000000001",
     "username": "testuser",
     "email": None,
-    "role": "resident",
+    # Role canonical sau Phase B. `resident` không còn là một role.
+    "role": "customer",
     "password_hash": "not-used",
     "created_at": _iso(),
     "archived_at": None,

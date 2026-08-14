@@ -38,7 +38,7 @@ class UserRepository:
         self,
         username: str,
         password_hash: str,
-        role: str = "resident",
+        role: str = "customer",
         email: str | None = None,
     ) -> dict:
         """Tạo user mới, trả row KHÔNG kèm password_hash (không lộ qua API).

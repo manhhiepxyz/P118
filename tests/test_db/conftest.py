@@ -70,3 +70,74 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
             RESTART IDENTITY CASCADE
             """
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase B — client mang danh tính thật, dùng chung cho các test auth/IDOR.
+#
+# Đặt ở conftest thay vì import chéo giữa hai file test: import một fixture
+# từ module test khác khiến `client` bị định nghĩa lại và ruff báo F811, còn
+# thứ tự nạp module thì quyết định fixture nào thắng.
+# ---------------------------------------------------------------------------
+
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+from src.main import app  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def client(db_pool, monkeypatch):
+    """Client in-process nói chuyện với PostgreSQL test thật.
+
+    `app.state.runtime` chỉ được dựng trong lifespan, mà ASGITransport không
+    chạy lifespan — nên mọi endpoint auth trả 503. Ở đây gắn thẳng repository
+    thật (không phải fake) để test đi qua đúng đường SQL mà production đi.
+    """
+    from src.api import routes
+    from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+
+    repository = PostgreSQLWorkflowStateRepository(db_pool)
+
+    class _SharedPool:
+        def __init__(self, pool):
+            self._inner = pool
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def close(self):
+            return None
+
+    repository._pool = _SharedPool(db_pool)  # noqa: SLF001 - test sở hữu pool
+
+    async def _fake_build_repository(**_kwargs):
+        return repository
+
+    # Mỗi module import `build_repository` vào namespace riêng của nó, nên vá
+    # một chỗ là chưa đủ: module chưa vá vẫn mở kết nối tới DATABASE_URL thật
+    # và test sẽ đọc nhầm database phát triển.
+    from src.api import admin_routes
+    from src.orchestration import demo_service
+
+    for module in (routes, demo_service, admin_routes):
+        monkeypatch.setattr(module, "build_repository", _fake_build_repository)
+
+    app.state.runtime = (None, repository)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            yield c
+    finally:
+        app.state.runtime = None
+
+
+async def _register_and_login(client: AsyncClient, username: str) -> str:
+    await client.post(
+        "/api/v1/auth/register",
+        json={"username": username, "password": "MatKhauRatDai123!"},
+    )
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": "MatKhauRatDai123!"},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["access_token"]

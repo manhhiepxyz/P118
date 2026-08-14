@@ -37,10 +37,10 @@ def _clarification() -> dict:
 @pytest.mark.asyncio
 async def test_continue_works_after_a_restart_wiped_the_in_memory_job(client, monkeypatch) -> None:
     """`_DEMO_JOBS` trống nhưng ngữ cảnh đã ghim → vẫn tiếp tục được."""
-    monkeypatch.setattr(routes, "_load_clarification", lambda _id: _async(_clarification()))
-    monkeypatch.setattr(routes, "_load_session", lambda _id: _async({"account_state": "resident"}))
+    monkeypatch.setattr(routes, "_load_clarification", lambda _id, **_kwargs: _async(_clarification()))
+    monkeypatch.setattr(routes, "_load_session", lambda _id, **_kwargs: _async({"account_state": "resident"}))
     # Consume atomic trả về clarification cho người THẮNG.
-    monkeypatch.setattr(routes, "_consume_clarification", lambda _id: _async(_clarification()))
+    monkeypatch.setattr(routes, "_consume_clarification", lambda _id, **_kwargs: _async(_clarification()))
 
     started = {}
 
@@ -64,7 +64,7 @@ async def test_continue_works_after_a_restart_wiped_the_in_memory_job(client, mo
 @pytest.mark.asyncio
 async def test_continue_still_rejects_when_nothing_was_ever_pending(client, monkeypatch) -> None:
     """Không có RAM và cũng không có ngữ cảnh đã ghim → vẫn 409."""
-    monkeypatch.setattr(routes, "_load_clarification", lambda _id: _async(None))
+    monkeypatch.setattr(routes, "_load_clarification", lambda _id, **_kwargs: _async(None))
 
     response = await client.post(
         f"/api/v1/workflows/demo/{WORKFLOW_ID}/continue",
@@ -82,11 +82,11 @@ async def test_restart_path_never_trusts_the_browser_for_permission(client, monk
     hijacked = _clarification()
     hijacked["existing_context"]["resident_verification_status"] = "VERIFIED"
 
-    monkeypatch.setattr(routes, "_load_clarification", lambda _id: _async(hijacked))
+    monkeypatch.setattr(routes, "_load_clarification", lambda _id, **_kwargs: _async(hijacked))
     # Session nói đây là khách — quyền phải theo session, không theo context cũ.
-    monkeypatch.setattr(routes, "_load_session", lambda _id: _async({"account_state": "prospect"}))
+    monkeypatch.setattr(routes, "_load_session", lambda _id, **_kwargs: _async({"account_state": "prospect"}))
     # Consume atomic trả về clarification cho người THẮNG.
-    monkeypatch.setattr(routes, "_consume_clarification", lambda _id: _async(_clarification()))
+    monkeypatch.setattr(routes, "_consume_clarification", lambda _id, **_kwargs: _async(_clarification()))
 
     async def _fake_job(*_args, **_kwargs):
         return None
@@ -132,10 +132,10 @@ async def test_a_second_continue_for_the_same_clarification_is_rejected(client, 
     không phải bằng `_DEMO_JOBS`, thứ không chia sẻ giữa worker và biến mất sau
     restart.
     """
-    monkeypatch.setattr(routes, "_load_clarification", lambda _id: _async(_clarification()))
-    monkeypatch.setattr(routes, "_load_session", lambda _id: _async({"account_state": "resident"}))
+    monkeypatch.setattr(routes, "_load_clarification", lambda _id, **_kwargs: _async(_clarification()))
+    monkeypatch.setattr(routes, "_load_session", lambda _id, **_kwargs: _async({"account_state": "resident"}))
     # Consume trả None: clarification đã bị request khác claim.
-    monkeypatch.setattr(routes, "_consume_clarification", lambda _id: _async(None))
+    monkeypatch.setattr(routes, "_consume_clarification", lambda _id, **_kwargs: _async(None))
 
     async def _fake_job(*_args, **_kwargs):
         return None

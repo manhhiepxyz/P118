@@ -44,9 +44,24 @@ async def seeded(db_pool: asyncpg.Pool, monkeypatch):
     # DATABASE_URL thật. Test ghi bản ghi chờ duyệt vào pool test rồi endpoint
     # đọc ở database khác — kết quả là 409 "đã xử lý", và một test không assert
     # status code sẽ xanh mà chưa từng chạm đường thành công.
+    from src.api import admin_routes
     from src.orchestration import demo_service
 
-    monkeypatch.setattr(demo_service, "build_repository", _fake_build_repository)
+    for module in (demo_service, admin_routes):
+        monkeypatch.setattr(module, "build_repository", _fake_build_repository)
+
+    # Chủ sở hữu THẬT cho các workflow được seed. Sau Phase B endpoint nào cũng
+    # đòi token và lọc theo owner, nên fixture phải cấp một danh tính thật —
+    # không phải nới auth để test cũ xanh lại.
+    owner = await db_pool.fetchrow(
+        """
+        INSERT INTO users (username, password_hash, role)
+        VALUES ('chu_so_huu_seed', 'scrypt:not-used', 'customer')
+        ON CONFLICT (username) DO UPDATE SET updated_at = NOW()
+        RETURNING id, username, role
+        """
+    )
+    owner_id = str(owner["id"])
 
     made = {}
     for key, goal, status in (
@@ -54,7 +69,7 @@ async def seeded(db_pool: asyncpg.Pool, monkeypatch):
         ("waiting", "Đặt lịch chuyển nhà ngày 20/12", WorkflowStatus.WAITING_APPROVAL),
         ("done", "Báo hỏng điều hoà căn hộ", WorkflowStatus.SUCCESS),
     ):
-        workflow_id = await repository.create_workflow({"goal": goal})
+        workflow_id = await repository.create_workflow({"goal": goal, "owner_user_id": owner_id})
         await repository.create_task(workflow_id, {"id": "T1", "tool": "register_vehicle", "depends_on": []})
         await repository.create_task(workflow_id, {"id": "T2", "tool": "book_parking", "depends_on": ["T1"]})
         await repository.update_task_status(workflow_id, "T1", TaskStatus.SUCCESS)
@@ -64,8 +79,18 @@ async def seeded(db_pool: asyncpg.Pool, monkeypatch):
         made[key] = workflow_id
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        yield {"client": client, "ids": made, "pool": db_pool}
+    # Token THẬT cho chủ sở hữu vừa tạo. `get_current_user` vẫn chạy đủ đường
+    # (giải mã token → tra user trong PostgreSQL), chỉ là test tự cấp danh tính.
+    from src.api.auth import create_access_token
+    from src.main import app as _app
+
+    _app.state.runtime = (None, repository)
+    headers = {"Authorization": f"Bearer {create_access_token(dict(owner))}"}
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers) as client:
+            yield {"client": client, "ids": made, "pool": db_pool, "owner_id": owner_id}
+    finally:
+        _app.state.runtime = None
 
 
 @pytest.mark.asyncio

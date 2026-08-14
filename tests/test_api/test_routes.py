@@ -54,7 +54,7 @@ def _demo_plan(with_payment: bool = False) -> TaskPlan:
     return TaskPlan(goal="Dữ liệu test", tasks=tasks)
 
 
-async def _no_session(session_id):
+async def _no_session(session_id, **_kwargs):
     """Giả lập DB không có session (trả None) — dùng cho route test không chạy
     PostgreSQL thật (tests/conftest.py client fixture không có test DB)."""
     return None
@@ -411,8 +411,6 @@ async def test_continue_workflow_maps_answer_into_context_without_rewriting_goal
         "plan": None,
         "events": [],
         "goal": original_goal,
-        "account_state": "resident",
-        "approve_mock_payment": False,
         "existing_context": {"project_id": "PRJ-001"},
         "response": routes.DemoWorkflowResponse(
             status="NEEDS_INFORMATION",
@@ -460,8 +458,6 @@ async def test_continue_workflow_accepts_partial_answer_then_planner_can_ask_rem
         "plan": None,
         "events": [],
         "goal": "Đặt lịch tham quan PRJ-001.",
-        "account_state": "resident",
-        "approve_mock_payment": False,
         "existing_context": {"project_id": "PRJ-001"},
         "response": routes.DemoWorkflowResponse(
             status="NEEDS_INFORMATION",
@@ -491,8 +487,9 @@ async def test_demo_start_returns_immediately_then_status_returns_background_res
 
     async def _fake_job(workflow_id, goal, approve_mock_payment, service_urls, account_state, **kwargs):
         assert goal == "Đăng ký dữ liệu test"
-        # Request khai rõ persona; test này không dựa vào default nữa.
-        assert account_state == "resident"
+        # Persona do server suy ra từ token + user_resident_links; request
+        # không còn khai được. Tài khoản test chưa có liên kết đã VERIFIED.
+        assert account_state == "prospect"
         routes._DEMO_JOBS[workflow_id]["stage"] = "FINISHED"
         routes._DEMO_JOBS[workflow_id]["message"] = "Đã hoàn tất."
         routes._DEMO_JOBS[workflow_id]["response"] = routes.DemoWorkflowResponse(
@@ -509,7 +506,7 @@ async def test_demo_start_returns_immediately_then_status_returns_background_res
 
     started = await client.post(
         "/api/v1/workflows/demo/start",
-        json={"goal": "Đăng ký dữ liệu test", "account_state": "resident"},
+        json={"goal": "Đăng ký dữ liệu test"},
     )
 
     assert started.status_code == 202
@@ -522,37 +519,6 @@ async def test_demo_start_returns_immediately_then_status_returns_background_res
     assert status.status_code == 200
     assert status.json()["status"] == "SUCCESS"
     assert status.json()["stage"] == "FINISHED"
-
-
-@pytest.mark.asyncio
-async def test_demo_start_keeps_contact_profile_outside_trusted_planner_context(client, monkeypatch) -> None:
-    routes._DEMO_JOBS.clear()
-
-    async def _fake_job(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
-    profile = {
-        "full_name": "Nguyễn Văn A",
-        "phone": "0948500414",
-        "email": "nguyenvana@example.com",
-        "note": "Muốn được tư vấn buổi chiều",
-    }
-    response = await client.post(
-        "/api/v1/workflows/demo/start",
-        json={
-            "goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.",
-            "account_state": "prospect",
-            "contact_profile": profile,
-        },
-    )
-    await asyncio.sleep(0)
-
-    assert response.status_code == 202
-    job = routes._DEMO_JOBS[response.json()["workflow_id"]]
-    assert job["contact_profile"] == profile
-    assert set(profile).isdisjoint(job["existing_context"])
-    assert "0948500414" not in job["goal"]
 
 
 @pytest.mark.asyncio
@@ -607,34 +573,6 @@ async def test_demo_start_rejects_unsupported_selected_project_without_echo(clie
 
     assert response.status_code == 422
     assert unknown not in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_start_rejects_invalid_contact_before_planning(client) -> None:
-    response = await client.post(
-        "/api/v1/workflows/demo/start",
-        json={
-            "goal": "Đặt lịch tham quan.",
-            "contact_profile": {
-                "full_name": "Nguyễn Văn A",
-                "phone": "not-a-phone",
-                "email": "invalid-email",
-            },
-        },
-    )
-
-    assert response.status_code == 422
-    assert "not-a-phone" not in response.text
-    assert "invalid-email" not in response.text
-
-    whitespace = await client.post(
-        "/api/v1/workflows/demo/start",
-        json={
-            "goal": "Đặt lịch tham quan.",
-            "contact_profile": {"full_name": "   ", "phone": "0948500414"},
-        },
-    )
-    assert whitespace.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -725,6 +663,33 @@ async def test_demo_status_preserves_fast_intermediate_events(client, monkeypatc
 
 
 @pytest.mark.asyncio
+async def _start_and_poll(client, goal: str) -> dict:
+    """Chạy workflow qua đường async CHÍNH THỨC rồi đọc kết quả.
+
+    Bốn test dưới đây trước chạy qua `POST /workflows/demo` — biến thể đồng bộ
+    đã bị xoá vì nó không đòi xác thực nhưng vẫn gọi LLM và runtime thật. Ý
+    định của chúng (view an toàn, không echo lỗi, không nguỵ trang lỗi thực thi
+    thành lời mời thanh toán) không đổi; chỉ đường đi đổi.
+    """
+    started = await client.post("/api/v1/workflows/demo/start", json={"goal": goal})
+    assert started.status_code == 202, started.text
+    workflow_id = started.json()["workflow_id"]
+
+    # Poll cho tới khi job nền kết thúc. `asyncio.sleep(0)` chỉ nhường một vòng
+    # lặp, không đủ cho một job có nhiều điểm await — và một test đọc quá sớm
+    # sẽ luôn thấy RUNNING, tức là xanh/đỏ theo tốc độ máy chứ không theo code.
+    for _ in range(200):
+        polled = await client.get(f"/api/v1/workflows/demo/{workflow_id}")
+        assert polled.status_code == 200, polled.text
+        body = polled.json()
+        if body["status"] not in {"PENDING", "RUNNING"}:
+            return body
+        await asyncio.sleep(0.01)
+
+    raise AssertionError(f"workflow không kết thúc, trạng thái cuối: {body['status']}")
+
+
+@pytest.mark.asyncio
 async def test_demo_workflow_returns_safe_success_view(client, monkeypatch):
     plan = _demo_plan()
 
@@ -745,15 +710,13 @@ async def test_demo_workflow_returns_safe_success_view(client, monkeypatch):
 
     monkeypatch.setattr(routes, "run_demo_workflow", _run_demo_workflow)
 
-    response = await client.post(
-        "/api/v1/workflows/demo",
-        json={"goal": "Đăng ký dữ liệu test", "approve_mock_payment": False},
-    )
+    body = await _start_and_poll(client, "Đăng ký dữ liệu test")
 
-    assert response.status_code == 200
-    body = response.json()
     assert body["status"] == "SUCCESS"
-    assert body["workflow_id"] == "workflow-test"
+    # Đường async dùng workflow_id do SERVER sinh, không phải id trong state
+    # giả — và chính nó là id mà client poll. Giữ nguyên khẳng định cũ sẽ khoá
+    # test vào một chi tiết của biến thể đồng bộ đã bị xoá.
+    assert body["workflow_id"]
     assert body["summary"] == "Đã đăng ký hồ sơ cư dân cho TEST_APARTMENT tại TEST_AREA."
     assert body["plan"] == [
         {
@@ -780,9 +743,13 @@ async def test_demo_workflow_returns_safe_success_view(client, monkeypatch):
             ],
         }
     ]
-    assert "MUST-NOT-LEAK" not in response.text
-    assert "provider_token" not in response.text
-    assert "input" not in response.text
+    # Token của provider và dữ liệu thô của tool KHÔNG được lọt ra view.
+    import json as _json
+
+    rendered = _json.dumps(body, ensure_ascii=False)
+    assert "MUST-NOT-LEAK" not in rendered
+    assert "provider_token" not in rendered
+    assert "input" not in rendered
 
 
 def test_demo_response_presents_four_business_steps_in_vietnamese() -> None:
@@ -948,33 +915,30 @@ def test_demo_response_explains_planning_and_validation_failures() -> None:
     assert "safe internal category" not in planning.model_dump_json()
 
 
-@pytest.mark.asyncio
-async def test_demo_workflow_reports_payment_approval_required(client, monkeypatch):
-    plan = _demo_plan(with_payment=True)
+def test_a_payment_approval_signal_renders_as_a_waiting_view_with_a_quote() -> None:
+    """`policy_error=PAYMENT_APPROVAL_REQUIRED` phải thành view chờ duyệt kèm báo giá.
 
+    Test này trước chạy qua `POST /workflows/demo` — biến thể đồng bộ đã bị xoá.
+    Thứ nó thực sự kiểm là hàm render `_demo_response`, nên giờ gọi thẳng hàm
+    đó. Đi vòng qua nhánh async sẽ kéo theo persist báo giá xuống PostgreSQL,
+    tức là kiểm một thứ khác — và nhánh đó đã có test riêng ngay bên dưới.
+    """
     from src.common.results import StandardResult
 
-    async def _run_demo_workflow(*args, **kwargs):
+    plan = _demo_plan(with_payment=True)
+    state = {
+        "planner_status": "READY",
+        "plan": plan,
         # Chờ duyệt là tín hiệu TƯỜNG MINH từ policy guard, kèm kết quả prefix.
-        return {
-            "planner_status": "READY",
-            "plan": plan,
-            "policy_error": "PAYMENT_APPROVAL_REQUIRED",
-            "workflow_id": "wf-approval",
-            "task_results": {"T2": StandardResult.ok({"booking_id": "BOOK-001", "amount": 150_000, "currency": "VND"})},
-        }
+        "policy_error": "PAYMENT_APPROVAL_REQUIRED",
+        "workflow_id": "wf-approval",
+        "task_results": {"T2": StandardResult.ok({"booking_id": "BOOK-001", "amount": 150_000, "currency": "VND"})},
+    }
 
-    monkeypatch.setattr(routes, "run_demo_workflow", _run_demo_workflow)
+    body = routes._demo_response(state, False)
 
-    response = await client.post(
-        "/api/v1/workflows/demo",
-        json={"goal": "Thanh toán phí mock", "approve_mock_payment": False},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "WAITING_APPROVAL"
-    assert body["payment_quote"]["amount"] == 150_000
+    assert body.status == "WAITING_APPROVAL"
+    assert body.payment_quote["amount"] == 150_000
 
 
 @pytest.mark.asyncio
@@ -989,7 +953,6 @@ async def test_background_payment_approval_is_not_reported_as_failure_or_finishe
         "response": None,
         "events": [],
         "existing_context": {},
-        "contact_profile": {},
     }
 
     async def _run_demo_workflow(*args, **kwargs):
@@ -1039,12 +1002,9 @@ async def test_execution_failure_is_not_disguised_as_a_payment_prompt(client, mo
 
     monkeypatch.setattr(routes, "run_demo_workflow", _run_demo_workflow)
 
-    response = await client.post(
-        "/api/v1/workflows/demo",
-        json={"goal": "Thanh toán phí mock", "approve_mock_payment": False},
-    )
+    body = await _start_and_poll(client, "Thanh toán phí mock")
 
-    assert response.json()["status"] == "EXECUTION_ERROR"
+    assert body["status"] == "EXECUTION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -1056,14 +1016,18 @@ async def test_demo_workflow_does_not_echo_unexpected_exception(client, monkeypa
 
     monkeypatch.setattr(routes, "run_demo_workflow", _run_demo_workflow)
 
-    response = await client.post(
-        "/api/v1/workflows/demo",
-        json={"goal": "Đăng ký dữ liệu test"},
-    )
+    body = await _start_and_poll(client, "Đăng ký dữ liệu test")
 
-    assert response.status_code == 503
-    assert secret not in response.text
-    assert response.json()["detail"] == "Workflow demo unavailable (RuntimeError)."
+    # Lỗi bất ngờ KHÔNG được mang DSN ra ngoài. Nhánh async báo lỗi qua trạng
+    # thái workflow chứ không qua HTTP 503, nhưng ràng buộc thì y hệt: không
+    # mẩu nào của exception gốc được xuất hiện trong thứ người dùng đọc được.
+    import json as _json
+
+    rendered = _json.dumps(body, ensure_ascii=False)
+    assert secret not in rendered
+    assert "postgresql://" not in rendered
+    assert "user:secret" not in rendered
+    assert body["status"] != "SUCCESS"
 
 
 @pytest.mark.asyncio
@@ -1075,7 +1039,7 @@ async def test_demo_workflow_does_not_echo_unexpected_exception(client, monkeypa
     ],
 )
 async def test_demo_workflow_rejects_untrusted_request_shape(client, payload):
-    response = await client.post("/api/v1/workflows/demo", json=payload)
+    response = await client.post("/api/v1/workflows/demo/start", json=payload)
 
     assert response.status_code == 422
 
@@ -1182,28 +1146,37 @@ def test_resident_only_denial_speaks_business_language_only() -> None:
 
 
 def test_prospect_context_cannot_prove_resident_mapping() -> None:
-    """Guard đọc context do server dựng, không đọc gì từ request body."""
+    """Guard đọc context do server dựng, không đọc gì từ request body.
+
+    `_DEMO_ACCOUNT_CONTEXTS["resident"]` giờ là KHUNG, không phải dữ liệu:
+    `resident_id`/`apartment_code` được điền từ `user_resident_links` cộng bảng
+    `residents`. Trước đây RES-001/A1201 nằm cứng ở đây nên mọi tài khoản
+    resident đều thao tác trên cùng một căn hộ.
+    """
     prospect = routes._DEMO_ACCOUNT_CONTEXTS["prospect"]
     resident = routes._DEMO_ACCOUNT_CONTEXTS["resident"]
 
     assert prospect.get("resident_verification_status") != "VERIFIED"
     assert "resident_id" not in prospect
     assert resident["resident_verification_status"] == "VERIFIED"
-    assert resident["resident_id"]
+    assert "resident_id" not in resident, "danh tính phải đến từ DB, không nằm cứng trong hằng số"
 
 
 def test_account_state_defaults_to_the_least_privileged_persona() -> None:
-    """Fail-closed: quên khai account_state là MẤT quyền, không phải được thêm.
+    """`account_state` không còn là field của request — gửi nó là 422.
 
-    Default cũ là "resident", nên một request chỉ có `goal` được cấp thẳng
-    context cư dân đã xác thực (RES-001 / căn A1201) và chạm được tới pay_fee.
+    Fail-closed bằng default là chưa đủ: caller vẫn gửi được và vẫn tin nó có
+    tác dụng. Giờ nó bị TỪ CHỐI, nên hiểu nhầm trở thành một lỗi nhìn thấy được
+    thay vì một giả định sai âm thầm.
     """
-    request = DemoWorkflowRequest(goal="Đăng ký chỗ đậu xe cho xe của tôi")
+    import pytest as _pytest
+    from pydantic import ValidationError
 
-    assert request.account_state == "prospect"
-    context = routes._DEMO_ACCOUNT_CONTEXTS[request.account_state]
-    assert context.get("resident_verification_status") != "VERIFIED"
-    assert "resident_id" not in context
+    with _pytest.raises(ValidationError):
+        DemoWorkflowRequest(goal="Đăng ký chỗ đậu xe cho xe của tôi", account_state="resident")
+
+    request = DemoWorkflowRequest(goal="Đăng ký chỗ đậu xe cho xe của tôi")
+    assert not hasattr(request, "account_state")
 
 
 # ---------------------------------------------------------------------------
@@ -1245,10 +1218,31 @@ async def test_successful_payment_decision_replaces_stale_waiting_stage(monkeypa
         assert _workflow_id == workflow_id
 
     monkeypatch.setattr(routes, "reject_payment", _reject)
+
+    # Guard ownership tra chủ sở hữu từ PostgreSQL. Test này gọi thẳng handler
+    # nên phải cấp một repository trả đúng chủ — KHÔNG tắt guard đi, vì chính
+    # thứ tự "kiểm quyền trước khi đọc trạng thái" là điều cần giữ.
+    user = {"id": "00000000-0000-0000-0000-0000000000aa"}
+
+    class _Pool:
+        async def close(self) -> None:
+            return None
+
+    class _Repo:
+        _pool = _Pool()
+
+        async def get_workflow_owner(self, _wf_id: str) -> str:
+            return user["id"]
+
+    async def _build_repo(**_kwargs):
+        return _Repo()
+
+    monkeypatch.setattr(routes, "build_repository", _build_repo)
     try:
         response = await routes.decide_demo_payment(
             workflow_id,
             routes.DemoPaymentDecisionRequest(decision="reject"),
+            user=user,
         )
 
         job = routes._DEMO_JOBS[workflow_id]
@@ -1333,12 +1327,15 @@ def test_public_stage_messages_are_free_of_internal_vocabulary() -> None:
 
 @pytest.mark.asyncio
 async def test_second_start_with_new_persona_returns_new_session_id(client, monkeypatch) -> None:
-    """Persona switch phải tạo session mới — thread mới, KHÔNG nối tiếp session cũ.
+    """Mỗi /start là một thread mới, và persona LUÔN do server quyết định.
 
-    Server tự sinh session_id ở mỗi /start; account_state body chỉ là persona
-    mong muốn CHO LẦN TẠO session đó. Chuyển persona không được tái sử dụng
-    session_id của cuộc hội thoại trước (nếu không lần /continue sau đọc session
-    cũ — ghim persona CŨ — là leo thang hoặc khóa nhầm quyền).
+    Bản trước khẳng định persona đi theo `account_state` trong body. Field đó
+    đã rời contract: quyền giờ suy ra từ token cộng `user_resident_links`, nên
+    hai lần /start của cùng một tài khoản phải cho cùng một persona bất kể body
+    gửi gì. Đây là khẳng định MẠNH HƠN bản cũ, không phải nới lỏng nó.
+
+    Session_id vẫn phải khác nhau: nối tiếp session cũ sẽ khiến lần /continue
+    sau đọc trúng ngữ cảnh của cuộc hội thoại trước.
     """
     routes._DEMO_JOBS.clear()
     captured = []
@@ -1350,11 +1347,11 @@ async def test_second_start_with_new_persona_returns_new_session_id(client, monk
 
     first = await client.post(
         "/api/v1/workflows/demo/start",
-        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.", "account_state": "resident"},
+        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00."},
     )
     second = await client.post(
         "/api/v1/workflows/demo/start",
-        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.", "account_state": "prospect"},
+        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00."},
     )
     await asyncio.sleep(0)
 
@@ -1362,7 +1359,8 @@ async def test_second_start_with_new_persona_returns_new_session_id(client, monk
     second_sid = second.json()["session_id"]
     assert first_sid and second_sid
     assert first_sid != second_sid
-    assert captured == ["resident", "prospect"]
+    # Tài khoản test chưa có liên kết cư dân đã VERIFIED → prospect ở cả hai lần.
+    assert captured == ["prospect", "prospect"]
 
 
 @pytest.mark.asyncio
@@ -1390,7 +1388,6 @@ async def test_continue_never_uses_body_account_state(client, monkeypatch) -> No
         # Browser đã gửi resident ở /start — nhưng session server-side không tồn
         # tại, nên đây phải bị bỏ qua.
         "account_state": "resident",
-        "approve_mock_payment": False,
         "existing_context": {"project_id": "PRJ-001"},
         "response": routes.DemoWorkflowResponse(
             status="NEEDS_INFORMATION",
@@ -1436,9 +1433,37 @@ async def test_session_persist_failure_is_nonfatal(client, monkeypatch) -> None:
     monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
     response = await client.post(
         "/api/v1/workflows/demo/start",
-        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.", "account_state": "resident"},
+        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00."},
     )
     await asyncio.sleep(0)
 
     assert response.status_code == 202
-    assert calls == [("job", "resident")]
+    # Persona server-side; tài khoản test chưa có liên kết đã VERIFIED.
+    assert calls == [("job", "prospect")]
+
+
+@pytest.mark.asyncio
+async def test_demo_start_refuses_a_contact_profile_from_the_browser(client, monkeypatch) -> None:
+    """`contact_profile` đã rời contract — gửi nó là 422.
+
+    Hai test trước kiểm rằng hồ sơ liên hệ do browser gửi không lọt vào trusted
+    context. Ràng buộc đó giờ mạnh hơn: browser không gửi được nữa. Thông tin
+    liên hệ lấy từ tài khoản/provider, nên số điện thoại và email không còn đi
+    qua request body ở bất kỳ đường nào.
+    """
+    routes._DEMO_JOBS.clear()
+
+    async def _fake_job(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
+
+    response = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={
+            "goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00.",
+            "contact_profile": {"full_name": "Nguyễn Văn A", "phone": "0948500414"},
+        },
+    )
+
+    assert response.status_code == 422, response.text

@@ -26,7 +26,7 @@ async def test_create_user_strips_password_hash(db_pool):
     repo = make_user_repo(db_pool)
     user = await repo.create_user("nguyen.van.a", hash_password("matkhau123"))
 
-    assert user["role"] == "resident"
+    assert user["role"] == "customer"
     assert user["username"] == "nguyen.van.a"
     assert "password_hash" not in user
     assert user["id"]
@@ -47,18 +47,18 @@ async def test_get_user_by_username_includes_hash(db_pool):
 @pytest.mark.asyncio
 async def test_get_user_by_id_roundtrip(db_pool):
     repo = make_user_repo(db_pool)
-    created = await repo.create_user("user.b", hash_password("matkhau123"), role="resident")
+    created = await repo.create_user("user.b", hash_password("matkhau123"), role="customer")
     fetched = await repo.get_user_by_id(created["id"])
     assert fetched is not None
     assert fetched["username"] == "user.b"
-    assert fetched["role"] == "resident"
+    assert fetched["role"] == "customer"
 
 
 @pytest.mark.asyncio
-async def test_default_role_is_resident(db_pool):
+async def test_default_role_is_customer(db_pool):
     repo = make_user_repo(db_pool)
     user = await repo.create_user("user.c", hash_password("matkhau123"))
-    assert user["role"] == "resident"
+    assert user["role"] == "customer"
 
 
 @pytest.mark.asyncio

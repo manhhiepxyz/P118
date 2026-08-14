@@ -6,7 +6,10 @@ Owner: Hoàng Anh
 
 Mounted ở /api/v1/auth (prefix đặt trên router). Body JSON — KHÔNG dùng
 OAuth2PasswordRequestForm vì cần python-multipart chưa cài. Đăng ký mặc định
-role='resident'; admin tạo bằng scripts/create_admin.py.
+role='customer'; admin tạo bằng scripts/create_admin.py.
+
+`customer` là VAI TRÒ TÀI KHOẢN, không phải quyền cư dân. Quyền cư dân nằm ở
+bảng `user_resident_links` và chỉ mở khi verification_status='VERIFIED'.
 
 Test: override `get_user_repository` bằng FakeUserRepository qua
 `app.dependency_overrides` (ASGITransport không fire lifespan).
@@ -45,7 +48,11 @@ async def register(
     req: RegisterRequest,
     users: Any = Depends(get_user_repository),
 ) -> UserResponse:
-    """Đăng ký tài khoản mới — luôn tạo role='resident'. Không trả token.
+    """Đăng ký tài khoản mới — luôn tạo role='customer'. Không trả token.
+
+    KHÔNG tạo liên kết cư dân. Role cũ tên 'resident' khiến đăng ký xong trông
+    như đã là cư dân, và mọi chỗ kiểm "role == resident" để mở dịch vụ cư dân
+    đều mở cho tài khoản vừa tạo xong.
 
     Trả 409 nếu username đã tồn tại (đồng bộ với nút trùng trong DB).
     """
@@ -57,7 +64,7 @@ async def register(
         user = await users.create_user(
             username=username,
             password_hash=password_hash,
-            role="resident",
+            role="customer",
             email=email,
         )
     except UserAlreadyExistsError:

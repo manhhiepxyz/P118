@@ -66,11 +66,13 @@ async def _login(client, username="nguyen.van.a", password="matkhau123"):
 
 
 @pytest.mark.asyncio
-async def test_register_creates_resident(client, auth_env):
+async def test_register_creates_a_customer_account(client, auth_env):
     res = await _register(client)
     assert res.status_code == 201
     data = res.json()
-    assert data["role"] == "resident"
+    # Role canonical sau Phase B. `resident` không còn là một role: nó là
+    # trạng thái liên kết căn hộ, sống ở bảng user_resident_links.
+    assert data["role"] == "customer"
     assert data["username"] == "nguyen.van.a"
     # Không lộ password_hash.
     assert "password_hash" not in data
@@ -121,7 +123,7 @@ async def test_login_returns_token(client, auth_env):
     assert data["access_token"]
     assert data["expires_in"] > 0
     assert data["user"]["username"] == "nguyen.van.a"
-    assert data["user"]["role"] == "resident"
+    assert data["user"]["role"] == "customer"
 
 
 @pytest.mark.asyncio
@@ -179,8 +181,14 @@ async def test_me_with_garbage_token_401(client, auth_env):
 
 
 @pytest.mark.asyncio
+@pytest.mark.anonymous
 async def test_workflow_start_without_token_401(client, workflow_runtime_env):
-    """No-token → 401 (không phải 503) — get_runtime đã override trước."""
+    """No-token → 401 (không phải 503) — get_runtime đã override trước.
+
+    `@pytest.mark.anonymous` bảo fixture `client` đừng gắn token: fixture giờ
+    mặc định mang token hợp lệ để các test nghiệp vụ đi qua cổng, còn test này
+    kiểm chính cái cổng.
+    """
     res = await client.post("/api/v1/workflow/start", json={"goal": "Đăng ký cư dân"})
     assert res.status_code == 401
 
@@ -252,7 +260,7 @@ async def test_require_roles_allows_admin_blocks_resident(client, auth_env):
     app.include_router(test_router)
 
     # resident → 403
-    app.dependency_overrides[get_current_user] = lambda: {"id": "x", "username": "u", "role": "resident"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "x", "username": "u", "role": "customer"}
     try:
         res = await client.get("/admin-test")
         assert res.status_code == 403

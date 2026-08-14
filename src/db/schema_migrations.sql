@@ -326,3 +326,116 @@ BEGIN
     END IF;
 END
 $$;
+
+-- =============================================================
+-- Phase B — danh tính đã xác thực và quyền cư dân
+-- =============================================================
+--
+-- Tách hai trục từng bị trộn làm một:
+--
+--   role            = tài khoản này là loại gì (customer | admin)
+--   resident link   = tài khoản này đã liên kết căn hộ đã xác minh chưa
+--
+-- Role cũ tên 'resident' làm hai thứ đó trông như một. Hệ quả không phải chỉ
+-- là đặt tên xấu: đăng ký xong là có role 'resident', nên bất kỳ chỗ nào kiểm
+-- "role == resident" để mở dịch vụ cư dân đều mở cho mọi tài khoản vừa tạo.
+--
+-- Admin KHÔNG tự động có quyền cư dân. Quản trị viên là người vận hành hệ
+-- thống, không phải chủ căn hộ; gộp hai thứ lại là cho một tài khoản vận hành
+-- đặt chỗ đỗ xe và thanh toán phí dưới danh nghĩa cư dân nào đó.
+DO $$
+BEGIN
+    IF to_regclass('users') IS NOT NULL THEN
+        -- Bỏ constraint cũ TRƯỚC khi đổi dữ liệu, nếu không UPDATE sẽ vi phạm.
+        ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+
+        UPDATE users SET role = 'customer' WHERE role = 'resident';
+
+        ALTER TABLE users ALTER COLUMN role SET DEFAULT 'customer';
+
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_users_role') THEN
+            ALTER TABLE users
+                ADD CONSTRAINT ck_users_role CHECK (role IN ('customer', 'admin'));
+        END IF;
+    END IF;
+END
+$$;
+
+-- Liên kết tài khoản ↔ cư dân. Đây là NGUỒN SỰ THẬT DUY NHẤT cho câu hỏi
+-- "tài khoản này được dùng dịch vụ cư dân chưa".
+--
+--   - Không có row  = NOT_LINKED. Không cần một trạng thái riêng cho nó: thiếu
+--     bằng chứng và có bằng chứng bị từ chối đều dẫn tới cùng một kết quả là
+--     từ chối, nên fail-closed là mặc định tự nhiên.
+--   - PENDING / REJECTED đều KHÔNG mở quyền. Chỉ VERIFIED mở.
+--   - `verification_status` do provider/admin ghi. Không có đường nào cho
+--     customer tự đặt nó, và cũng không có Agent tool nào chạm tới bảng này.
+-- Bảng liên kết chỉ dựng được khi `users` và `residents` đã tồn tại.
+DO $$
+BEGIN
+    IF to_regclass('users') IS NULL OR to_regclass('residents') IS NULL THEN
+        RETURN;
+    END IF;
+
+    CREATE TABLE IF NOT EXISTS user_resident_links (
+    user_id             UUID         NOT NULL REFERENCES users(id),
+    resident_id         VARCHAR(20)  NOT NULL REFERENCES residents(resident_id),
+    verification_status VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+                            CHECK (verification_status IN ('PENDING', 'VERIFIED', 'REJECTED')),
+    verified_at         TIMESTAMPTZ  DEFAULT NULL,
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    -- Một user tối đa MỘT liên kết. Nhiều liên kết nghĩa là "cư dân hiện tại"
+    -- không xác định, và khi đó guard phải chọn một trong số đó — chọn thế nào
+    -- cũng sai với một nửa trường hợp.
+        CONSTRAINT pk_user_resident_links PRIMARY KEY (user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_user_resident_links_resident
+        ON user_resident_links(resident_id);
+END
+$$;
+
+-- Chủ sở hữu workflow. NULL được phép để giữ dữ liệu legacy tạo trước Phase B;
+-- endpoint authenticated KHÔNG bao giờ trả row NULL cho customer, nên dữ liệu
+-- cũ vẫn còn để truy vết mà không lọt sang tài khoản nào.
+DO $$
+BEGIN
+    -- Khoá ngoại chỉ thêm được khi `users` đã tồn tại. Database cũ hơn bản
+    -- Auth thì chưa có bảng đó, và một migration bắt buộc phải chạy được trên
+    -- mọi phiên bản dữ liệu đang chạy ngoài thực tế — không chỉ trên bản mới nhất.
+    IF to_regclass('workflows') IS NOT NULL THEN
+        IF to_regclass('users') IS NOT NULL THEN
+            ALTER TABLE workflows
+                ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id);
+        ELSE
+            ALTER TABLE workflows ADD COLUMN IF NOT EXISTS owner_user_id UUID;
+        END IF;
+    END IF;
+
+    -- Session cũng phải gắn với user. Bind bằng mỗi `session_id` là bind bằng
+    -- một giá trị client biết và gửi lại được.
+    IF to_regclass('sessions') IS NOT NULL THEN
+        IF to_regclass('users') IS NOT NULL THEN
+            ALTER TABLE sessions
+                ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id);
+        ELSE
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id UUID;
+        END IF;
+    END IF;
+END
+$$;
+
+-- Index cũng phải chờ bảng. `CREATE INDEX IF NOT EXISTS` chỉ bỏ qua khi INDEX
+-- đã có, không bỏ qua khi BẢNG chưa có.
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS idx_workflows_owner ON workflows(owner_user_id);
+    END IF;
+    IF to_regclass('sessions') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    END IF;
+END
+$$;

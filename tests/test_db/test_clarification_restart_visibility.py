@@ -52,8 +52,24 @@ async def restarted(db_pool: asyncpg.Pool, monkeypatch):
 
     monkeypatch.setattr(routes, "read_demo_workflow", _read_record)
 
+    # Chủ sở hữu thật cho shell. Sau Phase B, workflow không có owner sẽ trả
+    # 404 cho mọi tài khoản — đúng thiết kế, nên fixture phải cấp một danh tính
+    # thật thay vì nới guard.
+    owner = await db_pool.fetchrow(
+        """
+        INSERT INTO users (username, password_hash, role)
+        VALUES ('chu_so_huu_clarification', 'scrypt:not-used', 'customer')
+        ON CONFLICT (username) DO UPDATE SET updated_at = NOW()
+        RETURNING id, username, role
+        """
+    )
+
     await routes._ensure_workflow_shell(
-        WF, goal="Tôi muốn đặt chỗ đậu xe", session_id=SESSION_ID, parent_workflow_id=None
+        WF,
+        goal="Tôi muốn đặt chỗ đậu xe",
+        session_id=SESSION_ID,
+        parent_workflow_id=None,
+        owner_user_id=str(owner["id"]),
     )
     await routes._persist_clarification(
         WF,
@@ -66,10 +82,18 @@ async def restarted(db_pool: asyncpg.Pool, monkeypatch):
     )
     routes._DEMO_JOBS.clear()
 
+    from src.api.auth import create_access_token
     from src.main import app
 
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
-        yield {"client": client, "pool": db_pool, "repository": repository}
+    app.state.runtime = (None, repository)
+    headers = {"Authorization": f"Bearer {create_access_token(dict(owner))}"}
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t", headers=headers
+        ) as client:
+            yield {"client": client, "pool": db_pool, "repository": repository, "owner_id": str(owner["id"])}
+    finally:
+        app.state.runtime = None
     routes._DEMO_JOBS.clear()
 
 
@@ -119,7 +143,7 @@ async def test_a_clarification_read_failure_never_turns_into_404(restarted, monk
 # 4. Continue vẫn chạy sau restart
 @pytest.mark.asyncio
 async def test_continue_after_restart_creates_exactly_one_child(restarted, monkeypatch) -> None:
-    async def _session(_session_id):
+    async def _session(_session_id, **_kwargs):
         return {"account_state": "resident", "resident_id": "RES-001"}
 
     async def _no_job(*_args, **_kwargs):
@@ -151,7 +175,7 @@ async def test_continue_after_restart_creates_exactly_one_child(restarted, monke
 # 6. Hai continue đồng thời — chỉ một tạo child
 @pytest.mark.asyncio
 async def test_two_concurrent_continues_create_one_child(restarted, monkeypatch) -> None:
-    async def _session(_session_id):
+    async def _session(_session_id, **_kwargs):
         return {"account_state": "resident", "resident_id": "RES-001"}
 
     async def _no_job(*_args, **_kwargs):
@@ -176,7 +200,7 @@ async def test_two_concurrent_continues_create_one_child(restarted, monkeypatch)
 # 3 (invalid). Câu trả lời sai không đốt mất lượt hỏi
 @pytest.mark.asyncio
 async def test_an_invalid_answer_leaves_the_clarification_open(restarted, monkeypatch) -> None:
-    async def _session(_session_id):
+    async def _session(_session_id, **_kwargs):
         return {"account_state": "resident", "resident_id": "RES-001"}
 
     monkeypatch.setattr(routes, "_load_session", _session)
