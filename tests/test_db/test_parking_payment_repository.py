@@ -278,7 +278,9 @@ async def test_cancel_unpaid_booking_releases_capacity(pool) -> None:
     assert await cancel_booking(pool, booking.booking_id) is True
 
     async with pool.acquire() as conn:
-        assert await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 0
+        assert (
+            await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 0
+        )
 
 
 @pytest.mark.asyncio
@@ -296,7 +298,9 @@ async def test_cancel_paid_booking_is_refused(pool) -> None:
     assert await cancel_booking(pool, booking.booking_id) is False
 
     async with pool.acquire() as conn:
-        assert await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 1
+        assert (
+            await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 1
+        )
 
 
 @pytest.mark.asyncio
@@ -343,4 +347,6 @@ async def test_refund_then_cancel_releases_a_paid_booking(pool) -> None:
     assert await cancel_booking(pool, booking.booking_id) is True
 
     async with pool.acquire() as conn:
-        assert await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 0
+        assert (
+            await conn.fetchval("SELECT COUNT(*) FROM parking_bookings WHERE booking_id = $1", booking.booking_id) == 0
+        )

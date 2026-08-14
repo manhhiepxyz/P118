@@ -35,10 +35,7 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> flo
     price = PRICE_PER_1K_TOKENS.get(model)
     if price is None:
         return 0.0
-    cost = (
-        prompt_tokens * price.get("input", 0) / 1000.0
-        + completion_tokens * price.get("output", 0) / 1000.0
-    )
+    cost = prompt_tokens * price.get("input", 0) / 1000.0 + completion_tokens * price.get("output", 0) / 1000.0
     return round(cost, 2)
 
 
@@ -61,7 +58,9 @@ def cost_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total_tokens = sum(b["prompt_tokens"] + b["completion_tokens"] for b in per_model.values())  # type: ignore[operator]
     total_cost = sum(float(b["cost_vnd"]) for b in per_model.values())  # type: ignore[operator]
     return {
-        "per_model": {m: {k: (round(float(v), 2) if k == "cost_vnd" else v) for k, v in b.items()} for m, b in per_model.items()},
+        "per_model": {
+            m: {k: (round(float(v), 2) if k == "cost_vnd" else v) for k, v in b.items()} for m, b in per_model.items()
+        },
         "total_tokens": int(total_tokens),
         "total_cost_vnd": round(total_cost, 2),
         "is_placeholder": IS_PLACEHOLDER,

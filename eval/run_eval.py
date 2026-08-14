@@ -32,7 +32,6 @@ from typing import Any
 
 from src.agents.planner import Planner, PlannerResult
 from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
-from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.common.tool_contract import TOOL_CONTRACTS
 from src.config import get_settings
@@ -53,16 +52,12 @@ SCORE_WEIGHTS = {
 # Các giá trị phải có nguồn tin cậy (goal/context/InputRef). KHÔNG quét enum/string
 # thường như parking_zone, vehicle_type, project_id — chúng được normalize từ văn
 # phong ngườ dùng và không xuất hiện nguyên văn trong goal.
-AUTHORITATIVE_FIELDS = frozenset(
-    {"booking_id", "vehicle_id", "resident_id", "amount", "currency"}
-)
+AUTHORITATIVE_FIELDS = frozenset({"booking_id", "vehicle_id", "resident_id", "amount", "currency"})
 
 # Các key trong existing_context được coi là nguồn authoritative. Values từ key
 # ngoài danh sách này (vd owner_name, phone, email) không được dùng để chứng minh
 # nguồn gốc cho internal ID — đó là PII leak.
-AUTHORITATIVE_CONTEXT_KEYS = frozenset(
-    {"booking_id", "vehicle_id", "resident_id", "amount", "currency"}
-)
+AUTHORITATIVE_CONTEXT_KEYS = frozenset({"booking_id", "vehicle_id", "resident_id", "amount", "currency"})
 
 
 def _git_sha() -> str:
@@ -93,11 +88,7 @@ def _build_metadata(llm_total_tokens: int) -> dict[str, Any]:
         "git_sha": _git_sha(),
         "timestamp": datetime.now(UTC).isoformat(),
         "provider": settings.llm_provider,
-        "model": (
-            settings.deepseek_model_name
-            if settings.llm_provider == "deepseek"
-            else settings.model_name
-        ),
+        "model": (settings.deepseek_model_name if settings.llm_provider == "deepseek" else settings.model_name),
         "temperature": settings.llm_temperature,
         "llm_total_tokens": llm_total_tokens,
     }
@@ -176,9 +167,7 @@ def _score_structure(plan: TaskPlan, expected: dict[str, Any]) -> float:
             continue
         expected_dep_tools = set(deps)
         actual_dep_tools = {
-            plan.tasks[int(dep[1:]) - 1].tool
-            for dep in task.depends_on
-            if dep.startswith("T") and dep[1:].isdigit()
+            plan.tasks[int(dep[1:]) - 1].tool for dep in task.depends_on if dep.startswith("T") and dep[1:].isdigit()
         }
         if expected_dep_tools == actual_dep_tools:
             points += 1.0
@@ -421,14 +410,16 @@ async def evaluate_planner(
             status_matches += 1
 
         # Mask goal trong output report để tránh rò PII ra file commit.
-        results.append({
-            "id": case["id"],
-            "goal": None,
-            "expected_status": _expected_status(case["expected"]),
-            "actual_status": actual_status,
-            "scores": scores,
-            "actual": _result_to_expected(result),
-        })
+        results.append(
+            {
+                "id": case["id"],
+                "goal": None,
+                "expected_status": _expected_status(case["expected"]),
+                "actual_status": actual_status,
+                "scores": scores,
+                "actual": _result_to_expected(result),
+            }
+        )
 
     avg_score = total / len(cases) if cases else 0.0
     status_accuracy = status_matches / len(cases) if cases else 0.0

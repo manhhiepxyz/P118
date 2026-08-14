@@ -29,9 +29,7 @@ from src.orchestration.deps import build_repository
 
 logger = logging.getLogger(__name__)
 
-_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset(
-    {"SUCCESS", "FAILED", "CANCELLED", "SKIPPED"}
-)
+_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"SUCCESS", "FAILED", "CANCELLED", "SKIPPED"})
 
 
 async def _expire_stale_payment_approvals(pool: Any, ttl_hours: int) -> list[str]:
@@ -119,12 +117,8 @@ async def sweep_zombie_workflows(live_ids: set[str] | None = None) -> dict[str, 
     repository = await build_repository(migrate=False)
     pool = repository._pool  # noqa: SLF001
     try:
-        summary["expired_approvals"] = await _expire_stale_payment_approvals(
-            pool, settings.payment_approval_ttl_hours
-        )
-        summary["swept_workflows"] = await _sweep_zombie_workflows(
-            pool, settings.zombie_running_ttl_hours, live
-        )
+        summary["expired_approvals"] = await _expire_stale_payment_approvals(pool, settings.payment_approval_ttl_hours)
+        summary["swept_workflows"] = await _sweep_zombie_workflows(pool, settings.zombie_running_ttl_hours, live)
     except Exception:  # noqa: BLE001 - sweep không được làm vỡ poll
         logger.warning("zombie sweep failed", exc_info=True)
     finally:

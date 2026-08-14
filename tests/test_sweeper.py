@@ -19,8 +19,8 @@ class _FakePool:
     """Fake asyncpg.Pool — mô phỏng hai câu SELECT của sweeper."""
 
     def __init__(self, *, approvals: list[str] | None = None, zombies: list[str] | None = None) -> None:
-        self.approvals = approvals or []   # workflow_id đang AWAITING quá hạn
-        self.zombies = zombies or []       # workflow_id RUNNING/PENDING mồ côi
+        self.approvals = approvals or []  # workflow_id đang AWAITING quá hạn
+        self.zombies = zombies or []  # workflow_id RUNNING/PENDING mồ côi
         self.closed = False
         self.writes: list[tuple[str, str]] = []  # (workflow_id, status)
 

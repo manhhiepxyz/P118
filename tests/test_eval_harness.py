@@ -146,7 +146,20 @@ def test_score_perfect_plan() -> None:
 
 
 def test_score_wrong_tool() -> None:
-    plan = _plan([("search_properties", {"transaction_type": "rent", "property_type": "apartment", "residential_area": "Ocean Park", "max_price": 10000000}, [])])
+    plan = _plan(
+        [
+            (
+                "search_properties",
+                {
+                    "transaction_type": "rent",
+                    "property_type": "apartment",
+                    "residential_area": "Ocean Park",
+                    "max_price": 10000000,
+                },
+                [],
+            )
+        ]
+    )
     expected = {
         "tools": ["schedule_property_viewing"],
         "dependencies": {},
@@ -539,15 +552,25 @@ async def test_evaluate_planner_status_accuracy_only(golden_path: Path) -> None:
     results = {
         "Tìm căn hộ cho thuê": PlannerResult(status="NEEDS_INFORMATION", missing_fields=("transaction_type",)),
         "Đặt lịch xem nhà": PlannerResult(status="NEEDS_INFORMATION", missing_fields=("project_id",)),
-        "Đặt chỗ đỗ xe": PlannerResult(status="NEEDS_INFORMATION", missing_fields=("plate_number", "vehicle_type", "parking_zone")),
+        "Đặt chỗ đỗ xe": PlannerResult(
+            status="NEEDS_INFORMATION", missing_fields=("plate_number", "vehicle_type", "parking_zone")
+        ),
         "Đăng ký xe và đặt chỗ": PlannerResult(
             status="READY",
             plan=_plan(
                 [
-                    ("register_vehicle", {"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"}, []),
+                    (
+                        "register_vehicle",
+                        {"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"},
+                        [],
+                    ),
                     (
                         "book_parking",
-                        {"vehicle_id": InputRef(from_task="T1", field="vehicle_id"), "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
+                        {
+                            "vehicle_id": InputRef(from_task="T1", field="vehicle_id"),
+                            "booking_date": "2026-12-10",
+                            "parking_zone": "ZONE_A",
+                        },
                         ["T1"],
                     ),
                 ],

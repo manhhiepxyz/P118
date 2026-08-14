@@ -70,6 +70,15 @@ class PaymentConnector(Connector):
         # Danh sách các tool mà connector này đảm nhận
         return ["pay_fee"]
 
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """`pay_fee` chỉ an toàn khi lần gọi này MANG idempotency key.
+
+        Không có key thì provider coi mỗi request là một giao dịch mới, và
+        retry sau timeout sẽ thu tiền lần hai. Có key thì provider trả lại đúng
+        payment cũ, nên gọi lại vô hại.
+        """
+        return tool_name == "pay_fee" and bool(self._idempotency_key)
+
     async def execute(
         self,
         tool_name: str,

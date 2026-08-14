@@ -215,8 +215,21 @@ class Executor:
                     )
                 connector_name = type(connector).__name__
 
+                # Retry chỉ được phép khi tool CHỨNG MINH được là an toàn khi
+                # gọi lại. `is_retryable` mới nói lỗi là transient — nó không
+                # nói gì về việc provider đã kịp ghi dữ liệu hay chưa.
+                #
+                # Với tool ghi chưa có idempotency key, một timeout ở đường về
+                # là không phân biệt được với "chưa chạy": retry sẽ tạo bản ghi
+                # thứ hai (đặt hai lịch chuyển nhà, hai phiếu bảo trì...).
+                #
+                # `getattr` với mặc định False: connector nào chưa khai báo thì
+                # coi như KHÔNG an toàn.
+                retry_safe = getattr(connector, "is_retry_safe", None)
+                max_attempts = _MAX_ATTEMPTS if callable(retry_safe) and retry_safe(task.tool) else 1
+
                 result: StandardResult | None = None
-                for attempt in range(1, _MAX_ATTEMPTS + 1):
+                for attempt in range(1, max_attempts + 1):
                     start = time.monotonic()
                     try:
                         result = await connector.execute(task.tool, resolved_input)
@@ -249,7 +262,7 @@ class Executor:
                         return result
 
                     # Còn attempts thì backoff trước khi thử lại.
-                    if attempt < _MAX_ATTEMPTS:
+                    if attempt < max_attempts:
                         delay = min(
                             _RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
                             _RETRY_MAX_DELAY_SECONDS,

@@ -76,6 +76,26 @@ class Connector(ABC):
         """
         ...
 
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Gọi lại tool này sau timeout có an toàn không?
+
+        Mặc định **False** — fail-closed. Đây là chủ ý: một tool ghi dữ liệu mà
+        chưa có idempotency key thì retry sau timeout có thể tạo bản ghi THỨ HAI.
+        Provider đã tạo record rồi mới timeout ở đường về là tình huống hoàn
+        toàn bình thường; Executor không có cách nào phân biệt "chưa chạy" với
+        "đã chạy nhưng mất response".
+
+        Subclass chỉ được trả True khi chứng minh được một trong hai điều:
+
+          1. Tool là read-only (gọi lại không đổi trạng thái gì).
+          2. Tool mang idempotency key thật, và provider dùng key đó để trả lại
+             kết quả cũ thay vì tạo mới.
+
+        Executor kết hợp cờ này VỚI `StandardResult.is_retryable`: lỗi phải vừa
+        transient vừa nằm trên một tool an toàn thì mới được thử lại.
+        """
+        return False
+
     @abstractmethod
     async def execute(
         self,

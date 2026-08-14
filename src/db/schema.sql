@@ -152,13 +152,46 @@ CREATE TABLE IF NOT EXISTS workflows (
     -- [fix] Soft delete thay vì DELETE cứng.
     -- Lý do: execution_logs cần giữ audit trail ngay cả khi workflow "bị xóa".
     -- NULL = active; NOT NULL = archived (không hiển thị ở UI nhưng không mất dữ liệu).
-    archived_at TIMESTAMPTZ  DEFAULT NULL
+    archived_at TIMESTAMPTZ  DEFAULT NULL,
+
+    -- Phiên hội thoại đã ghim (server-side) và workflow cha khi một lượt
+    -- clarification sinh ra workflow con.
+    parent_workflow_id UUID         REFERENCES workflows(workflow_id),
+    session_id         VARCHAR(100)
 );
 
 -- Index tìm workflow active (chưa archived)
 CREATE INDEX IF NOT EXISTS idx_workflows_active
     ON workflows(status)
     WHERE archived_at IS NULL;
+
+-- Ngữ cảnh cần để tiếp tục một workflow đang chờ người dùng bổ sung thông tin.
+--
+-- Không có bảng này, `/continue` chỉ chạy được khi job còn trong RAM: một lần
+-- restart giữa lúc NEEDS_INFORMATION là mất hẳn hội thoại.
+--
+-- `workflow_id` có khoá ngoại tới `workflows`, nên workflow shell phải được
+-- tạo TRƯỚC khi ghi clarification (xem `_ensure_workflow_shell`).
+--
+-- KHÔNG lưu: token, credential, raw LLM output. `existing_context` là context
+-- TRUSTED do server dựng, không phải dữ liệu browser gửi lên.
+CREATE TABLE IF NOT EXISTS workflow_clarifications (
+    workflow_id        UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
+    session_id         VARCHAR(100),
+    parent_workflow_id UUID,
+    goal               TEXT         NOT NULL,
+    missing_fields     JSONB        NOT NULL DEFAULT '[]',
+    question           TEXT,
+    existing_context   JSONB        NOT NULL DEFAULT '{}',
+    resolved_at        TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Chỉ index phần chưa được trả lời — đó là tập được truy vấn.
+CREATE INDEX IF NOT EXISTS idx_workflow_clarifications_open
+    ON workflow_clarifications(workflow_id) WHERE resolved_at IS NULL;
+
 
 CREATE TABLE IF NOT EXISTS workflow_tasks (
     id            BIGSERIAL    PRIMARY KEY,

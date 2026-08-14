@@ -118,9 +118,19 @@ class WorkflowRepository:
                     COALESCE(NULLIF($6, ''), gen_random_uuid()::text)
                 )
                 ON CONFLICT (workflow_id) DO UPDATE
-                    SET goal = EXCLUDED.goal,
-                        parent_workflow_id = EXCLUDED.parent_workflow_id,
-                        session_id = EXCLUDED.session_id,
+                    -- Idempotent VÀ không phá dữ liệu shell đã ghi.
+                    --
+                    -- Workflow shell được tạo trước khi Planner chạy, mang
+                    -- session_id và parent_workflow_id thật. Executor gọi lại
+                    -- create_workflow sau đó mà KHÔNG truyền hai field này —
+                    -- nếu lấy thẳng EXCLUDED thì parent bị set NULL còn
+                    -- session_id bị thay bằng một UUID ngẫu nhiên (xem
+                    -- COALESCE ở VALUES), tức là mất liên kết phiên.
+                    SET goal = COALESCE(EXCLUDED.goal, workflows.goal),
+                        parent_workflow_id = COALESCE(
+                            EXCLUDED.parent_workflow_id, workflows.parent_workflow_id
+                        ),
+                        session_id = COALESCE(workflows.session_id, EXCLUDED.session_id),
                         -- Snapshot ĐÃ CÓ thì giữ nguyên, không cho ghi đè.
                         --
                         -- Orchestration ghi canonical plan ĐẦY ĐỦ trước khi
@@ -419,3 +429,100 @@ class WorkflowRepository:
                 session_id,
             )
         return [dict(row) for row in rows]
+
+    async def save_clarification(
+        self,
+        workflow_id: str,
+        *,
+        session_id: str | None,
+        parent_workflow_id: str | None,
+        goal: str,
+        missing_fields: list[str],
+        question: str | None,
+        existing_context: dict,
+    ) -> None:
+        """Ghim ngữ cảnh cần để `/continue` chạy được sau restart.
+
+        Ghi đè bản cũ của cùng workflow: mỗi workflow chỉ có một lần chờ bổ
+        sung thông tin đang mở.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO workflow_clarifications
+                    (workflow_id, session_id, parent_workflow_id, goal,
+                     missing_fields, question, existing_context)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (workflow_id) DO UPDATE
+                    SET session_id       = EXCLUDED.session_id,
+                        parent_workflow_id = EXCLUDED.parent_workflow_id,
+                        goal             = EXCLUDED.goal,
+                        missing_fields   = EXCLUDED.missing_fields,
+                        question         = EXCLUDED.question,
+                        existing_context = EXCLUDED.existing_context,
+                        resolved_at      = NULL,
+                        updated_at       = NOW()
+                """,
+                _uuid(workflow_id),
+                session_id,
+                _uuid(parent_workflow_id) if parent_workflow_id else None,
+                goal,
+                _json_dumps(missing_fields),
+                question,
+                _json_dumps(existing_context),
+            )
+
+    async def get_clarification(self, workflow_id: str) -> dict | None:
+        """Ngữ cảnh chờ bổ sung còn mở, hoặc None."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM workflow_clarifications
+                WHERE workflow_id = $1 AND resolved_at IS NULL
+                """,
+                _uuid(workflow_id),
+            )
+        if row is None:
+            return None
+        record = dict(row)
+        for key in ("missing_fields", "existing_context"):
+            value = record.get(key)
+            if isinstance(value, str):
+                record[key] = json.loads(value)
+        record["workflow_id"] = str(record["workflow_id"])
+        if record.get("parent_workflow_id"):
+            record["parent_workflow_id"] = str(record["parent_workflow_id"])
+        return record
+
+    async def consume_clarification(self, workflow_id: str) -> dict | None:
+        """Claim ngữ cảnh chờ bổ sung — ATOMIC, chỉ một request thắng.
+
+        `UPDATE ... WHERE resolved_at IS NULL ... RETURNING *` là một câu lệnh
+        duy nhất, nên PostgreSQL tự tuần tự hoá hai request đồng thời: người
+        đến sau thấy 0 row và biết mình thua.
+
+        Không xoá row — `resolved_at` giữ lại để audit.
+
+        Trả None khi clarification không tồn tại HOẶC đã bị claim.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE workflow_clarifications
+                SET resolved_at = NOW(), updated_at = NOW()
+                WHERE workflow_id = $1 AND resolved_at IS NULL
+                RETURNING *
+                """,
+                _uuid(workflow_id),
+            )
+        if row is None:
+            return None
+        record = dict(row)
+        for key in ("missing_fields", "existing_context"):
+            value = record.get(key)
+            if isinstance(value, str):
+                record[key] = json.loads(value)
+        record["workflow_id"] = str(record["workflow_id"])
+        if record.get("parent_workflow_id"):
+            record["parent_workflow_id"] = str(record["parent_workflow_id"])
+        return record

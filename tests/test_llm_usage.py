@@ -22,7 +22,11 @@ from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, us
 def _aimessage_with_usage(*, input_tokens: int, output_tokens: int) -> SimpleNamespace:
     """Fake AIMessage — đúng thứ on_llm_end đọc từ usage_metadata."""
     return SimpleNamespace(
-        usage_metadata={"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": input_tokens + output_tokens}
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
     )
 
 
@@ -121,10 +125,10 @@ async def test_flush_writes_rows_and_clears_pending(monkeypatch) -> None:
     assert len(pool.inserted) == 1
     row = pool.inserted[0]
     assert row[0] == "wf-9"  # workflow_id
-    assert row[1] is None    # run_id
+    assert row[1] is None  # run_id
     assert row[2] == "plan"  # stage
-    assert row[5] == 10      # prompt_tokens
-    assert row[6] == 20      # completion_tokens
-    assert row[7] == 30      # total_tokens
+    assert row[5] == 10  # prompt_tokens
+    assert row[6] == 20  # completion_tokens
+    assert row[7] == 30  # total_tokens
     assert pool.closed is True
     assert logger.pending == []

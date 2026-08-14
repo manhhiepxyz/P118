@@ -47,12 +47,19 @@ class TransientThenSuccessConnector(Connector):
     def tool_names(self):
         return ["book_parking"]
 
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Test double này kiểm CƠ CHẾ retry, nên khai báo mình an toàn.
+
+        Executor giờ chỉ retry khi connector tự nhận là idempotent/read-only.
+        Connector THẬT cho `book_parking` trả False — hành vi đó được khoá
+        riêng trong tests/test_retry_safety.py.
+        """
+        return True
+
     async def execute(self, tool_name, input_data):
         self.call_count += 1
         if self.call_count < self._success_after:
-            return StandardResult.fail(
-                ErrorCode.SERVICE_TIMEOUT, "timeout", retryable=True
-            )
+            return StandardResult.fail(ErrorCode.SERVICE_TIMEOUT, "timeout", retryable=True)
         return StandardResult.ok({"booking_id": f"BOOK-{self.call_count}"})
 
 

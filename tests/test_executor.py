@@ -70,6 +70,15 @@ class TransientThenSuccessConnector(Connector):
     def tool_names(self) -> list[str]:
         return [self._tool_name]
 
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Test double này kiểm CƠ CHẾ retry, nên khai báo mình an toàn.
+
+        Executor giờ chỉ retry khi connector tự nhận là idempotent/read-only.
+        Connector THẬT cho `book_parking` trả False — hành vi đó được khoá
+        riêng trong tests/test_retry_safety.py.
+        """
+        return True
+
     async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
         self.call_count += 1
         if self.call_count < self._success_after:
@@ -91,6 +100,14 @@ class AlwaysFailRetryableConnector(Connector):
     @property
     def tool_names(self) -> list[str]:
         return [self._tool_name]
+
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Test double kiểm cơ chế retry cạn attempts — khai báo mình an toàn.
+
+        Executor chỉ retry khi connector tự nhận là idempotent/read-only;
+        connector thật cho tool ghi trả False.
+        """
+        return True
 
     async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
         self.call_count += 1

@@ -41,10 +41,7 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
 
     async def list_workflows_by_session(self, session_id: str) -> list[dict]:
         """Lấy tất cả workflow cùng session_id, sắp xếp từ cũ đến mới."""
-        matching = [
-            wf for wf in self._workflows.values()
-            if wf.get("session_id") == session_id
-        ]
+        matching = [wf for wf in self._workflows.values() if wf.get("session_id") == session_id]
         matching.sort(key=lambda wf: wf.get("created_at") or "")
         return matching
 
@@ -174,28 +171,30 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         logs = self._tasks.setdefault(key, {}).setdefault("execution_logs", [])
         # Giữ cả nested standard_result (cho metrics) lẫn các fields flatten
         # (backward compatibility cho tests/test_execution_logging.py).
-        logs.append({
-            "workflow_id": workflow_id,
-            "task_id": task_id,
-            "attempt_number": attempt_number,
-            "connector_name": connector_name,
-            "http_status": http_status,
-            "raw_error_code": raw_error_code,
-            "standard_result": {
+        logs.append(
+            {
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "attempt_number": attempt_number,
+                "connector_name": connector_name,
+                "http_status": http_status,
+                "raw_error_code": raw_error_code,
+                "standard_result": {
+                    "success": standard_result.success,
+                    "data": standard_result.data,
+                    "error_code": standard_result.error_code.value if standard_result.error_code else None,
+                    "message": standard_result.message,
+                    "retryable": standard_result.retryable,
+                },
                 "success": standard_result.success,
                 "data": standard_result.data,
                 "error_code": standard_result.error_code.value if standard_result.error_code else None,
                 "message": standard_result.message,
                 "retryable": standard_result.retryable,
-            },
-            "success": standard_result.success,
-            "data": standard_result.data,
-            "error_code": standard_result.error_code.value if standard_result.error_code else None,
-            "message": standard_result.message,
-            "retryable": standard_result.retryable,
-            "duration_ms": duration_ms,
-            "created_at": datetime.now(UTC).isoformat(),
-        })
+                "duration_ms": duration_ms,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        )
 
     async def list_execution_logs(self, limit: int = 10_000) -> list[dict]:
         """Đọc tất cả execution logs (in-memory), mới nhất trước."""

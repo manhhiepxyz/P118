@@ -25,8 +25,8 @@ class _FakePool:
     """Fake asyncpg.Pool — expose giao diện tối thiểu repo function cần."""
 
     def __init__(self) -> None:
-        self.bookings: dict[str, dict] = {}   # booking_id -> row
-        self.payments: dict[str, dict] = {}   # booking_id -> payment row
+        self.bookings: dict[str, dict] = {}  # booking_id -> row
+        self.payments: dict[str, dict] = {}  # booking_id -> payment row
         self.closed = False
 
     async def acquire(self):
@@ -49,7 +49,9 @@ class _FakeConn:
             booking_id = params[0]
             if self._pool.payments.get(booking_id, {}).get("payment_status") != "PAID":
                 self._pool.payments.pop(booking_id, None)
-            return "DELETE 1" if booking_id in self._pool.payments or booking_id not in self._pool.bookings else "DELETE 0"
+            return (
+                "DELETE 1" if booking_id in self._pool.payments or booking_id not in self._pool.bookings else "DELETE 0"
+            )
         if sql.lstrip().upper().startswith("DELETE FROM parking_bookings"):
             booking_id = params[0]
             if self._pool.bookings.pop(booking_id, None) is not None:

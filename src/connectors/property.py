@@ -40,6 +40,15 @@ class PropertyConnector(Connector):
     def tool_names(self) -> list[str]:
         return ["search_properties", "schedule_property_viewing", "register_property_interest"]
 
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Chỉ `search_properties` an toàn: nó read-only.
+
+        `schedule_property_viewing` và `register_property_interest` đều TẠO
+        bản ghi và provider tự sinh ID, chưa có idempotency key — gọi lại sau
+        timeout sẽ tạo lịch xem nhà hoặc phiếu tư vấn thứ hai.
+        """
+        return tool_name == "search_properties"
+
     async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
         routes = {
             "search_properties": ("/api/properties/search", ("properties", "result_count")),

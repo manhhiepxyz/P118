@@ -40,9 +40,7 @@ TERMINAL_RELEASE_STATUSES: frozenset[str] = frozenset({"FAILED", "CANCELLED"})
 _RELEASABLE_TOOLS: frozenset[str] = frozenset({"book_parking", "pay_fee"})
 
 # Task đã kết thúc vĩnh viễn — không đổi trạng thái nữa.
-_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset(
-    {"SUCCESS", "FAILED", "CANCELLED", "SKIPPED"}
-)
+_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"SUCCESS", "FAILED", "CANCELLED", "SKIPPED"})
 
 
 async def release_on_failure(workflow_id: str) -> dict[str, Any]:

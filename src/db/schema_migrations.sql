@@ -235,3 +235,34 @@ BEGIN
     END IF;
 END
 $$;
+
+-- 2026-08 — workflow_clarifications
+-- Ngữ cảnh cần để tiếp tục một workflow đang chờ người dùng bổ sung thông tin.
+--
+-- Trước đây `/continue` bắt buộc `_DEMO_JOBS[workflow_id]` phải còn trong RAM.
+-- Một lần restart backend giữa lúc NEEDS_INFORMATION là mất hẳn hội thoại:
+-- người dùng điền form xong thì nhận 409 và không có đường quay lại.
+--
+-- KHÔNG lưu: token, credential, raw LLM output, hay câu trả lời chưa kiểm của
+-- người dùng. `existing_context` là context TRUSTED do server dựng (resident_id,
+-- apartment, project_id), không phải dữ liệu browser gửi lên.
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        CREATE TABLE IF NOT EXISTS workflow_clarifications (
+            workflow_id        UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
+            session_id         VARCHAR(100),
+            parent_workflow_id UUID,
+            goal               TEXT         NOT NULL,
+            missing_fields     JSONB        NOT NULL DEFAULT '[]',
+            question           TEXT,
+            existing_context   JSONB        NOT NULL DEFAULT '{}',
+            resolved_at        TIMESTAMPTZ,
+            created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_clarifications_open
+            ON workflow_clarifications(workflow_id) WHERE resolved_at IS NULL;
+    END IF;
+END
+$$;

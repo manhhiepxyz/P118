@@ -119,6 +119,7 @@ def test_is_acknowledgement_preserves_existing_semantics() -> None:
 
 # --- Phase C: capability false-positive -------------------------------------
 
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -152,6 +153,7 @@ def test_service_intent_not_swallowed_by_capability(message: str) -> None:
 
 
 # --- Phase B: greeting/acknowledgement mở rộng ------------------------------
+
 
 @pytest.mark.parametrize(
     "message",
@@ -210,6 +212,7 @@ def test_creative_and_social_requests(message: str) -> None:
 
 # --- Phase 4a: repetition -----------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "message",
     ["đặt chỗ đặt chỗ đặt chỗ", "xin chào xin chào xin chào", "ok ok ok"],
@@ -227,6 +230,7 @@ def test_repetition_does_not_block_legit_multi_vehicle_goal() -> None:
 
 
 # --- Bảo mật: prompt tấn công xen kẽ ----------------------------------------
+
 
 @pytest.mark.parametrize(
     "message",

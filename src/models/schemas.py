@@ -249,6 +249,14 @@ class DemoWorkflowResponse(BaseModel):
     ) = None
     message: str | None = None
     persisted: bool = False
+    # Workflow này có tiếp tục được sau khi backend restart hay không.
+    #
+    # KHÁC `persisted`: `persisted` chỉ nói "có row trong workflows". Một
+    # workflow đang chờ bổ sung thông tin còn cần row trong
+    # `workflow_clarifications`; nếu ghi row đó thất bại thì shell vẫn tồn tại
+    # nhưng hội thoại KHÔNG sống sót qua restart. Trả `persisted=true` trong
+    # tình huống đó là nói dối về khả năng phục hồi.
+    resumable: bool = False
     question: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
     summary: str | None = None
