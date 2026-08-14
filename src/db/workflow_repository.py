@@ -180,6 +180,31 @@ class WorkflowRepository:
             )
             return {"workflow": dict(wf), "tasks": [_row_to_task(t) for t in tasks]}
 
+    async def list_workflows(self, page: int = 1, limit: int = 10) -> dict:
+        """Liệt kê workflow active (chưa archived), mới nhất trước + phân trang.
+
+        Trả shape FE `WorkflowListResponse` kỳ vọng: {items, total, page, limit}.
+        Mỗi item là summary (không chứa task_plan/archived_at).
+        """
+        offset = (page - 1) * limit
+        async with self._pool.acquire() as conn:
+            total = await conn.fetchval("SELECT COUNT(*) FROM workflows WHERE archived_at IS NULL")
+            rows = await conn.fetch(
+                """
+                SELECT workflow_id, goal, status, created_at, updated_at
+                FROM workflows
+                WHERE archived_at IS NULL
+                ORDER BY created_at DESC, workflow_id
+                LIMIT $1 OFFSET $2
+                """,
+                limit,
+                offset,
+            )
+        items = [dict(r) for r in rows]
+        for item in items:
+            item["workflow_id"] = str(item["workflow_id"])  # UUID → str (asyncpg trả UUID object)
+        return {"items": items, "total": total, "page": page, "limit": limit}
+
     async def update_workflow_status(self, workflow_id: str, status: str) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -192,6 +217,27 @@ class WorkflowRepository:
                 status,
                 _uuid(workflow_id),
             )
+
+    async def update_workflow_task_plan(self, workflow_id: str, plan: Any) -> None:
+        """Cập nhật task_plan (bản nháp / bản đã duyệt) cho workflow.
+
+        Gọi TRƯỚC khi Executor chạy trên một draft đã persist: snapshot kế
+        hoạch cuối cùng (có thể đã được người dùng sửa trên review canvas)
+        vào cột JSONB thay vì để Executor's `create_workflow` (ON CONFLICT chỉ
+        update goal) ghi đè bằng bản cũ.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE workflows
+                SET task_plan = $1, updated_at = NOW()
+                WHERE workflow_id = $2
+                  AND archived_at IS NULL
+                """,
+                _json_dumps(plan),
+                _uuid(workflow_id),
+            )
+            logger.info("updated task_plan for workflow %s", workflow_id)
 
     async def archive_workflow(self, workflow_id: str) -> None:
         async with self._pool.acquire() as conn:

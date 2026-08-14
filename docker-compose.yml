@@ -219,6 +219,81 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
+  # Mock Tour Provider — 8005. Đặt lịch tham quan dự án căn hộ (book_tour).
+  # ----------------------------------------------------------------
+  mock-tour:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_tour
+    command: ["uvicorn", "src.services.mock.tour:tour_app", "--host", "0.0.0.0", "--port", "8005"]
+    ports:
+      - "8005:8005"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # Mock Shuttle Provider — 8006. Đặt xe tham quan căn hộ (book_shuttle).
+  # ----------------------------------------------------------------
+  mock-shuttle:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_shuttle
+    command: ["uvicorn", "src.services.mock.shuttle:shuttle_app", "--host", "0.0.0.0", "--port", "8006"]
+    ports:
+      - "8006:8006"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # Mock Consultation Provider — 8007. Đăng ký tư vấn (register_consultation).
+  # ----------------------------------------------------------------
+  mock-consultation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_consultation
+    command: ["uvicorn", "src.services.mock.consultation:consultation_app", "--host", "0.0.0.0", "--port", "8007"]
+    ports:
+      - "8007:8007"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
   # Mock Ownership Provider — 8004.
   # KHÔNG phải Agent tool: phục vụ Auth/VerificationGuard (Week 2),
   # chạy trước Agent Workflow. Không Connector nào gọi service này.

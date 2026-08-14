@@ -1,0 +1,235 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   P-118 Design tokens — theo docs/ui-design-prompts.md (Design System)
+   Tailwind v4: khai báo theme inline qua @theme, không cần tailwind.config.js
+--------------------------------------------------------------------------- */
+@theme {
+  /* Brand teal */
+  --color-brand-600: #0f766e;
+  --color-brand-700: #115e59;
+  --color-brand-50: #f0fdfa;
+  --color-brand-100: #ccfbf1;
+
+  /* Surfaces (gray scale chuẩn Tailwind) */
+  --color-surface: #f8fafc; /* gray-50 */
+  --color-card: #ffffff;
+  --color-border-card: #e2e8f0; /* slate-200 */
+
+  /* Typography */
+  --font-sans:
+    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Timeline node ring */
+  --color-node-ring: #e2e8f0;
+
+  /* Màu chữ chính (body) — sáng/sậm theo theme */
+  --color-ink: #0f172a;
+}
+
+/* ---------------------------------------------------------------------------
+   Dark mode — remap toàn bộ token (surface + neutral + brand + status tint)
+   qua biến CSS. Utility như bg-gray-50 / text-gray-900 / border-gray-200 đều
+   resolve tới --color-* nên chỉ cần override ở đây — KHÔNG sửa từng class.
+   Các nền trắng (card) đã chuyển sang token `bg-card` trong JSX.
+   --color-white GIỮ NGUYÊN #fff vì `text-white`/`border-white` (nhãn nút,
+   viền handle) phải sáng trên mọi theme.
+--------------------------------------------------------------------------- */
+@custom-variant dark (&:where(.dark, .dark *));
+
+.dark {
+  --color-surface: #0f172a; /* slate-900 */
+  --color-card: #1e293b; /* slate-800 */
+  --color-border-card: #334155; /* slate-700 */
+  --color-node-ring: #334155;
+  --color-ink: #e2e8f0;
+
+  /* Neutral gray — đảo chiều (50 = tối nhất, 900 = sáng nhất) */
+  --color-gray-50: #1e293b;
+  --color-gray-100: #273449;
+  --color-gray-200: #334155;
+  --color-gray-300: #475569;
+  --color-gray-400: #64748b;
+  --color-gray-500: #94a3b8;
+  --color-gray-600: #cbd5e1;
+  --color-gray-700: #e2e8f0;
+  --color-gray-800: #f1f5f9;
+  --color-gray-900: #f8fafc;
+
+  /* Neutral slate */
+  --color-slate-50: #1e293b;
+  --color-slate-100: #273449;
+  --color-slate-200: #334155;
+  --color-slate-300: #475569;
+  --color-slate-400: #64748b;
+  --color-slate-500: #94a3b8;
+  --color-slate-600: #cbd5e1;
+  --color-slate-700: #e2e8f0;
+
+  /* Brand teal — nền tint 50/100 tối hơn; 700/800 (nút primary) GIỮ NGUYÊN
+     màu đậm để chữ trắng trên nút luôn đủ tương phản. Link/text teal-700/800
+     được làm sáng riêng bằng selector ở dưới. */
+  --color-teal-50: #042f2e;
+  --color-teal-100: #134e4a;
+
+  /* Status tints — 50/100 nền pastel → nền tối, 600/700 chữ → sáng */
+  --color-amber-50: #451a03;
+  --color-amber-100: #78350f;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #fbbf24;
+  --color-amber-700: #fcd34d;
+  --color-amber-800: #fde68a;
+
+  --color-emerald-50: #022c22;
+  --color-emerald-100: #064e3b;
+  --color-emerald-600: #34d399;
+  --color-emerald-700: #6ee7b7;
+  --color-emerald-800: #a7f3d0;
+
+  --color-blue-50: #172554;
+  --color-blue-100: #1e3a8a;
+  --color-blue-600: #60a5fa;
+  --color-blue-700: #93c5fd;
+
+  /* Tool tints mới (book_tour/book_shuttle/register_consultation) */
+  --color-violet-50: #2e1065;
+  --color-violet-100: #4c1d95;
+  --color-violet-700: #a78bfa;
+
+  --color-indigo-50: #1e1b4b;
+  --color-indigo-100: #312e81;
+  --color-indigo-700: #a5b4fc;
+
+  --color-cyan-50: #083344;
+  --color-cyan-100: #164e63;
+  --color-cyan-700: #67e8f9;
+
+  --color-red-50: #450a0a;
+  --color-red-100: #7f1d1d;
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-600: #f87171;
+  --color-red-700: #fca5a5;
+  --color-red-800: #fecaca;
+}
+
+/* Base */
+html,
+body {
+  background-color: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Monospace cho id */
+.font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Dark mode: link/text teal sáng hơn cho đủ tương phản trên nền tối.
+   Nút primary (bg-teal-700/bg-teal-800 + text-white) KHÔNG đổi vì teal đậm
+   mới đảm bảo chữ trắng rõ. Border/hover của link cũng làm sáng nhẹ.
+--------------------------------------------------------------------------- */
+.dark .text-teal-700,
+.dark .text-teal-800 {
+  color: #2dd4bf; /* teal-400 */
+}
+
+.dark .border-teal-600,
+.dark .border-teal-700,
+.dark .border-teal-700\/50 {
+  border-color: #2dd4bf;
+}
+
+.dark .hover\:text-teal-700:hover {
+  color: #5eead4; /* teal-300 */
+}
+
+.dark .hover\:border-teal-700:hover,
+.dark .hover\:border-teal-700\/50:hover {
+  border-color: #2dd4bf;
+}
+
+.dark .hover\:bg-teal-50:hover {
+  background-color: #134e4a;
+}
+
+/* ---------------------------------------------------------------------------
+   React Flow (@xyflow/react) — theme theo design system P-118 (teal)
+   CSS của RF được import TRƯỚC index.css trong main.tsx để override này thắng.
+   Ưu tiên biến CSS v12 (--xy-*) trước, fallback selector thường.
+--------------------------------------------------------------------------- */
+.react-flow {
+  --xy-edge-stroke: #94a3b8; /* slate-400 */
+  --xy-edge-stroke-width: 2;
+  --xy-edge-stroke-selected: #0f766e;
+  --xy-handle-background-color: #0f766e;
+  --xy-handle-border-color: #ffffff;
+  --xy-background-color: #f8fafc;
+  --xy-controls-button-background-color: #ffffff;
+  --xy-controls-button-background-color-hover: #f8fafc;
+  --xy-controls-button-color: #475569;
+}
+
+.dark .react-flow {
+  --xy-edge-stroke: #64748b;
+  --xy-edge-stroke-selected: #14b8a6;
+  --xy-handle-background-color: #14b8a6;
+  --xy-handle-border-color: #0f172a;
+  --xy-background-color: #1e293b;
+  --xy-controls-button-background-color: #1e293b;
+  --xy-controls-button-background-color-hover: #273449;
+  --xy-controls-button-color: #cbd5e1;
+}
+
+/* Handle nhỏ, viền trắng, đúng brand teal */
+.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.2);
+}
+
+.dark .react-flow__handle {
+  border-color: #0f172a;
+}
+
+/* Edge được chọn → teal */
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #0f766e;
+}
+
+.dark .react-flow__edge.selected .react-flow__edge-path,
+.dark .react-flow__edge:hover .react-flow__edge-path {
+  stroke: #14b8a6;
+}
+
+/* Attribution ẩn (đã set proOptions, giữ lại phòng hờ) */
+.react-flow__attribution {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Toast — animation slide-in / fade-out
+--------------------------------------------------------------------------- */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}

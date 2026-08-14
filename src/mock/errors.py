@@ -156,4 +156,21 @@ def inject_failure(code: str) -> MockApiError:
         return MockApiError(status_code=404, code=code, message="[MOCK] Injected: ownership not found")
     if code == "OWNERSHIP_MISMATCH":
         return MockApiError(status_code=403, code=code, message="[MOCK] Injected: ownership mismatch")
+    # --- book_tour / book_shuttle / register_consultation (v0.5.0) ---
+    if code == "TOUR_NOT_FOUND":
+        return MockApiError(status_code=404, code=code, message="[MOCK] Injected: tour not found")
+    if code == "TOUR_ALREADY_BOOKED":
+        return MockApiError(status_code=409, code=code, message="[MOCK] Injected: tour already booked")
+    if code == "TOUR_SLOT_NOT_FOUND":
+        return MockApiError(status_code=404, code=code, message="[MOCK] Injected: tour slot not found")
+    if code == "SLOT_FULL":
+        return MockApiError(status_code=409, code=code, message="[MOCK] Injected: slot full")
+    if code == "SHUTTLE_NOT_FOUND":
+        return MockApiError(status_code=404, code=code, message="[MOCK] Injected: shuttle not found")
+    if code == "SHUTTLE_ALREADY_BOOKED":
+        return MockApiError(status_code=409, code=code, message="[MOCK] Injected: shuttle already booked")
+    if code == "CONSULTATION_NOT_FOUND":
+        return MockApiError(status_code=404, code=code, message="[MOCK] Injected: consultation not found")
+    if code == "CONSULTATION_ALREADY_EXISTS":
+        return MockApiError(status_code=409, code=code, message="[MOCK] Injected: consultation already exists")
     return MockApiError(status_code=500, code="UNKNOWN_EXTERNAL_ERROR", message=f"[MOCK] Unknown fail code: {code}")
