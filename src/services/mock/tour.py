@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.mock import schemas
+from src.mock.business_contacts import contact_for_project
 from src.mock.errors import conflict, inject_failure, install_error_handler, not_found
 from src.mock.ids import make_generator
 from src.mock.projects import UnknownProjectError, get_project
@@ -97,6 +98,10 @@ def book_tour(
     with store._lock:
         store.tour_bookings[tour_id] = {
             "tour_id": tour_id,
+            # Endpoint legacy `book_tour` vẫn nhận `resident_id` và chống trùng
+            # theo nó. Nó bị xoá nhầm khi bỏ `resident_id` khỏi endpoint canonical
+            # (contract public không có field này) — hai endpoint dùng chung store
+            # nên một lần sửa nhầm chỗ làm hỏng cái còn lại.
             "resident_id": payload.resident_id,
             "residential_area": payload.residential_area,
             "tour_date": tour_date,
@@ -174,12 +179,20 @@ def schedule_property_viewing(
 
     viewing_date = payload.viewing_date.isoformat()
 
-    # Chống trùng ở mức (cư dân, ngày, GIỜ) — không phải (cư dân, ngày, buổi).
-    # Đặt 09:00 rồi vẫn phải đặt được 11:00 cùng buổi sáng; gom về buổi sẽ chặn
-    # nhầm một lịch hoàn toàn hợp lệ.
-    if payload.resident_id is not None and any(
-        t["resident_id"] == payload.resident_id
-        and t["tour_date"] == viewing_date
+    # Chống trùng theo (ngày, GIỜ) — không phải (ngày, buổi). Đặt 09:00 rồi vẫn
+    # phải đặt được 11:00 cùng buổi sáng; gom về buổi sẽ chặn nhầm lịch hợp lệ.
+    #
+    # Khoá gồm CẢ `project_id`. Thiếu nó, một lịch xem PRJ-001 lúc 09:30 sẽ chặn
+    # luôn PRJ-002 lúc 09:30 — hai dự án khác nhau, hai đoàn khác nhau, không có
+    # lý do nào xung đột.
+    #
+    # Không khoá theo người đặt: contract canonical không nhận `resident_id`, và
+    # thông tin liên hệ do provider giữ chứ không đi qua TaskPlan. Đây cũng là
+    # điểm khác endpoint legacy `book_tour` (khoá theo resident_id + buổi) — hai
+    # endpoint dùng chung store nên khác biệt này phải là chủ ý, không phải tình cờ.
+    if any(
+        t.get("project_id") == project.project_id
+        and t.get("tour_date") == viewing_date
         and t.get("viewing_time") == payload.viewing_time
         for t in store.tour_bookings.values()
     ):
@@ -197,11 +210,10 @@ def schedule_property_viewing(
         )
 
     viewing_id = new_viewing_id()
-    resident = store.residents.get(payload.resident_id) if payload.resident_id else None
+    contact = contact_for_project(project.project_id)
     with store._lock:
         store.tour_bookings[viewing_id] = {
             "tour_id": viewing_id,
-            "resident_id": payload.resident_id,
             "residential_area": project.residential_area,
             "project_id": project.project_id,
             "tour_date": viewing_date,
@@ -220,10 +232,10 @@ def schedule_property_viewing(
             "viewing_date": viewing_date,
             "viewing_time": payload.viewing_time,
             "viewing_status": "SCHEDULED",
-            # Liên hệ lấy từ hồ sơ cư dân đã xác thực, KHÔNG từ input của tool.
-            # Số điện thoại không bao giờ đi qua TaskPlan do LLM sinh ra.
-            "contact_name": (resident or {}).get("full_name"),
-            "contact_phone": (resident or {}).get("phone"),
+            # Đầu mối tư vấn CỦA DỰ ÁN, không phải người đặt lịch. Prospect chưa
+            # có hồ sơ vẫn nhận được người để liên hệ.
+            "contact_name": contact.contact_name,
+            "contact_phone": contact.contact_phone,
         },
         message="Created",
     )
@@ -237,7 +249,7 @@ def get_property_viewing(viewing_id: str) -> schemas.ApiEnvelope:
 
     project_id = viewing.get("project_id")
     project_name = get_project(project_id).project_name if project_id else None
-    resident = store.residents.get(viewing["resident_id"]) if viewing.get("resident_id") else None
+    contact = contact_for_project(project_id)
     return schemas.ApiEnvelope(
         success=True,
         data={
@@ -247,8 +259,8 @@ def get_property_viewing(viewing_id: str) -> schemas.ApiEnvelope:
             "viewing_date": viewing["tour_date"],
             "viewing_time": viewing.get("viewing_time"),
             "viewing_status": viewing.get("viewing_status", "SCHEDULED"),
-            "contact_name": (resident or {}).get("full_name"),
-            "contact_phone": (resident or {}).get("phone"),
+            "contact_name": contact.contact_name,
+            "contact_phone": contact.contact_phone,
         },
         message="Found",
     )

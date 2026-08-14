@@ -398,7 +398,7 @@ CREATE TABLE IF NOT EXISTS workflow_repair_hints (
 
 CREATE INDEX IF NOT EXISTS idx_workflow_repair_hints_wf
     ON workflow_repair_hints(workflow_id);
-=======
+-- =============================================================
 -- NHÓM 6: AUTH
 -- =============================================================
 -- [add] v0.4.0 — Tài khoản đăng nhập (login/register) + phân quyền.

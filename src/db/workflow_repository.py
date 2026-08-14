@@ -180,8 +180,13 @@ class WorkflowRepository:
             )
             return {"workflow": dict(wf), "tasks": [_row_to_task(t) for t in tasks]}
 
-    async def list_workflows(self, page: int = 1, limit: int = 10) -> dict:
+    async def list_workflows_page(self, page: int = 1, limit: int = 10) -> dict:
         """Liệt kê workflow active (chưa archived), mới nhất trước + phân trang.
+
+        Tên khác `list_workflows` là CỐ Ý. Hai nhánh cùng thêm một method
+        `list_workflows` với chữ ký khác nhau; sau khi gộp, bản định nghĩa
+        sau âm thầm đè bản trước và `GET /workflows` vỡ với TypeError ở
+        runtime. Test không thấy vì chúng dùng FakeRepository.
 
         Trả shape FE `WorkflowListResponse` kỳ vọng: {items, total, page, limit}.
         Mỗi item là summary (không chứa task_plan/archived_at).

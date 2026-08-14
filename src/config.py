@@ -56,6 +56,20 @@ class Settings(BaseSettings):
     payment_service_url: str = "http://localhost:8003"
     property_service_url: str = "http://localhost:8005"
     resident_services_service_url: str = "http://localhost:8006"
+    # Mỗi tool một service, mỗi service một cổng. Trước đây PropertyConnector và
+    # TourConnector cùng trỏ 8005 nhưng mock-tour không có /api/properties/search,
+    # còn ResidentServicesConnector trỏ 8006 nơi Docker đang chạy shuttle — cả hai
+    # là 404 lúc chạy thật mà test in-process không thấy.
+    tour_service_url: str = "http://localhost:8005"
+    consultation_service_url: str = "http://localhost:8007"
+    # Experimental, không chạy mặc định (compose profile `experimental`).
+    shuttle_service_url: str = "http://localhost:8009"
+
+    # Auth (JWT-like HMAC token — stdlib only, xem src/api/auth.py)
+    # Rỗng thì tạo token phải 500: fail-closed là hành vi đúng, không được nới.
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 1440  # 24h — demo, không cần refresh token
 
     # Vector Store
     chroma_persist_dir: str = "./data/chroma"

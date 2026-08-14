@@ -68,7 +68,7 @@ class FakeRepository:
         tasks = [t for t in self._tasks.values() if t["workflow_id"] == workflow_id]
         return {"workflow": dict(wf), "tasks": tasks}
 
-    async def list_workflows(self, page: int = 1, limit: int = 10) -> dict:
+    async def list_workflows_page(self, page: int = 1, limit: int = 10) -> dict:
         workflows = [dict(w) for w in self._workflows.values() if w.get("archived_at") is None]
         workflows.sort(key=lambda w: w.get("created_at") or "", reverse=True)
         start = (page - 1) * limit

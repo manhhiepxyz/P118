@@ -31,6 +31,7 @@ import httpx
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
 from src.connectors.base import Connector
+from src.connectors.output_contract import OutputContractError, enforce_exact_contract
 
 
 class ConsultationConnector(Connector):
@@ -86,31 +87,28 @@ class ConsultationConnector(Connector):
                         return self._build_envelope_failure(env_error)
 
                     # Kiểm tra required output field theo contract.
-                    # Contract public. `consultation_id`/`consultation_type`/`buy_sub_type`
-                    # là từ vựng nội bộ và không được vượt qua Connector.
-                    required_keys = [
-                        "interest_id",
-                        "project_id",
-                        "project_name",
-                        "interest_type",
-                        "preferred_contact_time",
-                        "interest_status",
-                        "contact_name",
-                        "contact_phone",
-                    ]
-                    missing = [k for k in required_keys if k not in data]
-                    if missing:
+                    try:
+                        canonical = enforce_exact_contract(
+                            data,
+                            ("interest_id", "project_id", "project_name", "interest_status", "contact_channel"),
+                            # `interest_type`/`preferred_contact_time` được lưu nội bộ
+                            # để audit nhưng KHÔNG nằm trong contract — whitelist ở
+                            # đây là chỗ chúng dừng lại.
+                            non_empty_strings=(
+                                "interest_id",
+                                "project_id",
+                                "project_name",
+                                "interest_status",
+                                "contact_channel",
+                            ),
+                        )
+                    except OutputContractError as exc:
                         return StandardResult.fail(
                             error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
-                            message=f"Thiếu {', '.join(missing)} trong response",
+                            message=str(exc),
                             retryable=False,
                         )
-
-                    # Lọc: chỉ giữ canonical field, bỏ mọi field thừa.
-                    # `buy_sub_type` từng được gắn thêm ở đây; nó là từ vựng
-                    # nội bộ nên đã bỏ. Bộ lọc trắng này chính là ranh giới
-                    # giữ tên nội bộ không đi tiếp vào state của Agent.
-                    return StandardResult.ok(data={k: data[k] for k in required_keys})
+                    return StandardResult.ok(data=canonical)
 
                 # --- Bước 3b: HTTP lỗi (4xx/5xx) ---
                 return self._handle_error_response(response)

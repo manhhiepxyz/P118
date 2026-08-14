@@ -285,16 +285,23 @@ async def test_search_does_not_create_or_schedule_a_transaction() -> None:
     assert "reservation_id" not in result.data
 
 
-def test_runtime_factory_registers_both_property_tools() -> None:
+def test_runtime_factory_gives_the_property_connector_only_the_search_tool() -> None:
+    """PropertyConnector chỉ sở hữu `search_properties`.
+
+    Tên cũ của test này là `..._registers_both_property_tools` và nó khẳng định
+    PropertyConnector giữ cả ba tool bất động sản. Thiết kế đã đổi: đặt lịch xem
+    nhà thuộc TourConnector, đăng ký quan tâm thuộc ConsultationConnector, và
+    mỗi tool chỉ có đúng một chủ. Giữ nguyên assertion cũ sẽ khoá chặt trạng thái
+    hai chủ cho một tool — nơi ai thắng phụ thuộc thứ tự đăng ký.
+
+    Class PropertyConnector vẫn còn code cho hai tool kia; điều ngăn chúng chạy
+    là `tool_names`, nên chính chỗ đó phải được kiểm.
+    """
     connectors = build_connectors(property_url="http://property")
     property_connector = next(item for item in connectors if isinstance(item, PropertyConnector))
 
     assert property_connector.base_url == "http://property"
-    assert set(property_connector.tool_names) == {
-        "search_properties",
-        "schedule_property_viewing",
-        "register_property_interest",
-    }
+    assert set(property_connector.tool_names) == {"search_properties"}
 
 
 @pytest.mark.asyncio

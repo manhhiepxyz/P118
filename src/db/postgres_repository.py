@@ -84,9 +84,9 @@ class PostgreSQLWorkflowStateRepository:
         """Trả dict gồm workflow metadata + danh sách tasks."""
         return await self.workflows.get_workflow(workflow_id)
 
-    async def list_workflows(self, page: int = 1, limit: int = 10) -> dict:
+    async def list_workflows_page(self, page: int = 1, limit: int = 10) -> dict:
         """Liệt kê workflow (summary) — dùng cho GET /workflows."""
-        return await self.workflows.list_workflows(page, limit)
+        return await self.workflows.list_workflows_page(page, limit)
 
     async def update_workflow_task_plan(self, workflow_id: str, plan: Any) -> None:
         """Snapshot task_plan (draft/approved) vào cột JSONB của workflow."""

@@ -78,9 +78,7 @@ DEFAULT_APARTMENT_OWNERS = [
 # `search_properties` trả về đều phải đặt lịch xem được. Danh sách viết tay
 # trước đây chỉ phủ 2 khu, nên 5 dự án còn lại search ra rồi đặt là 404.
 DEFAULT_TOUR_SLOTS = [
-    (_project["project_name"], slot, 3)
-    for _project in _CANONICAL_PROJECTS
-    for slot in ("MORNING", "AFTERNOON")
+    (_project["project_name"], slot, 3) for _project in _CANONICAL_PROJECTS for slot in ("MORNING", "AFTERNOON")
 ]
 
 

@@ -38,7 +38,11 @@ class PropertyConnector(Connector):
 
     @property
     def tool_names(self) -> list[str]:
-        return ["search_properties", "schedule_property_viewing", "register_property_interest"]
+        # CHỈ `search_properties`. Connector này cũng có implementation cho hai
+        # tool kia, nhưng chúng thuộc TourConnector và ConsultationConnector.
+        # Khai cả ba là hai chủ sở hữu cho một tool, và ai thắng phụ thuộc thứ
+        # tự đăng ký — im lặng và rất khó lần khi chạy thật.
+        return ["search_properties"]
 
     def is_retry_safe(self, tool_name: str) -> bool:
         """Chỉ `search_properties` an toàn: nó read-only.

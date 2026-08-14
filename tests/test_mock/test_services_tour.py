@@ -94,3 +94,41 @@ async def test_get_tour_not_found():
     assert response.status_code == 404
     body = response.json()
     assert body["error_code"] == "TOUR_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_viewing_at_the_same_time_in_a_different_project_is_allowed():
+    """Hai dự án khác nhau không được chặn nhau chỉ vì trùng giờ.
+
+    Khoá chống trùng của endpoint canonical từng bỏ quên `project_id`, nên đặt
+    lịch xem PRJ-001 lúc 09:30 làm PRJ-002 lúc 09:30 trả 409. Người dùng không
+    có cách nào tự thoát: giờ họ chọn hợp lệ, dự án họ chọn còn chỗ.
+    """
+    async with AsyncClient(transport=ASGITransport(app=tour_app), base_url="http://test") as ac:
+        first = await ac.post(
+            "/api/property/viewings",
+            json={"project_id": "PRJ-001", "viewing_date": "2030-05-05", "viewing_time": "09:30"},
+        )
+        second = await ac.post(
+            "/api/property/viewings",
+            json={"project_id": "PRJ-002", "viewing_date": "2030-05-05", "viewing_time": "09:30"},
+        )
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+
+
+@pytest.mark.asyncio
+async def test_viewing_at_the_same_time_in_the_same_project_is_rejected():
+    async with AsyncClient(transport=ASGITransport(app=tour_app), base_url="http://test") as ac:
+        await ac.post(
+            "/api/property/viewings",
+            json={"project_id": "PRJ-001", "viewing_date": "2030-05-06", "viewing_time": "10:00"},
+        )
+        duplicate = await ac.post(
+            "/api/property/viewings",
+            json={"project_id": "PRJ-001", "viewing_date": "2030-05-06", "viewing_time": "10:00"},
+        )
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error_code"] == "VIEWING_ALREADY_BOOKED"

@@ -31,6 +31,7 @@ import httpx
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
 from src.connectors.base import Connector
+from src.connectors.output_contract import OutputContractError, enforce_exact_contract
 
 
 class TourConnector(Connector):
@@ -89,26 +90,36 @@ class TourConnector(Connector):
                     # Contract public. `tour_id`/`tour_date`/`tour_slot` là từ vựng
                     # nội bộ của implementation cũ và dừng lại ở biên provider —
                     # nếu chúng xuất hiện ở đây nghĩa là adapter đã hỏng.
-                    required_keys = [
-                        "viewing_id",
-                        "project_id",
-                        "project_name",
-                        "viewing_date",
-                        "viewing_time",
-                        "viewing_status",
-                        "contact_name",
-                        "contact_phone",
-                    ]
-                    missing = [k for k in required_keys if k not in data]
-                    if missing:
+                    try:
+                        canonical = enforce_exact_contract(
+                            data,
+                            (
+                                "viewing_id",
+                                "project_id",
+                                "project_name",
+                                "viewing_date",
+                                "viewing_time",
+                                "viewing_status",
+                                "contact_name",
+                                "contact_phone",
+                            ),
+                            # Đầu mối tư vấn phải dùng được. `None` ở đây nghĩa là
+                            # provider hỏng, không phải "khách chưa là cư dân".
+                            non_empty_strings=(
+                                "viewing_id",
+                                "project_name",
+                                "viewing_time",
+                                "contact_name",
+                                "contact_phone",
+                            ),
+                        )
+                    except OutputContractError as exc:
                         return StandardResult.fail(
                             error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
-                            message=f"Thiếu {', '.join(missing)} trong response",
+                            message=str(exc),
                             retryable=False,
                         )
-
-                    # Lọc: chỉ giữ canonical field, bỏ mọi field thừa.
-                    return StandardResult.ok(data={k: data[k] for k in required_keys})
+                    return StandardResult.ok(data=canonical)
 
                 # --- Bước 3b: HTTP lỗi (4xx/5xx) ---
                 return self._handle_error_response(response)

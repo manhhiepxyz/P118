@@ -227,7 +227,7 @@ async def test_list_workflows_returns_summary_excluding_archived(db_pool):
     wf_b = await repo.create_workflow({"goal": "B", "status": "SUCCESS"})
     await repo.archive_workflow(wf_a)
 
-    result = await repo.list_workflows(page=1, limit=10)
+    result = await repo.list_workflows_page(page=1, limit=10)
     assert result["total"] == 1  # archived A bị loại
     assert len(result["items"]) == 1
     item = result["items"][0]
@@ -246,8 +246,8 @@ async def test_list_workflows_pagination(db_pool):
     for i in range(3):
         ids.append(await repo.create_workflow({"goal": f"W{i}"}))
 
-    page1 = await repo.list_workflows(page=1, limit=2)
-    page2 = await repo.list_workflows(page=2, limit=2)
+    page1 = await repo.list_workflows_page(page=1, limit=2)
+    page2 = await repo.list_workflows_page(page=2, limit=2)
 
     assert page1["total"] == 3
     assert len(page1["items"]) == 2

@@ -11,7 +11,7 @@ from datetime import date, time
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _reject_past(value: date) -> date:
@@ -181,3 +181,88 @@ class ApiEnvelope(BaseModel):
     error_code: str | None = None
     message: str | None = None
     retryable: bool = False
+
+
+# =====================================================================
+# Dịch vụ tham quan/tư vấn — implementation nội bộ.
+#
+# `book_tour`/`book_shuttle`/`register_consultation` KHÔNG phải tool public.
+# Chúng là phần chạy bên dưới của `schedule_property_viewing` và
+# `register_property_interest`; schema giữ lại vì mock provider và test của
+# chúng vẫn dùng.
+# =====================================================================
+
+
+# ---- book_tour (đặt lịch tham quan dự án căn hộ) ----
+class TourSlot(StrEnum):
+    MORNING = "MORNING"
+    AFTERNOON = "AFTERNOON"
+
+
+class BookTourRequest(BaseModel):
+    residential_area: str = Field(..., min_length=1, description="Tên khu đô thị dự án căn hộ")
+    tour_date: date = Field(..., description="Ngày tham quan, định dạng YYYY-MM-DD")
+    tour_slot: TourSlot = Field(..., description="Khung giờ tham quan: MORNING hoặc AFTERNOON")
+    resident_id: str | None = Field(default=None, description="ID cư dân (tùy chọn; NULL = khách tham quan)")
+
+
+# ---- book_shuttle (đặt xe tham quan căn hộ) ----
+class BookShuttleRequest(BaseModel):
+    tour_id: str = Field(..., min_length=1, description="Mã đặt lịch tham quan")
+    tour_date: date = Field(..., description="Ngày tham quan, định dạng YYYY-MM-DD")
+    passenger_count: int = Field(..., ge=1, le=30, description="Số người đi xe (1–30)")
+
+
+# ---- register_consultation (đăng ký tư vấn) ----
+class ConsultationType(StrEnum):
+    BUY = "BUY"  # tư vấn mua
+    RENT = "RENT"  # tư vấn thuê
+
+
+class BuySubType(StrEnum):
+    RESIDE = "RESIDE"  # mua để ở
+    BUSINESS = "BUSINESS"  # mua để kinh doanh
+    INVEST = "INVEST"  # mua để đầu tư
+
+
+class RegisterConsultationRequest(BaseModel):
+    consultation_type: ConsultationType = Field(..., description="Loại tư vấn: BUY (mua) hoặc RENT (thuê)")
+    buy_sub_type: BuySubType | None = Field(
+        default=None,
+        description="Phân loại tư vấn mua — bắt buộc khi consultation_type=BUY",
+    )
+    resident_id: str | None = Field(default=None, description="ID cư dân (tùy chọn)")
+
+    @model_validator(mode="after")
+    def _require_buy_sub_type(self) -> "RegisterConsultationRequest":
+        """Bắt buộc `buy_sub_type` khi tư vấn mua.
+
+        Tư vấn thuê (RENT) không có phân loại con. Vi phạm → 422 INVALID_INPUT
+        qua validation handler chuẩn của mock API.
+        """
+        if self.consultation_type == ConsultationType.BUY and self.buy_sub_type is None:
+            raise ValueError("buy_sub_type is required when consultation_type is BUY")
+        return self
+
+
+def viewing_time_to_slot(viewing_time: str) -> TourSlot:
+    """Quy giờ HH:MM về khung sức chứa MORNING/AFTERNOON.
+
+    Đây CHỈ là khoá gom nhóm để đếm chỗ. Giờ người dùng chọn vẫn được lưu
+    nguyên văn ở `viewing_time` — quy về hai buổi rồi vứt phút giờ đi là làm
+    mất dữ liệu họ đã nhập, và lịch trả về sẽ sai so với lịch họ đặt.
+    """
+    hour = int(viewing_time.split(":", 1)[0])
+    return TourSlot.MORNING if hour < 12 else TourSlot.AFTERNOON
+
+
+class InterestType(StrEnum):
+    BUY = "buy"
+    RENT = "rent"
+    CONSULTATION = "consultation"
+
+
+class PreferredContactTime(StrEnum):
+    MORNING = "morning"
+    AFTERNOON = "afternoon"
+    EVENING = "evening"

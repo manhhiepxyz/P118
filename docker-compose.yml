@@ -73,8 +73,10 @@ services:
       RESIDENT_SERVICE_URL: http://mock-resident:8001
       TRANSPORT_SERVICE_URL: http://mock-transport:8002
       PAYMENT_SERVICE_URL: http://mock-payment:8003
-      PROPERTY_SERVICE_URL: http://mock-property:8005
+      PROPERTY_SERVICE_URL: http://mock-property:8008
       RESIDENT_SERVICES_SERVICE_URL: http://mock-resident-services:8006
+      TOUR_SERVICE_URL: http://mock-tour:8005
+      CONSULTATION_SERVICE_URL: http://mock-consultation:8007
     volumes:
       - ./data:/app/data
     depends_on:
@@ -92,11 +94,14 @@ services:
   # ----------------------------------------------------------------
   # Mock Providers — provider độc lập theo domain.
   # Cổng phải khớp base_url mặc định của Connector:
-  #   ResidentConnector  → 8001
-  #   TransportConnector → 8002  (register_vehicle + book_parking)
-  #   PaymentConnector   → 8003
-  #   PropertyConnector  → 8005
-  #   ResidentServicesConnector → 8006
+  #   ResidentConnector         → 8001  register_resident
+  #   TransportConnector        → 8002  register_vehicle, book_parking
+  #   PaymentConnector          → 8003  pay_fee
+  #   PropertyConnector         → 8008  search_properties
+  #   TourConnector             → 8005  schedule_property_viewing
+  #   ResidentServicesConnector → 8006  create_maintenance_request, schedule_move
+  #   ConsultationConnector     → 8007  register_property_interest
+  #   (8009 mock-shuttle: experimental, profile riêng, không chạy mặc định)
   # ----------------------------------------------------------------
   mock-resident:
     build:
@@ -175,9 +180,9 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: p118_mock_property
-    command: ["uvicorn", "src.services.mock.property:property_app", "--host", "0.0.0.0", "--port", "8005"]
+    command: ["uvicorn", "src.services.mock.property:property_app", "--host", "0.0.0.0", "--port", "8008"]
     ports:
-      - "8005:8005"
+      - "8008:8008"
     env_file:
       - .env
     environment:
@@ -188,7 +193,7 @@ services:
       db-migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -219,7 +224,7 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Mock Tour Provider — 8005. Đặt lịch tham quan dự án căn hộ (book_tour).
+  # Mock Tour Provider — 8005. Nền của `schedule_property_viewing`.
   # ----------------------------------------------------------------
   mock-tour:
     build:
@@ -244,16 +249,16 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Mock Shuttle Provider — 8006. Đặt xe tham quan căn hộ (book_shuttle).
+  # Mock Shuttle Provider — 8009. EXPERIMENTAL, không chạy mặc định.
   # ----------------------------------------------------------------
   mock-shuttle:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: p118_mock_shuttle
-    command: ["uvicorn", "src.services.mock.shuttle:shuttle_app", "--host", "0.0.0.0", "--port", "8006"]
+    command: ["uvicorn", "src.services.mock.shuttle:shuttle_app", "--host", "0.0.0.0", "--port", "8009"]
     ports:
-      - "8006:8006"
+      - "8009:8009"
     env_file:
       - .env
     environment:
@@ -262,14 +267,18 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
+    # EXPERIMENTAL: `book_shuttle` không nằm trong 9 tool canonical và không
+    # được đăng ký với Executor. Profile riêng để `docker compose up` mặc
+    # định KHÔNG chạy nó — một service không ai gọi vẫn tốn cổng và RAM.
+    profiles: ["experimental"]
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Mock Consultation Provider — 8007. Đăng ký tư vấn (register_consultation).
+  # Mock Consultation Provider — 8007. Nền của `register_property_interest`.
   # ----------------------------------------------------------------
   mock-consultation:
     build:

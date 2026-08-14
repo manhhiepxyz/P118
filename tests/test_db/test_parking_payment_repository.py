@@ -8,7 +8,6 @@ qua trên CI thì tệ hơn không có test, vì nó báo xanh trong khi chưa k
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import date, timedelta
 
 import asyncpg
@@ -25,6 +24,7 @@ from src.db.parking_payment_repository import (
     payment_idempotency_key,
     refund_payment,
 )
+from tests._dbcheck import require_test_database_url
 
 # `db_pool` (tests/test_db/conftest.py) đã lo TEST_DATABASE_URL qua
 # `require_test_database_url()`: skip khi chạy local, FAIL khi chạy CI. Không
@@ -115,7 +115,7 @@ async def test_concurrent_bookings_never_exceed_capacity(pool) -> None:
     # và thời gian bắt tay TCP + auth đủ để transaction đầu commit xong. Pool
     # dùng chung vì thế tuần tự hoá vài request đầu và giấu mất tranh chấp.
     # Mở sẵn 8 connection để tranh chấp là thật.
-    warm_pool = await asyncpg.create_pool(os.environ["TEST_DATABASE_URL"], min_size=8, max_size=8)
+    warm_pool = await asyncpg.create_pool(require_test_database_url(), min_size=8, max_size=8)
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO parking_capacity (parking_zone, booking_date, capacity) VALUES ('ZONE_A', $1, 1) "

@@ -18,11 +18,7 @@ import pytest
 from src.agents.validator import TaskPlanValidator
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.common.tool_contract import TOOL_CONTRACTS
-from src.connectors.payment import PaymentConnector
-from src.connectors.property import PropertyConnector
-from src.connectors.resident import ResidentConnector
-from src.connectors.resident_services import ResidentServicesConnector
-from src.connectors.transport import TransportConnector
+from src.orchestration.deps import build_connectors
 
 # Một input hợp lệ tối thiểu cho từng tool. Ngày đặt xa để không bao giờ rơi
 # vào quá khứ khi suite chạy lại sau này.
@@ -145,20 +141,66 @@ def test_connector_output_fields_match_the_contract() -> None:
         assert set(TOOL_CONTRACTS[tool].outputs) == fields, tool
 
 
-def test_every_tool_is_owned_by_exactly_one_connector() -> None:
-    owners: dict[str, list[str]] = {tool: [] for tool in ALL_TOOLS}
-    connectors = [
-        ("property", PropertyConnector(base_url="http://property")),
-        ("resident", ResidentConnector(base_url="http://resident")),
-        ("transport", TransportConnector(base_url="http://transport")),
-        ("payment", PaymentConnector(base_url="http://payment")),
-        ("resident_services", ResidentServicesConnector(base_url="http://resident-services")),
-    ]
-    for name, connector in connectors:
-        for tool in connector.tool_names:
-            owners[tool].append(name)
+# Chủ sở hữu canonical của từng tool. Đây là bảng mà runtime PHẢI khớp.
+EXPECTED_OWNERS: dict[str, str] = {
+    "search_properties": "PropertyConnector",
+    "schedule_property_viewing": "TourConnector",
+    "register_property_interest": "ConsultationConnector",
+    "register_resident": "ResidentConnector",
+    "register_vehicle": "TransportConnector",
+    "book_parking": "TransportConnector",
+    "pay_fee": "PaymentConnector",
+    "create_maintenance_request": "ResidentServicesConnector",
+    "schedule_move": "ResidentServicesConnector",
+}
 
-    assert all(len(names) == 1 for names in owners.values()), owners
+
+def test_every_tool_is_owned_by_exactly_one_connector() -> None:
+    """Dựng runtime THẬT và kiểm quyền sở hữu trên đó.
+
+    Bản cũ tự liệt kê năm connector trong test. Danh sách viết tay đó lệch khỏi
+    `build_connectors()` mà không ai biết: khi TourConnector và
+    ConsultationConnector được thêm vào runtime, test vẫn xanh trong khi nó
+    không còn kiểm runtime nữa. Ở đây gọi thẳng factory, nên test không thể tụt
+    lại phía sau cấu hình thật.
+    """
+    connectors = build_connectors()
+
+    owners: dict[str, list[str]] = {tool: [] for tool in ALL_TOOLS}
+    for connector in connectors:
+        for tool in connector.tool_names:
+            owners.setdefault(tool, []).append(type(connector).__name__)
+
+    unowned = sorted(tool for tool, names in owners.items() if not names)
+    shared = {tool: names for tool, names in owners.items() if len(names) > 1}
+    unexpected = sorted(set(owners) - set(ALL_TOOLS))
+
+    assert not unowned, f"tool không có connector nào phục vụ: {unowned}"
+    assert not shared, f"tool có nhiều hơn một chủ, ai thắng tuỳ thứ tự đăng ký: {shared}"
+    assert not unexpected, f"connector khai tool ngoài contract: {unexpected}"
+    assert {tool: names[0] for tool, names in owners.items()} == EXPECTED_OWNERS
+
+
+def test_runtime_exposes_exactly_the_nine_canonical_tools() -> None:
+    connectors = build_connectors()
+
+    registered = [tool for connector in connectors for tool in connector.tool_names]
+
+    assert len(registered) == 9, f"số tool đăng ký lệch: {sorted(registered)}"
+    assert set(registered) == set(ALL_TOOLS)
+
+
+def test_shuttle_connector_is_absent_from_the_default_runtime() -> None:
+    """`book_shuttle` là experimental — runtime mặc định không được biết tới nó.
+
+    Source vẫn nằm trong repo nên đọc code dễ tưởng tool còn dùng được. Ràng
+    buộc thật nằm ở registry: nó phải vắng mặt. Bật lại mà chưa đổi `tour_id`
+    thành `viewing_id` sẽ tạo một tool Planner không cấp nổi input.
+    """
+    connectors = build_connectors()
+
+    assert not any(type(c).__name__ == "ShuttleConnector" for c in connectors)
+    assert "book_shuttle" not in {tool for c in connectors for tool in c.tool_names}
 
 
 # ---------------------------------------------------------------------------

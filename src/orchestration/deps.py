@@ -8,12 +8,19 @@ Mục đích:
     để smoke test / API / demo dùng chung.
   - Tránh mỗi nơi tự hardcode base_url và database_url.
 
-Cổng mặc định khớp docker-compose.yml:
-  ResidentConnector  → http://localhost:8001
-  TransportConnector → http://localhost:8002
-  PaymentConnector   → http://localhost:8003
-  PropertyConnector  → http://localhost:8005
-  ResidentServicesConnector → http://localhost:8006
+Cổng mặc định khớp docker-compose.yml — MỘT tool một owner, một service một cổng:
+  ResidentConnector         → 8001  register_resident
+  TransportConnector        → 8002  register_vehicle, book_parking
+  PaymentConnector          → 8003  pay_fee
+  PropertyConnector         → 8008  search_properties
+  TourConnector             → 8005  schedule_property_viewing
+  ResidentServicesConnector → 8006  create_maintenance_request, schedule_move
+  ConsultationConnector     → 8007  register_property_interest
+  ShuttleConnector          → 8009  EXPERIMENTAL, không đăng ký runtime
+
+Trước đây PropertyConnector và TourConnector cùng trỏ 8005 (mock-tour không có
+/api/properties/search) còn ResidentServicesConnector trỏ 8006 nơi Docker chạy
+shuttle. Cả hai là 404 lúc chạy thật mà test in-process không thấy.
 """
 
 from __future__ import annotations
@@ -25,10 +32,12 @@ import asyncpg
 
 from src.common.enums import ErrorCode, TaskStatus
 from src.config import get_settings
+from src.connectors.consultation import ConsultationConnector
 from src.connectors.payment import PaymentConnector
 from src.connectors.property import PropertyConnector
 from src.connectors.resident import ResidentConnector
 from src.connectors.resident_services import ResidentServicesConnector
+from src.connectors.tour import TourConnector
 from src.connectors.transport import TransportConnector
 from src.db.migrations import run_migrations
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
@@ -40,8 +49,10 @@ def build_connectors(
     resident_url: str = "http://localhost:8001",
     transport_url: str = "http://localhost:8002",
     payment_url: str = "http://localhost:8003",
-    property_url: str = "http://localhost:8005",
+    property_url: str = "http://localhost:8008",
     resident_services_url: str = "http://localhost:8006",
+    tour_url: str = "http://localhost:8005",
+    consultation_url: str = "http://localhost:8007",
     contact_profile: dict[str, Any] | None = None,
 ) -> list[Any]:
     """Dựng các Connector thật trỏ tới Mock Provider.
@@ -59,7 +70,12 @@ def build_connectors(
         TransportConnector(base_url=transport_url),
         PaymentConnector(base_url=payment_url),
         PropertyConnector(base_url=property_url, contact_profile=contact_profile),
+        TourConnector(base_url=tour_url),
         ResidentServicesConnector(base_url=resident_services_url),
+        ConsultationConnector(base_url=consultation_url),
+        # ShuttleConnector KHÔNG đăng ký — experimental, xem ADR trong
+        # src/connectors/shuttle.py (nó còn đòi `tour_id`, id đã bị contract
+        # public loại bỏ).
     ]
 
 
@@ -109,11 +125,13 @@ async def build_execution_boundary(
 
 
 async def build_runtime(
-    resident_url: str = "http://localhost:8001",
-    transport_url: str = "http://localhost:8002",
-    payment_url: str = "http://localhost:8003",
-    property_url: str = "http://localhost:8005",
-    resident_services_url: str = "http://localhost:8006",
+    resident_url: str | None = None,
+    transport_url: str | None = None,
+    payment_url: str | None = None,
+    property_url: str | None = None,
+    resident_services_url: str | None = None,
+    tour_url: str | None = None,
+    consultation_url: str | None = None,
     contact_profile: dict[str, Any] | None = None,
 ) -> tuple[list[Any], PostgreSQLWorkflowStateRepository]:
     """Dựng toàn bộ runtime: connectors + repository.
@@ -121,13 +139,23 @@ async def build_runtime(
     Returns:
         (connectors, repository) để dựng Executor hoặc test từng tầng.
     """
+    # URL mặc định lấy từ Settings, KHÔNG hardcode lại ở đây: trong container
+    # phải là service DNS (http://mock-tour:8005), trên máy dev là localhost.
+    # Hai nơi cùng giữ hằng số là hai nơi có thể lệch nhau.
+    #
+    # Truyền theo KEYWORD. Trước đây gọi positional, nên khi signature của
+    # `build_connectors` thêm tham số ở giữa, `contact_profile` lặng lẽ trôi
+    # vào `tour_url` — sai không lộ ra cho tới khi gọi HTTP thật.
+    settings = get_settings()
     connectors = build_connectors(
-        resident_url,
-        transport_url,
-        payment_url,
-        property_url,
-        resident_services_url,
-        contact_profile,
+        resident_url=resident_url or settings.resident_service_url,
+        transport_url=transport_url or settings.transport_service_url,
+        payment_url=payment_url or settings.payment_service_url,
+        property_url=property_url or settings.property_service_url,
+        resident_services_url=resident_services_url or settings.resident_services_service_url,
+        tour_url=tour_url or settings.tour_service_url,
+        consultation_url=consultation_url or settings.consultation_service_url,
+        contact_profile=contact_profile,
     )
     repository = await build_repository()
     return connectors, repository
