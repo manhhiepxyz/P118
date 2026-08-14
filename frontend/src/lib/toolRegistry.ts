@@ -22,7 +22,10 @@ import { TOOL_LABELS } from './status'
    là InputRef trỏ về CÙNG 1 task book_parking (src/agents/planner.py).
 =========================================================================== */
 
-export type ToolFieldKind = 'text' | 'select' | 'date' | 'int' | 'source'
+// 'time' = HH:MM 24h; 'consent' = checkbox đồng ý.
+// Giờ xem nhà KHÔNG dùng 'select' hai buổi: contract cần giữ nguyên phút.
+// Đồng ý KHÔNG dùng 'select': nó phải là một hành động tích chủ động.
+export type ToolFieldKind = 'text' | 'select' | 'date' | 'time' | 'int' | 'source' | 'consent'
 
 export interface ToolFieldDef {
   /** Tên field canonical (snake_case) — khớp contract. */
@@ -60,9 +63,11 @@ export const TOOL_ORDER: ToolName[] = [
   'register_vehicle',
   'book_parking',
   'pay_fee',
-  'book_tour',
-  'book_shuttle',
-  'register_consultation',
+  'search_properties',
+  'schedule_property_viewing',
+  'register_property_interest',
+  'create_maintenance_request',
+  'schedule_move',
 ]
 
 export const TOOL_REGISTRY: Record<ToolName, ToolDef> = {
@@ -136,52 +141,75 @@ export const TOOL_REGISTRY: Record<ToolName, ToolDef> = {
     ],
     outputs: ['payment_id', 'payment_status'],
   },
-  book_tour: {
-    tool: 'book_tour',
-    label: TOOL_LABELS.book_tour,
+  search_properties: {
+    tool: 'search_properties',
+    label: TOOL_LABELS.search_properties,
     icon: SquareParking,
     tint: 'bg-violet-100 text-violet-700',
     headerClass: 'border-violet-200 bg-violet-50',
     inputs: [
-      { name: 'residential_area', kind: 'text', label: 'Khu dân cư', required: true, placeholder: 'Ví dụ: KĐT Vinhomes' },
-      { name: 'tour_date', kind: 'date', label: 'Ngày tham quan', required: true },
-      { name: 'tour_slot', kind: 'select', label: 'Khung giờ', required: true, options: ['MORNING', 'AFTERNOON'] },
+      { name: 'project_name', kind: 'text', label: 'Tên dự án', required: false, placeholder: 'Ví dụ: Vinhomes Ocean Park' },
+      { name: 'bedrooms', kind: 'int', label: 'Số phòng ngủ', required: false, min: 1 },
+    ],
+    outputs: ['project_id'],
+  },
+  schedule_property_viewing: {
+    tool: 'schedule_property_viewing',
+    label: TOOL_LABELS.schedule_property_viewing,
+    icon: SquareParking,
+    tint: 'bg-violet-100 text-violet-700',
+    headerClass: 'border-violet-200 bg-violet-50',
+    inputs: [
+      { name: 'project_id', kind: 'source', label: 'Dự án', required: true, allowedSources: ['search_properties'] },
+      { name: 'viewing_date', kind: 'date', label: 'Ngày xem nhà', required: true },
+      // `time`, không phải select buổi: contract cần HH:MM và chọn buổi sẽ làm
+      // mất phút giờ người dùng muốn.
+      { name: 'viewing_time', kind: 'time', label: 'Giờ xem nhà', required: true },
       { name: 'resident_id', kind: 'source', label: 'Mã cư dân (tùy chọn)', required: false, allowedSources: ['register_resident'] },
     ],
-    outputs: ['tour_id'],
+    outputs: ['viewing_id'],
   },
-  book_shuttle: {
-    tool: 'book_shuttle',
-    label: TOOL_LABELS.book_shuttle,
-    icon: Bus,
-    tint: 'bg-indigo-100 text-indigo-700',
-    headerClass: 'border-indigo-200 bg-indigo-50',
-    inputs: [
-      { name: 'tour_id', kind: 'source', label: 'Mã lịch tham quan', required: true, allowedSources: ['book_tour'] },
-      { name: 'tour_date', kind: 'date', label: 'Ngày tham quan', required: true },
-      { name: 'passenger_count', kind: 'int', label: 'Số người đi (1–30)', required: true, min: 1 },
-    ],
-    outputs: ['shuttle_id'],
-  },
-  register_consultation: {
-    tool: 'register_consultation',
-    label: TOOL_LABELS.register_consultation,
+  register_property_interest: {
+    tool: 'register_property_interest',
+    label: TOOL_LABELS.register_property_interest,
     icon: MessagesSquare,
     tint: 'bg-cyan-100 text-cyan-700',
     headerClass: 'border-cyan-200 bg-cyan-50',
     inputs: [
-      { name: 'consultation_type', kind: 'select', label: 'Loại tư vấn', required: true, options: ['BUY', 'RENT'] },
-      {
-        name: 'buy_sub_type',
-        kind: 'select',
-        label: 'Phân loại tư vấn mua',
-        required: false,
-        requiredWhen: { field: 'consultation_type', equals: 'BUY' },
-        options: ['RESIDE', 'BUSINESS', 'INVEST'],
-      },
+      { name: 'project_id', kind: 'source', label: 'Dự án', required: true, allowedSources: ['search_properties'] },
+      { name: 'interest_type', kind: 'select', label: 'Loại quan tâm', required: true, options: ['buy', 'rent', 'consultation'] },
+      { name: 'preferred_contact_time', kind: 'select', label: 'Giờ muốn được liên hệ', required: true, options: ['morning', 'afternoon', 'evening'] },
+      // Ô đồng ý phải do người dùng tự tích. Không đặt sẵn giá trị mặc định.
+      { name: 'consent', kind: 'consent', label: 'Tôi đồng ý để nhân viên tư vấn liên hệ', required: true },
       { name: 'resident_id', kind: 'source', label: 'Mã cư dân (tùy chọn)', required: false, allowedSources: ['register_resident'] },
     ],
-    outputs: ['consultation_id'],
+    outputs: ['interest_id'],
+  },
+  create_maintenance_request: {
+    tool: 'create_maintenance_request',
+    label: TOOL_LABELS.create_maintenance_request,
+    icon: MessagesSquare,
+    tint: 'bg-amber-100 text-amber-700',
+    headerClass: 'border-amber-200 bg-amber-50',
+    inputs: [
+      { name: 'resident_id', kind: 'source', label: 'Mã cư dân', required: true, allowedSources: ['register_resident'] },
+      { name: 'category', kind: 'text', label: 'Hạng mục', required: true, placeholder: 'Ví dụ: điện, nước' },
+      { name: 'description', kind: 'text', label: 'Mô tả sự cố', required: true },
+    ],
+    outputs: ['request_id'],
+  },
+  schedule_move: {
+    tool: 'schedule_move',
+    label: TOOL_LABELS.schedule_move,
+    icon: Bus,
+    tint: 'bg-indigo-100 text-indigo-700',
+    headerClass: 'border-indigo-200 bg-indigo-50',
+    inputs: [
+      { name: 'resident_id', kind: 'source', label: 'Mã cư dân', required: true, allowedSources: ['register_resident'] },
+      { name: 'move_date', kind: 'date', label: 'Ngày chuyển', required: true },
+      { name: 'move_type', kind: 'select', label: 'Hình thức', required: true, options: ['move_in', 'move_out'] },
+    ],
+    outputs: ['move_id'],
   },
 }
 

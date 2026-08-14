@@ -129,9 +129,11 @@ export const TOOL_LABELS: Record<string, string> = {
   register_vehicle: 'Đăng ký phương tiện',
   book_parking: 'Đặt chỗ đậu xe',
   pay_fee: 'Thanh toán phí',
-  book_tour: 'Đặt lịch tham quan',
-  book_shuttle: 'Đặt xe tham quan',
-  register_consultation: 'Đăng ký tư vấn',
+  search_properties: 'Tìm bất động sản',
+  schedule_property_viewing: 'Đặt lịch xem nhà',
+  register_property_interest: 'Đăng ký quan tâm',
+  create_maintenance_request: 'Yêu cầu bảo trì',
+  schedule_move: 'Đăng ký chuyển nhà',
 }
 
 export function toolLabel(tool: string): string {
@@ -163,22 +165,32 @@ export function formatResult(tool: string, data: Record<string, unknown>): Array
       push('Mã GD', data['payment_id'])
       push('Trạng thái', formatPaymentStatus(data['payment_status']))
       break
-    case 'book_tour':
-      push('Mã tham quan', data['tour_id'])
-      push('Khu dân cư', data['residential_area'])
-      push('Ngày', data['tour_date'])
-      push('Khung giờ', formatTourSlot(data['tour_slot']))
+    case 'search_properties':
+      push('Số kết quả', data['total'] ?? (data['results'] as unknown[] | undefined)?.length)
       break
-    case 'book_shuttle':
-      push('Mã xe', data['shuttle_id'])
-      push('Mã tham quan', data['tour_id'])
-      push('Ngày', data['tour_date'])
-      push('Số người', data['passenger_count'])
+    case 'schedule_property_viewing':
+      push('Mã lịch xem', data['viewing_id'])
+      push('Dự án', data['project_name'])
+      push('Ngày', data['viewing_date'])
+      // Giờ hiển thị nguyên văn giờ người dùng đã chọn (HH:MM), không quy về buổi.
+      push('Giờ', data['viewing_time'])
+      push('Trạng thái', data['viewing_status'])
       break
-    case 'register_consultation':
-      push('Mã tư vấn', data['consultation_id'])
-      push('Loại', formatConsultationType(data['consultation_type']))
-      push('Phân loại', formatBuySubType(data['buy_sub_type']))
+    case 'register_property_interest':
+      push('Mã đăng ký', data['interest_id'])
+      push('Dự án', data['project_name'])
+      push('Loại quan tâm', data['interest_type'])
+      push('Giờ liên hệ', data['preferred_contact_time'])
+      push('Trạng thái', data['interest_status'])
+      break
+    case 'create_maintenance_request':
+      push('Mã yêu cầu', data['request_id'])
+      push('Trạng thái', data['request_status'])
+      break
+    case 'schedule_move':
+      push('Mã chuyển nhà', data['move_id'])
+      push('Ngày', data['move_date'])
+      push('Trạng thái', data['move_status'])
       break
     default:
       for (const [k, v] of Object.entries(data)) rows.push([k, String(v)])

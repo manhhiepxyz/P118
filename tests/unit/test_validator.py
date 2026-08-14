@@ -29,7 +29,7 @@ def _book_only_task(task_id: str = "T1", depends_on: list[str] | None = None) ->
         depends_on=depends_on or [],
         input={
             "vehicle_id": "VEH-001",
-            "booking_date": "2026-08-10",
+            "booking_date": "2030-08-10",
             "parking_zone": "ZONE_A",
         },
     )
@@ -104,7 +104,7 @@ def test_reject_self_dependency() -> None:
             depends_on=["T1"],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2030-08-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -127,7 +127,7 @@ def test_reject_direct_cycle() -> None:
             depends_on=["T2"],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2030-08-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -175,7 +175,7 @@ def test_reject_multi_task_cycle() -> None:
             depends_on=["T2"],
             input={
                 "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                "booking_date": "2026-08-10",
+                "booking_date": "2030-08-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -231,7 +231,7 @@ def test_reject_missing_required_input_book_parking() -> None:
             depends_on=[],
             input={
                 # vehicle_id is missing
-                "booking_date": "2026-08-10",
+                "booking_date": "2030-08-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -461,7 +461,7 @@ def test_ordinary_business_goal_is_accepted() -> None:
     """A normal Vietnamese business goal must not trip the sensitive-data checks."""
     plan = _make_plan(
         _book_only_task(),
-        goal="Tôi mới chuyển vào căn hộ A1201. Hãy đặt chỗ đậu xe tại ZONE_A ngày 2026-08-10 giúp tôi.",
+        goal="Tôi mới chuyển vào căn hộ A1201. Hãy đặt chỗ đậu xe tại ZONE_A ngày 2030-08-10 giúp tôi.",
     )
     assert TaskPlanValidator.validate(plan) is plan
 
@@ -479,7 +479,7 @@ def test_reject_url_in_task_id() -> None:
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2030-08-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -497,7 +497,7 @@ def test_task_id_error_does_not_echo_task_id() -> None:
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2030-08-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -651,21 +651,29 @@ def test_example_plans_still_valid_after_sweep() -> None:
 # BEFORE the workflow — it must never reappear as a TaskPlan tool.
 # ---------------------------------------------------------------------------
 
+# 9 tool canonical theo `shared_contracts.md`.
+#
+# `book_tour` và `register_consultation` là tên NỘI BỘ của implementation cũ,
+# đã được adapter sang `schedule_property_viewing` và
+# `register_property_interest`; chúng không được xuất hiện trong contract
+# public. `book_shuttle` là capability thử nghiệm, chưa reachable từ Agent.
 EXPECTED_TOOLS = frozenset(
     {
+        "search_properties",
+        "schedule_property_viewing",
+        "register_property_interest",
+        "create_maintenance_request",
+        "schedule_move",
         "register_resident",
         "register_vehicle",
         "book_parking",
         "pay_fee",
-        "book_tour",
-        "book_shuttle",
-        "register_consultation",
     }
 )
 
 
-def test_planner_contract_is_exactly_seven_tools() -> None:
-    """Schema, validator allowlist and required-input table must agree on 7 tools."""
+def test_planner_contract_is_exactly_the_nine_canonical_tools() -> None:
+    """Schema, validator allowlist và bảng required-input phải khớp 9 tool."""
     assert frozenset(typing.get_args(AllowedTool)) == EXPECTED_TOOLS
     assert TaskPlanValidator.ALLOWED_TOOLS == EXPECTED_TOOLS
     assert frozenset(TaskPlanValidator.REQUIRED_INPUTS) == EXPECTED_TOOLS
@@ -727,3 +735,24 @@ def test_schema_rejects_ownership_task_from_raw_json() -> None:
     }
     with pytest.raises(ValidationError):
         TaskPlan.model_validate(raw_plan)
+
+
+def test_internal_implementation_names_never_reach_the_public_contract() -> None:
+    """`book_tour`/`register_consultation` là tên nội bộ, không phải tool public.
+
+    Chúng vẫn tồn tại dưới dạng implementation (provider/DB) nhưng được adapter
+    sang tên canonical ở tầng Connector. Nếu chúng quay lại contract, Planner sẽ
+    sinh ra plan dùng field `tour_id`/`tour_slot` mà `shared_contracts.md`
+    không hề khai báo.
+    """
+    for internal in ("book_tour", "register_consultation"):
+        assert internal not in typing.get_args(AllowedTool), internal
+        assert internal not in TaskPlanValidator.ALLOWED_TOOLS, internal
+        assert internal not in TaskPlanValidator.REQUIRED_INPUTS, internal
+
+
+def test_book_shuttle_is_experimental_and_not_reachable_from_the_agent() -> None:
+    """Chưa có contract chính thức: nó cần `viewing_id`, không phải `tour_id`."""
+    assert "book_shuttle" not in typing.get_args(AllowedTool)
+    assert "book_shuttle" not in TaskPlanValidator.ALLOWED_TOOLS
+    assert "book_shuttle" not in TaskPlanValidator.REQUIRED_INPUTS

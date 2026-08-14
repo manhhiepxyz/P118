@@ -72,7 +72,7 @@ class FakeExecutionBoundary:
 GOAL = (
     "Tôi mới chuyển vào căn hộ A1201 tại Vinhomes Ocean Park. "
     "Hãy đăng ký cư dân cho Lâm Thành Bảo, đăng ký ô tô biển số 51A-12345, "
-    "đặt chỗ ZONE_A ngày 2026-08-10 và thanh toán phí."
+    "đặt chỗ ZONE_A ngày 2030-08-10 và thanh toán phí."
 )
 
 
@@ -107,7 +107,7 @@ def _valid_plan() -> TaskPlan:
                 depends_on=["T2"],
                 input={
                     "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2030-08-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -152,7 +152,7 @@ def _plan_with_cycle() -> TaskPlan:
                 depends_on=["T2"],
                 input={
                     "vehicle_id": "VEH-001",
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2030-08-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
@@ -180,7 +180,7 @@ def _plan_with_unknown_dependency() -> TaskPlan:
                 depends_on=["T99"],  # không tồn tại
                 input={
                     "vehicle_id": "VEH-001",
-                    "booking_date": "2026-08-10",
+                    "booking_date": "2030-08-10",
                     "parking_zone": "ZONE_A",
                 },
             )

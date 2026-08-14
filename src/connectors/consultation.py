@@ -1,19 +1,26 @@
-"""ConsultationConnector — Connector cho Mock Consultation provider (tool `register_consultation`).
+"""ConsultationConnector — Connector cho tool `register_property_interest`.
+
+ADAPTER, không phải đổi tên. Implementation đăng ký tư vấn cũ
+(`register_consultation`) được dùng lại làm phần chạy bên dưới, còn Connector
+này nói đúng contract public. `consultation_id`, `consultation_type`,
+`buy_sub_type` dừng lại ở biên provider và không bao giờ vào state Agent.
 
 Owner: Hoàng Anh (Tầng Dịch vụ — tạm thời; connector vốn thuộc Executor layer
 của Mạnh Hiệp, xem `src/connectors/base.py`).
 
 Vai trò trong luồng demo:
-  [User] → register_consultation → [ConsultationConnector] → POST /api/consultations (port 8007)
+  [User] → register_property_interest → [ConsultationConnector]
+         → POST /api/property/interests (port 8007)
 
 Quy tắc mock (app độc lập `src/services/mock/consultation.py`):
-  - Tư vấn mua (BUY) bắt buộc `buy_sub_type` (RESIDE/BUSINESS/INVEST) — 422 nếu thiếu.
+  - `consent` phải là literal true — 422 nếu thiếu hoặc false.
   - Tư vấn thuê (RENT) không có phân loại con.
   - Một resident chỉ đăng ký 1 tư vấn cho mỗi loại → 409 CONSULTATION_ALREADY_EXISTS.
   - Provider này KHÔNG check `resident_id` tồn tại — là dữ liệu provider khác.
 
 Contract output (canonical field):
-  {"consultation_id", "consultation_type", "buy_sub_type"}
+  {"interest_id", "project_id", "project_name", "interest_type",
+   "preferred_contact_time", "interest_status", "contact_name", "contact_phone"}
 """
 
 from contextlib import asynccontextmanager
@@ -29,8 +36,8 @@ from src.connectors.base import Connector
 class ConsultationConnector(Connector):
     """Connector cho Mock Consultation Service.
 
-    Xử lý tool: register_consultation
-    Endpoint: POST /api/consultations
+    Xử lý tool: register_property_interest
+    Endpoint: POST /api/property/interests
     """
 
     def __init__(
@@ -47,7 +54,7 @@ class ConsultationConnector(Connector):
 
     @property
     def tool_names(self) -> list[str]:
-        return ["register_consultation"]
+        return ["register_property_interest"]
 
     async def execute(
         self,
@@ -55,7 +62,7 @@ class ConsultationConnector(Connector):
         input_data: dict[str, Any],
     ) -> StandardResult:
         # --- Bước 1: Guard – chỉ xử lý tool được khai báo ---
-        if tool_name != "register_consultation":
+        if tool_name != "register_property_interest":
             return StandardResult.fail(
                 error_code=ErrorCode.INVALID_INPUT,
                 message=f"Tool không được hỗ trợ: {tool_name}",
@@ -65,7 +72,7 @@ class ConsultationConnector(Connector):
             # --- Bước 2: Gọi HTTP ---
             async with self._get_client() as client:
                 response = await client.post(
-                    f"{self.base_url}/api/consultations",  # URL cố định theo contract
+                    f"{self.base_url}/api/property/interests",  # URL cố định theo contract
                     json=input_data,
                     timeout=self.timeout,
                 )
@@ -79,9 +86,18 @@ class ConsultationConnector(Connector):
                         return self._build_envelope_failure(env_error)
 
                     # Kiểm tra required output field theo contract.
-                    # buy_sub_type có thể null (khi tư vấn thuê RENT) nên chỉ
-                    # cần consultation_id + consultation_type.
-                    required_keys = ["consultation_id", "consultation_type"]
+                    # Contract public. `consultation_id`/`consultation_type`/`buy_sub_type`
+                    # là từ vựng nội bộ và không được vượt qua Connector.
+                    required_keys = [
+                        "interest_id",
+                        "project_id",
+                        "project_name",
+                        "interest_type",
+                        "preferred_contact_time",
+                        "interest_status",
+                        "contact_name",
+                        "contact_phone",
+                    ]
                     missing = [k for k in required_keys if k not in data]
                     if missing:
                         return StandardResult.fail(
@@ -91,10 +107,10 @@ class ConsultationConnector(Connector):
                         )
 
                     # Lọc: chỉ giữ canonical field, bỏ mọi field thừa.
-                    # buy_sub_type giữ nguyên (null hoặc giá trị thật).
-                    canonical = {k: data[k] for k in required_keys}
-                    canonical["buy_sub_type"] = data.get("buy_sub_type")
-                    return StandardResult.ok(data=canonical)
+                    # `buy_sub_type` từng được gắn thêm ở đây; nó là từ vựng
+                    # nội bộ nên đã bỏ. Bộ lọc trắng này chính là ranh giới
+                    # giữ tên nội bộ không đi tiếp vào state của Agent.
+                    return StandardResult.ok(data={k: data[k] for k in required_keys})
 
                 # --- Bước 3b: HTTP lỗi (4xx/5xx) ---
                 return self._handle_error_response(response)

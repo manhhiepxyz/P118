@@ -134,3 +134,67 @@ class ApiEnvelope(BaseModel):
     error_code: str | None = None
     message: str | None = None
     retryable: bool = False
+
+
+# =====================================================================
+# Contract canonical — schedule_property_viewing / register_property_interest
+#
+# Hai tool này TÁI SỬ DỤNG implementation của `book_tour` / `register_consultation`
+# (sức chứa slot, chống trùng, sinh id) nhưng nói bằng ngôn ngữ contract public.
+# `tour_id`/`tour_date`/`tour_slot` là chi tiết nội bộ và không được lộ ra ngoài.
+# =====================================================================
+
+
+def viewing_time_to_slot(viewing_time: str) -> TourSlot:
+    """Quy giờ HH:MM về khung sức chứa MORNING/AFTERNOON.
+
+    Đây CHỈ là khoá gom nhóm để đếm chỗ. Giờ người dùng chọn vẫn được lưu
+    nguyên văn ở `viewing_time` — quy về hai buổi rồi vứt phút giờ đi là làm
+    mất dữ liệu họ đã nhập, và lịch trả về sẽ sai so với lịch họ đặt.
+    """
+    hour = int(viewing_time.split(":", 1)[0])
+    return TourSlot.MORNING if hour < 12 else TourSlot.AFTERNOON
+
+
+class SchedulePropertyViewingRequest(BaseModel):
+    project_id: str = Field(..., min_length=1, description="Mã dự án, ví dụ PRJ-001")
+    viewing_date: date = Field(..., description="Ngày xem nhà, YYYY-MM-DD")
+    viewing_time: str = Field(
+        ...,
+        pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$",
+        description="Giờ xem nhà, HH:MM 24h",
+    )
+    resident_id: str | None = Field(default=None, description="ID cư dân (NULL = khách)")
+
+
+class InterestType(StrEnum):
+    BUY = "buy"
+    RENT = "rent"
+    CONSULTATION = "consultation"
+
+
+class PreferredContactTime(StrEnum):
+    MORNING = "morning"
+    AFTERNOON = "afternoon"
+    EVENING = "evening"
+
+
+class RegisterPropertyInterestRequest(BaseModel):
+    project_id: str = Field(..., min_length=1, description="Mã dự án quan tâm")
+    interest_type: InterestType = Field(..., description="buy | rent | consultation")
+    preferred_contact_time: PreferredContactTime = Field(..., description="Khung giờ muốn được liên hệ")
+    consent: bool = Field(..., description="Đồng ý được liên hệ — phải là true")
+    resident_id: str | None = Field(default=None, description="ID cư dân (tùy chọn)")
+
+    @model_validator(mode="after")
+    def _consent_must_be_granted(self) -> "RegisterPropertyInterestRequest":
+        """`consent` phải là literal true.
+
+        Pydantic coerce "false"/0/"" thành bool nên chỉ khai báo `bool` là chưa
+        đủ: đăng ký nhận liên hệ mà không có đồng ý rõ ràng là vấn đề về dữ
+        liệu cá nhân, không phải chi tiết validation. Từ chối tại schema để
+        không nhánh gọi nào bỏ sót được.
+        """
+        if self.consent is not True:
+            raise ValueError("consent phải là true — không đăng ký khi người dùng chưa đồng ý.")
+        return self

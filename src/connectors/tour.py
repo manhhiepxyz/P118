@@ -1,19 +1,26 @@
-"""TourConnector — Connector cho Mock Tour provider (tool `book_tour`).
+"""TourConnector — Connector cho tool `schedule_property_viewing`.
+
+ADAPTER, không phải đổi tên. Implementation đặt lịch tham quan cũ (`book_tour`)
+được dùng lại làm phần chạy bên dưới — sức chứa slot, chống đặt trùng, sinh id
+— còn Connector này nói đúng contract public. `tour_id`, `tour_date`,
+`tour_slot`, `residential_area` dừng lại ở biên provider.
 
 Owner: Hoàng Anh (Tầng Dịch vụ — tạm thời; connector vốn thuộc Executor layer
 của Mạnh Hiệp, xem `src/connectors/base.py`).
 
 Vai trò trong luồng demo:
-  [User] → book_tour → [TourConnector] → POST /api/tours/bookings (port 8005)
-         → tour_id → truyền sang book_shuttle (qua InputRef)
+  [User] → schedule_property_viewing → [TourConnector]
+         → POST /api/property/viewings (port 8005)
 
 Quy tắc mock (app độc lập `src/services/mock/tour.py`):
-  - Slot tham quan (residential_area, tour_slot) có sức chứa cố định → hết chỗ
+  - Sức chứa đếm theo buổi, nhưng `viewing_time` HH:MM người dùng chọn được
+    lưu nguyên văn — buổi chỉ là khoá gom nhóm → hết chỗ
     trả 409 NO_AVAILABILITY.
   - Provider này KHÔNG cross-check `resident_id` — là dữ liệu provider khác.
 
-Contract output (canonical field được truyền sang book_shuttle):
-  {"tour_id", "residential_area", "tour_date", "tour_slot"}
+Contract output (canonical field trả về cho Agent):
+  {"viewing_id", "project_id", "project_name", "viewing_date", "viewing_time",
+   "viewing_status", "contact_name", "contact_phone"}
 """
 
 from contextlib import asynccontextmanager
@@ -29,8 +36,8 @@ from src.connectors.base import Connector
 class TourConnector(Connector):
     """Connector cho Mock Tour Service.
 
-    Xử lý tool: book_tour
-    Endpoint: POST /api/tours/bookings
+    Xử lý tool: schedule_property_viewing
+    Endpoint: POST /api/property/viewings
     """
 
     def __init__(
@@ -47,7 +54,7 @@ class TourConnector(Connector):
 
     @property
     def tool_names(self) -> list[str]:
-        return ["book_tour"]
+        return ["schedule_property_viewing"]
 
     async def execute(
         self,
@@ -55,7 +62,7 @@ class TourConnector(Connector):
         input_data: dict[str, Any],
     ) -> StandardResult:
         # --- Bước 1: Guard – chỉ xử lý tool được khai báo ---
-        if tool_name != "book_tour":
+        if tool_name != "schedule_property_viewing":
             return StandardResult.fail(
                 error_code=ErrorCode.INVALID_INPUT,
                 message=f"Tool không được hỗ trợ: {tool_name}",
@@ -65,7 +72,7 @@ class TourConnector(Connector):
             # --- Bước 2: Gọi HTTP ---
             async with self._get_client() as client:
                 response = await client.post(
-                    f"{self.base_url}/api/tours/bookings",  # URL cố định theo contract
+                    f"{self.base_url}/api/property/viewings",  # URL cố định theo contract
                     json=input_data,
                     timeout=self.timeout,
                 )
@@ -79,7 +86,19 @@ class TourConnector(Connector):
                         return self._build_envelope_failure(env_error)
 
                     # Kiểm tra required output field theo contract.
-                    required_keys = ["tour_id", "residential_area", "tour_date", "tour_slot"]
+                    # Contract public. `tour_id`/`tour_date`/`tour_slot` là từ vựng
+                    # nội bộ của implementation cũ và dừng lại ở biên provider —
+                    # nếu chúng xuất hiện ở đây nghĩa là adapter đã hỏng.
+                    required_keys = [
+                        "viewing_id",
+                        "project_id",
+                        "project_name",
+                        "viewing_date",
+                        "viewing_time",
+                        "viewing_status",
+                        "contact_name",
+                        "contact_phone",
+                    ]
                     missing = [k for k in required_keys if k not in data]
                     if missing:
                         return StandardResult.fail(

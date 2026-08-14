@@ -26,9 +26,11 @@ export type ToolName =
   | 'register_vehicle'
   | 'book_parking'
   | 'pay_fee'
-  | 'book_tour'
-  | 'book_shuttle'
-  | 'register_consultation'
+  | 'search_properties'
+  | 'schedule_property_viewing'
+  | 'register_property_interest'
+  | 'create_maintenance_request'
+  | 'schedule_move'
 
 /** InputRef (TaskPlan) — khi persist, input_data giữ dạng {from_task, field} chưa resolve. */
 export interface InputRef {

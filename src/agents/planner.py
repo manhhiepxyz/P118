@@ -70,12 +70,18 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "booking_id": "mã đặt chỗ",
     "amount": "số tiền",
     "currency": "loại tiền tệ",
-    "tour_date": "ngày tham quan theo định dạng YYYY-MM-DD",
-    "tour_slot": "khung giờ tham quan (MORNING hoặc AFTERNOON)",
-    "tour_id": "mã lịch tham quan",
-    "passenger_count": "số người đi xe tham quan (1-30)",
-    "consultation_type": "loại tư vấn (BUY hoặc RENT)",
-    "buy_sub_type": "phân loại tư vấn mua (RESIDE, BUSINESS hoặc INVEST)",
+    "project_id": "mã dự án muốn xem",
+    "viewing_date": "ngày xem nhà theo định dạng YYYY-MM-DD",
+    # Nhãn nêu rõ HH:MM. Người dùng trả lời "buổi sáng" thì vẫn còn thiếu —
+    # contract cần giờ cụ thể, và gợi ý mơ hồ sẽ khiến họ trả lời lại sai lần nữa.
+    "viewing_time": "giờ xem nhà theo định dạng HH:MM, ví dụ 09:30",
+    "interest_type": "loại quan tâm (buy, rent hoặc consultation)",
+    "preferred_contact_time": "khung giờ muốn được liên hệ (morning, afternoon hoặc evening)",
+    "consent": "xác nhận đồng ý để nhân viên tư vấn liên hệ",
+    "category": "hạng mục cần bảo trì",
+    "description": "mô tả sự cố cần bảo trì",
+    "move_date": "ngày chuyển nhà theo định dạng YYYY-MM-DD",
+    "move_type": "hình thức chuyển nhà (move_in hoặc move_out)",
 }
 
 # `Literal` không được kiểm tra lúc chạy — giữ bản runtime để `PlannerResult`
@@ -219,7 +225,16 @@ class _StructuredLLM(Protocol):
 
 
 class _SupportsStructuredOutput(Protocol):
-    def with_structured_output(self, schema: Any) -> _StructuredLLM: ...
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> _StructuredLLM: ...
+
+
+# Phụ lục CHỈ dùng cho `json_mode`. API tương thích OpenAI từ chối request nếu
+# prompt không chứa chữ "json" khi bật `response_format: json_object`.
+# Không mô tả lại schema ở đây — schema đã đi qua `with_structured_output`.
+_JSON_MODE_INSTRUCTION = (
+    "Trả lời bằng một object JSON hợp lệ duy nhất, đúng schema đã cho. "
+    "Không bọc trong code fence, không thêm chữ nào ngoài JSON."
+)
 
 
 class _PlannerResponse(BaseModel):
@@ -409,17 +424,29 @@ class Planner:
         result = await planner.plan(goal, existing_context={})
     """
 
-    def __init__(self, llm: _SupportsStructuredOutput) -> None:
+    def __init__(
+        self,
+        llm: _SupportsStructuredOutput,
+        *,
+        structured_output_method: str = "function_calling",
+    ) -> None:
         # `with_structured_output` buộc LLM trả object đúng schema: không cần
-        # code fence, không tự json.loads(), không parse text thủ công.
+        # code fence, không tự json.loads(), không parse text thủ công. Dù đi
+        # đường nào, output CUỐI CÙNG vẫn được validate bằng `_PlannerResponse`.
         #
-        # method="function_calling": langchain-openai >= 0.3 mặc định chuyển
-        # sang structured-output strict (`json_schema`), và mode này TỪ CHỐI
-        # schema `_PlannerResponse` vì `Task.input` là dict tự do (không khai
-        # `additionalProperties: false` được cho object lồng). Kết quả là
-        # `POST /workflow/start` (chỉ goal) trả 502 BadRequestError. Chọn
-        # function_calling để giữ khả năng trả object lồng với dict tự do.
-        self._structured_llm = llm.with_structured_output(_PlannerResponse, method="function_calling")
+        # Mặc định `function_calling`: langchain-openai >= 0.3 chuyển sang
+        # structured-output strict (`json_schema`), mà mode đó TỪ CHỐI
+        # `_PlannerResponse` vì `Task.input` là dict tự do.
+        #
+        # DeepSeek V4 Flash KHÔNG dùng được `function_calling`: nó chạy thinking
+        # mode và trả "Thinking mode does not support this tool_choice";
+        # `json_schema` thì báo "response_format type is unavailable now".
+        # `json_mode` là đường còn lại — caller truyền vào qua
+        # `structured_output_method()` của `src/services/llm.py`.
+        self._json_mode_hint = structured_output_method == "json_mode"
+        self._structured_llm = llm.with_structured_output(
+            _PlannerResponse, method=structured_output_method
+        )
 
     async def plan(
         self,
@@ -439,7 +466,12 @@ class Planner:
 
         context = existing_context or {}
         messages = [
-            ("system", PLANNER_SYSTEM_PROMPT),
+            (
+                "system",
+                f"{PLANNER_SYSTEM_PROMPT}\n\n{_JSON_MODE_INSTRUCTION}"
+                if self._json_mode_hint
+                else PLANNER_SYSTEM_PROMPT,
+            ),
             ("human", self._build_user_message(goal, context)),
         ]
 

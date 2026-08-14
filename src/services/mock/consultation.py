@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.mock import schemas
 from src.mock.errors import conflict, inject_failure, install_error_handler, not_found
 from src.mock.ids import make_generator
+from src.mock.projects import UnknownProjectError, get_project
 from src.mock.store import Store
 
 consultation_app = FastAPI(
@@ -110,3 +111,99 @@ def get_consultation(consultation_id: str) -> schemas.ApiEnvelope:
 @consultation_app.get("/health", tags=["meta"])
 def health() -> dict:
     return {"status": "ok", "service": "consultation"}
+
+
+# =====================================================================
+# Endpoint canonical — tool `register_property_interest`
+#
+# Tái sử dụng implementation `register_consultation` (chống đăng ký trùng, sinh
+# id) nhưng theo contract public: vào bằng `project_id` + `interest_type` +
+# `preferred_contact_time` + `consent`. `consultation_type`/`buy_sub_type` là
+# từ vựng nội bộ và không lộ ra ngoài.
+# =====================================================================
+
+new_interest_id = make_generator("INT")
+
+
+@consultation_app.post("/api/property/interests", status_code=201, summary="Đăng ký quan tâm dự án")
+def register_property_interest(
+    payload: schemas.RegisterPropertyInterestRequest,
+    fail: str | None = None,
+) -> schemas.ApiEnvelope:
+    if fail:
+        raise inject_failure(fail)
+
+    try:
+        project = get_project(payload.project_id)
+    except UnknownProjectError as exc:
+        raise not_found("PROJECT_NOT_FOUND", str(exc)) from exc
+
+    # Chống trùng theo (cư dân, DỰ ÁN, loại quan tâm). Bản cũ chỉ khoá theo
+    # (cư dân, loại) nên quan tâm dự án thứ hai cùng loại sẽ bị từ chối nhầm.
+    if payload.resident_id is not None and any(
+        c["resident_id"] == payload.resident_id
+        and c.get("project_id") == project.project_id
+        and c.get("interest_type") == payload.interest_type.value
+        for c in store.consultations.values()
+    ):
+        raise conflict(
+            "INTEREST_ALREADY_EXISTS",
+            f"Đã đăng ký quan tâm {payload.interest_type.value} cho dự án {project.project_id}",
+        )
+
+    interest_id = new_interest_id()
+    resident = store.residents.get(payload.resident_id) if payload.resident_id else None
+    with store._lock:
+        store.consultations[interest_id] = {
+            "consultation_id": interest_id,
+            "resident_id": payload.resident_id,
+            "project_id": project.project_id,
+            "interest_type": payload.interest_type.value,
+            "preferred_contact_time": payload.preferred_contact_time.value,
+            # Chỉ tới được đây khi schema đã xác nhận consent is True.
+            "consent": True,
+            "interest_status": "RECEIVED",
+            # Từ vựng nội bộ giữ lại để lịch sử dữ liệu cũ vẫn đọc được.
+            "consultation_type": None,
+            "buy_sub_type": None,
+        }
+
+    return schemas.ApiEnvelope(
+        success=True,
+        data={
+            "interest_id": interest_id,
+            "project_id": project.project_id,
+            "project_name": project.project_name,
+            "interest_type": payload.interest_type.value,
+            "preferred_contact_time": payload.preferred_contact_time.value,
+            "interest_status": "RECEIVED",
+            # Liên hệ lấy từ hồ sơ đã xác thực, không từ input tool.
+            "contact_name": (resident or {}).get("full_name"),
+            "contact_phone": (resident or {}).get("phone"),
+        },
+        message="Created",
+    )
+
+
+@consultation_app.get("/api/property/interests/{interest_id}", summary="Tra cứu đăng ký quan tâm")
+def get_property_interest(interest_id: str) -> schemas.ApiEnvelope:
+    interest = store.consultations.get(interest_id)
+    if interest is None or interest.get("interest_type") is None:
+        raise not_found("INTEREST_NOT_FOUND", f"Không tìm thấy đăng ký {interest_id}")
+
+    project_id = interest.get("project_id")
+    resident = store.residents.get(interest["resident_id"]) if interest.get("resident_id") else None
+    return schemas.ApiEnvelope(
+        success=True,
+        data={
+            "interest_id": interest["consultation_id"],
+            "project_id": project_id,
+            "project_name": get_project(project_id).project_name if project_id else None,
+            "interest_type": interest["interest_type"],
+            "preferred_contact_time": interest.get("preferred_contact_time"),
+            "interest_status": interest.get("interest_status", "RECEIVED"),
+            "contact_name": (resident or {}).get("full_name"),
+            "contact_phone": (resident or {}).get("phone"),
+        },
+        message="Found",
+    )

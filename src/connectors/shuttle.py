@@ -13,6 +13,19 @@ Quy tắc mock (app độc lập `src/services/mock/shuttle.py`):
 
 Contract output (canonical field):
   {"shuttle_id", "tour_id", "tour_date", "passenger_count"}
+
+TRẠNG THÁI: EXPERIMENTAL — KHÔNG ĐƯỢC ĐĂNG KÝ VỚI EXECUTOR.
+
+Contract public Gate 2 gồm đúng 9 tool và `book_shuttle` không nằm trong đó.
+Source được giữ lại vì implementation vẫn đúng, không phải vì tool còn dùng
+được: nó không có mặt trong allowlist của Planner, trong prompt, hay trong
+registry của Executor.
+
+TODO trước khi kích hoạt lại: đổi input `tour_id` → `viewing_id`. Sau khi
+`book_tour` được adapter thành `schedule_property_viewing`, id trả về cho
+Agent là `viewing_id`; connector này vẫn đòi `tour_id`, một field không còn
+tồn tại ở phía ngoài Connector. Bật lại mà không sửa sẽ tạo một tool mà
+Planner không bao giờ nối được InputRef vào.
 """
 
 from contextlib import asynccontextmanager

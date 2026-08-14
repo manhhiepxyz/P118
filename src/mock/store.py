@@ -8,6 +8,8 @@ Singleton ``store`` dùng chung cho cả 4 service để mô phỏng dữ liệu
 from dataclasses import dataclass, field
 from threading import RLock
 
+from src.common.projects import PROJECTS as _CANONICAL_PROJECTS
+
 # Dữ liệu chủ sở hữu căn hộ — seed từ ban quản lý chung cư.
 # Dùng verify quyền sở hữu khi register_resident.
 # Phải khớp với dữ liệu test (Lâm Thành Bảo / A1201 / Vinhomes Ocean Park).
@@ -72,11 +74,13 @@ DEFAULT_APARTMENT_OWNERS = [
 
 # Sức chứa slot tham quan theo (residential_area, tour_slot) — seed như
 # apartment_owners. Dùng cho NO_AVAILABILITY khi slot đã kín.
+# Sức chứa được sinh từ danh mục dự án canonical, không liệt kê tay: mọi dự án
+# `search_properties` trả về đều phải đặt lịch xem được. Danh sách viết tay
+# trước đây chỉ phủ 2 khu, nên 5 dự án còn lại search ra rồi đặt là 404.
 DEFAULT_TOUR_SLOTS = [
-    ("Vinhomes Ocean Park", "MORNING", 3),
-    ("Vinhomes Ocean Park", "AFTERNOON", 3),
-    ("Vinhomes Smart City", "MORNING", 3),
-    ("Vinhomes Smart City", "AFTERNOON", 3),
+    (_project["project_name"], slot, 3)
+    for _project in _CANONICAL_PROJECTS
+    for slot in ("MORNING", "AFTERNOON")
 ]
 
 

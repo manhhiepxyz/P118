@@ -53,9 +53,11 @@ def get_planner(request: Request) -> Any:
     planner = getattr(request.app.state, "planner", None)
     if planner is None:
         from src.agents.planner import Planner
-        from src.services.llm import get_llm
+        from src.services.llm import get_llm, structured_output_method
 
-        planner = Planner(get_llm())
+        # Cơ chế structured output theo provider: DeepSeek phải dùng json_mode,
+        # các provider khác giữ function_calling.
+        planner = Planner(get_llm(), structured_output_method=structured_output_method())
         request.app.state.planner = planner
     return planner
 
