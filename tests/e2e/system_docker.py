@@ -335,7 +335,10 @@ def main() -> int:
         SELECT count(*) FROM workflows w
         WHERE w.status IN ('PENDING','RUNNING')
           AND w.archived_at IS NULL
-          AND w.updated_at < NOW() - INTERVAL '5 minutes'
+          -- Cửa sổ phải RỘNG HƠN TTL của sweeper (`zombie_running_ttl_hours`,
+          -- mặc định 0.5h). Dùng 5 phút là chấm điểm hệ thống vì nó chưa làm
+          -- một việc mà chính nó đã hẹn 30 phút nữa mới làm.
+          AND w.updated_at < NOW() - INTERVAL '45 minutes'
           AND NOT EXISTS (
               SELECT 1 FROM workflow_clarifications c
               WHERE c.workflow_id = w.workflow_id AND c.resolved_at IS NULL

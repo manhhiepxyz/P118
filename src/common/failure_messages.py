@@ -54,4 +54,27 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
         return f"Bước “{title}” chưa được thực hiện vì bước trước đó không thành công."
     if code == "INVALID_INPUT":
         return f"Thông tin của bước “{title}” chưa hợp lệ. Hãy kiểm tra lại dữ liệu đã nhập."
-    return f"Không thể hoàn thành bước “{title}”. Vui lòng thử lại."
+    if code == "PROJECT_NOT_FOUND":
+        project = _text(inputs.get("project_name"))
+        subject = f"Dự án “{project}”" if project else "Dự án đã chọn"
+        return f"{subject} không có trong danh mục. Hãy chọn một dự án trong danh sách được hỗ trợ."
+    if code == "VIEWING_ALREADY_BOOKED":
+        viewing_date = _text(inputs.get("viewing_date"))
+        viewing_time = _text(inputs.get("viewing_time"))
+        slot = " ".join(value for value in (viewing_date, viewing_time) if value)
+        suffix = f" {slot}" if slot else " này"
+        return f"Khung giờ{suffix} đã có người đặt. Hãy chọn một khung giờ khác."
+    if code == "INTEREST_ALREADY_EXISTS":
+        project = _text(inputs.get("project_name"))
+        subject = f"dự án “{project}”" if project else "dự án này"
+        return f"Bạn đã đăng ký quan tâm {subject} rồi. Bộ phận tư vấn sẽ liên hệ với bạn."
+    if code in {"SERVICE_UNAVAILABLE", "SERVICE_TIMEOUT"}:
+        return f"Dịch vụ cho bước “{title}” đang tạm gián đoạn. Bạn thử lại sau ít phút giúp mình nhé."
+
+    # Mã CHƯA được phân loại.
+    #
+    # Câu này cố ý KHÔNG nói "vui lòng thử lại". "Thử lại" là một lời hứa rằng
+    # lần sau sẽ khác — với một mã chưa ai phân loại, ta không biết điều đó có
+    # đúng không. Thực tế đã xảy ra: dự án không tồn tại rơi vào nhánh này, và
+    # người dùng được mời bấm lại một việc không bao giờ chạy được.
+    return f"Bước “{title}” chưa thực hiện được. Bạn kiểm tra lại thông tin hoặc liên hệ hỗ trợ giúp mình nhé."

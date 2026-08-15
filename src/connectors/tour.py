@@ -172,6 +172,10 @@ class TourConnector(Connector):
         """
         mapping = {
             "VALIDATION_ERROR": ErrorCode.INVALID_INPUT,
+            # Giờ yêu cầu không nằm trong khung dịch vụ mở — đây là
+            # input sai, không phải lỗi hệ thống, nên người dùng sửa được.
+            "VIEWING_SLOT_NOT_FOUND": ErrorCode.INVALID_INPUT,
+            "TOUR_SLOT_NOT_FOUND": ErrorCode.INVALID_INPUT,
             "NO_AVAILABILITY": ErrorCode.NO_AVAILABILITY,
             "RESIDENT_NOT_FOUND": ErrorCode.RESIDENT_NOT_FOUND,
             "INVALID_DATA": ErrorCode.INVALID_INPUT,

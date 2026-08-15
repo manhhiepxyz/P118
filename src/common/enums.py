@@ -124,6 +124,12 @@ class ErrorCode(StrEnum):
     PAYMENT_NOT_FOUND = "PAYMENT_NOT_FOUND"
     NO_AVAILABILITY = "NO_AVAILABILITY"
     PAYMENT_FAILED = "PAYMENT_FAILED"
+    # Ba mã dưới đây provider vẫn phát ra từ trước, nhưng chưa có chỗ trong
+    # enum nên connector gộp hết vào UNKNOWN_EXTERNAL_ERROR — và lý do thật
+    # ("Không có dự án X trong danh mục") bị thay bằng "Vui lòng thử lại".
+    PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
+    VIEWING_ALREADY_BOOKED = "VIEWING_ALREADY_BOOKED"
+    INTEREST_ALREADY_EXISTS = "INTEREST_ALREADY_EXISTS"
 
     # --- Infrastructure / Network ---
     SERVICE_TIMEOUT = "SERVICE_TIMEOUT"
