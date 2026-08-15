@@ -30,6 +30,7 @@ import asyncpg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.agents.validator import TaskPlanValidator
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.payment import PaymentConnector
@@ -42,16 +43,25 @@ from src.services.mock.payment import payment_app
 from src.services.mock.resident import resident_app
 from src.services.mock.transport import transport_app
 
-_BASE_DATE = date(2100, 1, 1)
-
 
 def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
 def _unique_booking_date() -> str:
-    """Ngày riêng trên dải rộng, tránh Store singleton đụng test module khác."""
-    return (_BASE_DATE + timedelta(days=uuid.uuid4().int % 100_000)).isoformat()
+    """Ngày riêng, nhưng nằm trong khung ngày hợp lệ.
+
+    Bản trước rải ngày từ 2100 tới ~2374 để chắc chắn không đụng Store singleton
+    của module test khác. Mẹo đó không còn dùng được từ khi hệ thống có trần
+    ngày đặt trước — và đúng ra là không nên dùng: một test chứng minh "boundary
+    chạy được" bằng dữ liệu mà sản phẩm phải từ chối thì nó không chứng minh
+    điều nó nói.
+
+    Tính duy nhất thật sự đến từ `vehicle_id` riêng của mỗi lần chạy, nên chỉ
+    cần ngày nằm trong khung hợp lệ là đủ.
+    """
+    span = TaskPlanValidator.MAX_HORIZON_DAYS - 1
+    return (date.today() + timedelta(days=1 + uuid.uuid4().int % span)).isoformat()
 
 
 @asynccontextmanager

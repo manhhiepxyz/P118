@@ -279,7 +279,8 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
             "http://localhost:8006",
         ),
     ) in events
-    assert ("invoke", {"goal": "Đăng ký cư dân", "existing_context": {}}) in events
+    #  rỗng ở lượt đầu: chưa có câu hỏi lại nào để trả lời.
+    assert ("invoke", {"goal": "Đăng ký cư dân", "existing_context": {}, "user_answers": {}}) in events
     assert events[-1] == "pool_closed"
 
 

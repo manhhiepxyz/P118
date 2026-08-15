@@ -77,6 +77,10 @@ services:
       RESIDENT_SERVICES_SERVICE_URL: http://mock-resident-services:8006
       TOUR_SERVICE_URL: http://mock-tour:8005
       CONSULTATION_SERVICE_URL: http://mock-consultation:8007
+      # Bật để xem prompt / chuỗi suy luận / câu trả lời của model ngay trong
+      # `docker compose logs -f backend`. Mặc định TẮT: trace in cả nội dung
+      # người dùng gõ, không phải thứ nên chạy thường trực.
+      P118_LLM_TRACE: ${P118_LLM_TRACE:-0}
     volumes:
       - ./data:/app/data
     depends_on:

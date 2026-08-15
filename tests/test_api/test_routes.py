@@ -245,7 +245,7 @@ def test_follow_up_rejects_past_date_and_outside_business_hours() -> None:
 @pytest.mark.parametrize(
     ("field", "expected"),
     [
-        ("project_name", "dự án trong danh sách"),
+        ("project_name", "Vinhomes Sài Gòn Park"),
         ("viewing_date", "từ hôm nay trở đi"),
         ("viewing_time", "08:00–17:30"),
         ("preferred_time", "08:00–18:00"),

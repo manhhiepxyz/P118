@@ -21,6 +21,7 @@ from src.common.results import StandardResult
 from src.common.task_plan import TaskPlan
 from src.connectors.payment import PaymentConnector
 from src.db.parking_payment_repository import payment_idempotency_key
+from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.deps import build_execution_boundary
 from src.orchestration.payment_approval import (
@@ -440,6 +441,10 @@ async def run_demo_workflow(
     workflow_id: str | None = None,
     on_stage: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     existing_context: dict[str, Any] | None = None,
+    # Field người dùng VỪA trả lời trong lượt hỏi lại. Tách khỏi
+    # `existing_context` vì nó có thẩm quyền cao hơn: goal vẫn mang câu cũ
+    # ("lúc 12:30"), còn đây là điều người dùng vừa nói ("13h").
+    user_answers: dict[str, Any] | None = None,
     approve_mock_payment: bool = False,
     resident_url: str = "http://localhost:8001",
     transport_url: str = "http://localhost:8002",
@@ -491,7 +496,7 @@ async def run_demo_workflow(
     try:
         trusted_context = dict(existing_context or {})
         planner = Planner(
-            get_llm(callbacks=[usage_logger]),
+            get_llm(callbacks=[usage_logger, *trace_callbacks()]),
             structured_output_method=structured_output_method(),
         )
         resident_boundary = ResidentAccessBoundary(
@@ -509,7 +514,11 @@ async def run_demo_workflow(
             parent_workflow_id=parent_workflow_id,
             session_id=session_id,
         )
-        initial_state: dict[str, Any] = {"goal": goal, "existing_context": trusted_context}
+        initial_state: dict[str, Any] = {
+            "goal": goal,
+            "existing_context": trusted_context,
+            "user_answers": dict(user_answers or {}),
+        }
         if workflow_id is not None:
             initial_state["workflow_id"] = workflow_id
         return await graph.ainvoke(initial_state)

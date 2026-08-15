@@ -90,6 +90,17 @@ function messageForStatus(status: number, fallback: string): string {
   }
 }
 
+/**
+ * Tiền tố của những câu 422 được phép hiện nguyên văn cho người dùng.
+ *
+ * Danh sách này tồn tại để KHÔNG dội văn bản tuỳ ý của server ra màn hình. Nó
+ * cũng là thứ rệu rã lặng lẽ: backend đổi câu chữ, danh sách ở đây không đổi,
+ * và người dùng nhận "Đã có lỗi xảy ra. Vui lòng thử lại." trong khi server đã
+ * nói rõ vấn đề. Đúng chuyện vừa xảy ra với câu về dự án và câu về giờ liên hệ.
+ *
+ * `tests/test_frontend_error_messages.py` đối chiếu danh sách này với
+ * `_FOLLOW_UP_VALIDATION_MESSAGES` của backend, nên lệch là đỏ.
+ */
 const SAFE_VALIDATION_MESSAGES = [
   'Ngày tham quan chưa phù hợp.',
   'Ngày đặt chỗ chưa phù hợp.',
@@ -102,6 +113,7 @@ const SAFE_VALIDATION_MESSAGES = [
   'Vui lòng nhập biển số xe',
   'Hãy cho biết phương tiện',
   'Dự án bạn chọn chưa nằm trong danh sách',
+  'Giờ liên hệ phải theo định dạng',
   'Thông tin bổ sung chưa đúng định dạng',
 ]
 
@@ -287,6 +299,16 @@ export async function cancelWorkflow(workflowId: string): Promise<AgentWorkflowR
     `/workflows/demo/${encodeURIComponent(workflowId)}/cancel`,
     { method: 'POST' },
   )
+}
+
+/**
+ * Xoá một yêu cầu ĐÃ KẾT THÚC khỏi danh sách.
+ *
+ * Xoá mềm ở backend: dữ liệu nghiệp vụ và bằng chứng thanh toán được giữ, chỉ
+ * ẩn khỏi danh sách. Yêu cầu chưa kết thúc trả 409 — huỷ trước rồi mới xoá.
+ */
+export async function deleteWorkflow(workflowId: string): Promise<void> {
+  await request<void>(`/workflows/demo/${encodeURIComponent(workflowId)}`, { method: 'DELETE' })
 }
 
 /* ------------------------------------------------------------------ */

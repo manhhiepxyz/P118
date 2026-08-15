@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -12,6 +13,7 @@ from src.api.middleware import RateLimitMiddleware
 from src.api.readiness import evaluate_readiness
 from src.api.routes import router
 from src.config import get_settings
+from src.monitoring.llm_trace import trace_enabled
 from src.orchestration.deps import build_repository
 from src.orchestration.runtime_provider import (
     SharedPool,
@@ -83,6 +85,13 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     print("Shutting down...")
+
+
+if trace_enabled():  # pragma: no cover - phụ thuộc biến môi trường
+    # uvicorn chỉ cấu hình logger của chính nó; logger ứng dụng không có handler
+    # thì trace im lặng và người demo tưởng model không chạy.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger("p118.llm.trace").setLevel(logging.INFO)
 
 
 app = FastAPI(

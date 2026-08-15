@@ -57,6 +57,15 @@ def reset_usage_context(token: Token) -> None:
     _current_usage.reset(token)
 
 
+def current_usage_context() -> dict[str, Any] | None:
+    """Bối cảnh hiện tại, cho những nơi cần đọc mà không cần ghi usage.
+
+    Trace dùng nó để gắn nhãn stage/workflow vào dòng log — cùng một nguồn với
+    `llm_usage`, nên hai bên không bao giờ nói khác nhau về một lượt gọi.
+    """
+    return _current_usage.get()
+
+
 class LlmUsageLogger(BaseCallbackHandler):
     """Callback gom usage của mỗi lần LLM kết thúc.
 

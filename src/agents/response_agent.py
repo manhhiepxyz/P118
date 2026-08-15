@@ -80,6 +80,10 @@ class ReplyView(BaseModel):
     steps: list[dict[str, str]] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     payment_quote: dict[str, Any] | None = None
+    # Đã có bước `pay_fee` chạy xong THÀNH CÔNG hay chưa. Có `payment_quote`
+    # KHÔNG đồng nghĩa đã trả tiền: báo giá xuất hiện ngay khi giữ chỗ, còn tiền
+    # chỉ đi sau khi người dùng bấm duyệt.
+    payment_settled: bool = False
     error_code: str | None = None
     retryable: bool | None = None
     capabilities: list[str] = Field(default_factory=list)
@@ -132,6 +136,22 @@ _COMPLETION_CLAIMS: tuple[str, ...] = (
     "đã hoàn thành",
     "đã xong",
     "giao dịch thành công",
+)
+
+# Số tiền — "150.000 VND", "150000đ", "150.000 ₫".
+_MONEY = re.compile(r"\d[\d.,]*\s*(?:vnd|vnđ|đồng|đ|₫)", re.IGNORECASE)
+
+# Chữ cho người đọc biết khoản tiền CHƯA được trả. Chỉ cần một trong số này.
+_UNPAID_MARKERS: tuple[str, ...] = (
+    "chưa thanh toán",
+    "chưa trả",
+    "chưa thu",
+    "chờ",
+    "cần xác nhận",
+    "xác nhận thanh toán",
+    "sẽ là",
+    "dự kiến",
+    "tạm tính",
 )
 
 # Con số, ngày, giờ, tỉ lệ — mọi thứ model có thể bịa ra và nghe như dữ liệu.
@@ -248,6 +268,21 @@ def _reject_reason(reply: AgentReply, view: ReplyView) -> str | None:
     # thuyết phục và khiến người dùng tin rằng tiền đã được trả.
     if view.status != "SUCCESS" and any(claim in lowered for claim in _COMPLETION_CLAIMS):
         return "khẳng định đã hoàn tất trong khi chưa hoàn tất"
+
+    # Nêu số tiền mà không nói rõ nó chưa được trả.
+    #
+    # Sự cố thật: workflow FAILED, KHÔNG có bước thanh toán nào, và câu trả lời
+    # là "đặt chỗ đỗ xe Khu A thành công (phí 150.000 VND)". Không câu nào
+    # trong `_COMPLETION_CLAIMS` xuất hiện, nên guard cũ cho qua — nhưng người
+    # dùng đọc xong tin rằng tiền đã bị trừ. Ở đây thiệt hại không nằm ở một
+    # câu sai hẳn, mà ở một câu đúng-nửa-vời gắn số tiền cạnh chữ "thành công".
+    #
+    # Quy tắc: chừng nào tiền CHƯA đi, nhắc tới số tiền thì phải nhắc luôn rằng
+    # nó chưa đi. Câu mặc định lúc chờ duyệt đã đạt điều này ("chờ bạn xác nhận
+    # thanh toán 100.000 VND"), nên guard không cản đường nói thật.
+    if not view.payment_settled and _MONEY.search(lowered):
+        if not any(marker in lowered for marker in _UNPAID_MARKERS):
+            return "nêu số tiền như đã trả trong khi chưa thanh toán"
 
     # Con số phải đến từ dữ liệu, không phải từ model. Chỉ chấp nhận những số
     # đã có mặt trong view — số tiền, số bước, ngày giờ đã hiển thị.

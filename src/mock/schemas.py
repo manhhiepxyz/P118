@@ -8,16 +8,23 @@ Request model giữ nguyên; response model cũ được thay bằng ``ApiEnvelo
 """
 
 import re
-from datetime import date, time
+from datetime import date, time, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Trần tương lai — provider tự bảo vệ mình, không phải request nào cũng đi qua
+# Validator. Không có trần thì "2199-12-31" hợp lệ ở mọi lớp và chỗ đỗ năm 2199
+# chiếm capacity thật.
+MAX_HORIZON_DAYS = 1825
+
 
 def _reject_past(value: date) -> date:
     if value < date.today():
         raise ValueError("date must not be in the past")
+    if value > date.today() + timedelta(days=MAX_HORIZON_DAYS):
+        raise ValueError(f"date must be within {MAX_HORIZON_DAYS} days from today")
     return value
 
 

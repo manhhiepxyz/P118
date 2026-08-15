@@ -16,6 +16,7 @@ from src.common.repository import WorkflowStateRepository
 from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.base import Connector
+from src.monitoring.llm_trace import trace_task_result
 
 # Inline retry policy cho lỗi transient. Business errors (NO_AVAILABILITY,
 # PAYMENT_FAILED...) không retry. Chỉ SERVICE_TIMEOUT và SERVICE_UNAVAILABLE.
@@ -190,6 +191,7 @@ class Executor:
                     completed_results[task.task_id] = result
                     await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.FAILED)
                     await self.repository.save_task_result(workflow_id, task.task_id, result)
+                    trace_task_result(workflow_id, task.task_id, task.tool, result)
                     await self._emit_progress(workflow_id, task.task_id, TaskStatus.FAILED)
                 break
 
@@ -288,6 +290,10 @@ class Executor:
                     )
                 await self.repository.update_task_status(workflow_id, task.task_id, status)
                 await self.repository.save_task_result(workflow_id, task.task_id, result)
+                # Đây là dòng người demo cần nhất khi có lỗi: lý do provider từ
+                # chối nằm trong `result.message` và biến mất ngay sau đó nếu
+                # không ghi lại. No-op khi trace tắt.
+                trace_task_result(workflow_id, task.task_id, task.tool, result)
                 await self._emit_progress(workflow_id, task.task_id, status)
 
         # Final workflow status.

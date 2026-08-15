@@ -307,6 +307,36 @@ Logs tự động submit lên grading server mỗi khi `git push`.
 
 ---
 
+## Xem model làm gì lúc demo
+
+Mặc định backend chỉ ghi **số** cho mỗi lần gọi LLM (bảng `llm_usage`: stage,
+token, độ trễ). Prompt và câu trả lời không vào DB — chúng mang dữ liệu người
+dùng, và một bảng nghiệp vụ không phải chỗ để chúng nằm lại.
+
+Khi cần đứng cạnh máy vừa bấm UI vừa đọc log model, bật trace:
+
+```bash
+P118_LLM_TRACE=1 docker compose up -d --build backend
+docker compose logs -f backend | grep -A5 ───
+```
+
+Mỗi lần gọi in ba khối, gắn nhãn `stage/workflow`:
+
+```
+─── LLM VÀO (plan/9b7182a0) ───          prompt gửi đi
+─── MODEL SUY LUẬN (plan/9b7182a0) ───   484 token, provider không trả nội dung
+─── LLM RA (plan/9b7182a0) ───           TaskPlan model trả về
+```
+
+Về dòng giữa: DeepSeek V4 Flash **có** chạy thinking, nhưng endpoint tương
+thích OpenAI không trả `reasoning_content` — chỉ trả `reasoning_tokens`. Nên
+trace ghi số token thay vì bịa nội dung. Nếu sau này đổi sang provider có trả
+chuỗi suy luận, `LlmTraceLogger` đọc sẵn `additional_kwargs.reasoning_content`
+và sẽ in ra nguyên văn, không cần sửa gì.
+
+Trace không đi ra giao diện: người dùng cuối vẫn chỉ thấy câu đã qua guard của
+Response Agent. Đừng bật trong môi trường chung — nó in cả nội dung người dùng gõ.
+
 ## Runtime (Gate 2)
 
 ### Khởi động full stack

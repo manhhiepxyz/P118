@@ -4,12 +4,12 @@ import logging
 import re
 import unicodedata
 import uuid
-from datetime import date, time
+from datetime import date, time, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from src.agents.planner import MISSING_FIELD_LABELS
 from src.agents.response_agent import ReplyView, ResponseAgent
@@ -17,7 +17,7 @@ from src.agents.validator import TaskPlanValidator
 from src.api.deps import get_current_user
 from src.api.small_talk import SmallTalk, SpeechType, answer_capability_question, classify
 from src.common.enums import ErrorCode, WorkflowStatus
-from src.common.failure_messages import task_failure_message
+from src.common.failure_messages import repair_question, task_failure_message
 from src.common.failures import classify_failure, failure_for_code
 from src.common.projects import PROJECTS, find_project_id, project_name, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
@@ -68,9 +68,18 @@ _DEMO_WORKFLOW_TASKS: dict[str, asyncio.Task[None]] = {}
 _DATE_FIELDS = frozenset({"viewing_date", "booking_date", "preferred_date", "move_date"})
 _TIME_FIELDS = frozenset({"viewing_time", "preferred_time", "move_time"})
 _BOOLEAN_FIELDS = frozenset({"consent", "needs_elevator", "needs_loading_support"})
+_SUPPORTED_PROJECTS_MESSAGE = (
+    "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ. Các dự án đang có: "
+    + ", ".join(project["project_name"] for project in PROJECTS)
+    + "."
+)
+
 _FOLLOW_UP_VALIDATION_MESSAGES = {
-    "project_id": "Hãy chọn một dự án trong danh sách được hỗ trợ.",
-    "project_name": "Hãy chọn một dự án trong danh sách được hỗ trợ.",
+    # Kèm luôn danh sách: đây là hội thoại, không có bảng nào để người dùng
+    # nhìn. Bảo "chọn trong danh sách được hỗ trợ" mà không đưa danh sách thì
+    # họ chỉ còn cách đoán — và ảnh chụp lúc sự cố cho thấy họ đoán bốn lần.
+    "project_id": _SUPPORTED_PROJECTS_MESSAGE,
+    "project_name": _SUPPORTED_PROJECTS_MESSAGE,
     "viewing_date": "Ngày tham quan chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
     "booking_date": "Ngày đặt chỗ chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
     "preferred_date": "Ngày bảo trì chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
@@ -144,18 +153,36 @@ def _extract_vehicle_type(text: str) -> str | None:
     return None
 
 
+# Xa nhất người dùng được đặt trước. Không có trần thì "2199-12-31" là một ngày
+# hợp lệ: nó không nằm trong quá khứ, nên mọi lớp kiểm đều cho qua. Chỗ đỗ xe
+# năm 2199 vẫn được giữ thật trong database và chiếm capacity thật.
+#
+# Hai năm là con số của demo, cố ý rộng rãi. Điều quan trọng không phải trị số
+# mà là CÓ một trần: một ngày vô lý phải bị từ chối lúc nhập, không phải lúc ai
+# đó đọc báo cáo.
+MAX_SCHEDULE_HORIZON_DAYS = 1825
+
+
 def _is_allowed_schedule_date(value: str) -> bool:
-    return date.fromisoformat(value) >= date.today()
+    parsed = date.fromisoformat(value)
+    today = date.today()
+    return today <= parsed <= today + timedelta(days=MAX_SCHEDULE_HORIZON_DAYS)
+
+
+# Khung giờ dựng TỪ `TaskPlanValidator.TIME_INPUTS`, không chép tay.
+#
+# Bản chép tay trước đây thiếu `preferred_contact_time`: người dùng trả lời
+# "19:00" thì bộ lọc này cho qua, Validator mới chặn — và người dùng nhận
+# VALIDATION_ERROR chung chung thay vì một câu bảo chọn lại giờ. Hai bảng nói
+# về cùng một luật thì sớm muộn cũng lệch nhau; dựng từ một nguồn thì không.
+_TIME_WINDOWS: dict[str, tuple[time, time]] = {
+    field: (opens, closes) for field, opens, closes in TaskPlanValidator.TIME_INPUTS.values()
+}
 
 
 def _is_allowed_schedule_time(field: str, value: str) -> bool:
     parsed = time.fromisoformat(value)
-    windows = {
-        "viewing_time": (time(8, 0), time(17, 30)),
-        "preferred_time": (time(8, 0), time(18, 0)),
-        "move_time": (time(7, 0), time(20, 0)),
-    }
-    window = windows.get(field)
+    window = _TIME_WINDOWS.get(field)
     return window is None or window[0] <= parsed <= window[1]
 
 
@@ -222,7 +249,7 @@ _PUBLIC_FIELD_ALIASES: dict[str, str] = {"project_id": "project_name"}
 
 # Message KHÔNG liệt kê danh mục dự án và KHÔNG nhắc mã nội bộ. UI đã có
 # `/projects` để dựng danh sách chọn; lặp lại ở đây là hai nguồn cho một thứ.
-_UNSUPPORTED_PROJECT_MESSAGE = "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ."
+_UNSUPPORTED_PROJECT_MESSAGE = _SUPPORTED_PROJECTS_MESSAGE
 
 
 def _to_public_missing_fields(fields: list[str]) -> list[str]:
@@ -934,6 +961,7 @@ async def _run_demo_job(
             workflow_id=workflow_id,
             on_stage=on_stage,
             existing_context=job["existing_context"],
+            user_answers=job.get("user_answers") or {},
             approve_mock_payment=approve_mock_payment,
             resident_url=service_urls["resident"],
             transport_url=service_urls["transport"],
@@ -1233,6 +1261,11 @@ def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list
             if response.payment_quote
             else None
         ),
+        # Tiền chỉ coi là đã đi khi CÓ bước pay_fee và bước đó SUCCESS.
+        # Suy từ `payment_quote` là sai: báo giá có mặt ngay từ lúc giữ chỗ,
+        # trước khi người dùng bấm duyệt — đó chính là cách một khoản chưa thu
+        # được thuật lại như đã thu.
+        payment_settled=any(task.tool == "pay_fee" and task.status == "SUCCESS" for task in response.tasks),
         error_code=response.error_code,
         retryable=response.retryable,
         capabilities=capabilities,
@@ -1729,6 +1762,73 @@ async def chat(http_request: Request, request: ChatRequest) -> ChatResponse:
     )
 
 
+# Từ khoá nhận ra người dùng đang hỏi một dịch vụ CHỈ dành cho cư dân.
+#
+# Chỉ dùng để chọn CÂU CHỮ, không bao giờ để cấp quyền: quyền do
+# `ResidentAccessBoundary` quyết định dựa trên mapping đã xác minh trong
+# database. Một từ khoá sót chỉ khiến câu trả lời kém rõ, không mở được cửa nào.
+_RESIDENT_SERVICE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Đăng ký phương tiện và chỗ đỗ xe",
+        # "thanh toán phí" gộp vào đây sau khi dịch vụ thanh toán độc lập bị gỡ:
+        # trả phí là bước xác nhận trong luồng đặt chỗ. Tên dịch vụ nêu ra cho
+        # người dùng phải là tên CÓ THẬT trong danh mục, nếu không câu trả lời
+        # chỉ họ tới một mục không tồn tại.
+        (
+            "đỗ xe",
+            "chỗ đỗ",
+            "bãi xe",
+            "đăng ký xe",
+            "phương tiện",
+            "biển số",
+            "ô tô",
+            "oto",
+            "xe máy",
+            "thanh toán phí",
+            "trả phí",
+            "đóng phí",
+        ),
+    ),
+    ("Báo bảo trì / sửa chữa", ("bảo trì", "sửa chữa", "sửa nhà", "hỏng", "rò rỉ", "sự cố", "kỹ thuật viên")),
+    ("Đặt lịch chuyển nhà", ("chuyển nhà", "chuyển đồ", "thang máy", "vận chuyển đồ")),
+)
+
+_LINK_REQUIRED_TEMPLATE = (
+    "{service} chỉ dành cho cư dân đã liên kết căn hộ, nên mình chưa thực hiện được. "
+    "Bạn vào mục Liên kết căn hộ để gửi yêu cầu; ban quản lý duyệt xong là mình hỗ trợ ngay."
+)
+
+
+def _resident_service_in(goal: str) -> str | None:
+    """Tên dịch vụ chỉ-cư-dân mà câu này đang nhắc tới, nếu có."""
+    lowered = (goal or "").casefold()
+    for service, keywords in _RESIDENT_SERVICE_HINTS:
+        if any(keyword in lowered for keyword in keywords):
+            return service
+    return None
+
+
+def _resident_link_required_message(state: dict[str, Any]) -> str | None:
+    """Câu giải thích ĐÚNG lý do, khi lý do là chưa liên kết căn hộ.
+
+    Sự cố thật: tài khoản chưa liên kết gõ "đặt chỗ đỗ xe". Planner từ chối
+    (`supported_goal`) — chặn đúng — nhưng người dùng đọc được "Mình chưa đủ cơ
+    sở để hỏi thêm cho yêu cầu này. Bạn mô tả lại cụ thể hơn giúp mình nhé."
+
+    Lời mời mô tả lại là một lời hứa sai: mô tả kiểu gì cũng không dùng được,
+    vì thứ còn thiếu không phải chi tiết trong câu mà là quyền cư dân. Người
+    dùng sẽ gõ lại vài lần rồi kết luận sản phẩm hỏng.
+
+    Hàm này KHÔNG cấp và KHÔNG chặn quyền — nó chỉ chọn câu chữ cho một yêu cầu
+    đã bị chặn ở tầng khác.
+    """
+    context = state.get("existing_context") or {}
+    if context.get("resident_verification_status") == "VERIFIED":
+        return None
+    service = _resident_service_in(str(state.get("goal") or ""))
+    return _LINK_REQUIRED_TEMPLATE.format(service=service) if service else None
+
+
 def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflowResponse:
     """Chuyển AgentState thành view model chỉ chứa field nghiệp vụ allowlist."""
     plan = state.get("plan")
@@ -1755,12 +1855,23 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                 dict(task.input),
             )
             if missing_fields:
+                # Câu hỏi lại phải NÊU LÝ DO. Dùng chung câu với nhánh thiếu
+                # thông tin là nói với người vừa gõ "Khu A" rằng họ chưa cho
+                # biết khu nào — họ sẽ trả lời "Khu A" lần nữa và lại hỏng.
+                code = getattr(first_hint.error_code, "value", first_hint.error_code)
+                question = repair_question(task.tool, str(code), dict(task.input))
                 return DemoWorkflowResponse(
                     status="NEEDS_INFORMATION",
-                    question=_follow_up_validation_message(missing_fields),
+                    question=question or _follow_up_validation_message(missing_fields),
                     missing_fields=missing_fields,
                     plan=plan_view,
                 )
+
+    # Chưa liên kết căn hộ mà hỏi dịch vụ cư dân: nói đúng lý do, bất kể lỗi
+    # xuất hiện ở nhánh nào phía dưới — nguyên nhân vẫn là một.
+    link_required = _resident_link_required_message(state)
+    if link_required is not None and not state.get("plan_validated"):
+        return DemoWorkflowResponse(status="EXECUTION_ERROR", summary=link_required, plan=plan_view)
 
     if state.get("planning_error"):
         return DemoWorkflowResponse(
@@ -2358,6 +2469,10 @@ async def continue_demo_workflow(
         "owner_user_id": user["id"],
         "approve_mock_payment": pending_approve_payment,
         "existing_context": context,
+        # Tách riêng khỏi `existing_context`: đây là điều người dùng vừa nói
+        # SAU KHI biết lựa chọn đầu không dùng được, nên nó phải thắng câu chữ
+        # trong goal cũ — goal của workflow con vẫn mang nguyên "lúc 12:30".
+        "user_answers": dict(answers),
         "contact_profile": dict(pending_contact_profile),
         "session_id": session_id,
         "parent_workflow_id": parent_workflow_id,
@@ -2714,12 +2829,18 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
         description="Đăng ký thời gian, thang máy và hỗ trợ vận chuyển.",
         requires_resident=True,
     ),
-    DemoCapabilityItem(
-        name="Thanh toán phí đỗ xe",
-        description="Xác nhận khoản phí do dịch vụ đặt chỗ báo.",
-        requires_resident=True,
-    ),
 )
+
+# "Thanh toán phí đỗ xe" đã được gỡ khỏi danh mục.
+#
+# Nó chưa bao giờ là một dịch vụ người dùng đi TÌM. Từ khi bước thanh toán được
+# ghép tự động vào mọi lần đặt chỗ (`_ensure_payment_is_offered`), việc trả phí
+# là một bước XÁC NHẬN nằm trong luồng đặt chỗ, không phải một mục để chọn từ
+# menu. Để lại nó mời người dùng bắt đầu một yêu cầu "thanh toán" rời rạc mà
+# Planner không có booking nào để gắn vào.
+#
+# Tool `pay_fee` KHÔNG bị gỡ: nó vẫn nằm trong `ALLOWED_TOOLS` và vẫn chạy —
+# chỉ là không còn được rao như một dịch vụ độc lập.
 
 
 @router.get("/capabilities", response_model=DemoCapabilityListResponse)
@@ -2757,6 +2878,39 @@ async def list_supported_capabilities(
         return item.model_copy(update={"available": False, "blocked_reason": blocked_reason})
 
     return DemoCapabilityListResponse(capabilities=[_resolve(item) for item in _CAPABILITY_CATALOGUE])
+
+
+@router.delete("/workflows/demo/{workflow_id}", status_code=204)
+async def delete_demo_workflow(
+    workflow_id: str,
+    user: dict = Depends(get_current_user),
+) -> Response:
+    """Xoá một yêu cầu đã kết thúc khỏi danh sách của chính mình.
+
+    Xoá MỀM: dữ liệu nghiệp vụ và bằng chứng thanh toán được giữ lại, chỉ ẩn
+    khỏi danh sách. Yêu cầu chưa kết thúc phải huỷ trước — một workflow đang
+    chờ duyệt thanh toán mà biến mất khỏi màn hình thì khoản tiền vẫn treo và
+    người dùng không còn đường nhìn thấy nó.
+    """
+    await _require_workflow_owner(workflow_id, user)
+
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        outcome = await repository.delete_workflow_for_owner(workflow_id, owner_user_id=user["id"])
+    finally:
+        await pool.close()
+
+    if outcome is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+    if not outcome.get("deleted"):
+        raise HTTPException(
+            status_code=409,
+            detail="Yêu cầu này chưa kết thúc. Bạn huỷ yêu cầu trước rồi xoá nhé.",
+        )
+    # Bỏ job trong RAM để lượt poll đang chạy không dựng lại dòng vừa ẩn.
+    _DEMO_JOBS.pop(workflow_id, None)
+    return Response(status_code=204)
 
 
 @router.post(

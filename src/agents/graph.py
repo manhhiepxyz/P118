@@ -29,7 +29,98 @@ from src.agents.state import AgentState
 from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
-from src.common.task_plan import TaskPlan
+from src.common.task_plan import InputRef, Task, TaskPlan
+
+
+def _ensure_payment_is_offered(plan: Any) -> None:
+    """Đặt chỗ đỗ xe có phí thì luôn phải hỏi người dùng, không tuỳ Planner.
+
+    Sự cố thật: goal "đăng ký ô tô và đặt chỗ đỗ xe" (không có chữ "thanh
+    toán") ra plan 3 bước KHÔNG có `pay_fee`. Chỗ đỗ được giữ thật, phí 150.000
+    VND phát sinh thật, workflow báo SUCCESS — và người dùng không hề được hỏi
+    có trả hay không, cũng không biết mình đang nợ một khoản.
+
+    Vấn đề không phải một bước bị thiếu. Cổng duyệt thanh toán là cơ chế bảo vệ
+    duy nhất đứng giữa người dùng và tiền của họ, mà nó chỉ hoạt động khi
+    Planner tình cờ nghĩ ra `pay_fee`. Một cơ chế bảo vệ phụ thuộc vào cách LLM
+    diễn đạt thì không phải cơ chế bảo vệ — vậy nên nó được ghép vào ở đây,
+    bằng code.
+
+    Thêm `pay_fee` KHÔNG có nghĩa là thu tiền: nó đưa workflow tới
+    WAITING_APPROVAL và người dùng vẫn phải bấm duyệt. Không đồng nào đi trước
+    khi họ đồng ý — chỉ là bây giờ họ được hỏi.
+
+    Ba field lấy bằng InputRef từ chính bước đặt chỗ, đúng quy tắc đang có:
+    báo giá là dữ liệu authoritative của provider, không phải thứ LLM hay người
+    dùng khai.
+    """
+    tasks = list(getattr(plan, "tasks", ()) or ())
+    if not tasks:
+        return
+
+    def _refers_to(task: Any, booking_task_id: str) -> bool:
+        for value in task.input.values():
+            if getattr(value, "from_task", None) == booking_task_id:
+                return True
+            if isinstance(value, dict) and value.get("from_task") == booking_task_id:
+                return True
+        return False
+
+    used_ids = {task.task_id for task in tasks}
+    for booking in [task for task in tasks if task.tool == "book_parking"]:
+        if any(task.tool == "pay_fee" and _refers_to(task, booking.task_id) for task in tasks):
+            continue
+        index = len(used_ids) + 1
+        while f"T{index}" in used_ids:
+            index += 1
+        new_id = f"T{index}"
+        used_ids.add(new_id)
+        plan.tasks.append(
+            Task(
+                task_id=new_id,
+                tool="pay_fee",
+                depends_on=[booking.task_id],
+                input={
+                    field: InputRef(field=field, from_task=booking.task_id)
+                    for field in ("booking_id", "amount", "currency")
+                },
+            )
+        )
+
+
+def _apply_user_answers(plan: Any, user_answers: dict[str, Any]) -> None:
+    """Ép giá trị người dùng VỪA trả lời đè lên giá trị Planner suy từ goal.
+
+    Sự cố thật: khung 12:30 đã kín, hệ thống hỏi lại, người dùng đáp "13h".
+    Workflow con giữ nguyên goal cũ — trong đó vẫn ghi "lúc 12:30" — còn 13:00
+    chỉ nằm trong context. Planner đọc thấy hai giá trị mâu thuẫn và chọn cái
+    viết trong đề bài, nên lượt chạy lại hỏng y hệt lượt trước. Người dùng thấy
+    câu trả lời của mình bị bỏ qua.
+
+    Câu trả lời tường minh của người dùng có thẩm quyền cao hơn văn bản goal cũ:
+    goal là điều họ nói LÚC ĐẦU, `user_answers` là điều họ nói SAU KHI biết
+    lựa chọn đầu không dùng được.
+
+    Hai giới hạn cố ý:
+      - chỉ đè khi task ĐÃ CÓ field đó, tức Planner cũng cho rằng nó thuộc về
+        bước này. Thêm field mới là sửa kế hoạch, không phải sửa giá trị.
+      - không đụng vào InputRef (dict trỏ sang task khác). Ghi đè một reference
+        bằng literal sẽ cắt đứt dây chuyền dữ liệu giữa các bước.
+    """
+    if not user_answers or plan is None:
+        return
+    for task in getattr(plan, "tasks", ()):
+        for field, value in user_answers.items():
+            if field not in task.input:
+                continue
+            current = task.input[field]
+            # InputRef là model Pydantic, KHÔNG phải dict — kiểm bằng
+            # `isinstance(..., dict)` sẽ hụt và ghi đè mất reference. Kiểm theo
+            # `from_task` để bắt được cả dạng model lẫn dạng dict thô.
+            is_reference = isinstance(current, dict) and "from_task" in current
+            is_reference = is_reference or getattr(current, "from_task", None) is not None
+            if not is_reference:
+                task.input[field] = value
 
 
 class ExecutionBoundary(Protocol):
@@ -284,6 +375,8 @@ def build_planner_graph(
             }
 
         if result.is_ready:
+            _apply_user_answers(result.plan, state.get("user_answers") or {})
+            _ensure_payment_is_offered(result.plan)
             # READY: không đặt `question` — không có gì để hỏi người dùng.
             # `plan_validated=False` ghi đè mọi giá trị caller truyền vào initial
             # state: chỉ `validate_node` mới có quyền đặt cờ này thành True.

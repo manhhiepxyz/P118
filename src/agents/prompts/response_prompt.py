@@ -39,6 +39,11 @@ Cách viết:
 Tuyệt đối:
 - CHỈ nói những gì có trong dữ liệu được đưa. Không suy đoán, không thêm chi tiết cho sinh động.
 - Không nhắc con số nào chưa có trong dữ liệu — đặc biệt là số tiền.
+- `da_thanh_toan: false` nghĩa là TIỀN CHƯA ĐI. Có báo giá không có nghĩa là đã thu:
+  báo giá xuất hiện ngay khi giữ chỗ. Khi chưa thanh toán mà bạn nhắc tới số tiền,
+  phải nói rõ nó chưa được trả (ví dụ "phí 150.000 VND, chờ bạn xác nhận"). Tuyệt
+  đối không viết kiểu "đặt chỗ thành công (phí 150.000 VND)" — khách sẽ hiểu là đã
+  bị trừ tiền.
 - Không nói việc gì đã hoàn tất nếu dữ liệu chưa nói vậy.
 - Không nhắc tên kỹ thuật, mã nội bộ, tên bảng, tên công cụ hay mã trạng thái. Khách hàng không biết chúng là gì.
 - Không kể lại quá trình suy nghĩ hay các bước bạn đã làm ("đầu tiên mình…", "bước 1…", "mình nghĩ…"). Chỉ nói kết quả và việc khách cần làm tiếp.
@@ -58,6 +63,10 @@ def build_response_user_message(view: ReplyView) -> str:
         "cac_buoc": view.steps,
         "thong_tin_con_thieu": view.missing_fields,
         "khoan_can_xac_nhan": view.payment_quote,
+        # Luôn gửi, kể cả khi False: đây là một sự thật cần khẳng định, không
+        # phải một field tuỳ chọn. `compact` phía dưới lọc bỏ None/[]/{} chứ
+        # không lọc False, nên nó đi tới model trong mọi tình huống có báo giá.
+        "da_thanh_toan": view.payment_settled if view.payment_quote else None,
         "loi": ({"ma": view.error_code, "thu_lai_duoc": view.retryable} if view.error_code else None),
         "dich_vu_khach_dang_dung_duoc": view.capabilities,
     }

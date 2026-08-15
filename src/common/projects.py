@@ -19,7 +19,18 @@ def _normalize(value: str) -> str:
 
 _PROJECT_BY_ID = {project["project_id"]: project for project in PROJECTS}
 _PROJECT_ID_BY_NAME = {_normalize(project["project_name"]): project["project_id"] for project in PROJECTS}
-_PROJECT_ID_BY_NAME["vinhome ocean park"] = "PRJ-007"
+# "Vinhome" thiếu "s" là lỗi gõ phổ biến nhất với bộ tên này, và người dùng
+# không có cách nào biết mình sai: câu từ chối chỉ nói "chọn trong danh sách".
+#
+# Trước đây chỉ Ocean Park có alias này — sáu dự án còn lại thì không, nên cùng
+# một kiểu gõ sai lúc chạy được lúc không. Sinh alias cho CẢ danh mục thì thêm
+# dự án mới cũng tự có, không ai phải nhớ.
+#
+# Đây vẫn là khớp CHÍNH XÁC sau chuẩn hoá, không phải khớp gần đúng: hệ thống
+# không đoán hộ người dùng họ định chọn dự án nào.
+for _project in PROJECTS:
+    _alias = _normalize(_project["project_name"]).replace("vinhomes ", "vinhome ", 1)
+    _PROJECT_ID_BY_NAME.setdefault(_alias, _project["project_id"])
 
 
 def resolve_project_id(name: str) -> str | None:

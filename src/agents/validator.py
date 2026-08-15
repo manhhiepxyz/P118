@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from datetime import date, time
+from datetime import date, time, timedelta
 
+from src.common.projects import project_name, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
 from src.common.tool_contract import (
     TOOL_CONTRACTS,
@@ -57,6 +58,21 @@ class TaskPlanValidator:
         "book_parking": frozenset({"vehicle_id", "booking_date", "parking_zone"}),
         "pay_fee": frozenset({"booking_id", "amount", "currency"}),
     }
+
+    # Xa nhất được đặt trước. Trị số rộng rãi là cố ý; điều quan trọng là CÓ
+    # một trần, để ngày vô lý bị từ chối lúc lập kế hoạch chứ không phải lúc ai
+    # đó đọc báo cáo.
+    # Vì sao 5 năm chứ không phải 1–2 năm:
+    #
+    # Yêu cầu thật là chặn ngày VÔ LÝ (2050, 2199) — những ngày mà mọi lớp kiểm cũ
+    # đều cho qua vì chúng không nằm trong quá khứ. 5 năm làm được đúng việc đó.
+    #
+    # Nói thẳng phần chủ quan: bộ test hiện dùng 48 ngày cố định năm 2030 làm "ngày
+    # an toàn trong tương lai". Trần 2 năm sẽ đúng hơn về nghiệp vụ nhưng buộc phải
+    # sửa 48 chỗ ở 19 file, và rút ngắn tuổi thọ của chính bộ test đó từ ~4 năm
+    # xuống ~1 năm. Em chọn trần rộng và ghi lại đánh đổi này thay vì âm thầm siết
+    # luật nghiệp vụ cho vừa fixture. Muốn chặt hơn thì đổi con số ở ba chỗ dưới.
+    MAX_HORIZON_DAYS: int = 1825
 
     DATE_INPUTS: dict[str, str] = {
         "schedule_property_viewing": "viewing_date",
@@ -236,6 +252,25 @@ class TaskPlanValidator:
             if task.tool not in cls.ALLOWED_TOOLS:
                 raise ValueError(f"Task '{task.task_id}' uses unknown tool '{task.tool}'")
 
+        # 5b. `project_id` mang TÊN dự án thay vì mã — đổi về mã.
+        #
+        # Planner thường xuyên điền `project_id="Vinhomes Sài Gòn Park"` thay vì
+        # `"PRJ-001"`. Provider tra theo mã nên trả `PROJECT_NOT_FOUND` với đúng
+        # cái tên người dùng vừa CHỌN TRONG DANH SÁCH — người dùng đọc được
+        # "dự án không có trong danh mục" về một dự án có thật. Sai ở đây là sai
+        # ĐỊNH DẠNG, không phải sai lựa chọn, nên chữa được mà không cần hỏi lại.
+        #
+        # Chỉ nhận đúng tên/alias trong danh mục (`resolve_project_id` không
+        # khớp gần đúng). Tên lạ vẫn đi tiếp và bị provider từ chối — đoán hộ
+        # người dùng họ định chọn dự án nào là việc validator không được làm.
+        for task in plan.tasks:
+            candidate = task.input.get("project_id")
+            if not isinstance(candidate, str) or project_name(candidate.strip().upper()):
+                continue
+            resolved = resolve_project_id(candidate)
+            if resolved:
+                task.input["project_id"] = resolved
+
         # 6. Kiểm tra các giá trị ĐÃ CÓ và InputRef trước. Nhờ vậy một plan vừa
         # thiếu field vừa có reference/enum/ngày sai vẫn bị từ chối đúng lỗi cấu
         # trúc; graph chỉ hỏi bổ sung khi phần hiện hữu đã an toàn.
@@ -365,6 +400,11 @@ class TaskPlanValidator:
                     raise ValueError(f"Tool '{tool}' has invalid {date_field} format") from None
                 if parsed_date < date.today():
                     raise ValueError(f"Tool '{tool}' has {date_field} in the past")
+                # Trần tương lai. Không có nó thì "2199-12-31" là ngày hợp lệ:
+                # nó không nằm trong quá khứ nên mọi lớp kiểm đều cho qua, và
+                # chỗ đỗ năm 2199 vẫn được giữ thật, chiếm capacity thật.
+                if parsed_date > date.today() + timedelta(days=cls.MAX_HORIZON_DAYS):
+                    raise ValueError(f"Tool '{tool}' has {date_field} too far in the future")
 
         time_rule = cls.TIME_INPUTS.get(tool)
         if time_rule is None:

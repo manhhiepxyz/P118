@@ -278,6 +278,58 @@ class WorkflowRepository:
                 _uuid(workflow_id),
             )
 
+    async def delete_workflow_for_owner(self, workflow_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Ẩn một yêu cầu ĐÃ KẾT THÚC khỏi danh sách của chủ sở hữu.
+
+        Xoá mềm bằng `archived_at`, không DELETE. Ba lý do:
+
+          - `workflow_tasks`, `payments` và `payment_approvals` là bằng chứng
+            một khoản tiền đã đi. Xoá cứng nghĩa là người dùng dọn màn hình
+            xong thì hệ thống mất luôn dấu vết giao dịch của chính họ.
+          - `archived_at` đã là cơ chế đang dùng để ẩn workflow cha sau khi bàn
+            giao. Thêm một cách ẩn thứ hai là thêm một cách để hai chỗ nói khác
+            nhau về cùng một dòng.
+          - Khôi phục được: `archived_at = NULL` là hết.
+
+        Chỉ cho xoá khi đã kết thúc. Workflow đang chờ duyệt thanh toán mà biến
+        khỏi danh sách thì khoản tiền vẫn treo, chỗ đỗ vẫn bị giữ, và người
+        dùng không còn đường nào nhìn thấy nó — muốn bỏ thì huỷ trước, vì huỷ
+        có chính sách rõ ràng cho khoản đang chờ.
+
+        None dùng chung cho "không tồn tại" và "không phải chủ sở hữu" để không
+        tạo oracle IDOR — giống hệt `cancel_workflow`.
+        """
+        terminal = {"SUCCESS", "FAILED", "CANCELLED"}
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT status, owner_user_id, archived_at
+                    FROM workflows
+                    WHERE workflow_id = $1
+                    FOR UPDATE
+                    """,
+                    _uuid(workflow_id),
+                )
+                if row is None or str(row["owner_user_id"]) != str(owner_user_id):
+                    return None
+
+                status = str(row["status"])
+                if status not in terminal:
+                    return {"deleted": False, "status": status}
+                if row["archived_at"] is not None:
+                    return {"deleted": True, "status": status}
+
+                await conn.execute(
+                    """
+                    UPDATE workflows
+                    SET archived_at = NOW(), updated_at = NOW()
+                    WHERE workflow_id = $1 AND archived_at IS NULL
+                    """,
+                    _uuid(workflow_id),
+                )
+                return {"deleted": True, "status": status}
+
     async def cancel_workflow(self, workflow_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         """Huỷ workflow và mọi bước chưa kết thúc trong một transaction.
 
