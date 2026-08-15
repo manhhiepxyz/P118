@@ -121,12 +121,23 @@ def test_a_provider_may_not_borrow_another_providers_model():
     ],
 )
 def test_the_error_message_never_carries_a_key_or_a_credentialed_url(overrides):
-    secret = "sk-canary-khong-duoc-xuat-hien-0123456789"
+    # Canary không mang dạng key thật, và biến không tên là `secret`.
+    #
+    # Repo có bộ quét secret chạy trên mọi file được track
+    # (`tests/test_no_committed_secrets.py`). Nó bắt cả tiền tố `sk-` lẫn mẫu
+    # `SECRET = "<32 ký tự trở lên>"`, và cố ý KHÔNG phân biệt key thật với key
+    # giả — đúng như nó nên thế. Một canary trông giống key thật sẽ làm guard
+    # đó đỏ vĩnh viễn, và một guard luôn đỏ là một guard đã bị tắt.
+    #
+    # Hình dạng canary không quan trọng ở đây: điều cần chứng minh là GIÁ TRỊ
+    # của key không bao giờ được lặp lại trong message. Tiền tố `sk-` vẫn được
+    # kiểm riêng ở assert phía dưới.
+    planted = "canary-khong-duoc-xuat-hien-0123456789"
     settings = _settings(
         **{
-            "deepseek_api_key": secret,
-            "openrouter_api_key": secret,
-            "openai_api_key": secret,
+            "deepseek_api_key": planted,
+            "openrouter_api_key": planted,
+            "openai_api_key": planted,
             **overrides,
         }
     )
@@ -134,7 +145,7 @@ def test_the_error_message_never_carries_a_key_or_a_credentialed_url(overrides):
         check_llm_configuration(settings)
 
     message = str(exc.value)
-    assert secret not in message
+    assert planted not in message
     assert "sk-" not in message
     assert "://" not in message, "message chứa URL — URL là chỗ credential hay đi nhờ"
 

@@ -34,7 +34,13 @@ const EMPTY_WORKFLOWS: AgentWorkflowListItem[] = []
 
 /** Admin Dashboard — giám sát toàn bộ workflow (Prompt 3.1). */
 export function AdminDashboardPage() {
-  const { data, loading, error } = usePolling(() => listWorkflows().then((r) => r.items), 10000)
+  // `all`, không phải mặc định `active`.
+  //
+  // Trang này có bộ lọc trạng thái ở phía client, trong đó có "Hoàn thành" và
+  // "Thất bại". Nạp bằng `active` thì backend đã loại sẵn đúng những trạng
+  // thái đó, nên chọn chúng luôn ra danh sách rỗng — bộ lọc trông như hỏng.
+  // KPI "Hoàn thành" cũng vì thế luôn bằng 0.
+  const { data, loading, error } = usePolling(() => listWorkflows('all', 50).then((r) => r.items), 10000)
   const workflows = data ?? EMPTY_WORKFLOWS
 
   const [query, setQuery] = useState('')
