@@ -83,6 +83,10 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 from src.main import app  # noqa: E402
+from src.orchestration.runtime_provider import (  # noqa: E402
+    clear_repository_provider,
+    set_repository_provider,
+)
 
 
 @pytest_asyncio.fixture
@@ -93,7 +97,6 @@ async def client(db_pool, monkeypatch):
     chạy lifespan — nên mọi endpoint auth trả 503. Ở đây gắn thẳng repository
     thật (không phải fake) để test đi qua đúng đường SQL mà production đi.
     """
-    from src.api import routes
     from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 
     repository = PostgreSQLWorkflowStateRepository(db_pool)
@@ -110,23 +113,21 @@ async def client(db_pool, monkeypatch):
 
     repository._pool = _SharedPool(db_pool)  # noqa: SLF001 - test sở hữu pool
 
-    async def _fake_build_repository(**_kwargs):
+    async def _provide():
         return repository
 
-    # Mỗi module import `build_repository` vào namespace riêng của nó, nên vá
-    # một chỗ là chưa đủ: module chưa vá vẫn mở kết nối tới DATABASE_URL thật
-    # và test sẽ đọc nhầm database phát triển.
-    from src.api import admin_routes
-    from src.orchestration import demo_service
-
-    for module in (routes, demo_service, admin_routes):
-        monkeypatch.setattr(module, "build_repository", _fake_build_repository)
+    # ĐÚNG MỘT chỗ override. Trước đây mỗi module import `build_repository` vào
+    # namespace riêng nên test phải vá từng module — và bốn lần đã quên một
+    # module, khiến route đó lặng lẽ đọc `p118_db` thật trong khi phần còn lại
+    # chạy trên `p118_test_db`.
+    set_repository_provider(_provide)
 
     app.state.runtime = (None, repository)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             yield c
     finally:
+        clear_repository_provider()
         app.state.runtime = None
 
 

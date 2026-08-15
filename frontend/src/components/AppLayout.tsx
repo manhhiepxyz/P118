@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import {
   Bell,
+  Home,
+  Inbox,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -17,7 +19,6 @@ import {
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 
 import { useAuth } from '../lib/auth'
-import { USE_MOCK } from '../lib/client'
 import { useToast } from '../lib/toast'
 
 /* ---------------------------------------------------------------------------
@@ -34,6 +35,7 @@ const COLLAPSED_KEY = 'p118_sidebar_collapsed'
 const USER_NAV_ITEMS = [
   { to: '/', label: 'Trang chủ', icon: LayoutDashboard, end: true },
   { to: '/profile', label: 'Hồ sơ & Tài sản', icon: UserCheck, end: true },
+  { to: '/apartment-link', label: 'Liên kết căn hộ', icon: Home, end: true },
   { to: '/approvals', label: 'Chờ duyệt', icon: TimerReset, end: false },
   { to: '/workflows', label: 'Workflows', icon: Workflow, end: true },
 ]
@@ -76,14 +78,6 @@ function Brand({ collapsed, onClick }: { collapsed?: boolean; onClick?: () => vo
   )
 }
 
-function MockBadge() {
-  return (
-    <span className="hidden items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 sm:inline-flex">
-      <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden />
-      MOCK DATA
-    </span>
-  )
-}
 
 function initials(name: string): string {
   const parts = name.split(/[.\s-]+/).filter(Boolean)
@@ -164,14 +158,33 @@ function SidebarContent({
           />
         ))}
 
+        {/* Điều hướng quản trị chỉ hiện với admin. Route cũng được chặn bằng
+            `AdminRoute`, và backend chặn lần nữa bằng `require_roles("admin")` —
+            ẩn menu là tiện dụng, không phải kiểm soát truy cập. */}
         {isAdmin && (
-          <NavItem
-            to="/admin"
-            label="Quản trị"
-            icon={ShieldCheck}
-            collapsed={collapsed}
-            onClick={onNavigate}
-          />
+          <>
+            <NavItem
+              to="/admin"
+              label="Quản trị"
+              icon={ShieldCheck}
+              collapsed={collapsed}
+              onClick={onNavigate}
+            />
+            <NavItem
+              to="/admin/link-requests"
+              label="Yêu cầu liên kết"
+              icon={Inbox}
+              collapsed={collapsed}
+              onClick={onNavigate}
+            />
+            <NavItem
+              to="/admin/resident-links"
+              label="Liên kết cư dân"
+              icon={ShieldCheck}
+              collapsed={collapsed}
+              onClick={onNavigate}
+            />
+          </>
         )}
       </nav>
 
@@ -242,7 +255,6 @@ export function AppLayout() {
           </div>
 
           <div className="flex items-center gap-2">
-            {USE_MOCK && <MockBadge />}
             <span className="hidden text-xs text-gray-400 md:block dark:text-gray-500">
               {new Date().toLocaleDateString('vi-VN', {
                 weekday: 'long',

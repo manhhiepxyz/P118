@@ -1,24 +1,58 @@
 import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 
 from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
 from src.api.middleware import RateLimitMiddleware
+from src.api.readiness import evaluate_readiness
 from src.api.routes import router
 from src.config import get_settings
+from src.orchestration.deps import build_repository
+from src.orchestration.runtime_provider import (
+    SharedPool,
+    clear_repository_provider,
+    set_repository_provider,
+)
 from src.orchestration.sweeper import sweep_zombie_workflows
+from src.services.llm import LLMConfigurationError, check_llm_configuration
+
+
+async def _ready(repository):
+    """Provider trả repository đã dựng sẵn — không mở kết nối mới."""
+    return repository
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     print(f"Starting {settings.app_name} in {settings.app_env} mode")
+
+    # Composition root: dựng pool MỘT LẦN và đăng ký provider.
+    #
+    # Trước đây mỗi handler tự gọi `build_repository()` — đọc thẳng
+    # DATABASE_URL và mở một pool mới cho từng request. Ngoài chi phí bắt tay
+    # TCP mỗi lần chạm database, nó còn khiến test phải patch từng namespace
+    # một; quên một module là route đó lặng lẽ đọc database phát triển.
+    repository = await build_repository()
+    repository._pool = SharedPool(repository._pool)  # noqa: SLF001 - composition root sở hữu pool
+    set_repository_provider(lambda: _ready(repository))
+    app.state.runtime = (None, repository)
+
+    # Nói ra NGAY nếu cấu hình LLM sai, thay vì để lỗi nổ ra lúc người dùng bấm
+    # nút. Chỉ log rồi vẫn khởi động, không raise: raise ở đây làm container
+    # restart-loop, và dòng giải thích cuộn mất trong log của mười lần thử. App
+    # sống nhưng `/ready` đỏ thì người vận hành vừa đọc được lý do, vừa không bị
+    # Compose coi là healthy.
+    try:
+        check_llm_configuration(settings)
+    except LLMConfigurationError as exc:
+        print(f"[CẤU HÌNH] LLM chưa dùng được: {exc} — /ready sẽ báo not_ready.")
+
     sweep_task = None
     if settings.zombie_sweep_enabled:
         # Loop nền dọn workflow mồ côi (payment approval hết hạn, RUNNING không
@@ -36,6 +70,12 @@ async def lifespan(app: FastAPI):
         sweep_task = asyncio.create_task(_sweep_forever())
         print("Zombie sweep loop started")
     yield
+
+    clear_repository_provider()
+    app.state.runtime = None
+    # Đóng pool THẬT đúng một lần, ở đúng nơi đã tạo ra nó.
+    await repository._pool._inner.close()  # noqa: SLF001 - composition root sở hữu pool
+
     if sweep_task is not None:
         sweep_task.cancel()
         try:
@@ -91,19 +131,29 @@ app.include_router(auth_router, prefix="/api/v1")
 # Đường DUY NHẤT ghi user_resident_links. Chặn bằng require_roles("admin").
 app.include_router(admin_router, prefix="/api/v1")
 
-_DEMO_HTML = Path(__file__).resolve().parents[1] / "static" / "demo.html"
-
-
-@app.get("/demo", include_in_schema=False)
-async def demo_ui() -> FileResponse:
-    """Trang HTML một file cho Gate 2 demo."""
-    return FileResponse(
-        _DEMO_HTML,
-        headers={"Cache-Control": "no-store, max-age=0"},
-    )
-
 
 # health
 @app.get("/health")
 async def health():
+    """Liveness: tiến trình còn sống. KHÔNG nói gì về việc nhận việc được hay chưa.
+
+    Đừng dùng endpoint này làm healthcheck của Docker. Nó đã từng là healthcheck,
+    và hệ quả là Compose báo mọi service healthy trong khi backend chạy với một
+    `LLM_PROVIDER` không có key tương ứng — mọi workflow đều chết ngay ở bước
+    lập kế hoạch. Dùng `/ready`.
+    """
     return {"status": "ok", "env": settings.app_env}
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    """Readiness: cấu hình LLM, database, migration và connector đều hợp lệ.
+
+    Trả 503 khi chưa sẵn sàng, để Docker healthcheck đánh dấu container
+    unhealthy thay vì để nó nhận việc rồi hỏng lặng lẽ.
+    """
+    ok, checks = await evaluate_readiness()
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={"status": "ready" if ok else "not_ready", "checks": checks},
+    )

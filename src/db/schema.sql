@@ -248,7 +248,44 @@ CREATE TABLE IF NOT EXISTS workflows (
     -- Phiên hội thoại đã ghim (server-side) và workflow cha khi một lượt
     -- clarification sinh ra workflow con.
     parent_workflow_id UUID         REFERENCES workflows(workflow_id),
-    session_id         VARCHAR(100)
+    session_id         VARCHAR(100),
+
+    -- Lý do workflow hỏng, ở dạng MÃ ỔN ĐỊNH (LLM_CONFIGURATION_ERROR,
+    -- PROVIDER_UNAVAILABLE, …). KHÔNG lưu message của exception: message đến
+    -- từ thư viện bên thứ ba, đổi bất cứ lúc nào, và hay kèm chi tiết không
+    -- nên nằm trong database.
+    --
+    -- Vì sao phải lưu: trước đây lỗi chỉ nằm trong `_DEMO_JOBS` — RAM của một
+    -- tiến trình. Sau restart, workflow đọc lên là `PENDING`, giao diện map
+    -- thành "đang chạy" và poll mãi một việc đã chết từ lâu.
+    error_code         VARCHAR(60),
+
+    -- Câu trả lời tự nhiên của P-118 cho CHÍNH workflow này.
+    --
+    -- Đây là thuộc tính TRÌNH BÀY của workflow, không phải một tin nhắn rời.
+    -- P-118 là Agent thực hiện tác vụ, không phải chatbot có trí nhớ hội thoại:
+    -- không có bảng conversation_messages, và box chat chỉ là cách hiển thị lại
+    -- các workflow. Vì vậy câu trả lời sống ở đây, cùng chỗ với thứ nó mô tả.
+    --
+    -- Không có mấy cột này, câu trả lời chỉ nằm trong `_DEMO_JOBS` — RAM của
+    -- một tiến trình — nên F5 hoặc restart là mất, còn workflow thì vẫn còn.
+    assistant_answer      TEXT,
+    assistant_suggestions JSONB       NOT NULL DEFAULT '[]'::jsonb,
+
+    -- PENDING: đã chốt quyền sinh, đang gọi mô hình
+    -- READY:   mô hình trả lời và câu đó đã qua kiểm
+    -- FALLBACK: dùng câu deterministic (mô hình lỗi hoặc câu bị loại)
+    assistant_response_state VARCHAR(20)
+        CHECK (assistant_response_state IN ('PENDING', 'READY', 'FALLBACK')),
+
+    -- Trạng thái workflow mà câu trả lời đang mô tả.
+    --
+    -- Cần thiết vì câu trả lời gắn với MỘT trạng thái: câu viết cho
+    -- WAITING_APPROVAL trở thành sai ngay khi người dùng bấm duyệt. Cột này
+    -- vừa là khoá idempotency (một lần gọi mô hình cho mỗi trạng thái) vừa là
+    -- cách phát hiện câu đã lỗi thời.
+    assistant_for_status  VARCHAR(30),
+    assistant_updated_at  TIMESTAMPTZ
 );
 
 -- Index tìm workflow active (chưa archived)
@@ -429,3 +466,48 @@ CREATE TABLE IF NOT EXISTS users (
 -- Email unique chỉ khi có giá trị (nhiều user có thể bỏ trống email)
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email
     ON users(email) WHERE email IS NOT NULL;
+
+
+-- =============================================================
+-- Yêu cầu liên kết căn hộ do CHÍNH CHỦ TÀI KHOẢN gửi
+-- =============================================================
+-- Trước đây customer không có đường nào để bắt đầu việc liên kết: admin phải
+-- tự gõ UUID tài khoản và mã cư dân. Nghĩa là admin phải biết trước ai muốn
+-- liên kết căn hộ nào — một thông tin chỉ tồn tại ngoài hệ thống.
+--
+-- Bảng này giữ phần khách hàng KHAI. Nó KHÔNG phải nguồn sự thật về quyền:
+-- quyền vẫn nằm ở `user_resident_links.verification_status`, và chỉ admin ghi
+-- được. Khách hàng gửi yêu cầu; ban quản lý quyết định.
+--
+-- GIỚI HẠN GATE 2: xác minh là thao tác THỦ CÔNG của admin, không phải eKYC.
+-- Trust boundary thì đúng — người dùng không tự nâng quyền được — nhưng bằng
+-- chứng danh tính thì chưa có.
+CREATE TABLE IF NOT EXISTS resident_link_requests (
+    request_id       UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          UUID         NOT NULL REFERENCES users(id),
+
+    -- Thông tin người dùng ĐỌC ĐƯỢC và biết được. Cố ý KHÔNG có `resident_id`:
+    -- đó là mã nội bộ, và cho khách hàng gửi mã cư dân nghĩa là cho họ trỏ vào
+    -- hồ sơ của bất kỳ ai.
+    apartment_code   VARCHAR(50)  NOT NULL,
+    residential_area VARCHAR(100) NOT NULL,
+    full_name        VARCHAR(200) NOT NULL,
+
+    status           VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+                         CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decided_at       TIMESTAMPTZ,
+    -- Ai đã quyết định. Audit trail: một liên kết được mở phải truy được về
+    -- một con người.
+    decided_by       UUID         REFERENCES users(id)
+);
+
+-- Mỗi tài khoản chỉ được có ĐÚNG MỘT yêu cầu đang chờ.
+-- Không có ràng buộc này, bấm gửi mười lần tạo mười dòng chờ duyệt giống hệt
+-- nhau, và admin phải đoán cái nào là thật.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_link_request_one_pending_per_user
+    ON resident_link_requests(user_id)
+    WHERE status = 'PENDING';
+
+CREATE INDEX IF NOT EXISTS idx_link_requests_status
+    ON resident_link_requests(status, created_at);

@@ -108,7 +108,7 @@ MAINTENANCE_INPUT = {
 INTEREST_INPUT = {
     "project_id": "PRJ-001",
     "interest_type": "consultation",
-    "preferred_contact_time": "morning",
+    "preferred_contact_time": "09:30",
     "consent": True,
 }
 PAY_INPUT = {"booking_id": "BOOK-001", "amount": 150_000, "currency": "VND"}

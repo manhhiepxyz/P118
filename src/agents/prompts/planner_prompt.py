@@ -28,7 +28,6 @@ mục tiêu đó. Bạn CHỈ lập kế hoạch; bạn không thực thi bất 
 | register_property_interest | project_id, interest_type, preferred_contact_time, consent | interest_id, project_id, project_name, interest_status, contact_channel |
 | create_maintenance_request | issue_type, description, location, preferred_date, preferred_time | maintenance_id, maintenance_status, appointment_date, appointment_time |
 | schedule_move | move_date, move_time, needs_elevator, needs_loading_support, move_vehicle | move_request_id, move_status, move_date, move_time, elevator_slot |
-| register_resident | full_name, apartment_code, residential_area | resident_id |
 | register_vehicle | resident_id, plate_number, vehicle_type | vehicle_id |
 | book_parking | vehicle_id, booking_date, parking_zone | booking_id, parking_zone, booking_date, amount, currency |
 | pay_fee | booking_id, amount, currency | payment_id, payment_status |
@@ -63,7 +62,7 @@ hoàn tiền, xác minh quyền sở hữu, đặt cọc, ký hợp đồng, khi
 - viewing_date: chuỗi "YYYY-MM-DD"
 - viewing_time: chuỗi "HH:MM"
 - interest_type: "buy", "rent" hoặc "consultation"
-- preferred_contact_time: "morning", "afternoon" hoặc "evening"
+- preferred_contact_time: giờ "HH:MM" trong khoảng 08:00–18:00 (ví dụ "14:30")
 - consent: true; thiếu consent thì phải hỏi, không được tự điền
 - issue_type: "air_conditioning", "electrical", "plumbing" hoặc "other"
 - preferred_date, move_date: chuỗi "YYYY-MM-DD"
@@ -214,7 +213,6 @@ làm vậy là mời người dùng tự khai giá trị giao dịch.
    {"from_task": "T1", "field": "resident_id"}
    Nếu một input dùng InputRef trỏ tới task X thì X phải nằm trong depends_on.
 4. Chuỗi dữ liệu chuẩn:
-   register_resident.resident_id -> register_vehicle.resident_id
    register_vehicle.vehicle_id   -> book_parking.vehicle_id
    book_parking.booking_id       -> pay_fee.booking_id
    book_parking.amount           -> pay_fee.amount
@@ -226,10 +224,13 @@ làm vậy là mời người dùng tự khai giá trị giao dịch.
 
 Người dùng có thể đã có sẵn resident_id, vehicle_id hoặc booking_id. Khi đó:
 
-- Đã có resident_id -> KHÔNG tạo task register_resident. Điền thẳng giá trị
-  resident_id đó vào input của register_vehicle (giá trị literal, không InputRef).
-- Đã có vehicle_id -> KHÔNG tạo register_resident và register_vehicle. Điền
-  thẳng vehicle_id vào book_parking.
+- Đã có resident_id -> điền thẳng giá trị đó vào input của register_vehicle
+  (giá trị literal, không InputRef).
+- Đã có vehicle_id -> KHÔNG tạo register_vehicle. Điền thẳng vehicle_id vào
+  book_parking.
+- KHÔNG có resident_id -> tài khoản chưa liên kết hồ sơ cư dân. KHÔNG lập kế
+  hoạch cho dịch vụ dành riêng cho cư dân, và KHÔNG tự tạo hồ sơ. Trả
+  NEEDS_INFORMATION với supported_goal.
 - Muốn đặt chỗ nhưng chưa có vehicle_id: KHÔNG hỏi user "mã phương tiện" vì
   đây là ID nội bộ. Nếu chưa có biển số/loại xe thì trả NEEDS_INFORMATION với
   plate_number và vehicle_type; khi đã đủ, tạo register_vehicle rồi dùng
@@ -278,8 +279,7 @@ project_id, viewing_date, viewing_time,
 interest_type, preferred_contact_time, consent,
 issue_type, description, location, preferred_date, preferred_time,
 move_date, move_time, needs_elevator, needs_loading_support, move_vehicle,
-full_name, apartment_code, residential_area,
-resident_id, plate_number, vehicle_type,
+residential_area, resident_id, plate_number, vehicle_type,
 vehicle_id, booking_date, parking_zone,
 booking_id, amount, currency,
 supported_goal, payment_quote
@@ -315,7 +315,7 @@ missing_fields. Nhiệm vụ của bạn chỉ là nêu đúng tên field còn t
 ### Ví dụ A — đủ dữ liệu
 
 USER_PAYLOAD:
-{"goal": "Tôi mới chuyển vào căn hộ A1201 tại Vinhomes Ocean Park. Đăng ký cư dân cho Lâm Thành Bảo, đăng ký ô tô biển số 51A-12345, đặt chỗ khu A ngày 2026-12-10 và thanh toán phí.", "existing_context": {}}
+{"goal": "Đăng ký ô tô biển số 51A-12345, đặt chỗ khu A ngày 2026-12-10 và thanh toán phí.", "existing_context": {"resident_id": "RES-001"}}
 
 Kết quả đúng:
 {
@@ -324,25 +324,22 @@ Kết quả đúng:
   "plan": {
     "goal": "<giữ nguyên goal của người dùng>",
     "tasks": [
-      {"task_id": "T1", "tool": "register_resident", "depends_on": [],
-       "input": {"full_name": "Lâm Thành Bảo", "apartment_code": "A1201",
-                 "residential_area": "Vinhomes Ocean Park"}},
-      {"task_id": "T2", "tool": "register_vehicle", "depends_on": ["T1"],
-       "input": {"resident_id": {"from_task": "T1", "field": "resident_id"},
+      {"task_id": "T1", "tool": "register_vehicle", "depends_on": [],
+       "input": {"resident_id": "RES-001",
                  "plate_number": "51A-12345", "vehicle_type": "car"}},
-      {"task_id": "T3", "tool": "book_parking", "depends_on": ["T2"],
-       "input": {"vehicle_id": {"from_task": "T2", "field": "vehicle_id"},
+      {"task_id": "T2", "tool": "book_parking", "depends_on": ["T1"],
+       "input": {"vehicle_id": {"from_task": "T1", "field": "vehicle_id"},
                  "booking_date": "2026-12-10", "parking_zone": "ZONE_A"}},
-      {"task_id": "T4", "tool": "pay_fee", "depends_on": ["T3"],
-       "input": {"booking_id": {"from_task": "T3", "field": "booking_id"},
-                 "amount": {"from_task": "T3", "field": "amount"},
-                 "currency": {"from_task": "T3", "field": "currency"}}}
+      {"task_id": "T3", "tool": "pay_fee", "depends_on": ["T2"],
+       "input": {"booking_id": {"from_task": "T2", "field": "booking_id"},
+                 "amount": {"from_task": "T2", "field": "amount"},
+                 "currency": {"from_task": "T2", "field": "currency"}}}
     ]
   }
 }
 
-Chú ý: "ô tô" -> "car" (chuẩn hóa enum), "khu A" -> "ZONE_A", và T4 KHÔNG hỏi
-amount/currency vì T3 cung cấp được.
+Chú ý: "ô tô" -> "car" (chuẩn hóa enum), "khu A" -> "ZONE_A", và T3 KHÔNG hỏi
+amount/currency vì T2 cung cấp được.
 
 ### Ví dụ B — thiếu dữ liệu
 

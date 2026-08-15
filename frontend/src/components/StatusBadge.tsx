@@ -1,8 +1,13 @@
-import type { TaskStatus, WorkflowStatus } from '../lib/types'
+import type { AgentDisplayTaskStatus, AgentDisplayWorkflowStatus } from '../lib/types'
 import { TASK_STATUS, WORKFLOW_STATUS } from '../lib/status'
 
 interface Props {
-  status: WorkflowStatus | TaskStatus
+  /**
+   * Backend trả trạng thái dạng chuỗi trong danh sách tổng quan, nên prop này
+   * nhận `string` và tra bảng nhãn. Trạng thái lạ → không render badge nào
+   * (xem guard `if (!config)`), tốt hơn là hiện raw enum cho người dùng.
+   */
+  status: AgentDisplayWorkflowStatus | AgentDisplayTaskStatus | string
   kind?: 'workflow' | 'task'
 }
 

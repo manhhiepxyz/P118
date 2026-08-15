@@ -1,0 +1,16 @@
+{
+  "name": "p118-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser E2E chạy trên stack Docker. Tách khỏi frontend/package.json để bundle sản phẩm không kéo theo Playwright.",
+  "scripts": {
+    "test": "node browser_acceptance.mjs",
+    "setup": "npm install && npx playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1"
+  },
+  "engines": {
+    "node": ">=20.12"
+  }
+}

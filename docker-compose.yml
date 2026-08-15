@@ -85,10 +85,20 @@ services:
       db-migrate:
         condition: service_completed_successfully   # chờ postgres sẵn sàng mới start backend
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
+      # /ready, KHÔNG phải /health.
+      #
+      # /health chỉ nói tiến trình còn sống. Compose từng dùng nó và báo mọi
+      # service healthy trong khi backend chạy với một LLM_PROVIDER không có
+      # key tương ứng — mọi workflow chết ngay ở bước lập kế hoạch, còn bảng
+      # trạng thái thì xanh hết.
+      #
+      # start_period cho app thời gian dựng pool và chạy migration trước khi
+      # lần kiểm đầu tiên được tính là thất bại.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/ready').status == 200 else 1)"]
+      interval: 15s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   # ----------------------------------------------------------------

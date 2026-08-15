@@ -40,7 +40,7 @@ async def test_continue_works_after_a_restart_wiped_the_in_memory_job(client, mo
     monkeypatch.setattr(routes, "_load_clarification", lambda _id, **_kwargs: _async(_clarification()))
     monkeypatch.setattr(routes, "_load_session", lambda _id, **_kwargs: _async({"account_state": "resident"}))
     # Consume atomic trả về clarification cho người THẮNG.
-    monkeypatch.setattr(routes, "_consume_clarification", lambda _id, **_kwargs: _async(_clarification()))
+    monkeypatch.setattr(routes, "_consume_and_create_child", lambda _id, **_kwargs: _async(_clarification()))
 
     started = {}
 
@@ -86,7 +86,7 @@ async def test_restart_path_never_trusts_the_browser_for_permission(client, monk
     # Session nói đây là khách — quyền phải theo session, không theo context cũ.
     monkeypatch.setattr(routes, "_load_session", lambda _id, **_kwargs: _async({"account_state": "prospect"}))
     # Consume atomic trả về clarification cho người THẮNG.
-    monkeypatch.setattr(routes, "_consume_clarification", lambda _id, **_kwargs: _async(_clarification()))
+    monkeypatch.setattr(routes, "_consume_and_create_child", lambda _id, **_kwargs: _async(_clarification()))
 
     async def _fake_job(*_args, **_kwargs):
         return None
@@ -135,7 +135,7 @@ async def test_a_second_continue_for_the_same_clarification_is_rejected(client, 
     monkeypatch.setattr(routes, "_load_clarification", lambda _id, **_kwargs: _async(_clarification()))
     monkeypatch.setattr(routes, "_load_session", lambda _id, **_kwargs: _async({"account_state": "resident"}))
     # Consume trả None: clarification đã bị request khác claim.
-    monkeypatch.setattr(routes, "_consume_clarification", lambda _id, **_kwargs: _async(None))
+    monkeypatch.setattr(routes, "_consume_and_create_child", lambda _id, **_kwargs: _async(None))
 
     async def _fake_job(*_args, **_kwargs):
         return None

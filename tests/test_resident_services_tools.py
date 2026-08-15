@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import httpx
 import pytest
 
@@ -99,26 +97,6 @@ def test_runtime_factory_registers_resident_services_connector() -> None:
     connector = next(item for item in connectors if isinstance(item, ResidentServicesConnector))
     assert connector.base_url == "http://resident-services"
     assert set(connector.tool_names) == {"create_maintenance_request", "schedule_move"}
-
-
-def test_demo_ui_exposes_both_services_as_active_choices() -> None:
-    """Bảo trì và chuyển nhà đều tới được từ Agent Workspace.
-
-    Quick action giờ là MỤC TIÊU gửi thẳng cho agent, không phải chip điền hộ
-    ô nhập; nên kiểm bằng nhãn nghiệp vụ và câu goal, không bằng data-attribute.
-    """
-    html = (Path(__file__).parents[1] / "static" / "demo.html").read_text(encoding="utf-8")
-
-    assert "Báo hỏng cần sửa" in html
-    assert "Đăng ký chuyển nhà" in html
-    assert "báo hỏng và đặt lịch bảo trì" in html
-    assert "đặt lịch chuyển nhà" in html
-
-    # Không có lựa chọn nhiều dịch vụ, và UI không dựng plan phía browser nên
-    # tên tool không còn (và không được) xuất hiện.
-    assert 'type="checkbox"' not in html
-    assert "create_maintenance_request" not in html
-    assert "schedule_move" not in html
 
 
 class _Boundary:
@@ -242,7 +220,7 @@ _OPEN_PLANS = {
     "register_property_interest": {
         "project_id": "PRJ-001",
         "interest_type": "consultation",
-        "preferred_contact_time": "morning",
+        "preferred_contact_time": "09:30",
         "consent": True,
     },
 }

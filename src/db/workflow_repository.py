@@ -11,6 +11,23 @@ from pydantic_core import to_jsonable_python
 logger = logging.getLogger(__name__)
 
 
+def _decode_clarification_row(row) -> dict:
+    """Row clarification → dict: JSONB về Python, UUID về chuỗi.
+
+    Dùng chung cho cả `consume_clarification` và bản atomic — hai chỗ giải mã
+    khác nhau là hai chỗ có thể lệch nhau.
+    """
+    record = dict(row)
+    for key in ("missing_fields", "existing_context"):
+        value = record.get(key)
+        if isinstance(value, str):
+            record[key] = json.loads(value)
+    record["workflow_id"] = str(record["workflow_id"])
+    if record.get("parent_workflow_id"):
+        record["parent_workflow_id"] = str(record["parent_workflow_id"])
+    return record
+
+
 def _uuid(value: Any) -> UUID:
     """Chuẩn hoá về `uuid.UUID`.
 
@@ -255,8 +272,210 @@ class WorkflowRepository:
                 SET status = $1, updated_at = NOW()
                 WHERE workflow_id = $2
                   AND archived_at IS NULL
+                  AND (status <> 'CANCELLED' OR $1 = 'CANCELLED')
                 """,
                 status,
+                _uuid(workflow_id),
+            )
+
+    async def cancel_workflow(self, workflow_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Huỷ workflow và mọi bước chưa kết thúc trong một transaction.
+
+        Task đã SUCCESS được giữ nguyên: huỷ không phải rollback. Clarification
+        còn mở được đóng lại để `/continue` không hồi sinh một yêu cầu đã huỷ.
+        None dùng chung cho "không tồn tại" và "không phải chủ sở hữu" để
+        không tạo oracle IDOR.
+        """
+        terminal = {"SUCCESS", "FAILED", "CANCELLED"}
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT status, owner_user_id
+                    FROM workflows
+                    WHERE workflow_id = $1
+                    FOR UPDATE
+                    """,
+                    _uuid(workflow_id),
+                )
+                if row is None or str(row["owner_user_id"]) != str(owner_user_id):
+                    return None
+
+                previous_status = str(row["status"])
+                if previous_status in terminal:
+                    return {"cancelled": False, "previous_status": previous_status}
+
+                await conn.execute(
+                    """
+                    UPDATE workflow_tasks
+                    SET status = 'CANCELLED', updated_at = NOW()
+                    WHERE workflow_id = $1
+                      AND status NOT IN ('SUCCESS', 'FAILED', 'CANCELLED', 'SKIPPED')
+                    """,
+                    _uuid(workflow_id),
+                )
+                await conn.execute(
+                    """
+                    UPDATE workflow_clarifications
+                    SET resolved_at = COALESCE(resolved_at, NOW())
+                    WHERE workflow_id = $1 AND resolved_at IS NULL
+                    """,
+                    _uuid(workflow_id),
+                )
+                await conn.execute(
+                    """
+                    UPDATE workflows
+                    SET status = 'CANCELLED',
+                        error_code = NULL,
+                        assistant_answer = NULL,
+                        assistant_suggestions = '[]'::jsonb,
+                        assistant_response_state = NULL,
+                        assistant_for_status = NULL,
+                        assistant_updated_at = NULL,
+                        updated_at = NOW()
+                    WHERE workflow_id = $1
+                    """,
+                    _uuid(workflow_id),
+                )
+                return {"cancelled": True, "previous_status": previous_status}
+
+    async def mark_workflow_failed(self, workflow_id: str, error_code: str) -> None:
+        """Đóng workflow ở trạng thái FAILED kèm mã lỗi ổn định.
+
+        Chỉ đóng workflow CHƯA kết thúc: `status IN ('PENDING','RUNNING')`. Một
+        workflow đã SUCCESS mà gặp lỗi ở bước dọn dẹp phía sau thì vẫn là
+        SUCCESS — người dùng đã có chỗ đỗ xe và đã trả tiền; ghi đè thành FAILED
+        là nói sai về thứ đã thực sự xảy ra.
+
+        `WAITING_APPROVAL` cũng không bị đụng: nó đang chờ NGƯỜI, không phải
+        đang chạy dở.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE workflows
+                SET status = 'FAILED', error_code = $2, updated_at = NOW()
+                WHERE workflow_id = $1
+                  AND archived_at IS NULL
+                  AND status IN ('PENDING', 'RUNNING')
+                """,
+                _uuid(workflow_id),
+                error_code[:60],
+            )
+
+    # Sau khoảng này, một PENDING được coi là do tiến trình đã chết bỏ lại.
+    #
+    # Chính sách đã chọn: cho claim LẠI thay vì để PENDING vĩnh viễn. Để vĩnh
+    # viễn thì workflow đó không bao giờ có câu trả lời; cho claim lại ngay lập
+    # tức thì hai tiến trình cùng gọi mô hình cho một việc.
+    ASSISTANT_PENDING_TTL_SECONDS = 120
+
+    async def claim_assistant_response(self, workflow_id: str, *, for_status: str) -> bool:
+        """Giành quyền sinh câu trả lời cho MỘT trạng thái. True = được phép.
+
+        Chốt bằng một câu `UPDATE ... RETURNING` duy nhất, nên PostgreSQL tự
+        tuần tự hoá: mười lượt poll đồng thời thì đúng một lượt nhận True.
+
+        Không dùng cờ trong RAM để chốt: cờ RAM chỉ chặn trong cùng tiến trình
+        và biến mất sau restart — đúng hai tình huống cần được chặn nhất.
+
+        Claim được khi:
+          - chưa có câu nào cho trạng thái này, HOẶC
+          - có một PENDING quá cũ, tức tiến trình giữ nó đã chết.
+        """
+        async with self._pool.acquire() as conn:
+            claimed = await conn.fetchval(
+                """
+                UPDATE workflows
+                SET assistant_response_state = 'PENDING',
+                    assistant_for_status = $2,
+                    -- XOÁ câu cũ ngay khi chốt quyền sinh.
+                    --
+                    -- Không xoá thì trong lúc PENDING, `assistant_for_status`
+                    -- đã là trạng thái MỚI còn `assistant_answer` vẫn là câu
+                    -- của trạng thái CŨ — và mọi đường đọc sẽ phục vụ câu cũ
+                    -- như thể nó mô tả trạng thái mới. Cụ thể: người dùng vừa
+                    -- bấm duyệt xong lại đọc được "bạn vui lòng xác nhận
+                    -- thanh toán".
+                    assistant_answer = NULL,
+                    assistant_suggestions = '[]'::jsonb,
+                    assistant_updated_at = NOW()
+                WHERE workflow_id = $1
+                  AND (
+                      assistant_for_status IS DISTINCT FROM $2
+                      OR assistant_response_state IS NULL
+                      OR (
+                          assistant_response_state = 'PENDING'
+                          AND assistant_updated_at < NOW() - make_interval(secs => $3)
+                      )
+                  )
+                RETURNING workflow_id
+                """,
+                _uuid(workflow_id),
+                for_status,
+                float(self.ASSISTANT_PENDING_TTL_SECONDS),
+            )
+        return claimed is not None
+
+    async def save_assistant_response(
+        self,
+        workflow_id: str,
+        *,
+        answer: str,
+        suggestions: list[str],
+        state: str,
+        for_status: str,
+    ) -> None:
+        """Ghi câu trả lời đã sinh xong. `state` là READY hoặc FALLBACK.
+
+        FALLBACK cũng được GHI, không để trống: để trống thì lượt poll kế tiếp
+        lại claim được và lại gọi mô hình, thành một vòng lặp gọi LLM cho một
+        workflow đã kết thúc từ lâu.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE workflows
+                SET assistant_answer = $2,
+                    assistant_suggestions = $3::jsonb,
+                    assistant_response_state = $4,
+                    assistant_for_status = $5,
+                    assistant_updated_at = NOW()
+                WHERE workflow_id = $1
+                """,
+                _uuid(workflow_id),
+                answer,
+                json.dumps(list(suggestions), ensure_ascii=False),
+                state,
+                for_status,
+            )
+
+    async def get_assistant_response(self, workflow_id: str) -> dict[str, Any]:
+        """Câu trả lời đã ghi. Workflow cũ chưa từng có câu nào trả về rỗng."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT assistant_answer, assistant_suggestions,
+                       assistant_response_state, assistant_for_status
+                FROM workflows WHERE workflow_id = $1
+                """,
+                _uuid(workflow_id),
+            )
+        if row is None:
+            return {"answer": None, "suggestions": [], "state": None, "for_status": None}
+        raw = row["assistant_suggestions"]
+        return {
+            "answer": row["assistant_answer"],
+            "suggestions": json.loads(raw) if isinstance(raw, str) else (raw or []),
+            "state": row["assistant_response_state"],
+            "for_status": row["assistant_for_status"],
+        }
+
+    async def get_workflow_error_code(self, workflow_id: str) -> str | None:
+        """Mã lỗi đã ghim, hoặc None. Đây là đường đọc lại sau restart."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT error_code FROM workflows WHERE workflow_id = $1",
                 _uuid(workflow_id),
             )
 
@@ -327,6 +546,7 @@ class WorkflowRepository:
                 UPDATE workflow_tasks
                 SET status = $1, updated_at = NOW()
                 WHERE workflow_id = $2 AND task_id = $3
+                  AND (status <> 'CANCELLED' OR $1 = 'CANCELLED')
                 """,
                 status,
                 _uuid(workflow_id),
@@ -437,6 +657,12 @@ class WorkflowRepository:
                     w.status,
                     w.created_at,
                     w.updated_at,
+                    -- Đủ để dựng lại một dòng hội thoại mà không cần gọi thêm
+                    -- một request cho từng workflow (N+1 trên màn hình chính).
+                    w.assistant_answer,
+                    w.assistant_suggestions,
+                    w.assistant_response_state,
+                    w.assistant_for_status,
                     COUNT(t.id) FILTER (WHERE t.task_id IS NOT NULL) AS total_tasks,
                     COUNT(t.id) FILTER (WHERE t.status = 'SUCCESS')   AS completed_tasks
                 FROM workflows w
@@ -545,6 +771,51 @@ class WorkflowRepository:
             )
         return [dict(row) for row in rows]
 
+    async def create_shell_and_session(
+        self,
+        *,
+        workflow_id: str,
+        owner_user_id: str,
+        session_id: str,
+        goal: str,
+        account_state: str,
+        resident_id: str | None,
+    ) -> None:
+        """Ghim workflow shell VÀ session trong cùng một transaction.
+
+        Hai lần ghi rời nhau tạo ra một khe hở thật: shell vào được, session
+        lỗi, route trả 503 — và một workflow PENDING không ai đọc được nằm lại
+        trong database vĩnh viễn. Dọn bằng DELETE sau lỗi thì lại phụ thuộc đúng
+        cái vừa hỏng, nên transaction là cách duy nhất đóng khe hở này.
+
+        Raise nếu bất kỳ bước nào lỗi; caller phải coi đó là "chưa nhận yêu cầu".
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO workflows (workflow_id, goal, status, task_plan, session_id, owner_user_id)
+                VALUES ($1, $2, 'PENDING', NULL, $3, $4)
+                ON CONFLICT (workflow_id) DO UPDATE
+                    SET goal = EXCLUDED.goal,
+                        updated_at = NOW()
+                """,
+                _uuid(workflow_id),
+                goal,
+                session_id,
+                _uuid(owner_user_id),
+            )
+            await conn.execute(
+                """
+                INSERT INTO sessions (session_id, account_state, resident_id, user_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (session_id) DO NOTHING
+                """,
+                session_id,
+                account_state,
+                resident_id,
+                _uuid(owner_user_id),
+            )
+
     async def save_clarification(
         self,
         workflow_id: str,
@@ -599,15 +870,75 @@ class WorkflowRepository:
             )
         if row is None:
             return None
-        record = dict(row)
-        for key in ("missing_fields", "existing_context"):
-            value = record.get(key)
-            if isinstance(value, str):
-                record[key] = json.loads(value)
-        record["workflow_id"] = str(record["workflow_id"])
-        if record.get("parent_workflow_id"):
-            record["parent_workflow_id"] = str(record["parent_workflow_id"])
-        return record
+        return _decode_clarification_row(row)
+
+    async def consume_clarification_and_create_child(
+        self,
+        parent_workflow_id: str,
+        *,
+        child_workflow_id: str,
+        owner_user_id: str | None,
+        session_id: str | None,
+        goal: str,
+    ) -> dict | None:
+        """Claim clarification VÀ tạo child shell trong CÙNG một transaction.
+
+        Tách hai bước để lại khe hở thật: consume xong, tiến trình chết, child
+        chưa kịp tạo — và câu trả lời của người dùng biến mất cùng với lượt hỏi
+        duy nhất. Họ không thể trả lời lại vì clarification đã bị đánh dấu đã
+        xử lý.
+
+        Trả None khi không claim được (request khác đã thắng, hoặc không có
+        clarification đang mở). Khi đó KHÔNG có child nào được tạo.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE workflow_clarifications
+                SET resolved_at = NOW(), updated_at = NOW()
+                WHERE workflow_id = $1 AND resolved_at IS NULL
+                RETURNING *
+                """,
+                _uuid(parent_workflow_id),
+            )
+            if row is None:
+                return None
+
+            await conn.execute(
+                """
+                INSERT INTO workflows
+                    (workflow_id, goal, status, task_plan, session_id, parent_workflow_id, owner_user_id)
+                VALUES ($1, $2, 'PENDING', NULL, $3, $4, $5)
+                ON CONFLICT (workflow_id) DO NOTHING
+                """,
+                _uuid(child_workflow_id),
+                goal,
+                session_id,
+                _uuid(parent_workflow_id),
+                _uuid(owner_user_id) if owner_user_id else None,
+            )
+
+            # Đóng workflow CHA trong cùng transaction.
+            #
+            # Cha đã bàn giao việc cho con: nó sẽ không chạy thêm bước nào nữa.
+            # Không đóng thì mỗi vòng hỏi bổ sung để lại một dòng `PENDING`
+            # vĩnh viễn — trông y hệt một workflow đang chạy dở, và mọi truy
+            # vấn tìm zombie đều đếm nhầm nó.
+            #
+            # Dùng `archived_at`, KHÔNG dùng FAILED/CANCELLED: cha không thất
+            # bại, cũng không bị huỷ. Nó bị thay thế. Đặt FAILED sẽ hiện "Không
+            # thành công" trong danh sách của người dùng cho một việc thực ra
+            # đã đi tiếp bình thường.
+            await conn.execute(
+                """
+                UPDATE workflows
+                SET archived_at = NOW(), updated_at = NOW()
+                WHERE workflow_id = $1 AND archived_at IS NULL
+                """,
+                _uuid(parent_workflow_id),
+            )
+
+        return _decode_clarification_row(row)
 
     async def consume_clarification(self, workflow_id: str) -> dict | None:
         """Claim ngữ cảnh chờ bổ sung — ATOMIC, chỉ một request thắng.

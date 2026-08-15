@@ -80,6 +80,7 @@ class WorkflowStatusResponse(BaseModel):
 
 # Role: dùng str thay enum để khỏi đụng src/common (sở hữu Mạnh Hiệp/Thành Bảo).
 UserRole = Literal["customer", "admin"]
+ResidentLinkStatus = Literal["NOT_LINKED", "PENDING", "VERIFIED", "REJECTED"]
 
 
 class RegisterRequest(BaseModel):
@@ -110,6 +111,14 @@ class UserResponse(BaseModel):
     email: str | None = None
     role: UserRole
     created_at: datetime
+    # Trạng thái liên kết căn hộ — đọc từ `user_resident_links` + `residents`.
+    #
+    # KHÔNG trả `resident_id`: UI không cần mã nội bộ để hiển thị gì cả, và mỗi
+    # định danh gửi ra là một định danh có thể bị gửi ngược lại vào một request
+    # khác. Căn hộ/khu chỉ xuất hiện khi đã VERIFIED.
+    resident_verification_status: ResidentLinkStatus = "NOT_LINKED"
+    apartment_code: str | None = None
+    residential_area: str | None = None
 
 
 class TokenResponse(BaseModel):
@@ -165,3 +174,43 @@ class AdminResidentLinkResponse(BaseModel):
 
     user_id: str
     verification_status: Literal["PENDING", "VERIFIED", "REJECTED"]
+
+
+class LinkRequestCreate(BaseModel):
+    """Khách hàng khai căn hộ của mình.
+
+    Cố ý KHÔNG có `resident_id` và KHÔNG có `verification_status`: cho khách
+    hàng gửi mã cư dân là cho họ trỏ vào hồ sơ người khác, còn cho họ gửi trạng
+    thái xác minh là cho họ tự cấp quyền. `extra="forbid"` biến mọi field thừa
+    thành 422 thay vì bị bỏ qua im lặng.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    apartment_code: str = Field(..., min_length=1, max_length=50)
+    residential_area: str = Field(..., min_length=1, max_length=100)
+    full_name: str = Field(..., min_length=1, max_length=200)
+
+
+class LinkRequestView(BaseModel):
+    """Trạng thái yêu cầu, cho chính chủ xem. Không kèm mã cư dân."""
+
+    request_id: str
+    apartment_code: str
+    residential_area: str
+    status: Literal["PENDING", "APPROVED", "REJECTED"]
+    created_at: str | None = None
+    decided_at: str | None = None
+
+
+class LinkRequestDecision(BaseModel):
+    """Quyết định của admin.
+
+    Chỉ mang ĐÚNG quyết định. `user_id`, `resident_id`, căn hộ đều đọc từ dòng
+    yêu cầu đã ghim — nhận lại chúng từ body là mở đường cho một request duyệt
+    yêu cầu này nhưng gán quyền cho tài khoản khác.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]

@@ -23,9 +23,10 @@ import logging
 from typing import Any
 
 from src.common.enums import TaskStatus, WorkflowStatus
+from src.common.failures import EXECUTION_ERROR
 from src.config import get_settings
 from src.orchestration.compensation import release_on_failure
-from src.orchestration.deps import build_repository
+from src.orchestration.runtime_provider import acquire_repository
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,38 @@ async def _expire_stale_payment_approvals(pool: Any, ttl_hours: int) -> list[str
     return expired_ids
 
 
+async def _archive_superseded_parents(pool: Any) -> list[str]:
+    """Đóng những workflow CHA đã bàn giao việc cho con nhưng chưa được đóng.
+
+    Vì sao vẫn cần dù đường ghi đã sửa: dữ liệu cũ. Mọi vòng hỏi bổ sung chạy
+    trước bản sửa đều để lại một dòng `PENDING` vĩnh viễn, và không có gì tự dọn.
+
+    Vì sao chạy TRƯỚC `_sweep_zombie_workflows`: sweeper đánh dấu zombie là
+    FAILED. Một workflow cha bị đánh FAILED sẽ hiện "Không thành công" trong
+    danh sách của người dùng cho một việc thực ra đã đi tiếp bình thường — và
+    còn kéo theo `release_on_failure`, tức là dọn side-effect của một chuỗi
+    đang chạy tốt.
+
+    Chỉ đụng row có CON thật sự tồn tại. `archived_at IS NULL` khiến câu lệnh
+    idempotent: chạy mười lần cũng như chạy một lần.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            UPDATE workflows AS parent
+            SET archived_at = NOW(), updated_at = NOW()
+            WHERE parent.status IN ('PENDING', 'RUNNING')
+              AND parent.archived_at IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM workflows AS child
+                  WHERE child.parent_workflow_id = parent.workflow_id
+              )
+            RETURNING parent.workflow_id
+            """
+        )
+    return [str(row["workflow_id"]) for row in rows]
+
+
 async def _sweep_zombie_workflows(pool: Any, running_ttl_hours: float, live_ids: set[str]) -> list[str]:
     """Workflow RUNNING/PENDING quá hạn và không còn process → FAILED + release."""
     swept_ids: list[str] = []
@@ -67,6 +100,14 @@ async def _sweep_zombie_workflows(pool: Any, running_ttl_hours: float, live_ids:
             SELECT workflow_id FROM workflows
             WHERE status IN ('RUNNING', 'PENDING')
               AND archived_at IS NULL
+              -- Chờ người dùng bổ sung thông tin là một trạng thái hợp lệ,
+              -- không phải tiến trình mồ côi. Sweep nó sẽ tạo đúng bất nhất:
+              -- workflow FAILED nhưng GET vẫn thấy form clarification mở.
+              AND NOT EXISTS (
+                  SELECT 1 FROM workflow_clarifications AS clarification
+                  WHERE clarification.workflow_id = workflows.workflow_id
+                    AND clarification.resolved_at IS NULL
+              )
               AND updated_at < NOW() - make_interval(secs => $1)
             """,
             ttl_seconds,
@@ -87,7 +128,7 @@ async def _cancel_workflow_and_tasks(workflow_id: str, *, from_expiry: bool) -> 
     — release được phép chạy (workflow đã CANCELLED do máy). `from_expiry=False`
     (zombie): workflow FAILED do máy — release được phép chạy.
     """
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         for row in await repository.list_tasks(workflow_id):
@@ -97,7 +138,15 @@ async def _cancel_workflow_and_tasks(workflow_id: str, *, from_expiry: bool) -> 
         if from_expiry:
             await repository.update_workflow_status(workflow_id, WorkflowStatus.CANCELLED)
         else:
-            await repository.update_workflow_status(workflow_id, WorkflowStatus.FAILED)
+            # Ghi kèm LÝ DO, không chỉ trạng thái.
+            #
+            # `update_workflow_status(FAILED)` để `error_code` rỗng, nên một
+            # workflow bị sweep đọc lên là "thất bại, không rõ vì sao" — đúng
+            # tình trạng mà lớp phân loại lỗi sinh ra để xoá bỏ.
+            #
+            # Từ phía người dùng, một workflow bỏ dở quá lâu ĐÚNG là "dừng lại
+            # giữa chừng, thử lại được": họ rời đi, không có gì hỏng vĩnh viễn.
+            await repository.mark_workflow_failed(workflow_id, EXECUTION_ERROR.code)
     finally:
         await pool.close()
 
@@ -110,14 +159,21 @@ async def sweep_zombie_workflows(live_ids: set[str] | None = None) -> dict[str, 
     """
     settings = get_settings()
     if not settings.zombie_sweep_enabled:
-        return {"expired_approvals": [], "swept_workflows": [], "disabled": True}
+        return {"expired_approvals": [], "archived_parents": [], "swept_workflows": [], "disabled": True}
 
     live = live_ids or set()
-    summary: dict[str, Any] = {"expired_approvals": [], "swept_workflows": [], "disabled": False}
-    repository = await build_repository(migrate=False)
+    summary: dict[str, Any] = {
+        "expired_approvals": [],
+        "archived_parents": [],
+        "swept_workflows": [],
+        "disabled": False,
+    }
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001
     try:
         summary["expired_approvals"] = await _expire_stale_payment_approvals(pool, settings.payment_approval_ttl_hours)
+        # Đóng cha đã bàn giao TRƯỚC, để sweeper không đánh chúng là thất bại.
+        summary["archived_parents"] = await _archive_superseded_parents(pool)
         summary["swept_workflows"] = await _sweep_zombie_workflows(pool, settings.zombie_running_ttl_hours, live)
     except Exception:  # noqa: BLE001 - sweep không được làm vỡ poll
         logger.warning("zombie sweep failed", exc_info=True)

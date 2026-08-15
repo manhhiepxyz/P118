@@ -5,13 +5,15 @@ import {
   CircleDot,
   Clock,
   Hourglass,
+  CircleHelp,
   Loader2,
+  MessageSquare,
   PauseCircle,
   SkipForward,
   XCircle,
 } from 'lucide-react'
 
-import type { TaskStatus, WorkflowStatus } from './types'
+import type { AgentDisplayTaskStatus, AgentDisplayWorkflowStatus } from './types'
 
 /* ---------------------------------------------------------------------------
    Status config — màu + icon + label VN theo docs/ui-design-prompts.md §1.
@@ -28,7 +30,7 @@ export interface StatusConfig {
   spin?: boolean
 }
 
-export const WORKFLOW_STATUS: Record<WorkflowStatus, StatusConfig> = {
+export const WORKFLOW_STATUS: Record<AgentDisplayWorkflowStatus, StatusConfig> = {
   PENDING: {
     label: 'Đang chờ',
     icon: Clock,
@@ -66,9 +68,50 @@ export const WORKFLOW_STATUS: Record<WorkflowStatus, StatusConfig> = {
     badge: 'text-slate-500 bg-slate-100',
     dot: 'text-slate-400',
   },
+  // Sáu trạng thái dưới đây trước không có nhãn: bảng chỉ liệt kê 6 giá trị của
+  // type cũ, nên `NEEDS_INFORMATION` và các lỗi rơi vào nhánh mặc định và hiện
+  // ra màn hình dưới dạng enum thô.
+  NEEDS_INFORMATION: {
+    label: 'Cần thêm thông tin',
+    icon: CircleHelp,
+    badge: 'text-amber-600 bg-amber-50',
+    dot: 'text-amber-500',
+  },
+  PAYMENT_APPROVAL_REQUIRED: {
+    label: 'Chờ xác nhận',
+    icon: PauseCircle,
+    badge: 'text-amber-600 bg-amber-50',
+    dot: 'text-amber-500',
+  },
+  // Ba lỗi dưới đây khác nhau về NGUYÊN NHÂN kỹ thuật, nhưng với người dùng thì
+  // câu hỏi chỉ là "việc của tôi đến đâu rồi". Nhãn nói đúng mức đó.
+  PLANNING_ERROR: {
+    label: 'Chưa hiểu được yêu cầu',
+    icon: XCircle,
+    badge: 'text-red-600 bg-red-50',
+    dot: 'text-red-500',
+  },
+  VALIDATION_ERROR: {
+    label: 'Yêu cầu chưa hợp lệ',
+    icon: XCircle,
+    badge: 'text-red-600 bg-red-50',
+    dot: 'text-red-500',
+  },
+  EXECUTION_ERROR: {
+    label: 'Không thực hiện được',
+    icon: XCircle,
+    badge: 'text-red-600 bg-red-50',
+    dot: 'text-red-500',
+  },
+  CHAT: {
+    label: 'Đã trả lời',
+    icon: MessageSquare,
+    badge: 'text-slate-600 bg-slate-100',
+    dot: 'text-slate-400',
+  },
 }
 
-export const TASK_STATUS: Record<TaskStatus, StatusConfig> = {
+export const TASK_STATUS: Record<AgentDisplayTaskStatus, StatusConfig> = {
   PENDING: {
     label: 'Chưa sẵn sàng',
     icon: Hourglass,
@@ -118,14 +161,23 @@ export const TASK_STATUS: Record<TaskStatus, StatusConfig> = {
     badge: 'text-slate-500 bg-slate-100',
     dot: 'text-slate-400',
   },
+  // Bước không chạy vì bước trước dừng lại — khác "bỏ qua có chủ ý".
+  NOT_RUN: {
+    label: 'Chưa chạy',
+    icon: Hourglass,
+    badge: 'text-slate-400 bg-slate-50',
+    dot: 'text-slate-300',
+  },
 }
 
 /* ---------------------------------------------------------------------------
    Tên tool hiển thị + field hiện khi SUCCESS (theo Design System §1).
 --------------------------------------------------------------------------- */
 
+// Đúng 9 tool canonical. `register_resident` KHÔNG có ở đây: liên kết hồ sơ cư
+// dân xảy ra NGOÀI Agent (đường admin/provider), nên nó không bao giờ xuất hiện
+// như một bước trong workflow của người dùng.
 export const TOOL_LABELS: Record<string, string> = {
-  register_resident: 'Đăng ký cư dân',
   register_vehicle: 'Đăng ký phương tiện',
   book_parking: 'Đặt chỗ đậu xe',
   pay_fee: 'Thanh toán phí',
@@ -148,9 +200,6 @@ export function formatResult(tool: string, data: Record<string, unknown>): Array
   }
 
   switch (tool) {
-    case 'register_resident':
-      push('Resident ID', data['resident_id'])
-      break
     case 'register_vehicle':
       push('Vehicle ID', data['vehicle_id'])
       break

@@ -1,147 +1,63 @@
-import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CheckCircle2, ShieldCheck, XCircle } from 'lucide-react'
+import { ShieldAlert } from 'lucide-react'
 
-import { EmptyState, SkeletonRows } from '../components/Bits'
-import { approveTask, listPendingApprovals, rejectTask, USE_MOCK } from '../lib/client'
-import { formatDate, formatMoney, shortId, toolLabel } from '../lib/status'
-import { useToast } from '../lib/toast'
+import { StatusBadge } from '../components/StatusBadge'
+import { listWorkflows } from '../lib/agentApi'
 import { usePolling } from '../lib/usePolling'
+import type { AgentWorkflowListItem } from '../lib/types'
 
-/** Trang "Chờ duyệt" — queue HITL các hành động cần người dùng xác nhận. */
+/**
+ * "Cần bạn xử lý" — các yêu cầu đang chờ quyết định của chính bạn.
+ *
+ * Nút Duyệt/Từ chối KHÔNG nằm ở đây mà ở màn theo dõi từng yêu cầu: quyết định
+ * thanh toán cần báo giá và ngữ cảnh đi kèm, và duyệt từ một dòng danh sách là
+ * duyệt một con số mình chưa nhìn thấy.
+ *
+ * Danh sách do backend lọc theo chủ sở hữu; frontend không lọc lại.
+ */
 export function ApprovalsPage() {
-  const { data, loading, error, refresh } = usePolling(() => listPendingApprovals(), 8000)
-  const toast = useToast()
-  const [busy, setBusy] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-
-  async function decide(workflowId: string, decision: 'approve' | 'reject') {
-    setBusy(workflowId)
-    setNotice(null)
-    try {
-      await (decision === 'approve' ? approveTask(workflowId, '') : rejectTask(workflowId, ''))
-      const msg =
-        decision === 'approve'
-          ? `Đã duyệt workflow #${shortId(workflowId)}.`
-          : `Đã từ chối workflow #${shortId(workflowId)}.`
-      setNotice(`✓ ${msg}`)
-      toast.push(decision === 'approve' ? 'success' : 'info', msg)
-      refresh()
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Không thể gửi quyết định.'
-      setNotice(msg)
-      toast.push('error', msg)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const approvals = data ?? []
+  const { data, loading } = usePolling(() => listWorkflows('attention', 50), 5000, true)
+  const items: AgentWorkflowListItem[] = data?.items ?? []
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-gray-900">Chờ duyệt</h1>
+    <div className="space-y-5">
+      <header>
+        <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Cần bạn xử lý</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Các hành động Agent đang chờ bạn xác nhận trước khi thực hiện.
+          Những yêu cầu đang dừng lại chờ bạn xác nhận hoặc bổ sung thông tin.
         </p>
-      </div>
+      </header>
 
-      {notice && (
-        <p
-          className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
-          role="status"
-        >
-          {notice}
-        </p>
+      {loading && items.length === 0 && (
+        <div className="h-24 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-900" />
       )}
 
-      {error && (
-        <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
-          {error}
+      {!loading && items.length === 0 && (
+        <p className="rounded-2xl border border-gray-200 bg-card p-6 text-sm text-gray-500 dark:border-gray-800">
+          Hiện không có yêu cầu nào cần bạn xử lý.
         </p>
-      )}
-
-      {loading && <SkeletonRows count={2} />}
-
-      {!loading && approvals.length === 0 && (
-        <EmptyState message="Không có hành động nào đang chờ duyệt. Tuyệt vời!" />
       )}
 
       <div className="space-y-3">
-        {!loading &&
-          approvals.map((a) => (
-            <div
-              key={a.workflow_id}
-              className="rounded-2xl border border-gray-200 bg-card p-5 shadow-sm"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
-                      {toolLabel(a.tool)}
-                    </span>
-                    <span className="font-mono text-xs text-gray-400">
-                      #{shortId(a.workflow_id)}
-                    </span>
-                  </div>
-                  <p className="mt-2 text-sm font-medium text-gray-900">{a.goal}</p>
-                  <p className="mt-1 text-xs text-gray-400">
-                    Yêu cầu lúc {a.created_at ? formatDate(a.created_at) : '—'}
-                  </p>
-                </div>
-
-                {a.amount !== undefined && (
-                  <div className="shrink-0 text-right">
-                    <p className="text-xs text-gray-500">Số tiền</p>
-                    <p className="text-lg font-bold text-gray-900">{formatMoney(a.amount)}</p>
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                <Link
-                  to={`/workflow/${a.workflow_id}`}
-                  className="text-xs font-medium text-teal-700 hover:underline"
-                >
-                  Xem chi tiết workflow →
-                </Link>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    disabled={busy === a.workflow_id}
-                    onClick={() => decide(a.workflow_id, 'reject')}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
-                  >
-                    <XCircle className="h-4 w-4" aria-hidden />
-                    Từ chối
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy === a.workflow_id}
-                    onClick={() => decide(a.workflow_id, 'approve')}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-50"
-                  >
-                    {busy === a.workflow_id ? (
-                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                    ) : (
-                      <CheckCircle2 className="h-4 w-4" aria-hidden />
-                    )}
-                    Duyệt
-                  </button>
-                </div>
+        {items.map((wf) => (
+          <Link
+            key={wf.workflow_id}
+            to={`/workflow/${wf.workflow_id}`}
+            className="flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 transition hover:border-amber-300 dark:border-amber-900/50 dark:bg-amber-950/20"
+          >
+            <div className="flex min-w-0 items-start gap-3">
+              <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" aria-hidden />
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{wf.title}</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {wf.total_tasks > 0 ? `${wf.completed_tasks}/${wf.total_tasks} bước` : 'Chờ xử lý'}
+                </p>
               </div>
             </div>
-          ))}
+            <StatusBadge status={wf.status} />
+          </Link>
+        ))}
       </div>
-
-      {USE_MOCK && (
-        <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
-          <ShieldCheck className="h-4 w-4" aria-hidden />
-          Chế độ mock: duyệt / từ chối chỉ cập nhật dữ liệu mẫu trong trình duyệt.
-          Khi nối backend, quyết định sẽ gọi API thật.
-        </div>
-      )}
     </div>
   )
 }

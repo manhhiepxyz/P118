@@ -7,6 +7,7 @@ from src.common.enums import ErrorCode
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
 from src.models.schemas import DemoWorkflowRequest
+from src.orchestration.runtime_provider import set_repository_provider
 
 
 @pytest.mark.asyncio
@@ -58,150 +59,6 @@ async def _no_session(session_id, **_kwargs):
     """Giả lập DB không có session (trả None) — dùng cho route test không chạy
     PostgreSQL thật (tests/conftest.py client fixture không có test DB)."""
     return None
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_is_served(client):
-    """/demo phải phục vụ Agent Workspace, không phải giao diện chat cũ."""
-    response = await client.get("/demo")
-
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store, max-age=0"
-    assert "P-118 · Trợ lý dịch vụ cư dân" in response.text
-
-    # Sidebar đủ 6 mục theo thiết kế đã duyệt.
-    for item in ("Tổng quan", "Đang thực hiện", "Chờ bạn xử lý", "Đã hoàn thành", "Dịch vụ", "Hồ sơ cư dân"):
-        assert item in response.text, item
-
-    # Ô giao việc nhỏ gọn trên topbar, KHÔNG phải composer chiếm màn hình.
-    assert "Giao việc cho P-118…" in response.text
-
-    # Workspace, không phải chatbot: không còn khung hội thoại nào.
-    markup = response.text.split("<script>")[0]
-    for chat_pattern in ('class="stream', "streamInner", "msg agent", "bubble", "typing"):
-        assert chat_pattern not in markup, chat_pattern
-
-    # Ngôn ngữ nghiệp vụ, không lộ thuật ngữ kỹ thuật ra markup.
-    for jargon in (
-        "PostgreSQL",
-        "InputRef",
-        "pay_fee",
-        "TaskPlan",
-        "Validator",
-        "Executor",
-        "Connector",
-        "Mock Payment API",
-    ):
-        assert jargon not in markup, jargon
-
-    # Enum thô chỉ được nằm trong bảng dịch của <script>.
-    for raw_enum in ("WAITING_APPROVAL", "NEEDS_INFORMATION", "VALIDATION_ERROR"):
-        assert raw_enum not in markup, raw_enum
-
-    # Enter không cướp phím giữa lúc gõ dấu tiếng Việt qua IME.
-    assert "event.isComposing" in response.text
-    assert 'autocomplete="off"' in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_reads_the_workflow_list_from_the_backend(client):
-    """Danh sách trên Tổng quan phải gọi API thật, không phải mảng cứng."""
-    response = await client.get("/demo")
-
-    assert "status=attention" in response.text
-    assert "status=running" in response.text
-    assert "status=completed" in response.text
-    # Không có dữ liệu workflow nhúng sẵn trong trang.
-    assert 'workflow_id: "wf-' not in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_gives_each_workflow_its_own_url(client):
-    """Refresh trang phải đọc lại workflow theo ID."""
-    response = await client.get("/demo")
-
-    assert "/demo?workflow_id=" in response.text
-    assert "history.pushState" in response.text
-    assert 'new URLSearchParams(location.search).get("workflow_id")' in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_quick_actions_send_a_goal_directly(client):
-    """Bấm mục tiêu là giao việc luôn, không bắt mô tả lại."""
-    response = await client.get("/demo")
-
-    for label in (
-        "Đăng ký xe và chỗ đậu",
-        "Đăng ký chuyển nhà",
-        "Báo hỏng cần sửa",
-        "Đặt lịch tham quan dự án",
-        "Nhận tư vấn",
-    ):
-        assert label in response.text, label
-    assert "startWorkflow(item.goal)" in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_locks_resident_services_without_hiding_them(client):
-    """Khoá bằng `hidden` thì người dùng không biết dịch vụ tồn tại."""
-    response = await client.get("/demo")
-
-    assert "Cần liên kết căn hộ" in response.text
-    assert 'card.setAttribute("aria-disabled", "true")' in response.text
-    assert "item.resident && !resident" in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_progress_is_counted_from_real_tasks(client):
-    """Tiến độ đếm từ tasks[], không phải animation giả lập."""
-    response = await client.get("/demo")
-
-    assert 'if (status === "SUCCESS") done += 1' in response.text
-    assert "Math.round((done / total) * 100)" in response.text
-    assert "setInterval" not in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_decision_body_contains_only_the_decision(client):
-    """Không gửi amount/currency/booking_id/khoá idempotency từ trình duyệt."""
-    response = await client.get("/demo")
-
-    assert "/payment-decision" in response.text
-    assert "JSON.stringify({ decision })" in response.text
-    decide = response.text.split("const decide = async (decision)")[1].split("};")[0]
-    for forbidden in ("amount", "currency", "booking_id", "idempotency"):
-        assert forbidden not in decide, forbidden
-    # Cả hai nút bị vô hiệu khi đang gửi: bấm hai lần là hai lệnh duyệt.
-    assert "approve.disabled = true" in response.text
-    assert "reject.disabled = true" in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_continue_never_sends_a_goal(client):
-    """Trả lời form bổ sung đi /continue với đúng fields."""
-    response = await client.get("/demo")
-
-    assert "/continue" in response.text
-    assert "JSON.stringify({ fields })" in response.text
-
-
-@pytest.mark.asyncio
-async def test_demo_ui_never_invents_business_data(client):
-    """Ngày/giờ để trống; select bắt đầu bằng lựa chọn rỗng."""
-    response = await client.get("/demo")
-
-    definitions = response.text.split("const FIELDS = {")[1].split("\n      };")[0]
-    for line in definitions.splitlines():
-        if '"date"' in line or '"time"' in line:
-            assert "value:" not in line, line.strip()
-
-    assert 'textContent: "Vui lòng chọn"' in response.text
-    assert "c.checkValidity()" in response.text
-
-    # Chỉ field của tài khoản mới được điền sẵn, và phải nói rõ.
-    prefilled = [ln.split(":")[0].strip() for ln in definitions.splitlines() if "value: ACCOUNT." in ln]
-    assert sorted(prefilled) == ["email", "full_name", "phone"]
-    assert "Đã tự điền từ tài khoản · bạn có thể chỉnh" in response.text
 
 
 def test_demo_needs_information_exposes_structured_missing_fields() -> None:
@@ -362,6 +219,7 @@ async def test_capability_catalog_is_user_facing_and_marks_resident_services(cli
     body = response.json()
     assert any(item["name"] == "Đặt lịch tham quan dự án" for item in body["capabilities"])
     assert any(item["requires_resident"] for item in body["capabilities"])
+    assert not any(item["name"] == "Tìm gợi ý bất động sản" for item in body["capabilities"])
     assert "register_vehicle" not in response.text
     assert "pay_fee" not in response.text
 
@@ -387,6 +245,7 @@ def test_follow_up_rejects_past_date_and_outside_business_hours() -> None:
 @pytest.mark.parametrize(
     ("field", "expected"),
     [
+        ("project_name", "dự án trong danh sách"),
         ("viewing_date", "từ hôm nay trở đi"),
         ("viewing_time", "08:00–17:30"),
         ("preferred_time", "08:00–18:00"),
@@ -398,6 +257,68 @@ def test_follow_up_validation_message_is_specific_and_safe(field, expected) -> N
 
     assert expected in message
     assert "12h99" not in message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Có những dự án nào?",
+        "danh sách dự án",
+        "P-118 hỗ trợ dự án nào",
+    ],
+)
+def test_project_catalog_question_is_not_treated_as_a_field_answer(message) -> None:
+    assert routes._asks_for_project_catalog(message, ["project_name", "viewing_date"])
+    assert not routes._asks_for_project_catalog(message, ["parking_zone"])
+
+
+def test_project_catalog_answer_comes_from_the_canonical_catalogue() -> None:
+    answer = routes._project_catalog_answer()
+
+    for project in routes.PROJECTS:
+        assert project["project_name"] in answer
+    assert "PRJ-" not in answer
+
+
+@pytest.mark.asyncio
+async def test_project_catalog_question_keeps_the_same_clarification_open(client, monkeypatch) -> None:
+    routes._DEMO_JOBS.clear()
+    workflow_id = "workflow-project-catalog"
+    response = routes.DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="NEEDS_INFORMATION",
+        question="Bạn muốn tham quan dự án nào?",
+        # Mô phỏng đúng cache RAM dựng từ AgentState: ở đây vẫn là tên nội bộ.
+        # Route public phải chuẩn hoá giống đường đọc lại từ PostgreSQL.
+        missing_fields=["project_id", "viewing_date", "viewing_time"],
+    )
+    routes._DEMO_JOBS[workflow_id] = {
+        "stage": "NEEDS_INFORMATION",
+        "message": response.question,
+        "plan": None,
+        "events": [],
+        "goal": "Đặt lịch tham quan dự án.",
+        "existing_context": {},
+        "response": response,
+    }
+
+    async def _must_not_consume(*args, **kwargs):
+        raise AssertionError("câu hỏi tra cứu không được consume clarification")
+
+    monkeypatch.setattr(routes, "_consume_and_create_child", _must_not_consume)
+    result = await client.post(
+        f"/api/v1/workflows/demo/{workflow_id}/continue",
+        json={"message": "Có những dự án nào?"},
+    )
+
+    assert result.status_code == 202
+    body = result.json()
+    assert body["workflow_id"] == workflow_id
+    assert body["status"] == "NEEDS_INFORMATION"
+    assert body["missing_fields"] == ["project_name", "viewing_date", "viewing_time"]
+    assert body["response_state"] == "READY"
+    assert all(project["project_name"] in body["answer"] for project in routes.PROJECTS)
+    assert routes._DEMO_JOBS[workflow_id]["response"].status == "NEEDS_INFORMATION"
 
 
 @pytest.mark.asyncio
@@ -479,6 +400,50 @@ async def test_continue_workflow_accepts_partial_answer_then_planner_can_ask_rem
 
     assert response.status_code == 202
     assert captured == {"project_id": "PRJ-001", "viewing_date": "2026-08-22"}
+
+
+@pytest.mark.asyncio
+async def test_structured_form_rejects_partial_submission_without_creating_a_child(
+    client,
+    monkeypatch,
+) -> None:
+    """Form hiển thị nhiều ô phải gửi đủ trong một lần.
+
+    Chấp nhận một phần sẽ tạo một child workflow và một câu Response Agent cho
+    mỗi ô người dùng bỏ trống — đúng vòng lặp UI mà test này khoá lại.
+    """
+    routes._DEMO_JOBS.clear()
+    original_id = "workflow-structured-needs-date-time"
+    routes._DEMO_JOBS[original_id] = {
+        "stage": "NEEDS_INFORMATION",
+        "message": "Thiếu ngày và giờ.",
+        "plan": None,
+        "events": [],
+        "goal": "Đặt lịch tham quan PRJ-001.",
+        "existing_context": {"project_id": "PRJ-001"},
+        "response": routes.DemoWorkflowResponse(
+            status="NEEDS_INFORMATION",
+            question="Thiếu ngày và giờ.",
+            missing_fields=["viewing_date", "viewing_time"],
+        ),
+    }
+    ran = False
+
+    async def _fake_run(*_args, **_kwargs):
+        nonlocal ran
+        ran = True
+
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_run)
+    before = set(routes._DEMO_JOBS)
+
+    response = await client.post(
+        f"/api/v1/workflows/demo/{original_id}/continue",
+        json={"fields": {"viewing_time": "10:00"}},
+    )
+
+    assert response.status_code == 422
+    assert set(routes._DEMO_JOBS) == before
+    assert ran is False
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1009,34 @@ async def test_demo_workflow_rejects_untrusted_request_shape(client, payload):
     assert response.status_code == 422
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        # Quyết định thanh toán chỉ được mang ĐÚNG quyết định. Số tiền và mã đặt
+        # chỗ là dữ liệu có thẩm quyền của backend; nhận chúng từ browser là để
+        # người dùng tự định giá dịch vụ của mình.
+        ("payment-decision", {"decision": "approve", "amount": 1}),
+        ("payment-decision", {"decision": "approve", "booking_id": "BOOK-001"}),
+        # Trả lời câu hỏi bổ sung KHÔNG được kèm goal mới: đổi goal giữa chừng
+        # là thay việc cần làm sau khi quyền đã được xét cho việc cũ.
+        ("continue", {"fields": {"parking_zone": "ZONE_A"}, "goal": "Đăng ký cư dân"}),
+        ("continue", {"fields": {"parking_zone": "ZONE_A"}, "account_state": "resident"}),
+    ],
+)
+async def test_the_api_refuses_bodies_that_carry_backend_owned_data(client, path, payload):
+    """Coverage này trước được kiểm bằng cách đọc source `static/demo.html`.
+
+    Trang đó đã bị xoá, và đọc source của một client vốn cũng chỉ chứng minh
+    MỘT client cư xử đúng. Kiểm ở biên API mạnh hơn: bất kỳ client nào gửi thừa
+    field cũng bị từ chối, kể cả curl.
+    """
+    workflow_id = "00000000-0000-4000-8000-000000000abc"
+    response = await client.post(f"/api/v1/workflows/demo/{workflow_id}/{path}", json=payload)
+
+    assert response.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # A. workflow_id không được rơi mất trên đường poll
 #
@@ -1237,7 +1230,7 @@ async def test_successful_payment_decision_replaces_stale_waiting_stage(monkeypa
     async def _build_repo(**_kwargs):
         return _Repo()
 
-    monkeypatch.setattr(routes, "build_repository", _build_repo)
+    set_repository_provider(_build_repo)
     try:
         response = await routes.decide_demo_payment(
             workflow_id,
@@ -1414,32 +1407,68 @@ async def test_continue_never_uses_body_account_state(client, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_session_persist_failure_is_nonfatal(client, monkeypatch) -> None:
-    """DB lỗi lúc ghim session KHÔNG được làm hỏng workflow.
+async def test_session_persist_failure_before_202_is_fatal(client, monkeypatch) -> None:
+    """Không ghim được phiên TRƯỚC khi trả 202 → 503, và Planner không chạy.
 
-    Session chỉ ảnh hưởng quyền của các lần đọc sau; nếu không ghim được thì
-    fail-closed về prospect. Workflow vẫn phải chạy bình thường.
+    Contract cũ coi đây là non-fatal: `/start` vẫn trả 202 rồi fail-closed về
+    prospect. Nhưng khi đó người dùng nhận một `workflow_id` mà mọi lần đọc sau
+    đều mất quyền, và không có gì nói cho họ biết vì sao. Thà báo lỗi ngay.
     """
     routes._DEMO_JOBS.clear()
     calls = []
 
-    async def _boom(*args, **kwargs):
+    async def _boom(*_args, **_kwargs):
         raise RuntimeError("DB down")
 
-    async def _fake_job(workflow_id, goal, approve_mock_payment, service_urls, account_state, **kwargs):
-        calls.append(("job", account_state))
+    async def _fake_job(*args, **_kwargs):
+        calls.append(args[0] if args else None)
 
-    monkeypatch.setattr(routes, "_persist_session", _boom)
+    monkeypatch.setattr(routes, "_create_shell_and_session", _boom)
     monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
+
     response = await client.post(
         "/api/v1/workflows/demo/start",
-        json={"goal": "Đặt lịch tham quan PRJ-001 ngày 2026-12-10 lúc 10:00."},
+        json={"goal": "Đặt lịch xem nhà tại Vinhomes Ocean Park ngày 2030-12-10 lúc 10:00."},
     )
     await asyncio.sleep(0)
 
-    assert response.status_code == 202
-    # Persona server-side; tài khoản test chưa có liên kết đã VERIFIED.
-    assert calls == [("job", "prospect")]
+    assert response.status_code == 503, response.text
+    assert calls == [], "Planner chạy dù chưa ghim được phiên"
+    for leaked in ("DB down", "postgresql://", "RuntimeError"):
+        assert leaked not in response.text
+
+
+@pytest.mark.asyncio
+async def test_a_redundant_session_write_inside_the_job_never_breaks_a_running_workflow(client, monkeypatch) -> None:
+    """Ghim lại phiên trong background job là phòng thủ, không phải điều kiện.
+
+    Phiên durable đã có từ `/start`. Lần ghi lại bên trong `_run_demo_job` chỉ
+    là idempotent; nó lỗi thì workflow đang chạy vẫn phải chạy tiếp, và quyền
+    đã persist không được mất.
+    """
+    routes._DEMO_JOBS.clear()
+    ran = []
+
+    async def _redundant_write_fails(*_args, **_kwargs):
+        return False
+
+    async def _fake_job(workflow_id, goal, approve, urls, account_state, **kwargs):
+        # Job ghi lại phiên (idempotent) rồi vẫn phải chạy tiếp.
+        await routes._persist_session(kwargs.get("session_id"), account_state)
+        ran.append(account_state)
+
+    monkeypatch.setattr(routes, "_persist_session", _redundant_write_fails)
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
+
+    response = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={"goal": "Đặt lịch xem nhà tại Vinhomes Ocean Park ngày 2030-12-10 lúc 10:00."},
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    assert response.status_code == 202, response.text
+    assert ran == ["prospect"], "workflow bị chặn vì một lần ghi lại phiên thất bại"
 
 
 @pytest.mark.asyncio

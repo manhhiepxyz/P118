@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from src.orchestration import compensation
+from src.orchestration.runtime_provider import set_repository_provider
 
 
 class _FakePool:
@@ -120,7 +121,7 @@ def fake_repo_factory(monkeypatch):
         async def _refund_payment(p, booking_id: str) -> bool:
             return await _pool_refund(p, booking_id)
 
-        monkeypatch.setattr(compensation, "build_repository", _build_repository)
+        set_repository_provider(_build_repository)
         # Các repo function của module compensation gọi qua import — để test
         # deterministic, patch trực tiếp lên module.
         monkeypatch.setattr(compensation, "cancel_booking", _cancel_booking)

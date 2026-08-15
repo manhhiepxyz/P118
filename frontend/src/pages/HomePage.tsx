@@ -1,268 +1,556 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Building2, Bus, Car, Compass, CreditCard, HelpCircle, ParkingSquare, Plus, Sparkles } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BadgeCheck, Clock, Home, Lock, Loader2, SendHorizontal, ShieldX } from 'lucide-react'
 
-import { generatePlan, listWorkflows } from '../lib/client'
-import { formatDate, shortId } from '../lib/status'
-import { usePolling } from '../lib/usePolling'
-import { EmptyState, SkeletonRows } from '../components/Bits'
-import { StatusBadge } from '../components/StatusBadge'
-import type { WorkflowSummary } from '../lib/types'
+import { ChatWorkflowCard } from '../components/ChatWorkflowCard'
+import { QuickActionForm } from '../components/QuickActionForm'
+import { cancelWorkflow, continueWorkflow, getCapabilities, startWorkflow } from '../lib/agentApi'
+import { useAuth } from '../lib/auth'
+import type {
+  AgentWorkflowResponse,
+  Capability,
+  ResidentLinkStatus,
+} from '../lib/types'
 
-const SERVICES = [
-  {
-    id: 'resident',
-    name: 'Đăng ký Cư dân',
-    desc: 'Nhập học / Chuyển vào căn hộ mới',
-    icon: Building2,
-    snippet: 'đăng ký cư dân căn hộ A1201',
-    color: 'border-teal-200 bg-teal-50/60 hover:bg-teal-100/80 text-teal-800 dark:border-teal-900 dark:bg-teal-950/40 dark:text-teal-300',
-  },
-  {
-    id: 'vehicle',
-    name: 'Đăng ký Phương tiện',
-    desc: 'Đăng ký biển số ô tô hoặc xe máy',
-    icon: Car,
-    snippet: 'đăng ký xe ô tô 51A-12345',
-    color: 'border-blue-200 bg-blue-50/60 hover:bg-blue-100/80 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300',
-  },
-  {
-    id: 'parking',
-    name: 'Đặt chỗ Đỗ xe',
-    desc: 'Giữ chỗ đỗ xe tại ZONE_A / ZONE_B',
-    icon: ParkingSquare,
-    snippet: 'đặt chỗ đậu xe ZONE_A',
-    color: 'border-amber-200 bg-amber-50/60 hover:bg-amber-100/80 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300',
-  },
-  {
-    id: 'payment',
-    name: 'Thanh toán Phí',
-    desc: 'Thanh toán phí dịch vụ & đỗ xe',
-    icon: CreditCard,
-    snippet: 'thanh toán phí dịch vụ',
-    color: 'border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100/80 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300',
-  },
-  {
-    id: 'tour',
-    name: 'Tham quan Dự án',
-    desc: 'Đặt lịch tham quan căn hộ mẫu',
-    icon: Compass,
-    snippet: 'đặt lịch tham quan dự án Ocean Park buổi sáng',
-    color: 'border-purple-200 bg-purple-50/60 hover:bg-purple-100/80 text-purple-800 dark:border-purple-900 dark:bg-purple-950/40 dark:text-purple-300',
-  },
-  {
-    id: 'shuttle',
-    name: 'Xe Đưa đón',
-    desc: 'Đặt xe shuttle đưa đón tham quan',
-    icon: Bus,
-    snippet: 'đặt xe đưa đón tham quan 2 người',
-    color: 'border-indigo-200 bg-indigo-50/60 hover:bg-indigo-100/80 text-indigo-800 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300',
-  },
-  {
-    id: 'consultation',
-    name: 'Tư vấn Căn hộ',
-    desc: 'Tư vấn mua để ở/đầu tư hoặc thuê',
-    icon: HelpCircle,
-    snippet: 'đăng ký tư vấn mua căn hộ để ở',
-    color: 'border-rose-200 bg-rose-50/60 hover:bg-rose-100/80 text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300',
-  },
-]
+/**
+ * Trang chủ — MỘT cuộc hội thoại mới cho mỗi lần mở trang.
+ *
+ * Trước đây: gõ mục tiêu → `POST /start` → `navigate("/workflow/{id}")`. Người
+ * dùng bị đẩy sang một trang khác ngay sau khi bấm gửi, và từ đó câu hỏi bổ
+ * sung, tiến trình, bước duyệt thanh toán đều nằm tách khỏi thứ họ vừa gõ.
+ * Không có chỗ nào để hỏi tiếp, và cũng không có gì nối hai màn hình lại.
+ *
+ * Mọi thứ của lượt hiện tại ở lại đây: tin nhắn của người dùng, thẻ workflow
+ * sống, form bổ sung, card báo giá, rồi câu trả lời của P-118. Reload không
+ * dựng lại lịch sử vào chat. Workflow đã lưu chỉ xuất hiện ở `/workflows`; khi
+ * muốn tiếp tục, người dùng chủ động mở workflow đó.
+ */
 
-const SCENARIOS = [
-  {
-    title: '📦 Nhập cư Trọn gói (Full Resident Onboarding)',
-    prompt: 'Tôi mới chuyển vào căn hộ A1201. Hãy đăng ký cư dân, xe ô tô 51A-12345, đặt chỗ đậu xe ZONE_A và thanh toán phí giúp tôi.',
+const LINK_VIEW: Record<ResidentLinkStatus, { label: string; hint: string; tone: string; Icon: typeof Home }> = {
+  VERIFIED: {
+    label: 'Đã xác minh căn hộ',
+    hint: 'Bạn dùng được đầy đủ dịch vụ dành cho cư dân.',
+    tone: 'border-teal-200 bg-teal-50 text-teal-900 dark:border-teal-900/50 dark:bg-teal-950/30 dark:text-teal-200',
+    Icon: BadgeCheck,
   },
-  {
-    title: '🎫 Tham quan Dự án & Đặt xe đưa đón (Tour Combo)',
-    prompt: 'Tôi muốn đặt lịch tham quan dự án Vinhomes Ocean Park buổi sáng ngày mai và đặt xe đưa đón cho 2 người.',
+  PENDING: {
+    label: 'Hồ sơ đang chờ duyệt',
+    hint: 'Ban quản lý đang xem xét. Dịch vụ cư dân sẽ mở sau khi được duyệt.',
+    tone: 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200',
+    Icon: Clock,
   },
-  {
-    title: '💬 Tư vấn Mua Căn hộ & Đặt Lịch Tham quan',
-    prompt: 'Đăng ký tư vấn mua căn hộ để ở và đặt lịch tham quan căn hộ mẫu buổi chiều.',
+  REJECTED: {
+    label: 'Hồ sơ chưa được duyệt',
+    hint: 'Vui lòng liên hệ ban quản lý toà nhà để được hỗ trợ.',
+    tone: 'border-red-200 bg-red-50 text-red-900 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200',
+    Icon: ShieldX,
   },
-]
+  NOT_LINKED: {
+    label: 'Chưa liên kết căn hộ',
+    hint: 'Gửi yêu cầu ở mục "Liên kết căn hộ" để ban quản lý xác minh. Việc xác minh do ban quản lý thực hiện, không tự khai được.',
+    tone: 'border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300',
+    Icon: Home,
+  },
+}
 
-/** Home — nhập mục tiêu + Danh mục dịch vụ gợi ý (Prompt 2.1). */
+type ChatMessage =
+  | { kind: 'user'; id: string; text: string }
+  | { kind: 'assistant'; id: string; text: string; suggestions: string[] }
+  | { kind: 'thinking'; id: string }
+  | { kind: 'workflow'; id: string; workflowId: string; goal: string }
+
+let messageCounter = 0
+const nextId = () => `m${++messageCounter}`
+
+const CANCELLABLE_STATUSES = new Set([
+  'PENDING',
+  'RUNNING',
+  'NEEDS_INFORMATION',
+  'WAITING_APPROVAL',
+])
+
+/**
+ * Chỉ nhận câu điều khiển độc lập, không bắt nhầm câu như “không muốn huỷ”.
+ * Đây là lệnh UI deterministic; không tốn một lượt Planner để hiểu một thao
+ * tác đã có đích rõ ràng là workflow đang hoạt động.
+ */
+function isCancelCommand(text: string): boolean {
+  const normalized = text
+    .trim()
+    .toLocaleLowerCase('vi-VN')
+    .replace(/[.!?]+$/u, '')
+    .replace(/\s+/gu, ' ')
+  return /^(?:(?:tôi|mình)\s+)?(?:(?:muốn|cần)\s+)?(?:huỷ|hủy|dừng|bỏ)(?:\s+(?:yêu cầu|tác vụ|workflow|việc)(?:\s+(?:này|hiện tại))?)?$/u.test(
+    normalized,
+  )
+}
+
+interface WorkflowRuntimeState {
+  currentWorkflowId: string
+  data: AgentWorkflowResponse
+}
+
 export function HomePage() {
-  const navigate = useNavigate()
+  const { user } = useAuth()
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [goal, setGoal] = useState('')
-  const [selectedServices, setSelectedServices] = useState<string[]>([])
-  const [submitting, setSubmitting] = useState(false)
+  const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [capabilities, setCapabilities] = useState<Capability[]>([])
+  const [quickActions, setQuickActions] = useState<Capability[]>([])
+  const [workflowStates, setWorkflowStates] = useState<Record<string, WorkflowRuntimeState>>({})
+  const [workflowSnapshots, setWorkflowSnapshots] = useState<
+    Record<string, AgentWorkflowResponse>
+  >({})
+  const [workflowTargets, setWorkflowTargets] = useState<Record<string, string>>({})
 
-  const { data: recent, loading } = usePolling(() => listWorkflows().then((r) => r.items), 15000)
+  /** Chặn StrictMode/remount hoặc hai thẻ cùng workflow thêm lại một câu. */
+  const announcedReplies = useRef<Set<string>>(new Set())
 
-  function toggleService(id: string) {
-    let updated: string[]
-    if (selectedServices.includes(id)) {
-      updated = selectedServices.filter((s) => s !== id)
-    } else {
-      updated = [...selectedServices, id]
+  useEffect(() => {
+    let cancelled = false
+    getCapabilities()
+      .then((items) => {
+        if (!cancelled) setCapabilities(items)
+      })
+      .catch(() => {
+        /* Không chặn trang: ô nhập mục tiêu vẫn dùng được. */
+      })
+    return () => {
+      cancelled = true
     }
-    setSelectedServices(updated)
+  }, [])
 
-    if (updated.length === 0) {
+  /** P-118 nói một câu khi workflow dừng lại — đúng một lần cho mỗi lần dừng. */
+  const handleSettled = useCallback((data: AgentWorkflowResponse) => {
+    // NEEDS_INFORMATION dùng `question`, còn workflow đã hoàn tất thường dùng
+    // `answer`/`summary`. Bỏ `question` làm câu hỏi đầu tiên biến mất khỏi lịch
+    // sử dù người dùng vẫn nhìn thấy trạng thái chờ trong card.
+    const text = data.answer || data.summary || data.question || data.message
+    if (!text) return
+    const announcementKey = `${data.workflow_id ?? 'unknown'}:${data.status}:${text}`
+    if (announcedReplies.current.has(announcementKey)) return
+    announcedReplies.current.add(announcementKey)
+    setMessages((prev) => {
+      // Child workflow có thể diễn đạt y hệt parent. Không để hai bubble giống
+      // hệt đứng cạnh nhau dù chúng mang hai workflow_id khác nhau.
+      const previousReply = [...prev].reverse().find((message) => message.kind === 'assistant')
+      if (previousReply?.kind === 'assistant' && previousReply.text.trim() === text.trim()) return prev
+      return [
+        ...prev,
+        {
+          kind: 'assistant',
+          id: nextId(),
+          text,
+          // Capability tìm kiếm bất động sản đã bị gỡ khỏi trải nghiệm người
+          // dùng. Lọc cả snapshot cũ để một workflow đã lưu không làm nút này
+          // xuất hiện lại sau khi backend catalogue đã đổi.
+          suggestions: (data.suggestions ?? []).filter(
+            (suggestion) => !suggestion.toLocaleLowerCase('vi-VN').includes('gợi ý bất động sản'),
+          ),
+        },
+      ]
+    })
+  }, [])
+
+  const handleWorkflowState = useCallback(
+    (rootWorkflowId: string, currentWorkflowId: string, data: AgentWorkflowResponse) => {
+      setWorkflowStates((previous) => {
+        const current = previous[rootWorkflowId]
+        if (current?.currentWorkflowId === currentWorkflowId && current.data === data) return previous
+        return { ...previous, [rootWorkflowId]: { currentWorkflowId, data } }
+      })
+    },
+    [],
+  )
+
+  function latestCancellableWorkflow(): { rootWorkflowId: string; currentWorkflowId: string } | null {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.kind !== 'workflow') continue
+      const runtime = workflowStates[message.workflowId]
+      if (runtime && CANCELLABLE_STATUSES.has(runtime.data.status)) {
+        return { rootWorkflowId: message.workflowId, currentWorkflowId: runtime.currentWorkflowId }
+      }
+    }
+    return null
+  }
+
+  function latestWorkflowIn(statuses: Set<string>): {
+    rootWorkflowId: string
+    currentWorkflowId: string
+  } | null {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.kind !== 'workflow') continue
+      const runtime = workflowStates[message.workflowId]
+      if (runtime && statuses.has(runtime.data.status)) {
+        return { rootWorkflowId: message.workflowId, currentWorkflowId: runtime.currentWorkflowId }
+      }
+    }
+    return null
+  }
+
+  /** Tạo workflow từ một goal hoàn chỉnh, bất kể goal đến từ chat hay quick form. */
+  async function launchWorkflow(text: string) {
+    setSending(true)
+    setError(null)
+    const thinkingId = nextId()
+    setMessages((previous) => [
+      ...previous,
+      { kind: 'user', id: nextId(), text },
+      { kind: 'thinking', id: thinkingId },
+    ])
+
+    try {
+      // Browser chỉ gửi goal. TaskPlan, dependency, quyền và context đều do
+      // backend quyết định; quick form không phải một workflow builder.
+      const response = await startWorkflow(text)
+      const created = response.workflow_id
+      if (!created) throw new Error('Không tạo được yêu cầu. Vui lòng thử lại.')
+      setMessages((previous) => [
+        ...previous.filter((message) => message.id !== thinkingId),
+        { kind: 'workflow', id: nextId(), workflowId: created, goal: text },
+      ])
+    } catch (reason) {
+      setMessages((previous) => previous.filter((message) => message.id !== thinkingId))
+      throw reason
+    } finally {
+      setSending(false)
+    }
+  }
+
+  async function send() {
+    const text = goal.trim()
+    if (!text || sending) return
+
+    if (isCancelCommand(text)) {
+      const active = latestCancellableWorkflow()
       setGoal('')
+      setError(null)
+      setMessages((previous) => [...previous, { kind: 'user', id: nextId(), text }])
+
+      if (!active) {
+        setMessages((previous) => [
+          ...previous,
+          {
+            kind: 'assistant',
+            id: nextId(),
+            text: 'Hiện không có yêu cầu nào đang chạy hoặc đang chờ bạn xử lý.',
+            suggestions: [],
+          },
+        ])
+        return
+      }
+
+      setSending(true)
+      try {
+        const cancelled = await cancelWorkflow(active.currentWorkflowId)
+        // Đẩy thẳng response vào đúng thẻ. Form biến mất ngay, không phải chờ
+        // polling; câu trả lời tự nhiên tiếp tục được Response Agent sinh nền.
+        setWorkflowSnapshots((previous) => ({
+          ...previous,
+          [active.rootWorkflowId]: cancelled,
+        }))
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Không huỷ được yêu cầu.')
+      } finally {
+        setSending(false)
+      }
       return
     }
 
-    const snippets = SERVICES.filter((s) => updated.includes(s.id)).map((s) => s.snippet)
-    setGoal(`Tôi muốn ${snippets.join(', ')}.`)
-  }
-
-  async function handleSubmit() {
-    if (!goal.trim() || submitting) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      const res = await generatePlan(goal.trim())
-      if (res.status === 'NEEDS_INFORMATION') {
-        setError(res.question)
-        setSubmitting(false)
-        return
+    const waiting = latestWorkflowIn(new Set(['NEEDS_INFORMATION']))
+    if (waiting) {
+      setSending(true)
+      setError(null)
+      const thinkingId = nextId()
+      setMessages((previous) => [
+        ...previous,
+        { kind: 'user', id: nextId(), text },
+        { kind: 'thinking', id: thinkingId },
+      ])
+      try {
+        const next = await continueWorkflow(waiting.currentWorkflowId, { message: text })
+        setMessages((previous) => previous.filter((message) => message.id !== thinkingId))
+        setWorkflowSnapshots((previous) => ({
+          ...previous,
+          [waiting.rootWorkflowId]: next,
+        }))
+        if (next.workflow_id && next.workflow_id !== waiting.currentWorkflowId) {
+          setWorkflowTargets((previous) => ({
+            ...previous,
+            [waiting.rootWorkflowId]: next.workflow_id as string,
+          }))
+        } else if (next.answer || next.summary || next.message) {
+          handleSettled(next)
+        }
+        setGoal('')
+      } catch (e) {
+        setMessages((previous) => previous.filter((message) => message.id !== thinkingId))
+        setError(e instanceof Error ? e.message : 'Chưa gửi được câu trả lời.')
+      } finally {
+        setSending(false)
       }
-      navigate(`/review/${res.workflow_id}`)
+      return
+    }
+
+    try {
+      await launchWorkflow(text)
+      setGoal('')
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Đã xảy ra lỗi')
-      setSubmitting(false)
+      // GIỮ NGUYÊN nội dung đã gõ: bắt người dùng viết lại vì một lỗi mạng là
+      // cách chắc chắn để họ bỏ cuộc.
+      setError(e instanceof Error ? e.message : 'Đã xảy ra lỗi. Vui lòng thử lại.')
     }
   }
 
+  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // `isComposing` là bắt buộc với tiếng Việt: bộ gõ dùng Enter để chốt dấu,
+    // và gửi lúc đó sẽ cắt mất chữ người dùng đang viết dở.
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+    event.preventDefault()
+    void send()
+  }
+
+  const status: ResidentLinkStatus = user?.resident_verification_status ?? 'NOT_LINKED'
+  const view = LINK_VIEW[status] ?? LINK_VIEW.NOT_LINKED
+  const StatusIcon = view.Icon
+  const empty = messages.length === 0
+  const waitingWorkflow = latestWorkflowIn(new Set(['NEEDS_INFORMATION']))
+  const waitingSnapshot = waitingWorkflow
+    ? workflowStates[waitingWorkflow.rootWorkflowId]?.data
+    : null
+  // Backend công bố NEEDS_INFORMATION trước rồi mới sinh lời giải thích tự
+  // nhiên. Không mở composer trong cửa sổ này: một /continue gửi quá sớm có
+  // thể thay snapshot và làm mất chính câu hỏi P-118 đang soạn.
+  const assistantPreparing = waitingSnapshot?.response_state === 'PENDING'
+  const waitingForReply = waitingWorkflow && !assistantPreparing
+  const workflowRunning = latestWorkflowIn(new Set(['PENDING', 'RUNNING']))
+
   return (
-    <div className="space-y-10">
-      {/* Hero */}
-      <section className="py-6 text-center">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 sm:text-3xl">
-          Trợ lý AI Điều phối Dịch vụ Cư dân
+    <div className="flex min-h-[calc(100vh-9rem)] flex-col gap-4">
+      <header>
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+          Chào {user?.username ?? 'bạn'}
         </h1>
-        <p className="mt-2 text-sm text-gray-500 max-w-xl mx-auto">
-          Mô tả nhu cầu bằng ngôn ngữ tự nhiên hoặc chọn các dịch vụ bên dưới. AI Agent sẽ tự động lập kế hoạch liên hoàn và thực hiện.
-        </p>
+        <p className="mt-1 text-sm text-gray-500">P-118 có thể giúp bạn việc gì hôm nay?</p>
+      </header>
 
-        {/* Danh mục 4 Dịch vụ (Service Catalog Grid) */}
-        <div className="mx-auto mt-6 grid max-w-3xl grid-cols-2 gap-3 sm:grid-cols-4 text-left">
-          {SERVICES.map((s) => {
-            const isSelected = selectedServices.includes(s.id)
-            const Icon = s.icon
-            return (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => toggleService(s.id)}
-                className={`relative flex flex-col justify-between rounded-2xl border p-4 transition-all ${s.color} ${
-                  isSelected ? 'ring-2 ring-teal-600 shadow-md font-medium' : ''
-                }`}
-              >
-                <div>
-                  <div className="flex items-center justify-between">
-                    <Icon className="h-5 w-5 shrink-0" aria-hidden />
-                    {isSelected && (
-                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-teal-600 text-xs font-bold text-white">
-                        ✓
-                      </span>
-                    )}
-                  </div>
-                  <h3 className="mt-3 text-xs font-bold">{s.name}</h3>
-                  <p className="mt-1 text-[11px] opacity-80 line-clamp-2">{s.desc}</p>
-                </div>
-                <span className="mt-3 inline-flex items-center gap-1 text-[10px] font-semibold opacity-90">
-                  <Plus className="h-3 w-3" /> {isSelected ? 'Đã chọn' : 'Thêm vào câu lệnh'}
-                </span>
-              </button>
-            )
-          })}
+      <section className={`rounded-2xl border p-4 ${view.tone}`}>
+        <div className="flex items-start gap-3">
+          <StatusIcon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">{view.label}</p>
+            <p className="mt-1 text-sm opacity-90">{view.hint}</p>
+            {/* Căn hộ chỉ hiện khi ĐÃ xác minh — hiện sớm hơn là khẳng định một
+                quan hệ sở hữu mà hệ thống chưa xác nhận. */}
+            {status === 'VERIFIED' && user?.apartment_code && (
+              <p className="mt-2 text-sm font-medium">
+                {user.apartment_code}
+                {user.residential_area ? ` · ${user.residential_area}` : ''}
+              </p>
+            )}
+          </div>
         </div>
+      </section>
 
-        {/* Ô nhập Goal */}
-        <div className="mx-auto mt-6 max-w-xl text-left">
+      {/* Cuộc hội thoại */}
+      <div
+        className="flex-1 space-y-4 overflow-y-auto rounded-2xl border border-gray-200 bg-card p-4 dark:border-gray-800"
+        aria-live="polite"
+        aria-label="Cuộc hội thoại với P-118"
+      >
+        {empty && (
+          <p className="py-8 text-center text-sm text-gray-500">
+            Mô tả việc bạn cần, hoặc chọn một dịch vụ bên dưới. Mình sẽ lên kế hoạch và làm cùng bạn
+            ngay tại đây. Các yêu cầu trước nằm trong mục Workflows.
+          </p>
+        )}
+
+        {messages.map((message) => {
+          if (message.kind === 'user') {
+            return (
+              <div key={message.id} className="flex justify-end">
+                <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-teal-700 px-4 py-2.5 text-sm text-white">
+                  {message.text}
+                </p>
+              </div>
+            )
+          }
+          if (message.kind === 'thinking') {
+            return (
+              <div key={message.id} className="flex justify-start">
+                <p className="inline-flex items-center gap-2 rounded-2xl rounded-bl-sm bg-gray-100 px-4 py-2.5 text-sm text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                  P-118 đang xem thông tin còn thiếu…
+                </p>
+              </div>
+            )
+          }
+          if (message.kind === 'assistant') {
+            return (
+              <div key={message.id} className="flex flex-col items-start gap-2">
+                <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-sm bg-gray-100 px-4 py-2.5 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-100">
+                  {message.text}
+                </p>
+                {message.suggestions.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {message.suggestions.map((suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        onClick={() => {
+                          setGoal(suggestion)
+                        }}
+                        className="rounded-full border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:border-teal-700 hover:text-teal-700 dark:border-gray-700 dark:text-gray-300"
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          }
+          return (
+            <div key={message.id} className="max-w-[95%]">
+              <ChatWorkflowCard
+                workflowId={message.workflowId}
+                goal={message.goal}
+                onSettled={handleSettled}
+                externalSnapshot={workflowSnapshots[message.workflowId]}
+                externalCurrentId={workflowTargets[message.workflowId]}
+                onStateChange={handleWorkflowState}
+              />
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Composer ghim dưới cùng */}
+      <section className="rounded-2xl border border-gray-200 bg-card p-4 dark:border-gray-800">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <p className="text-xs text-gray-500">
+            {waitingForReply
+              ? 'P-118 đang chờ câu trả lời cho yêu cầu hiện tại.'
+              : assistantPreparing
+                ? 'P-118 đang xem thông tin còn thiếu…'
+              : workflowRunning
+                ? 'P-118 đang thực hiện yêu cầu. Bạn có thể gửi tiếp khi bước hiện tại dừng.'
+                : 'Mô tả một yêu cầu mới cho P-118.'}
+          </p>
+          {goal.trim() && (
+            <button
+              type="button"
+              onClick={() => {
+                setGoal('')
+                setError(null)
+              }}
+              className="shrink-0 rounded-full border border-gray-300 px-3 py-1 text-xs text-gray-600 hover:border-teal-700 hover:text-teal-700 dark:border-gray-700 dark:text-gray-300"
+            >
+              Tạo yêu cầu mới
+            </button>
+          )}
+        </div>
+        <label htmlFor="goal" className="sr-only">
+          Việc bạn cần P-118 giúp
+        </label>
+        <div className="flex items-end gap-2">
           <textarea
+            id="goal"
+            rows={2}
             value={goal}
             onChange={(e) => {
               setGoal(e.target.value)
-              setSelectedServices([])
             }}
-            rows={4}
-            maxLength={500}
-            placeholder="Ví dụ: Tôi mới chuyển vào căn hộ A1201. Hãy đăng ký cư dân, xe ô tô 51A-12345, chỗ đậu xe và thanh toán phí giúp tôi."
-            className="w-full resize-none rounded-2xl border border-gray-300 bg-card p-4 text-sm text-gray-900 shadow-sm outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-700/20 dark:border-gray-800 dark:text-gray-100"
-            aria-label="Mục tiêu"
+            onKeyDown={handleKeyDown}
+            placeholder="Ví dụ: Tôi muốn đăng ký xe và đặt chỗ đỗ xe. (Enter để gửi, Shift+Enter xuống dòng)"
+            disabled={Boolean(workflowRunning) || assistantPreparing}
+            className="min-h-[3rem] w-full resize-none rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
           />
-          <div className="mt-1 flex items-center justify-between">
-            <span className="text-xs text-gray-400">{goal.length}/500</span>
-            {error && (
-              <span className="text-xs text-red-600" role="alert">
-                {error}
-              </span>
-            )}
-          </div>
-
           <button
             type="button"
-            disabled={!goal.trim() || submitting}
-            onClick={handleSubmit}
-            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-teal-700 px-6 py-3 text-sm font-semibold text-white shadow-md hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+            onClick={() => void send()}
+            disabled={sending || Boolean(workflowRunning) || assistantPreparing || !goal.trim()}
+            aria-label="Gửi"
+            className="inline-flex h-11 shrink-0 items-center gap-2 rounded-xl bg-teal-700 px-4 text-sm font-medium text-white disabled:opacity-60"
           >
-            {submitting ? (
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            {sending ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
             ) : (
-              <Sparkles className="h-4 w-4" aria-hidden />
+              <SendHorizontal className="h-4 w-4" aria-hidden />
             )}
-            {submitting ? 'Agent đang lập kế hoạch…' : 'AI Lập Kế Hoạch Ngay'}
+            {waitingForReply ? 'Gửi' : 'Bắt đầu'}
           </button>
-
-          {/* Kịch bản mẫu phổ biến */}
-          <div className="mt-6">
-            <p className="text-xs font-bold uppercase tracking-wider text-gray-400">
-              Kịch bản gợi ý phổ biến (1-Click Presets)
-            </p>
-            <div className="mt-2 flex flex-col gap-2">
-              {SCENARIOS.map((sc) => (
-                <button
-                  key={sc.title}
-                  type="button"
-                  onClick={() => {
-                    setGoal(sc.prompt)
-                    setSelectedServices([])
-                  }}
-                  className="flex items-center justify-between rounded-xl border border-gray-200 bg-card px-4 py-2.5 text-left text-xs font-medium text-gray-700 shadow-sm transition hover:border-teal-600 hover:text-teal-700 dark:border-gray-800 dark:text-gray-300"
-                >
-                  <span>{sc.title}</span>
-                  <span className="text-[11px] text-gray-400">Dùng mẫu này ➔</span>
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
+        {error && (
+          <p className="mt-2 text-sm text-red-600" role="alert">
+            {error}
+          </p>
+        )}
       </section>
 
-      {/* Workflow gần đây */}
-      <section>
-        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Workflow gần đây</h2>
-        <div className="mt-3 space-y-3">
-          {loading && <SkeletonRows count={3} />}
-          {!loading && recent && recent.length === 0 && (
-            <EmptyState message="Chưa có workflow nào." />
-          )}
-          {!loading &&
-            recent?.map((wf: WorkflowSummary) => (
-              <a
-                key={wf.workflow_id}
-                href={`/workflow/${wf.workflow_id}`}
-                className="flex items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-card p-4 shadow-sm transition hover:border-teal-700/50 dark:border-gray-800"
+      {capabilities.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Dịch vụ</h2>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {capabilities.map((capability) => {
+              const selected = quickActions.some((item) => item.name === capability.name)
+              return (
+              <button
+                key={capability.name}
+                type="button"
+                // Backend quyết định mở hay khoá. Frontend KHÔNG tự suy từ role.
+                disabled={!capability.available || sending}
+                // Multi-select: mỗi click thêm/bỏ một dịch vụ. Chưa tạo
+                // workflow và chưa gọi model cho tới khi gửi form tổng hợp.
+                onClick={() => {
+                  setQuickActions((previous) =>
+                    selected
+                      ? previous.filter((item) => item.name !== capability.name)
+                      : [...previous, capability],
+                  )
+                }}
+                aria-pressed={selected}
+                aria-expanded={selected}
+                title={capability.blocked_reason ?? undefined}
+                className={`rounded-2xl border p-4 text-left transition ${
+                  !capability.available
+                    ? 'cursor-not-allowed border-gray-200 bg-gray-50 opacity-70 dark:border-gray-800 dark:bg-gray-900'
+                    : selected
+                      ? 'border-teal-700 bg-teal-50 dark:border-teal-700 dark:bg-teal-950/30'
+                      : 'border-gray-200 bg-card hover:border-teal-700/50 dark:border-gray-800'
+                }`}
               >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{wf.goal}</p>
-                  <p className="mt-1 text-xs text-gray-400">
-                    <span className="font-mono">#{shortId(wf.workflow_id)}</span>
-                    {wf.created_at ? ` · ${formatDate(wf.created_at)}` : ''}
-                  </p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{capability.name}</p>
+                  {!capability.available ? (
+                    <Lock className="h-4 w-4 shrink-0 text-gray-400" aria-hidden />
+                  ) : null}
                 </div>
-                <StatusBadge status={wf.status} />
-              </a>
-            ))}
-        </div>
-      </section>
+                <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">{capability.description}</p>
+                {/* Dịch vụ bị khoá vẫn HIỆN, kèm lý do: ẩn hẳn thì người dùng
+                    không biết nó tồn tại và cũng không biết cần làm gì để mở. */}
+                {!capability.available && capability.blocked_reason && (
+                  <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">{capability.blocked_reason}</p>
+                )}
+              </button>
+              )
+            })}
+          </div>
+          {quickActions.length > 0 && (
+            <QuickActionForm
+              capabilities={quickActions}
+              submitting={sending}
+              onCancel={() => setQuickActions([])}
+              onSubmit={async (preparedGoal) => {
+                await launchWorkflow(preparedGoal)
+                setQuickActions([])
+              }}
+            />
+          )}
+        </section>
+      )}
     </div>
   )
 }

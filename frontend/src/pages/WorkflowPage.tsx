@@ -1,204 +1,232 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, CheckCircle, RefreshCw, ShieldAlert, XCircle } from 'lucide-react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { ArrowLeft, CheckCircle2, CircleDot, Lock, ShieldAlert, XCircle } from 'lucide-react'
 
-import { approveTask, getWorkflowStatus, rejectTask } from '../lib/client'
-import { formatDate, formatMoney, toolLabel } from '../lib/status'
-import { usePolling } from '../lib/usePolling'
-import { HitlModal } from '../components/HitlModal'
-import { Timeline, WorkflowId } from '../components/Timeline'
+import { ClarificationReply } from '../components/ClarificationReply'
 import { StatusBadge } from '../components/StatusBadge'
-import type { WorkflowTask } from '../lib/types'
+import { continueWorkflow, decidePayment } from '../lib/agentApi'
+import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
-/** Workflow Visualizer & Action Panel — màn hình chính theo dõi và điều khiển tiến trình. */
+/**
+ * Màn theo dõi một yêu cầu.
+ *
+ * Đây là nơi DUY NHẤT người dùng nhìn thấy tiến trình, câu hỏi bổ sung và bước
+ * duyệt thanh toán. Trước đây trang này gọi `/workflow/{id}/status` — route đó
+ * đã bị xoá vì không kiểm chủ sở hữu.
+ *
+ * KHÔNG hiển thị: suy luận của mô hình, output thô của LLM, InputRef, tên
+ * Planner/Validator/Executor, SQL/DSN, hay enum thô khi đã có nhãn tiếng Việt.
+ */
+
+const STATUS_LABEL: Record<string, string> = {
+  PENDING: 'Đang chuẩn bị',
+  RUNNING: 'Đang thực hiện',
+  NEEDS_INFORMATION: 'Cần thêm thông tin',
+  WAITING_APPROVAL: 'Chờ bạn xác nhận',
+  SUCCESS: 'Hoàn thành',
+  FAILED: 'Không thành công',
+  PLANNING_ERROR: 'Chưa hiểu được yêu cầu',
+  VALIDATION_ERROR: 'Yêu cầu chưa hợp lệ',
+  EXECUTION_ERROR: 'Không thực hiện được',
+  CHAT: 'Đã trả lời',
+}
+
+function formatVnd(amount: number | undefined, currency: string | undefined): string {
+  if (typeof amount !== 'number') return '—'
+  const formatted = new Intl.NumberFormat('vi-VN').format(amount)
+  return currency === 'VND' || !currency ? `${formatted} ₫` : `${formatted} ${currency}`
+}
+
 export function WorkflowPage() {
   const { workflowId = '' } = useParams()
-  const [actionSubmitting, setActionSubmitting] = useState<'approve' | 'reject' | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
+  const navigate = useNavigate()
+  const [deciding, setDeciding] = useState<'approve' | 'reject' | null>(null)
+  const [decisionError, setDecisionError] = useState<string | null>(null)
 
-  const { data, error, loading, refresh } = usePolling(
-    () => getWorkflowStatus(workflowId),
-    2500,
-    Boolean(workflowId),
-  )
+  // Vòng poll dùng CHUNG với thẻ workflow trong hội thoại. Hai bản chép tay
+  // thì một bản được sửa còn bản kia giữ nguyên lỗi — và vòng lặp này đã từng
+  // hỏng theo một cách rất khó thấy.
+  const { data, error, loading, refresh: load } = useWorkflowPolling(workflowId)
 
-  const workflow = data?.workflow
-  const tasks = data?.tasks ?? []
-
-  const hitlTask: WorkflowTask | undefined = tasks.find(
-    (t) => t.status === 'WAITING_APPROVAL',
-  )
-
-  async function handleActionDecision(decision: 'approve' | 'reject') {
-    if (!hitlTask) return
-    setActionSubmitting(decision)
-    setActionError(null)
+  async function handleDecision(decision: 'approve' | 'reject') {
+    if (deciding) return
+    setDeciding(decision)
+    setDecisionError(null)
     try {
-      if (decision === 'approve') await approveTask(workflowId, hitlTask.task_id)
-      else await rejectTask(workflowId, hitlTask.task_id)
-      refresh()
+      // Body CHỈ có `decision`. Số tiền và mã đặt chỗ là dữ liệu có thẩm quyền
+      // của backend; gửi từ browser là để người dùng tự định giá dịch vụ.
+      await decidePayment(workflowId, decision)
+      await load()
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'Không thể gửi quyết định')
+      setDecisionError(e instanceof Error ? e.message : 'Không gửi được quyết định.')
     } finally {
-      setActionSubmitting(null)
+      setDeciding(null)
     }
   }
 
-  function handleDecision() {
-    refresh()
+  async function handleClarification(message: string) {
+    // Gửi vào ĐÚNG workflow đang hỏi — gọi start lần nữa sẽ tạo một yêu cầu
+    // mới và bỏ rơi toàn bộ ngữ cảnh đã thu thập.
+    const next = await continueWorkflow(workflowId, { message })
+
+    // Backend trả lời bằng một workflow CON: câu trả lời được tiêu thụ một lần
+    // và lượt chạy mới có id riêng. Ở lại URL cũ thì trang tiếp tục poll
+    // workflow cha — cái đã trả lời xong và không tiến thêm — nên người dùng
+    // thấy màn hình đứng yên, hoặc thấy lại chính câu hỏi vừa trả lời.
+    if (next.workflow_id && next.workflow_id !== workflowId) {
+      navigate(`/workflow/${next.workflow_id}`, { replace: true })
+      return
+    }
+
+    await load()
   }
+
+  if (loading && !data) {
+    return (
+      <div className="space-y-4">
+        <div className="h-6 w-48 animate-pulse rounded bg-gray-200 dark:bg-gray-800" />
+        <div className="h-32 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-900" />
+      </div>
+    )
+  }
+
+  if (error && !data) {
+    return (
+      <div className="space-y-4">
+        <Link to="/" className="inline-flex items-center gap-1 text-sm text-teal-700">
+          <ArrowLeft className="h-4 w-4" /> Về trang chủ
+        </Link>
+        <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700">{error}</p>
+      </div>
+    )
+  }
+
+  if (!data) return null
+
+  const quote = data.payment_quote ?? {}
+  const isWaitingPayment = data.status === 'WAITING_APPROVAL'
+  const needsInfo = data.status === 'NEEDS_INFORMATION'
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Link
-            to="/"
-            className="rounded-lg border border-gray-200 bg-card p-2 text-gray-500 hover:text-teal-700 dark:border-gray-800"
-            aria-label="Quay lại"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
+      <Link to="/" className="inline-flex items-center gap-1 text-sm text-teal-700">
+        <ArrowLeft className="h-4 w-4" /> Về trang chủ
+      </Link>
+
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
           <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-            Workflow <WorkflowId id={workflowId} />
+            {data.summary || data.message || 'Yêu cầu của bạn'}
           </h1>
+          <p className="mt-1 text-sm text-gray-500">{STATUS_LABEL[data.status] ?? 'Đang xử lý'}</p>
         </div>
-        <button
-          type="button"
-          onClick={refresh}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-card px-3 py-1.5 text-xs font-medium text-gray-600 hover:text-teal-700 dark:border-gray-800 dark:text-gray-300"
-        >
-          <RefreshCw className="h-3.5 w-3.5" aria-hidden />
-          Làm mới
-        </button>
-      </div>
+        <StatusBadge status={data.status} />
+      </header>
 
-      {error && (
-        <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700 dark:bg-red-950/50 dark:text-red-300" role="alert">
-          {error}
-        </p>
+      {needsInfo && data.question && (
+        <section className="space-y-3">
+          <p className="max-w-3xl whitespace-pre-wrap rounded-2xl rounded-bl-sm bg-gray-100 px-4 py-3 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-100">
+            {data.answer || data.question}
+          </p>
+          <ClarificationReply onSubmit={handleClarification} />
+        </section>
       )}
 
-      {loading && !data && (
-        <div className="animate-pulse space-y-4">
-          <div className="h-24 rounded-2xl bg-gray-100 dark:bg-gray-800" />
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-20 rounded-2xl bg-gray-100 dark:bg-gray-800" />
-          ))}
-        </div>
-      )}
+      {isWaitingPayment && (
+        <section className="rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900/50 dark:bg-amber-950/30">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                Cần bạn xác nhận khoản thanh toán
+              </h2>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                Phí chỗ đỗ xe cho yêu cầu này. Chúng tôi chỉ thu sau khi bạn đồng ý.
+              </p>
+              <p className="mt-3 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+                {formatVnd(quote.amount as number | undefined, quote.currency as string | undefined)}
+              </p>
 
-      {workflow && (
-        <>
-          {/* Thẻ thông tin */}
-          <div className="rounded-2xl border border-gray-200 bg-card p-5 shadow-sm dark:border-gray-800">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-base font-medium text-gray-900 dark:text-gray-100">“{workflow.goal}”</p>
-                <p className="mt-2 text-xs text-gray-400">
-                  Bắt đầu: {formatDate(workflow.created_at)}
-                  {workflow.updated_at && workflow.updated_at !== workflow.created_at
-                    ? ` · Cập nhật: ${formatDate(workflow.updated_at)}`
-                    : ''}
-                </p>
+              {decisionError && <p className="mt-3 text-sm text-red-600">{decisionError}</p>}
+
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleDecision('approve')}
+                  disabled={deciding !== null}
+                  className="inline-flex items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                >
+                  <CheckCircle2 className="h-4 w-4" aria-hidden />
+                  {deciding === 'approve' ? 'Đang gửi…' : 'Xác nhận thanh toán'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDecision('reject')}
+                  disabled={deciding !== null}
+                  className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:text-gray-200"
+                >
+                  <XCircle className="h-4 w-4" aria-hidden />
+                  {deciding === 'reject' ? 'Đang gửi…' : 'Từ chối'}
+                </button>
               </div>
-              <StatusBadge status={workflow.status} />
             </div>
           </div>
-
-          {/* Action Panel — Nổi bật khi workflow cần duyệt (WAITING_APPROVAL) */}
-          {hitlTask && (
-            <div className="overflow-hidden rounded-2xl border border-amber-300 bg-amber-50/90 p-5 shadow-md dark:border-amber-700/60 dark:bg-amber-950/40">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-                    <ShieldAlert className="h-5 w-5 shrink-0" aria-hidden />
-                    <h2 className="text-sm font-bold uppercase tracking-wide">
-                      Yêu cầu duyệt thao tác nhạy cảm
-                    </h2>
-                  </div>
-                  <p className="text-sm text-amber-900 dark:text-amber-200">
-                    Agent cần sự đồng ý của bạn để thực thi:{' '}
-                    <span className="font-bold underline decoration-amber-400">{toolLabel(hitlTask.tool)}</span>
-                  </p>
-                  {(hitlTask.result_data?.amount ?? hitlTask.input_data?.amount) !== undefined && (
-                    <p className="text-xs font-semibold text-amber-800 dark:text-amber-300">
-                      Số tiền dự kiến: {formatMoney(hitlTask.result_data?.amount ?? hitlTask.input_data?.amount)}
-                    </p>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-3 shrink-0">
-                  <button
-                    type="button"
-                    disabled={actionSubmitting !== null}
-                    onClick={() => handleActionDecision('reject')}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-4 py-2.5 text-sm font-semibold text-red-600 shadow-sm transition hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-gray-900 dark:text-red-400"
-                  >
-                    <XCircle className="h-4 w-4" aria-hidden />
-                    {actionSubmitting === 'reject' ? 'Đang từ chối…' : 'Từ chối'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={actionSubmitting !== null}
-                    onClick={() => handleActionDecision('approve')}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-teal-700 px-5 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-teal-800 disabled:opacity-50"
-                  >
-                    <CheckCircle className="h-4 w-4" aria-hidden />
-                    {actionSubmitting === 'approve' ? 'Đang duyệt…' : 'Phê duyệt ngay'}
-                  </button>
-                </div>
-              </div>
-
-              {actionError && (
-                <p className="mt-3 text-xs font-medium text-red-600 dark:text-red-400" role="alert">
-                  ⚠ {actionError}
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Timeline Visualizer */}
-          <Timeline tasks={tasks} workflowStatus={workflow.status} />
-
-          {/* Footer */}
-          {workflow.status === 'SUCCESS' && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm text-emerald-800 dark:border-emerald-800/40 dark:bg-emerald-950/40 dark:text-emerald-300">
-              ✅ Workflow hoàn thành thành công.{' '}
-              <span className="font-medium">
-                {tasks.filter((t) => t.status === 'SUCCESS').length}/{tasks.length}
-              </span>{' '}
-              tác vụ. —{' '}
-              <Link to={`/workflow/${workflowId}/detail`} className="underline">
-                Xem chi tiết / kết quả
-              </Link>
-            </div>
-          )}
-          {workflow.status === 'FAILED' && (
-            <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-800 dark:border-red-800/40 dark:bg-red-950/40 dark:text-red-300">
-              ❌ Workflow không thể tiếp tục.{' '}
-              <Link to={`/workflow/${workflowId}/detail`} className="underline">
-                Xem chi tiết
-              </Link>
-            </div>
-          )}
-          {workflow.status === 'CANCELLED' && (
-            <div className="rounded-2xl border border-gray-200 bg-gray-50 px-5 py-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400">
-              Workflow đã bị hủy.
-            </div>
-          )}
-        </>
+        </section>
       )}
 
-      {/* HITL Modal Backup */}
-      {hitlTask && (
-        <HitlModal
-          workflowId={workflowId}
-          task={hitlTask}
-          onClose={refresh}
-          onDecision={handleDecision}
-        />
+      {data.tasks.length > 0 && (
+        <section className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
+          <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Các bước</h2>
+          <ol className="mt-3 space-y-3">
+            {data.tasks.map((task) => (
+              <li key={task.task_id} className="flex items-start gap-3">
+                {task.status === 'SUCCESS' ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-teal-600" aria-hidden />
+                ) : task.status === 'FAILED' ? (
+                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-hidden />
+                ) : task.status === 'WAITING_APPROVAL' ? (
+                  <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden />
+                ) : (
+                  <CircleDot className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{task.title}</p>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">{task.message}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      {data.events.length > 0 && (
+        <section className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
+          <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Diễn biến</h2>
+          <ul className="mt-3 space-y-2">
+            {data.events.map((event) => (
+              <li key={event.sequence} className="text-sm text-gray-600 dark:text-gray-400">
+                {event.message}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {data.plan.length > 0 && (
+        <details className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
+          <summary className="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300">
+            Xem chi tiết kế hoạch
+          </summary>
+          {/* Read-only. Kế hoạch do backend lập; browser không dựng và không sửa. */}
+          <ol className="mt-3 space-y-2">
+            {data.plan.map((step) => (
+              <li key={step.task_id} className="text-sm text-gray-600 dark:text-gray-400">
+                <span className="font-medium text-gray-800 dark:text-gray-200">{step.title}</span>
+                {step.description ? ` — ${step.description}` : ''}
+              </li>
+            ))}
+          </ol>
+        </details>
       )}
     </div>
   )

@@ -80,9 +80,67 @@ class PostgreSQLWorkflowStateRepository:
     async def update_workflow_status(self, workflow_id: str, status: WorkflowStatus) -> None:
         await self.workflows.update_workflow_status(workflow_id, status.value)
 
+    async def cancel_workflow(self, workflow_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Huỷ workflow theo owner; không rollback task đã SUCCESS."""
+        return await self.workflows.cancel_workflow(workflow_id, owner_user_id=owner_user_id)
+
+    async def mark_workflow_failed(self, workflow_id: str, error_code: str) -> None:
+        """Đóng workflow CHƯA kết thúc ở FAILED kèm mã lỗi. Xem WorkflowRepository."""
+        await self.workflows.mark_workflow_failed(workflow_id, error_code)
+
+    async def get_workflow_error_code(self, workflow_id: str) -> str | None:
+        return await self.workflows.get_workflow_error_code(workflow_id)
+
+    async def claim_assistant_response(self, workflow_id: str, *, for_status: str) -> bool:
+        """Giành quyền sinh câu trả lời cho một trạng thái. Xem WorkflowRepository."""
+        return await self.workflows.claim_assistant_response(workflow_id, for_status=for_status)
+
+    async def save_assistant_response(self, workflow_id: str, **kwargs) -> None:
+        await self.workflows.save_assistant_response(workflow_id, **kwargs)
+
+    async def get_assistant_response(self, workflow_id: str) -> dict:
+        return await self.workflows.get_assistant_response(workflow_id)
+
     async def get_workflow(self, workflow_id: str) -> dict:
         """Trả dict gồm workflow metadata + danh sách tasks."""
         return await self.workflows.get_workflow(workflow_id)
+
+    async def consume_clarification_and_create_child(self, parent_workflow_id: str, **kwargs) -> dict | None:
+        """Claim clarification + tạo child atomic. Xem WorkflowRepository."""
+        return await self.workflows.consume_clarification_and_create_child(parent_workflow_id, **kwargs)
+
+    async def create_shell_and_session(self, **kwargs) -> None:
+        """Ghim shell + session atomic. Xem WorkflowRepository."""
+        await self.workflows.create_shell_and_session(**kwargs)
+
+    async def get_pending_payment_view(self, workflow_id: str) -> dict | None:
+        """Báo giá của khoản thanh toán ĐANG CHỜ DUYỆT, hoặc None.
+
+        Số tiền đọc từ `parking_bookings`, KHÔNG từ snapshot trong
+        `payment_approvals`: booking là dữ liệu provider đã ghi khi giữ chỗ, còn
+        snapshot chỉ là bản chép lại có thể lệch.
+
+        Chỉ trả khi `status = 'AWAITING'`. Approval đã quyết định không được kéo
+        một workflow đã kết thúc quay lại màn chờ duyệt.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT a.task_id, b.booking_id, b.amount, b.currency
+                FROM payment_approvals AS a
+                JOIN parking_bookings AS b ON b.booking_id = a.booking_id
+                WHERE a.workflow_id = $1 AND a.status = 'AWAITING'
+                """,
+                _uuid(workflow_id),
+            )
+        if row is None:
+            return None
+        return {
+            "task_id": row["task_id"],
+            "booking_id": row["booking_id"],
+            "amount": int(row["amount"]),
+            "currency": row["currency"],
+        }
 
     async def get_workflow_owner(self, workflow_id: str) -> str | None:
         """Chủ sở hữu workflow, đọc thẳng PostgreSQL.

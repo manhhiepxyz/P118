@@ -1,7 +1,7 @@
 # P-118 — Agent Workspace Redesign
 
 Tài liệu thiết kế và đối chiếu với implementation Gate 2 hiện tại. Mockup HTML
-trong cùng thư mục vẫn là bản tĩnh; giao diện chạy thật nằm tại `/demo`.
+trong cùng thư mục vẫn là bản tĩnh; giao diện chạy thật là React app trong `frontend/` (route `/demo` đã bị xoá).
 
 Mọi phần tử giao diện dưới đây đều được gắn nhãn:
 

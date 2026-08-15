@@ -13,6 +13,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from src.main import app
+from src.orchestration.runtime_provider import clear_repository_provider, set_repository_provider
 
 
 @pytest_asyncio.fixture
@@ -44,14 +45,20 @@ async def client(request):
         app.dependency_overrides[get_user_repository] = lambda: users
         headers["Authorization"] = f"Bearer {create_access_token(FAKE_USER)}"
 
-    # Guard ownership tra chủ sở hữu qua `routes.build_repository`, mà các test
-    # ở đây chạy trên repository giả. Cấp một repo giả CÓ `get_workflow_owner`
-    # trả về chính user đang đăng nhập: guard vẫn chạy đủ đường, chỉ nguồn dữ
-    # liệu là giả. Việc chứng minh guard thực sự chặn người khác thuộc về
-    # tests/test_db — nơi có PostgreSQL thật và hai tài khoản thật.
-    from src.api import routes as _routes
+    # Guard ownership tra chủ sở hữu qua provider trung tâm, mà các test ở đây
+    # chạy trên repository giả. Cấp một repo giả CÓ `get_workflow_owner` trả về
+    # chính user đang đăng nhập: guard vẫn chạy đủ đường, chỉ nguồn dữ liệu là
+    # giả. Việc chứng minh guard thực sự chặn người khác thuộc về tests/test_db
+    # — nơi có PostgreSQL thật và hai tài khoản thật.
 
-    original_build_repository = _routes.build_repository
+    class _StubAcquire:
+        """`async with pool.acquire() as conn` — conn cũng là pool rỗng."""
+
+        async def __aenter__(self):
+            return _StubPool()
+
+        async def __aexit__(self, *_exc):
+            return False
 
     class _OwnerAwareRepository:
         """Uỷ quyền mọi thứ cho repository thật, chỉ trả lời riêng câu hỏi chủ sở hữu.
@@ -69,17 +76,77 @@ async def client(request):
         async def get_workflow_owner(self, workflow_id: str):
             return None if anonymous else str(FAKE_USER["id"])
 
-    async def _stub_build_repository(**kwargs):
-        return _OwnerAwareRepository(await original_build_repository(**kwargs))
+    class _StubPool:
+        """Pool KHÔNG kết nối gì cả — trả rỗng cho mọi truy vấn.
 
-    _routes.build_repository = _stub_build_repository
+        Trước đây các test ở đây đi qua `build_repository()` thật, nghĩa là
+        chúng mở kết nối tới DATABASE_URL phát triển. Không ai thấy vì kết quả
+        vẫn đúng: database dev có sẵn schema. Giờ chúng chạy trên một pool
+        không chạm mạng — test cần dữ liệu thật thuộc về tests/test_db.
+        """
+
+        async def close(self) -> None:
+            return None
+
+        async def fetchrow(self, *_args, **_kwargs):
+            return None
+
+        async def fetchval(self, *_args, **_kwargs):
+            return None
+
+        async def fetch(self, *_args, **_kwargs):
+            return []
+
+        async def execute(self, *_args, **_kwargs):
+            return "OK"
+
+        def acquire(self):
+            return _StubAcquire()
+
+    class _StubRepository(_OwnerAwareRepository):
+        """Repo cho test API dùng fake — KHÔNG chạm PostgreSQL.
+
+        Nó đại diện cho persistence THÀNH CÔNG: `/start` giờ ghim shell +
+        session trước khi trả 202, nên một stub không biết `create_workflow` sẽ
+        khiến mọi test ở đây nhận 503 — lỗi của fixture, không phải của route.
+
+        Các thao tác ghi là no-op thành công. Thao tác nào KHÔNG được khai báo
+        vẫn raise: test cần dữ liệu thật thuộc về tests/test_db.
+        """
+
+        _pool = _StubPool()
+
+        def __init__(self):
+            super().__init__(None)
+
+        async def create_shell_and_session(self, **_kwargs) -> None:
+            return None
+
+        async def create_workflow(self, workflow_data: dict) -> str:
+            return str(workflow_data.get("id") or "00000000-0000-0000-0000-0000000000ff")
+
+        async def save_clarification(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def update_workflow_status(self, *_args, **_kwargs) -> None:
+            return None
+
+        def __getattr__(self, name):
+            raise AttributeError(
+                f"Test API không được chạm repository thật qua {name!r}. Test cần database phải nằm ở tests/test_db."
+            )
+
+    async def _stub_provider():
+        return _StubRepository()
+
+    set_repository_provider(_stub_provider)
 
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as ac:
             yield ac
     finally:
-        _routes.build_repository = original_build_repository
+        clear_repository_provider()
         app.dependency_overrides.pop(get_user_repository, None)
 
 

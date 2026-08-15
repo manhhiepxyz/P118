@@ -105,7 +105,7 @@ async def test_register_property_interest_reaches_the_consultation_provider(cons
         {
             "project_id": "PRJ-001",
             "interest_type": "buy",
-            "preferred_contact_time": "morning",
+            "preferred_contact_time": "09:30",
             "consent": True,
         },
     )

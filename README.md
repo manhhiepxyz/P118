@@ -217,13 +217,54 @@ bash scripts/setup_hooks.sh
 
 ## Running the Project
 
-```bash
-# Starter application — P-118 implementation bắt đầu sau Gate 1
-uvicorn src.main:app --reload --port 8000
+### Đường chạy canonical
 
-# Mở Swagger UI
-# http://localhost:8000/docs
+Bốn bước, theo đúng thứ tự. Không cần biết tên compose project, không cần biết
+volume cũ, không cần sửa gì bằng tay.
+
+```bash
+# 1. Dựng toàn bộ stack và KIỂM trước khi nói là xong.
+#
+#    Script dừng lại kèm hướng dẫn nếu: Docker chưa chạy, một tiến trình local
+#    đang giữ cổng của stack, container tên cố định thuộc compose project khác,
+#    migration lỗi, /ready đỏ, hoặc provider và backend không cùng một kho dữ liệu.
+#    Nó KHÔNG BAO GIỜ tự xoá volume hay container dữ liệu.
+sh scripts/stack_up.sh
+
+# 2. Giao diện React, trỏ vào backend Docker.
+cd frontend && npm install
+VITE_API_PROXY_TARGET=http://127.0.0.1:8080 npm run dev -- --port 5273
+
+# 3. Browser E2E thật (Playwright + Chromium), chạy trên stack ở bước 1.
+cd tests/e2e && npm run setup     # một lần: cài Playwright + Chromium
+npm test
+
+# 4. Manual eval với LLM thật (có tính phí).
+python eval/run_manual_eval.py > eval/results/raw.json
 ```
+
+Kiểm nhanh khi nghi ngờ:
+
+```bash
+curl -s http://127.0.0.1:8080/ready | python -m json.tool   # cấu hình/DB/migration/connector
+docker compose exec backend python scripts/smoke_llm.py     # khoá LLM còn dùng được không
+python scripts/check_data_plane.py                          # provider và backend cùng kho?
+```
+
+`/health` chỉ nói tiến trình còn sống — **đừng** dùng nó để kết luận hệ thống chạy
+được. Đó chính là cách một Compose "toàn healthy" từng che một cấu hình LLM sai
+trong khi mọi workflow đều chết ở bước lập kế hoạch.
+
+### Ba database, ba mục đích
+
+| Database | Dùng cho | Ai được ghi |
+|---|---|---|
+| `p118_db` | stack Docker, demo, browser E2E, manual eval | ứng dụng |
+| `p118_test_db` | `pytest` (fixture có `TRUNCATE`) | chỉ test |
+| `p118_e2e_db` | thí nghiệm tách biệt | chỉ khi cần |
+
+`tests/_dbcheck.py` chặn fail-closed: fixture test chỉ chạy trên `p118_test_db`.
+Trỏ `TEST_DATABASE_URL` sang chỗ khác thì suite dừng chứ không `TRUNCATE` nhầm.
 
 ---
 
@@ -278,13 +319,17 @@ docker compose up -d
 docker compose ps
 for p in 8080 8001 8002 8003 8005; do curl -s http://localhost:$p/health; done
 
-# Mở Agent Workspace dùng cho demo
-open http://localhost:8080/demo
+# Giao diện: React app (frontend/), chạy riêng
+cd frontend && npm install && npm run dev
 ```
+
+Trang HTML một file `static/demo.html` và route `/demo` đã bị xoá. Giao diện
+chạy thật là React app trong `frontend/`, nói chuyện với backend qua đúng một
+bộ API canonical `/api/v1/workflows/demo/*` — bộ có kiểm chủ sở hữu.
 
 | Service | Cổng | Mô tả |
 | --- | --- | --- |
-| Backend | 8080 | FastAPI app + Agent Workspace (`/demo`) |
+| Backend | 8080 | FastAPI app + API canonical `/api/v1/*` |
 | Mock Resident | 8001 | `POST /api/residents` |
 | Mock Transport | 8002 | `POST /api/vehicles` + `POST /api/parking/bookings` |
 | Mock Payment | 8003 | `POST /api/payments` |
@@ -299,7 +344,7 @@ Sau khi `docker compose up -d` và backend healthy, chạy:
 PYTHONPATH=. .venv/bin/python scripts/demo_chat.py
 ```
 
-CLI dùng cùng workflow API với giao diện `/demo`: tự hiển thị tiến độ, hỏi
+CLI dùng cùng workflow API với giao diện React: tự hiển thị tiến độ, hỏi
 thông tin còn thiếu và chỉ gửi quyết định `approve`/`reject` khi backend đã
 trả báo giá thanh toán. Nhập `/quit` để thoát. Dùng persona khách bằng
 `--account prospect`; mặc định là cư dân demo đã liên kết căn hộ. Khi Agent

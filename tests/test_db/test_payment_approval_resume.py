@@ -31,6 +31,7 @@ from src.orchestration.payment_approval import (
     save_pending_approval,
     tasks_to_resume,
 )
+from src.orchestration.runtime_provider import set_repository_provider
 
 
 def _future_day(offset: int = 60) -> str:
@@ -406,7 +407,6 @@ async def resumable(db_pool: asyncpg.Pool, monkeypatch):
     """Workflow đã persist ĐỦ plan, prefix SUCCESS, pay_fee WAITING_APPROVAL."""
     from src.common.enums import TaskStatus
     from src.common.results import StandardResult
-    from src.orchestration import demo_service
     from src.orchestration.payment_approval import persist_full_plan
 
     resident = await create_resident(
@@ -455,7 +455,7 @@ async def resumable(db_pool: asyncpg.Pool, monkeypatch):
     async def _fake_build_repository(**_kwargs):
         return repository
 
-    monkeypatch.setattr(demo_service, "build_repository", _fake_build_repository)
+    set_repository_provider(_fake_build_repository)
 
     return {"pool": db_pool, "workflow_id": workflow_id, "repository": repository, "quote": quote}
 

@@ -1,0 +1,128 @@
+{
+  "cases": [
+    {
+      "title": "1. Đăng ký xe + đặt chỗ đỗ xe, có vòng hỏi bổ sung",
+      "goal": "Đăng ký ô tô, đặt chỗ đỗ xe và thanh toán phí.",
+      "account": "customer đã được ban quản lý xác minh cư dân (VERIFIED)",
+      "planner": "NEEDS_INFORMATION → READY sau khi người dùng bổ sung",
+      "missing": "biển số xe, loại xe, ngày đặt chỗ, khu vực đỗ xe",
+      "tools": [
+        "Đăng ký phương tiện",
+        "Đặt chỗ đỗ xe",
+        "Thanh toán phí"
+      ],
+      "result": "WAITING_APPROVAL · báo giá 150000 VND",
+      "tasks": [
+        "Đăng ký phương tiện=SUCCESS",
+        "Đặt chỗ đỗ xe=SUCCESS",
+        "Thanh toán phí=WAITING_APPROVAL"
+      ],
+      "db": [
+        "workflow cha 95ff4eb1… → con 920790db…",
+        "vòng hỏi bổ sung = 1",
+        "approval AWAITING = 1",
+        "biển số canary 51E-*** · ngày 2028-05-30 · Khu A"
+      ],
+      "verdict": "PASS",
+      "why": "Dừng đúng ở điểm chờ người dùng quyết định, kèm báo giá đọc từ chỗ đỗ xe đã giữ.",
+      "llm": "2 (plan=2)"
+    },
+    {
+      "title": "2. Duyệt khoản thanh toán",
+      "goal": "(tiếp tục workflow của case 1) — người dùng bấm Xác nhận thanh toán",
+      "account": "chính chủ workflow, đã VERIFIED",
+      "planner": "không gọi lại Planner — quyết định là hành động của người dùng",
+      "missing": "—",
+      "tools": [
+        "Đăng ký phương tiện",
+        "Đặt chỗ đỗ xe",
+        "Thanh toán phí"
+      ],
+      "result": "HTTP 200 → SUCCESS",
+      "tasks": [
+        "Đăng ký phương tiện=SUCCESS",
+        "Đặt chỗ đỗ xe=SUCCESS",
+        "Thanh toán phí=SUCCESS"
+      ],
+      "db": [
+        "payments toàn hệ thống 8 → 9",
+        "duyệt lần hai: HTTP 409, payments 9 → 9",
+        "approval APPROVED = 1"
+      ],
+      "verdict": "PASS",
+      "why": "Đúng một khoản thu được tạo; lần duyệt thứ hai bị chặn 409 chứ không thu thêm.",
+      "llm": "1 (plan=1)"
+    },
+    {
+      "title": "3. Từ chối khoản thanh toán",
+      "goal": "Đăng ký ô tô, đặt chỗ đỗ xe và thanh toán phí.",
+      "account": "customer đã VERIFIED",
+      "planner": "NEEDS_INFORMATION → READY",
+      "missing": "biển số xe, loại xe, ngày đặt chỗ, khu vực đỗ xe",
+      "tools": [
+        "Đăng ký phương tiện",
+        "Đặt chỗ đỗ xe",
+        "Thanh toán phí"
+      ],
+      "result": "HTTP 200 → hiển thị FAILED (DB: CANCELLED)",
+      "tasks": [
+        "Đăng ký phương tiện=SUCCESS",
+        "Đặt chỗ đỗ xe=SUCCESS",
+        "Thanh toán phí=PENDING"
+      ],
+      "db": [
+        "workflow con a4d663ca… · DB status = CANCELLED",
+        "payments 9 → 9 (không đổi)",
+        "chỗ đỗ xe đã giữ vẫn còn = 1",
+        "biển số canary 51F-*** · ngày 2028-05-31 · Khu B"
+      ],
+      "verdict": "PASS",
+      "why": "Từ chối huỷ workflow và không thu tiền, nhưng KHÔNG xoá chỗ đã giữ — huỷ chỗ là quyết định khác.",
+      "llm": "2 (plan=2)"
+    },
+    {
+      "title": "4. Đặt lịch tham quan dự án với ngày/giờ hợp lệ",
+      "goal": "Tôi muốn đặt lịch tham quan căn hộ tại Vinhomes Ocean Park.",
+      "account": "customer đã VERIFIED (dịch vụ này vốn mở cho cả khách chưa liên kết)",
+      "planner": "NEEDS_INFORMATION → READY",
+      "missing": "dự án, ngày xem nhà, giờ xem nhà",
+      "tools": [
+        "Đặt lịch tham quan"
+      ],
+      "result": "SUCCESS",
+      "tasks": [
+        "Đặt lịch tham quan=SUCCESS"
+      ],
+      "db": [
+        "workflow 5537a3f1… · vòng hỏi = 1",
+        "ngày hẹn 2028-06-29 lúc 10:30 (giữ nguyên phút, không quy về buổi)",
+        "kết quả provider đã ghi vào workflow_tasks: 2028-06-29 10:30 · Vinhomes Ocean Park (PRJ-007)",
+        "số điện thoại đầu mối do provider giữ, không đưa vào báo cáo"
+      ],
+      "verdict": "PASS",
+      "why": "Giờ hẹn đi qua tới provider ở dạng HH:MM, không bị quy về MORNING/AFTERNOON.",
+      "llm": "2 (plan=2)"
+    },
+    {
+      "title": "5. Lỗi có chủ ý — đặt chỗ cho một ngày đã qua",
+      "goal": "Đăng ký ô tô, đặt chỗ đỗ xe và thanh toán phí. (người dùng chọn ngày 2026-07-16, đã qua)",
+      "account": "customer đã VERIFIED",
+      "planner": "NEEDS_INFORMATION cho vòng hỏi đầu; input sai bị chặn trước khi gọi provider",
+      "missing": "biển số xe, loại xe, ngày đặt chỗ, khu vực đỗ xe",
+      "tools": [],
+      "result": "HTTP_422 — Ngày đặt chỗ chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
+      "tasks": [],
+      "db": [
+        "vòng hỏi = 1",
+        "chỗ đỗ xe được tạo cho ngày quá khứ = 0 (phải là 0)",
+        "biển số canary 51G-***"
+      ],
+      "verdict": "PASS",
+      "why": "Không tạo chỗ đỗ xe cho ngày đã qua, và nói cho người dùng biết cần sửa gì.",
+      "llm": "2 (plan=2)"
+    }
+  ],
+  "resident_masked": "RES-EV-77…",
+  "apartment_masked": "E-7254",
+  "user_masked": "4074f424…"
+}

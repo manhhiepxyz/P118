@@ -439,3 +439,125 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ---------------------------------------------------------------------------
+-- Lý do workflow hỏng, lưu ở dạng mã ổn định.
+--
+-- Không có cột này, một workflow chết vì sai cấu hình vẫn đọc lên là PENDING
+-- sau restart: lỗi chỉ được ghi vào cache trong tiến trình, mà cache thì mất
+-- cùng tiến trình.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS error_code VARCHAR(60);
+    END IF;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Yêu cầu liên kết căn hộ do khách hàng gửi.
+--
+-- Khách hàng khai căn hộ; admin duyệt. Không có bảng này thì khách hàng không
+-- có đường nào bắt đầu, còn admin phải tự biết UUID của họ.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF to_regclass('users') IS NOT NULL THEN
+        CREATE TABLE IF NOT EXISTS resident_link_requests (
+            request_id       UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id          UUID         NOT NULL REFERENCES users(id),
+            apartment_code   VARCHAR(50)  NOT NULL,
+            residential_area VARCHAR(100) NOT NULL,
+            full_name        VARCHAR(200) NOT NULL,
+            status           VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+                                 CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+            created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            decided_at       TIMESTAMPTZ,
+            decided_by       UUID         REFERENCES users(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_link_request_one_pending_per_user
+            ON resident_link_requests(user_id)
+            WHERE status = 'PENDING';
+        CREATE INDEX IF NOT EXISTS idx_link_requests_status
+            ON resident_link_requests(status, created_at);
+    END IF;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Câu trả lời tự nhiên của P-118, lưu ngay trên workflow.
+--
+-- Không tạo bảng hội thoại riêng: P-118 là Agent thực hiện tác vụ, và box chat
+-- chỉ là cách trình bày lại các workflow. Câu trả lời vì thế là thuộc tính của
+-- workflow, không phải một tin nhắn độc lập.
+--
+-- Thiếu mấy cột này, câu trả lời chỉ sống trong RAM: F5 hoặc restart là mất,
+-- trong khi workflow vẫn còn nguyên.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS assistant_answer TEXT;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS assistant_suggestions JSONB NOT NULL DEFAULT '[]'::jsonb;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS assistant_response_state VARCHAR(20);
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS assistant_for_status VARCHAR(30);
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS assistant_updated_at TIMESTAMPTZ;
+
+        -- CHECK thêm riêng: `ADD COLUMN IF NOT EXISTS` không mang theo ràng
+        -- buộc khi cột đã tồn tại từ một lần chạy trước.
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'workflows_assistant_response_state_check'
+        ) THEN
+            ALTER TABLE workflows
+                ADD CONSTRAINT workflows_assistant_response_state_check
+                CHECK (assistant_response_state IN ('PENDING', 'READY', 'FALLBACK'));
+        END IF;
+    END IF;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
+-- `preferred_contact_time`: buổi → GIỜ CỤ THỂ (HH:MM, 08:00–18:00).
+--
+-- "afternoon" tới tay nhân viên tư vấn vẫn không nói được nên gọi lúc mấy giờ,
+-- còn người dùng muốn hẹn 14:30 thì không có cách nào diễn đạt. Cả hai đầu
+-- cùng mất thông tin, và không đầu nào lấy lại được.
+--
+-- Dữ liệu cũ được QUY ĐỔI, không xoá: mỗi buổi thành một giờ đại diện. Đây là
+-- phép đoán, nhưng là phép đoán tốt hơn hẳn việc để lại một giá trị mà không
+-- tầng nào còn hiểu.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF to_regclass('consultations') IS NOT NULL THEN
+        -- Bỏ ràng buộc cũ TRƯỚC khi đổi dữ liệu, nếu không UPDATE sẽ vi phạm nó.
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_consultations_contact_time') THEN
+            ALTER TABLE consultations DROP CONSTRAINT ck_consultations_contact_time;
+        END IF;
+
+        UPDATE consultations
+        SET preferred_contact_time = CASE preferred_contact_time
+                WHEN 'morning'   THEN '09:30'
+                WHEN 'afternoon' THEN '14:30'
+                WHEN 'evening'   THEN '17:30'
+                ELSE preferred_contact_time
+            END
+        WHERE preferred_contact_time IN ('morning', 'afternoon', 'evening');
+
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'ck_consultations_contact_time_hhmm'
+        ) THEN
+            ALTER TABLE consultations
+                ADD CONSTRAINT ck_consultations_contact_time_hhmm
+                CHECK (
+                    preferred_contact_time IS NULL
+                    OR preferred_contact_time ~ '^(0[89]|1[0-8]):[0-5][0-9]$'
+                )
+                -- NOT VALID: dữ liệu lịch sử ngoài hai dạng trên vẫn nằm yên,
+                -- nhưng mọi row MỚI đều phải đúng.
+                NOT VALID;
+        END IF;
+    END IF;
+END
+$$;

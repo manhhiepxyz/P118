@@ -17,6 +17,8 @@ import pytest_asyncio
 
 from src.api import routes
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+from src.orchestration.runtime_provider import set_repository_provider
+from src.orchestration.sweeper import _sweep_zombie_workflows
 
 WF = "55555555-6666-7777-8888-999999999999"
 SESSION_ID = "session-restart"
@@ -45,7 +47,7 @@ async def restarted(db_pool: asyncpg.Pool, monkeypatch):
         return repository
 
     # Cả routes lẫn demo_service phải trỏ về CÙNG database của test.
-    monkeypatch.setattr(routes, "build_repository", _fake_build_repository)
+    set_repository_provider(_fake_build_repository)
 
     async def _read_record(workflow_id):
         return await repository.get_workflow(workflow_id)
@@ -123,6 +125,43 @@ async def test_get_stops_reporting_needs_information_once_resolved(restarted) ->
 
     assert body["status"] != "NEEDS_INFORMATION"
     assert not body["missing_fields"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_workflow_never_resurrects_an_open_clarification_form(restarted) -> None:
+    """Dữ liệu cũ có thể đã FAILED trước khi clarification được đóng.
+
+    Trạng thái terminal là nguồn sự thật: API không được dựng lại form khiến
+    người dùng nhập vào một workflow mà mọi mutation đều từ chối bằng 409.
+    """
+    await restarted["pool"].execute(
+        "UPDATE workflows SET status = 'FAILED' WHERE workflow_id = $1::uuid",
+        WF,
+    )
+
+    body = (await restarted["client"].get(f"/api/v1/workflows/demo/{WF}")).json()
+
+    assert body["status"] == "FAILED"
+    assert body["question"] is None
+    assert body["missing_fields"] == []
+
+
+@pytest.mark.asyncio
+async def test_sweeper_does_not_fail_a_workflow_waiting_for_clarification(restarted) -> None:
+    """Một workflow chờ người dùng lâu không phải zombie."""
+    await restarted["pool"].execute(
+        "UPDATE workflows SET updated_at = NOW() - INTERVAL '2 days' WHERE workflow_id = $1::uuid",
+        WF,
+    )
+
+    swept = await _sweep_zombie_workflows(restarted["pool"], running_ttl_hours=0.5, live_ids=set())
+    status = await restarted["pool"].fetchval(
+        "SELECT status FROM workflows WHERE workflow_id = $1::uuid",
+        WF,
+    )
+
+    assert WF not in swept
+    assert status == "PENDING"
 
 
 # 7. Lỗi đọc bảng phụ không được biến workflow thành 404

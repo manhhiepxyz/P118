@@ -35,7 +35,7 @@ from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from src.orchestration.deps import build_repository
+from src.orchestration.runtime_provider import acquire_repository
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ class LlmUsageLogger(BaseCallbackHandler):
         if not rows:
             return
         try:
-            repository = await build_repository(migrate=False)
+            repository = await acquire_repository()
             pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
             try:
                 await _insert_rows(pool, rows)

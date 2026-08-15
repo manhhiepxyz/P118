@@ -12,12 +12,12 @@ import {
 
 import { EmptyState, SkeletonRows } from '../components/Bits'
 import { StatusBadge } from '../components/StatusBadge'
-import { listWorkflows } from '../lib/client'
-import { formatDate, shortId } from '../lib/status'
-import type { WorkflowStatus, WorkflowSummary } from '../lib/types'
+import { listWorkflows } from '../lib/agentApi'
+import { shortId } from '../lib/status'
+import type { AgentDisplayWorkflowStatus, AgentWorkflowListItem } from '../lib/types'
 import { usePolling } from '../lib/usePolling'
 
-const STATUS_OPTIONS: Array<{ value: WorkflowStatus | ''; label: string }> = [
+const STATUS_OPTIONS: Array<{ value: AgentDisplayWorkflowStatus | ''; label: string }> = [
   { value: '', label: 'Tất cả' },
   { value: 'PENDING', label: 'Đang chờ' },
   { value: 'RUNNING', label: 'Đang thực hiện' },
@@ -30,7 +30,7 @@ const STATUS_OPTIONS: Array<{ value: WorkflowStatus | ''; label: string }> = [
 const PAGE_SIZE = 10
 
 /** Mảng rỗng ổn định — tránh tạo mới mỗi render khi data null (usePolling). */
-const EMPTY_WORKFLOWS: WorkflowSummary[] = []
+const EMPTY_WORKFLOWS: AgentWorkflowListItem[] = []
 
 /** Admin Dashboard — giám sát toàn bộ workflow (Prompt 3.1). */
 export function AdminDashboardPage() {
@@ -38,7 +38,7 @@ export function AdminDashboardPage() {
   const workflows = data ?? EMPTY_WORKFLOWS
 
   const [query, setQuery] = useState('')
-  const [status, setStatus] = useState<WorkflowStatus | ''>('')
+  const [status, setStatus] = useState<AgentDisplayWorkflowStatus | ''>('')
   const [page, setPage] = useState(1)
 
   const kpi = useMemo(() => {
@@ -70,7 +70,7 @@ export function AdminDashboardPage() {
     const q = query.trim().toLowerCase()
     return workflows.filter((w) => {
       if (status && w.status !== status) return false
-      if (q && !w.goal.toLowerCase().includes(q) && !w.workflow_id.toLowerCase().includes(q)) {
+      if (q && !w.title.toLowerCase().includes(q) && !w.workflow_id.toLowerCase().includes(q)) {
         return false
       }
       return true
@@ -176,7 +176,7 @@ export function AdminDashboardPage() {
         <select
           value={status}
           onChange={(e) => {
-            setStatus(e.target.value as WorkflowStatus | '')
+            setStatus(e.target.value as AgentDisplayWorkflowStatus | '')
             setPage(1)
           }}
           className="rounded-xl border border-gray-300 bg-card px-3 py-2 text-sm text-gray-700 shadow-sm outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-700/20"
@@ -223,7 +223,7 @@ export function AdminDashboardPage() {
               </tr>
             </thead>
             <tbody>
-              {pageItems.map((wf: WorkflowSummary) => (
+              {pageItems.map((wf: AgentWorkflowListItem) => (
                 <tr
                   key={wf.workflow_id}
                   className="border-b border-gray-100 last:border-0 hover:bg-gray-50"
@@ -237,13 +237,13 @@ export function AdminDashboardPage() {
                     </Link>
                   </td>
                   <td className="hidden max-w-0 truncate px-4 py-3 text-gray-700 md:table-cell">
-                    <span className="block max-w-xs truncate">{wf.goal}</span>
+                    <span className="block max-w-xs truncate">{wf.title}</span>
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={wf.status} />
                   </td>
                   <td className="hidden px-4 py-3 text-xs text-gray-500 lg:table-cell">
-                    {formatDate(wf.created_at)}
+                    {wf.current_step ?? '—'}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <Link

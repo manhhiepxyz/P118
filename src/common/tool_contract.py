@@ -204,7 +204,12 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
             inputs={
                 "project_id": _STRING,
                 "interest_type": FieldSpec(kind="enum", enum=frozenset({"buy", "rent", "consultation"})),
-                "preferred_contact_time": FieldSpec(kind="enum", enum=frozenset({"morning", "afternoon", "evening"})),
+                # GIỜ CỤ THỂ, không phải buổi.
+                #
+                # "afternoon" tới tay nhân viên tư vấn vẫn không nói được nên
+                # gọi lúc mấy giờ, còn người dùng muốn hẹn 14:30 thì không có
+                # cách nào diễn đạt. Cả hai đầu cùng mất thông tin.
+                "preferred_contact_time": _TIME,
                 # consent=False không phải "đã trả lời là không" — nó nghĩa là
                 # chưa có sự đồng ý, nên plan không được phép chạy.
                 "consent": FieldSpec(kind="boolean", must_be_true=True),

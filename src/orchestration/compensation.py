@@ -28,7 +28,7 @@ import logging
 from typing import Any
 
 from src.db.parking_payment_repository import cancel_booking, refund_payment
-from src.orchestration.deps import build_repository
+from src.orchestration.runtime_provider import acquire_repository
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ async def release_on_failure(workflow_id: str) -> dict[str, Any]:
     Trả về tóm tắt những gì đã làm (để test + log). KHÔNG raise ra caller.
     """
     result: dict[str, Any] = {"workflow_id": workflow_id, "released": False}
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         try:

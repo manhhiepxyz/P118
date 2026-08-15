@@ -2,32 +2,27 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 import uuid
 from datetime import date, time
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import ValidationError
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.agents.planner import PlannerError
+from src.agents.planner import MISSING_FIELD_LABELS
+from src.agents.response_agent import ReplyView, ResponseAgent
 from src.agents.validator import TaskPlanValidator
-from src.api.deps import get_current_user, get_planner, get_runtime
-from src.api.schemas import (
-    ExecuteRequest,
-    ExecuteResponse,
-    StartWorkflowRequest,
-    WorkflowListResponse,
-    WorkflowStatusResponse,
-)
+from src.api.deps import get_current_user
 from src.api.small_talk import SmallTalk, SpeechType, answer_capability_question, classify
 from src.common.enums import ErrorCode, WorkflowStatus
 from src.common.failure_messages import task_failure_message
-from src.common.projects import PROJECTS, find_project_id, resolve_project_id
+from src.common.failures import classify_failure, failure_for_code
+from src.common.projects import PROJECTS, find_project_id, project_name, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
 from src.config import get_settings
-from src.db.resident_link_repository import get_verified_identity
+from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.session_repository import create_session, get_session
 from src.models.schemas import (
     ChatRequest,
@@ -47,7 +42,7 @@ from src.models.schemas import (
     DemoWorkflowRequest,
     DemoWorkflowResponse,
 )
-from src.orchestration.boundary import PlanRejectedError
+from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
     ResumeError,
@@ -57,22 +52,25 @@ from src.orchestration.demo_service import (
     resume_payment_after_approval,
     run_demo_workflow,
 )
-from src.orchestration.deps import build_repository
 from src.orchestration.payment_approval import quote_from_results
 from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
+from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.sweeper import sweep_zombie_workflows
-from src.services.llm import LLMConfigurationError
+from src.services.llm import get_llm, structured_output_method
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _DEMO_JOBS: dict[str, dict[str, Any]] = {}
 _DEMO_TASKS: set[asyncio.Task[None]] = set()
+_DEMO_WORKFLOW_TASKS: dict[str, asyncio.Task[None]] = {}
 
 _DATE_FIELDS = frozenset({"viewing_date", "booking_date", "preferred_date", "move_date"})
 _TIME_FIELDS = frozenset({"viewing_time", "preferred_time", "move_time"})
 _BOOLEAN_FIELDS = frozenset({"consent", "needs_elevator", "needs_loading_support"})
 _FOLLOW_UP_VALIDATION_MESSAGES = {
+    "project_id": "Hãy chọn một dự án trong danh sách được hỗ trợ.",
+    "project_name": "Hãy chọn một dự án trong danh sách được hỗ trợ.",
     "viewing_date": "Ngày tham quan chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
     "booking_date": "Ngày đặt chỗ chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
     "preferred_date": "Ngày bảo trì chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
@@ -80,6 +78,7 @@ _FOLLOW_UP_VALIDATION_MESSAGES = {
     "viewing_time": "Giờ xem phải theo định dạng HH:MM và trong khoảng 08:00–17:30.",
     "preferred_time": "Giờ bảo trì phải theo định dạng HH:MM và trong khoảng 08:00–18:00.",
     "move_time": "Giờ chuyển nhà phải theo định dạng HH:MM và trong khoảng 07:00–20:00.",
+    "preferred_contact_time": "Giờ liên hệ phải theo định dạng HH:MM và trong khoảng 08:00–18:00.",
     "parking_zone": "Hãy chọn Khu A hoặc Khu B.",
     "plate_number": "Vui lòng nhập biển số xe, ví dụ 59A-12345.",
     "vehicle_type": "Hãy cho biết phương tiện là ô tô hoặc xe máy.",
@@ -174,10 +173,18 @@ def _extract_follow_up_answers(message: str, missing_fields: list[str]) -> tuple
             value = _extract_time(text)
             if value is not None and not _is_allowed_schedule_time(field, value):
                 value = None
-        elif field == "project_id":
+        elif field in {"project_id", "project_name"}:
             # Câu trả lời thường gộp tên dự án + ngày + giờ. resolve chỉ nhận
             # đúng toàn bộ tên; find tìm tên đóng nằm bên trong câu tự nhiên.
-            value = find_project_id(text) or resolve_project_id(text)
+            #
+            # Với `project_name` (tên CÔNG KHAI), vẫn phải khớp danh mục — nhưng
+            # giữ lại TÊN, không phải mã: việc đổi sang `project_id` do adapter
+            # ở biên làm, và làm ở đúng một chỗ.
+            project_id = find_project_id(text) or resolve_project_id(text)
+            if field == "project_id":
+                value = project_id
+            else:
+                value = project_name(project_id) if project_id else None
         elif field == "parking_zone":
             value = _extract_parking_zone(text)
         elif field == "plate_number":
@@ -198,6 +205,51 @@ def _extract_follow_up_answers(message: str, missing_fields: list[str]) -> tuple
         else:
             answers[field] = value
     return answers, unresolved
+
+
+# ---------------------------------------------------------------------------
+# Adapter `project_name` (public) ↔ `project_id` (nội bộ)
+# ---------------------------------------------------------------------------
+#
+# Planner và TaskPlan làm việc với `project_id` (PRJ-xxx) — mã ổn định, không
+# đổi khi dự án đổi tên. Nhưng người dùng không biết mã đó và không có cách nào
+# tra được, nên hỏi họ "project_id" là hỏi một thứ họ chắc chắn không trả lời
+# được: form sẽ hiện ô trống, họ gõ tên dự án, và `/continue` trả 422.
+#
+# Vì vậy contract CÔNG KHAI dùng `project_name`, còn phần dịch nằm ở đúng biên
+# API. Bên trong biên đó không có gì thay đổi.
+_PUBLIC_FIELD_ALIASES: dict[str, str] = {"project_id": "project_name"}
+
+# Message KHÔNG liệt kê danh mục dự án và KHÔNG nhắc mã nội bộ. UI đã có
+# `/projects` để dựng danh sách chọn; lặp lại ở đây là hai nguồn cho một thứ.
+_UNSUPPORTED_PROJECT_MESSAGE = "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ."
+
+
+def _to_public_missing_fields(fields: list[str]) -> list[str]:
+    """Đổi tên field nội bộ sang tên người dùng hiểu được, giữ nguyên thứ tự."""
+    return [_PUBLIC_FIELD_ALIASES.get(name, name) for name in fields]
+
+
+def _resolve_public_answers(answers: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Dịch câu trả lời công khai sang khoá nội bộ.
+
+    Trả `(context_update, field_lỗi)`. `field_lỗi` khác None nghĩa là giá trị
+    không nằm trong danh mục dự án — caller phải trả 422 và KHÔNG được consume
+    clarification, để người dùng còn sửa lại.
+    """
+    resolved = dict(answers)
+    name = resolved.pop("project_name", None)
+    if name is None:
+        return resolved, None
+
+    project_id = resolve_project_id(str(name))
+    if project_id is None:
+        return resolved, "project_name"
+
+    # Chỉ giữ mã nội bộ. `project_name` không cần đi tiếp: Planner đọc
+    # `project_id`, và giữ cả hai là để hai nguồn cùng mô tả một dự án.
+    resolved["project_id"] = project_id
+    return resolved, None
 
 
 def _extract_structured_follow_up_answers(
@@ -238,6 +290,36 @@ def _follow_up_validation_message(unresolved: list[str]) -> str:
         if message is not None:
             return message
     return "Thông tin bổ sung chưa đúng định dạng được yêu cầu."
+
+
+def _asks_for_project_catalog(message: str, missing_fields: list[str]) -> bool:
+    """Câu hỏi tra cứu dự án trong lúc workflow đang chờ chọn dự án.
+
+    Đây KHÔNG phải câu trả lời cho ``project_name`` nên không được đưa qua
+    parser field rồi trả 422. Nó cũng không được consume clarification: người
+    dùng cần xem danh sách trước, sau đó mới chọn và tiếp tục chính workflow
+    đang dở.
+    """
+    if "project_name" not in missing_fields:
+        return False
+    normalized = unicodedata.normalize("NFD", message.casefold())
+    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+    normalized = " ".join(normalized.replace("đ", "d").strip(" .,!?").split())
+    markers = (
+        "co nhung du an nao",
+        "co du an nao",
+        "danh sach du an",
+        "ho tro du an nao",
+        "nhung du an nao",
+        "du an nao duoc ho tro",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _project_catalog_answer() -> str:
+    """Câu trả lời từ catalogue canonical, không phải danh sách chép tay."""
+    names = [str(project["project_name"]) for project in PROJECTS]
+    return "Hiện mình hỗ trợ các dự án: " + "; ".join(names) + ". Bạn chọn một dự án để mình tiếp tục nhé."
 
 
 # Demo-only server-side identity context. Browser chỉ chọn persona, không được
@@ -310,13 +392,13 @@ async def _load_session(session_id: str | None, *, user_id: str | None = None) -
     if not session_id:
         return None
 
-    # `build_repository()` phải nằm TRONG try. Tạo pool là thao tác chạm mạng:
+    # `acquire_repository()` phải nằm TRONG try. Chạm database có thể lỗi:
     # DB sập hoặc DSN sai sẽ raise ngay tại đây, và nếu nó nằm ngoài try thì
     # exception thoát thẳng ra route — trái đúng cam kết "DB lỗi trả None và
     # fail-closed về prospect" ghi trong docstring.
     pool = None
     try:
-        repository = await build_repository(migrate=False)
+        repository = await acquire_repository()
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         return await get_session(pool, session_id, user_id=user_id)
     except Exception:  # noqa: BLE001 - DB tạm lỗi không được lộ ra route
@@ -330,14 +412,57 @@ async def _load_session(session_id: str | None, *, user_id: str | None = None) -
             await pool.close()
 
 
+async def _create_shell_and_session(
+    workflow_id: str,
+    *,
+    owner_user_id: str,
+    session_id: str,
+    goal: str,
+    account_state: str,
+    resident_id: str | None,
+) -> bool:
+    """Ghim shell + session TRONG MỘT transaction. Trả True nếu đã lưu được.
+
+    Hai lần ghi rời nhau để lại khe hở: shell vào được, session lỗi, route trả
+    503 — và một workflow PENDING không ai đọc được nằm lại trong database.
+
+    Mọi exception đều quy về False. Route không được phân biệt lý do hỏng: chi
+    tiết của driver có thể chứa DSN, và người dùng chỉ cần biết "chưa nhận được
+    yêu cầu, thử lại".
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.create_shell_and_session(
+            workflow_id=workflow_id,
+            owner_user_id=owner_user_id,
+            session_id=session_id,
+            goal=goal,
+            account_state=account_state,
+            resident_id=resident_id,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("workflow shell/session persist failed (%s)", type(exc).__name__)
+        return False
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
 async def _persist_session(
     session_id: str | None,
     account_state: str,
     *,
     user_id: str | None = None,
     resident_id: str | None = None,
-) -> None:
-    """Ghim session server-side. Best-effort, KHÔNG raise ra caller.
+) -> bool:
+    """Ghim session server-side. Trả True nếu ĐÃ lưu được.
+
+    Caller PHẢI dùng giá trị trả về. Bản trước nuốt lỗi rồi trả None, nên
+    `/start` vẫn trả 202 kể cả khi phiên không được ghim — và mọi lần đọc sau
+    đó fail-closed về prospect mà không ai biết vì sao quyền bị mất.
 
     Chạy bên trong `_run_demo_job` — nơi đã có async context và được test
     monkeypatch. DB lỗi không được làm hỏng workflow: nếu không ghim được thì
@@ -345,9 +470,9 @@ async def _persist_session(
     về prospect ở mọi lần đọc sau.
     """
     if not session_id:
-        return
+        return False
     try:
-        repository = await build_repository(migrate=False)
+        repository = await acquire_repository()
         pool = repository._pool  # noqa: SLF001
         try:
             await create_session(
@@ -363,8 +488,11 @@ async def _persist_session(
             )
         finally:
             await pool.close()
-    except Exception:  # noqa: BLE001 - ghim session không được làm hỏng workflow
-        logger.warning("session persist failed for %r; running unbound", session_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 - ghim session không được làm hỏng workflow
+        # Chỉ TÊN LOẠI lỗi: message của driver có thể chứa DSN.
+        logger.warning("session persist failed (%s)", type(exc).__name__)
+        return False
 
 
 # Message CÔNG KHAI cho từng stage.
@@ -725,6 +853,16 @@ def _polling_task_views(plan: TaskPlan | None, record: dict[str, Any] | None) ->
                     message=_task_failure_message(task, title, code),
                 )
             )
+        elif status == "CANCELLED":
+            views.append(
+                DemoTaskResult(
+                    task_id=task.task_id,
+                    tool=task.tool,
+                    status="CANCELLED",
+                    title=title,
+                    message="Bước này đã được huỷ trước khi hoàn tất.",
+                )
+            )
         else:
             safe_status = "RUNNING" if status == "RUNNING" else "PENDING"
             message = (
@@ -850,7 +988,9 @@ async def _run_demo_job(
                 session_id=job.get("session_id"),
                 parent_workflow_id=job.get("parent_workflow_id"),
                 goal=job.get("goal") or "",
-                missing_fields=list(response.missing_fields or []),
+                # Ghim theo tên CÔNG KHAI để sau restart `/continue` vẫn nhận
+                # đúng contract mà client đã thấy trước đó.
+                missing_fields=_to_public_missing_fields(list(response.missing_fields or [])),
                 question=response.question,
                 existing_context=job.get("existing_context") or {},
             )
@@ -868,6 +1008,15 @@ async def _run_demo_job(
                 }
             )
 
+        # ĐIỂM DỪNG: workflow đã kết thúc, hoặc đang chờ người dùng làm gì đó.
+        # Sinh câu trả lời tự nhiên ở đây — nhưng KHÔNG chặn.
+        #
+        # Gọi LLM ngay trong luồng này sẽ cộng thêm cả một lượt round-trip vào
+        # thời gian người dùng phải chờ, cho một việc đã làm xong: thẻ workflow
+        # ngồi ở "Đang thực hiện" thêm vài giây sau khi chỗ đỗ xe đã được giữ.
+        # Công bố kết quả trước, nói sau.
+        _keep_demo_task(asyncio.create_task(_attach_answer(job, workflow_id, goal=job.get("goal") or goal)))
+
         # Release-on-failure (Phase B): workflow FAILED do máy, không repairable
         # (không có repair hint) → dọn side-effect giữ chỗ/thanh toán. FAILED có
         # repair hint là repairable — user sẽ /continue sửa input, release sẽ phá
@@ -875,23 +1024,56 @@ async def _run_demo_job(
         if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"} and not repair_hints:
             await release_on_failure(workflow_id)
     except Exception as exc:  # noqa: BLE001 - không để raw exception vào job public
-        logger.warning("demo background workflow failed (%s)", type(exc).__name__)
+        # Phân loại TRƯỚC khi làm gì khác: mã lỗi quyết định cả câu nói với
+        # người dùng lẫn việc có mời họ thử lại hay không.
+        failure = classify_failure(exc)
+        request_id = uuid4().hex[:12]
+        # Log giữ đủ để đối chiếu — mã lỗi, loại exception, request_id — nhưng
+        # KHÔNG giữ message của exception: message hay kèm URL, tên biến môi
+        # trường, đôi khi cả một phần credential.
+        logger.warning(
+            "demo background workflow failed code=%s exc=%s request_id=%s",
+            failure.code,
+            type(exc).__name__,
+            request_id,
+        )
         _append_job_event(job, "EXECUTION_FAILED")
-        job["message"] = "Workflow không thể hoàn thành do lỗi dịch vụ hoặc cấu hình."
+        job["message"] = failure.message
+
+        # Ghim trạng thái kết thúc xuống PostgreSQL.
+        #
+        # Không có bước này, lỗi chỉ sống trong `_DEMO_JOBS` — RAM của một tiến
+        # trình. `workflows.status` nằm nguyên ở PENDING, nên sau restart GET
+        # đọc lên và map thành "đang chạy": giao diện poll mãi một workflow đã
+        # chết, và bảng workflow đầy zombie.
+        await _mark_workflow_failed_safely(workflow_id, failure.code)
+
         job["response"] = DemoWorkflowResponse(
             workflow_id=workflow_id,
             status="EXECUTION_ERROR",
             stage="EXECUTION_FAILED",
-            message=f"Workflow unavailable ({type(exc).__name__}).",
+            message=failure.message,
+            summary=failure.message,
+            error_code=failure.code,
+            retryable=failure.retryable,
+            request_id=request_id,
         )
         # Job crash cũng là FAILED giữ booking — release luôn, không có repair
         # hint để cân nhắc.
         await release_on_failure(workflow_id)
 
 
-def _keep_demo_task(task: asyncio.Task[None]) -> None:
+def _keep_demo_task(task: asyncio.Task[None], *, workflow_id: str | None = None) -> None:
     _DEMO_TASKS.add(task)
-    task.add_done_callback(_DEMO_TASKS.discard)
+    if workflow_id is not None:
+        _DEMO_WORKFLOW_TASKS[workflow_id] = task
+
+    def _forget(done: asyncio.Task[None]) -> None:
+        _DEMO_TASKS.discard(done)
+        if workflow_id is not None and _DEMO_WORKFLOW_TASKS.get(workflow_id) is done:
+            _DEMO_WORKFLOW_TASKS.pop(workflow_id, None)
+
+    task.add_done_callback(_forget)
 
 
 async def _persist_clarification(
@@ -914,14 +1096,14 @@ async def _persist_clarification(
     """
     pool = None
     try:
-        repository = await build_repository(migrate=False)
+        repository = await acquire_repository()
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         await repository.save_clarification(
             workflow_id,
             session_id=session_id,
             parent_workflow_id=parent_workflow_id,
             goal=goal,
-            missing_fields=list(missing_fields or []),
+            missing_fields=_to_public_missing_fields(list(missing_fields or [])),
             question=question,
             existing_context=dict(existing_context or {}),
         )
@@ -941,7 +1123,7 @@ async def _load_clarification(workflow_id: str) -> dict[str, Any] | None:
     """Đọc lại ngữ cảnh chờ bổ sung từ PostgreSQL. DB lỗi → None."""
     pool = None
     try:
-        repository = await build_repository(migrate=False)
+        repository = await acquire_repository()
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         return await repository.get_clarification(workflow_id)
     except Exception:  # noqa: BLE001 - DB tạm lỗi không được lộ ra route
@@ -963,6 +1145,391 @@ async def _load_clarification_safely(workflow_id: str) -> dict[str, Any] | None:
         return None
 
 
+async def _consume_and_create_child(
+    parent_workflow_id: str,
+    *,
+    child_workflow_id: str,
+    owner_user_id: str | None,
+    session_id: str | None,
+    goal: str,
+) -> dict[str, Any] | None:
+    """Claim clarification + tạo child shell TRONG MỘT transaction.
+
+    Tách hai bước để lại khe hở thật: consume xong, tiến trình chết, child chưa
+    kịp tạo — câu trả lời của người dùng biến mất cùng lượt hỏi duy nhất, và họ
+    không trả lời lại được vì clarification đã bị đánh dấu đã xử lý.
+
+    Trả None khi không claim được; khi đó KHÔNG có child nào tồn tại.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return await repository.consume_clarification_and_create_child(
+            parent_workflow_id,
+            child_workflow_id=child_workflow_id,
+            owner_user_id=owner_user_id,
+            session_id=session_id,
+            goal=goal,
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("consume clarification + create child failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+# Câu mặc định theo TRẠNG THÁI, dùng khi chưa có gì cụ thể hơn để nói.
+#
+# Không có bảng này thì mọi trạng thái dùng chung một câu, và câu đó từng là
+# "Yêu cầu đã hoàn tất." — nói với người đang chờ bổ sung thông tin rằng việc
+# của họ đã xong.
+_DEFAULT_BASELINE: dict[str, str] = {
+    "PENDING": "Mình đang chuẩn bị kế hoạch cho yêu cầu của bạn.",
+    "RUNNING": "Mình đang thực hiện yêu cầu của bạn.",
+    "SUCCESS": "Yêu cầu của bạn đã hoàn tất.",
+    "FAILED": "Yêu cầu đã dừng lại giữa chừng.",
+    "CANCELLED": "Mình đã huỷ yêu cầu. Các bước đã hoàn thành trước đó vẫn được giữ lại.",
+    "NEEDS_INFORMATION": "Mình cần bạn bổ sung thêm một vài thông tin.",
+    "WAITING_APPROVAL": "Đang chờ bạn xác nhận khoản thanh toán.",
+    "PLANNING_ERROR": "Mình chưa hiểu được yêu cầu này.",
+    "VALIDATION_ERROR": "Thông tin chưa đủ điều kiện để thực hiện.",
+    "PAYMENT_APPROVAL_REQUIRED": "Đang chờ bạn xác nhận khoản thanh toán.",
+    "EXECUTION_ERROR": "Yêu cầu đã dừng lại giữa chừng.",
+    "CHAT": "Mình đã trả lời bạn ở trên.",
+}
+
+
+def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list[str]) -> ReplyView:
+    """View model cho Response Agent, dựng TỪ response công khai.
+
+    Đây là toàn bộ trust boundary của lớp đó, và nó gọn được vì response công
+    khai đã đi qua allowlist rồi: `_task_presentation()` chỉ đưa ra field nghiệp
+    vụ đã chọn, `error_code` đã được normalize, `payment_quote` đọc từ booking.
+
+    Nói cách khác: Response Agent không thấy gì mà người dùng chưa thấy. Không
+    có raw connector response, không có `input_data` đầy đủ, không có exception,
+    không có token — không phải vì đã lọc chúng ra, mà vì chúng chưa từng có mặt
+    trong thứ được truyền vào.
+    """
+    return ReplyView(
+        goal=goal,
+        status=response.status,
+        # `question` phải đứng trước `message`: ở NEEDS_INFORMATION, câu hỏi
+        # CHÍNH LÀ nội dung, còn `message` lúc này thường chưa được gán.
+        #
+        # Mặc định cuối tra theo TRẠNG THÁI, không phải hằng số. Bản trước rơi
+        # về `_STAGE_MESSAGES["FINISHED"]` — nghĩa là một workflow đang chờ
+        # người dùng bổ sung thông tin nhận câu "Yêu cầu đã hoàn tất.". Vừa sai,
+        # vừa đúng loại sai nguy hiểm nhất: khẳng định đã xong khi chưa xong.
+        baseline_message=(
+            response.summary or response.question or response.message or _DEFAULT_BASELINE[response.status]
+        ),
+        steps=[{"title": task.title, "status": task.status, "message": task.message} for task in response.tasks],
+        missing_fields=[MISSING_FIELD_LABELS.get(f, f) for f in response.missing_fields],
+        payment_quote=(
+            {"amount": response.payment_quote.get("amount"), "currency": response.payment_quote.get("currency")}
+            if response.payment_quote
+            else None
+        ),
+        error_code=response.error_code,
+        retryable=response.retryable,
+        capabilities=capabilities,
+    )
+
+
+async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) -> None:
+    """Sinh câu trả lời, GHI XUỐNG workflow, rồi gắn vào cache. Chạy ngoài luồng chính.
+
+    Ghi xuống PostgreSQL là điểm quan trọng nhất ở đây: câu trả lời là thuộc
+    tính TRÌNH BÀY của workflow, nên nó phải sống cùng workflow. Chỉ để trong
+    `_DEMO_JOBS` thì F5 hay restart là mất, còn workflow thì vẫn còn — người
+    dùng quay lại thấy thẻ nhưng P-118 im lặng.
+
+    Quyền sinh được chốt trong DATABASE (`claim_assistant_response`), không
+    bằng cờ RAM: cờ RAM chỉ chặn trong cùng tiến trình và mất sau restart.
+
+    Không raise: đây là tác vụ nền, và một exception thoát ra chỉ để lại dòng
+    "Task exception was never retrieved" trong log.
+    """
+    try:
+        current = job.get("response")
+        if not isinstance(current, DemoWorkflowResponse):
+            # Không có cache RAM (ví dụ sau restart): dựng lại trạng thái công
+            # khai từ database. Câu trả lời không được phụ thuộc vào việc tiến
+            # trình này có tình cờ còn giữ job hay không.
+            current = await _public_view_from_db(workflow_id)
+            if current is None:
+                return
+        for_status = current.status
+
+        if not await _claim_answer_safely(workflow_id, for_status):
+            # Trạng thái này đã có câu trả lời, hoặc một tiến trình khác đang
+            # sinh. Đọc lại thứ đã ghi thay vì gọi mô hình thêm lần nữa.
+            await _refresh_answer_from_db(job, workflow_id, current)
+            return
+
+        capabilities = await _capability_names_safely(job.get("owner_user_id"))
+        spoken = await _speak(current, goal=goal, capabilities=capabilities)
+        if spoken.answer is None:
+            # `_speak` không dựng được client (thiếu key chẳng hạn). Dùng CHÍNH
+            # câu deterministic mà Response Agent vốn lấy làm bản dự phòng, để
+            # hai đường không nói hai kiểu khác nhau cho cùng một tình huống.
+            baseline = _reply_view(current, goal=goal, capabilities=capabilities).baseline_message
+            spoken = spoken.model_copy(update={"answer": baseline})
+            state = "FALLBACK"
+        else:
+            baseline = _reply_view(current, goal=goal, capabilities=capabilities).baseline_message
+            state = "FALLBACK" if spoken.answer == baseline else "READY"
+
+        await _save_answer_safely(
+            workflow_id,
+            answer=spoken.answer or "",
+            suggestions=list(spoken.suggestions),
+            state=state,
+            for_status=for_status,
+        )
+        spoken = spoken.model_copy(update={"response_state": state})
+        # Chỉ ghi đè nếu chưa có ai thay response trong lúc chờ mô hình.
+        if job.get("response") is current:
+            job["response"] = spoken
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không gắn được câu trả lời cho %s (%s)", workflow_id[:8], type(exc).__name__)
+
+
+async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) -> DemoWorkflowResponse:
+    """Bổ sung câu trả lời ĐÃ GHI vào một response dựng lại từ database.
+
+    Đây là đường sống sót qua F5 và qua restart: `_DEMO_JOBS` mất, nhưng
+    `workflows.assistant_answer` thì còn.
+
+    Chỉ nhận câu viết cho ĐÚNG trạng thái hiện tại. Một câu viết cho
+    WAITING_APPROVAL trở thành sai ngay khi người dùng bấm duyệt — hiển thị lại
+    nó nghĩa là nói với họ rằng vẫn đang chờ, trong khi tiền đã thu xong.
+    """
+    stored = await _load_answer_safely(workflow_id)
+    if stored.get("for_status") != response.status:
+        return response
+    return response.model_copy(
+        update={
+            "answer": stored.get("answer"),
+            "suggestions": list(stored.get("suggestions") or []),
+            "response_state": stored.get("state"),
+        }
+    )
+
+
+async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
+    """Dựng một view công khai TỐI THIỂU từ database, đủ cho lớp trả lời.
+
+    Dùng khi `_DEMO_JOBS` không có gì — sau restart chẳng hạn. Không dựng lại
+    toàn bộ (event, plan): Response Agent chỉ cần trạng thái, các bước và câu
+    deterministic, và mỗi field thừa là một field nữa phải kiểm xem có rò gì
+    không.
+    """
+    try:
+        record = await read_demo_workflow(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không đọc được workflow để sinh câu trả lời (%s)", type(exc).__name__)
+        return None
+    if record is None:
+        return None
+
+    database_status = record["workflow"]["status"]
+    status = (
+        "SUCCESS"
+        if database_status == "SUCCESS"
+        else (
+            "CANCELLED" if database_status == "CANCELLED" else ("FAILED" if database_status == "FAILED" else "RUNNING")
+        )
+    )
+    plan = _plan_from_job_or_record(None, record)
+    tasks = _polling_task_views(plan, record)
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status=status,
+        message=_DEFAULT_BASELINE.get(status),
+        summary=_DEFAULT_BASELINE.get(status) if status in {"SUCCESS", "FAILED", "CANCELLED"} else None,
+        tasks=tasks,
+        persisted=True,
+    )
+
+
+async def _claim_answer_safely(workflow_id: str, for_status: str) -> bool:
+    """True nếu tiến trình này được phép gọi mô hình. DB lỗi → False (không gọi)."""
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return await repository.claim_assistant_response(workflow_id, for_status=for_status)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không chốt được quyền sinh câu trả lời (%s)", type(exc).__name__)
+        return False
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _save_answer_safely(workflow_id: str, **fields: Any) -> None:
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.save_assistant_response(workflow_id, **fields)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không ghi được câu trả lời (%s)", type(exc).__name__)
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _load_answer_safely(workflow_id: str) -> dict[str, Any]:
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return await repository.get_assistant_response(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không đọc được câu trả lời (%s)", type(exc).__name__)
+        return {"answer": None, "suggestions": [], "state": None, "for_status": None}
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _refresh_answer_from_db(job: dict[str, Any], workflow_id: str, current: DemoWorkflowResponse) -> None:
+    """Lấy câu đã ghi cho ĐÚNG trạng thái hiện tại vào cache."""
+    stored = await _load_answer_safely(workflow_id)
+    if stored.get("for_status") != current.status or not stored.get("answer"):
+        return
+    if job.get("response") is current:
+        job["response"] = current.model_copy(
+            update={
+                "answer": stored["answer"],
+                "suggestions": list(stored.get("suggestions") or []),
+                "response_state": stored.get("state"),
+            }
+        )
+
+
+async def _capability_names_safely(owner_user_id: Any) -> list[str]:
+    """Tên các dịch vụ tài khoản này ĐANG dùng được — để gợi ý việc tiếp theo.
+
+    Gợi ý một dịch vụ đang bị khoá còn tệ hơn không gợi ý gì: người dùng bấm
+    vào rồi nhận thông báo không có quyền.
+
+    Lỗi đọc trả về danh sách rỗng. Response Agent khi đó không gợi ý gì — mất
+    một tiện ích nhỏ, không mất câu trả lời.
+    """
+    if not owner_user_id:
+        return []
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        is_resident = await get_verified_identity(pool, owner_user_id) is not None
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không đọc được capability để gợi ý (%s)", type(exc).__name__)
+        return []
+    finally:
+        if pool is not None:
+            await pool.close()
+    return [item.name for item in _CAPABILITY_CATALOGUE if is_resident or not item.requires_resident]
+
+
+async def _speak(response: DemoWorkflowResponse, *, goal: str, capabilities: list[str]) -> DemoWorkflowResponse:
+    """Gắn câu trả lời tự nhiên vào response. Không bao giờ raise.
+
+    Chỉ gọi ở ĐIỂM DỪNG — lúc workflow đã kết thúc hoặc đang chờ người dùng.
+    Gọi ở mỗi lượt poll sẽ tốn một request LLM mỗi 1.5 giây cho một trạng thái
+    không đổi.
+    """
+    usage_logger = LlmUsageLogger()
+    # Theo dõi token/cost riêng cho lớp trả lời. Không tách stage thì mọi chi
+    # phí dồn vào "plan", và không ai biết lớp diễn đạt đang tốn bao nhiêu —
+    # trong khi nó chạy MỘT lần cho mỗi điểm dừng của mọi workflow.
+    usage_token = usage_context(workflow_id=response.workflow_id, stage="respond")
+    try:
+        agent = ResponseAgent(
+            get_llm(callbacks=[usage_logger]),
+            structured_output_method=structured_output_method(),
+        )
+        view = _reply_view(response, goal=goal, capabilities=capabilities)
+        reply = await agent.reply(view)
+        # `ResponseAgent.reply()` fail-closed về baseline khi provider lỗi hoặc
+        # output bị guard loại. Thử đúng MỘT lần nữa: model không tất định và
+        # lần hai thường sửa được lỗi diễn đạt, nhưng trần một retry giữ chi phí
+        # hữu hạn. Không loop và không hạ guard an toàn chỉ để có câu văn đẹp.
+        if reply.answer.strip() == view.baseline_message.strip():
+            reply = await agent.reply(view)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        # `ResponseAgent.reply` đã fail-closed bên trong; chỗ này bắt nốt lỗi
+        # khi dựng client (thiếu key chẳng hạn). Không có câu trả lời tự nhiên
+        # thì giao diện hiển thị câu deterministic — workflow không hề hấn gì.
+        logger.info("response agent không dựng được (%s)", type(exc).__name__)
+        return response
+    finally:
+        reset_usage_context(usage_token)
+        await usage_logger.flush()
+    return response.model_copy(update={"answer": reply.answer, "suggestions": list(reply.suggestions)})
+
+
+async def _mark_workflow_failed_safely(workflow_id: str, error_code: str) -> None:
+    """Ghim trạng thái kết thúc + mã lỗi. Không được ném lỗi ra ngoài.
+
+    Nơi gọi là handler `except` của background job. Một exception ở đây sẽ nuốt
+    mất exception gốc, và workflow lại quay về đúng chỗ cũ: PENDING vĩnh viễn.
+
+    DB đang hỏng thì không ghim được — đó chính là trường hợp
+    `DATABASE_UNAVAILABLE`. Sweeper dọn workflow mồ côi là lưới an toàn thứ hai
+    cho tình huống đó.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.mark_workflow_failed(workflow_id, error_code)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("could not persist workflow failure (%s)", type(exc).__name__)
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _archive_workflow_safely(workflow_id: str) -> None:
+    """Đánh dấu workflow đã bàn giao. Không được ném lỗi ra ngoài.
+
+    Đây là dọn dẹp, không phải nghiệp vụ: không archive được thì workflow con
+    vẫn phải chạy. Hậu quả duy nhất là một dòng thừa trong danh sách.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.archive_workflow(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("could not archive parent workflow (%s)", type(exc).__name__)
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _load_failure_code(workflow_id: str) -> str | None:
+    """Mã lỗi đã ghim, đọc từ PostgreSQL. Dùng cho đường đọc sau restart."""
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return await repository.get_workflow_error_code(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("could not read workflow failure code (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
 async def _consume_clarification(workflow_id: str) -> dict[str, Any] | None:
     """Claim ngữ cảnh chờ bổ sung — atomic, chỉ một request thắng.
 
@@ -971,7 +1538,7 @@ async def _consume_clarification(workflow_id: str) -> dict[str, Any] | None:
     """
     pool = None
     try:
-        repository = await build_repository(migrate=False)
+        repository = await acquire_repository()
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         return await repository.consume_clarification(workflow_id)
     except Exception:  # noqa: BLE001 - DB lỗi không được lộ ra route
@@ -1004,7 +1571,7 @@ async def _ensure_workflow_shell(
     """
     pool = None
     try:
-        repository = await build_repository(migrate=False)
+        repository = await acquire_repository()
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         await repository.create_workflow(
             {
@@ -1037,14 +1604,14 @@ async def _ensure_workflow_shell(
 async def _read_repair_hints(workflow_id: str) -> list[dict]:
     """Đọc repair hints từ DB; trả [] nếu không có hoặc DB lỗi.
 
-    `build_repository()` nằm trong try vì lý do như `_load_session`: lỗi tạo
+    `acquire_repository()` nằm trong try vì lý do như `_load_session`: lỗi tạo
     pool phải được nuốt ở ĐÂY. Trước đây nó thoát ra ngoài và caller
     (`get_demo_workflow_status`) bắt được, rồi vứt luôn cả record workflow đã
     đọc thành công.
     """
     pool = None
     try:
-        repository = await build_repository(migrate=False)
+        repository = await acquire_repository()
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         return await repository.get_repair_hints(workflow_id)
     except Exception:  # noqa: BLE001 - poll không được lộ connection detail
@@ -1056,7 +1623,7 @@ async def _read_repair_hints(workflow_id: str) -> list[dict]:
 
 async def _persist_repair_hints(workflow_id: str, repair_hints: dict[str, RepairHint]) -> None:
     """Persist hint generic {error_code, message} — KHÔNG có field/input echo."""
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         await repository.save_repair_hints(
@@ -1328,7 +1895,7 @@ async def _trusted_account_context(user: dict) -> tuple[str, dict[str, Any]]:
     Admin KHÔNG được cộng thêm quyền cư dân: role và resident link là hai trục
     độc lập. Một tài khoản vận hành không phải chủ căn hộ nào.
     """
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         identity = await get_verified_identity(pool, user["id"])
@@ -1365,7 +1932,7 @@ async def _require_workflow_owner(workflow_id: str, user: dict) -> None:
     Row legacy (`owner_user_id IS NULL`, tạo trước Phase B) cũng trả 404 cho
     customer. Dữ liệu vẫn còn để truy vết, nhưng không rơi vào tay tài khoản nào.
     """
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         owner = await repository.get_workflow_owner(workflow_id)
@@ -1455,6 +2022,38 @@ async def start_demo_workflow(
     if selected_project_id is not None:
         context["project_id"] = selected_project_id
 
+    # Shell + session ĐƯỢC GHIM TRƯỚC khi trả 202.
+    #
+    # Trước đây shell được tạo bên trong `_run_demo_job`, tức là SAU khi route
+    # đã trả `workflow_id` cho client. Client poll ngay lập tức thì workflow
+    # chưa tồn tại, `_require_workflow_owner` không tìm thấy chủ, và GET trả
+    # 404 cho chính workflow vừa được tạo. Đó là race, không phải chuyện thời
+    # điểm: không có mốc nào để client biết khi nào an toàn để đọc.
+    #
+    # Persist thất bại thì KHÔNG schedule Planner và KHÔNG trả workflow_id —
+    # trả một id client không đọc được còn tệ hơn báo lỗi.
+    # Bọc cả lời gọi: helper có hợp đồng "trả bool", nhưng một route sinh ra
+    # lỗi cho người dùng thì không được 500 chỉ vì tầng dưới ném ra thứ khác
+    # hợp đồng. Mọi thất bại đều quy về cùng một câu trả lời an toàn.
+    try:
+        persisted = await _create_shell_and_session(
+            workflow_id,
+            owner_user_id=user["id"],
+            session_id=session_id,
+            goal=request.goal,
+            account_state=account_state,
+            resident_id=context.get("resident_id"),
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("workflow start persist raised (%s)", type(exc).__name__)
+        persisted = False
+
+    if not persisted:
+        raise HTTPException(
+            status_code=503,
+            detail="Hệ thống đang bận, chưa nhận được yêu cầu. Vui lòng thử lại sau ít phút.",
+        )
+
     _DEMO_JOBS[workflow_id] = {
         "stage": "PLANNING",
         "message": _STAGE_MESSAGES["PLANNING"],
@@ -1492,7 +2091,7 @@ async def start_demo_workflow(
             session_id=session_id,
         )
     )
-    _keep_demo_task(task)
+    _keep_demo_task(task, workflow_id=workflow_id)
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status="PENDING",
@@ -1524,7 +2123,11 @@ async def continue_demo_workflow(
     if previous is not None and isinstance(response, DemoWorkflowResponse):
         if response.status != "NEEDS_INFORMATION" or not response.missing_fields:
             raise HTTPException(status_code=409, detail="Workflow không chờ thêm thông tin.")
-        pending_missing_fields = list(response.missing_fields)
+        # Cache RAM đi thẳng từ AgentState nên có thể còn tên nội bộ
+        # ``project_id``; bản ghim PostgreSQL đã dùng ``project_name`` công
+        # khai. Hai đường phải có cùng contract, nếu không cùng một câu hỏi sẽ
+        # chạy sau restart nhưng 422 khi backend chưa restart.
+        pending_missing_fields = _to_public_missing_fields(list(response.missing_fields))
         pending_goal = previous["goal"]
         pending_session_id = previous.get("session_id")
         pending_context = dict(previous["existing_context"])
@@ -1584,6 +2187,7 @@ async def continue_demo_workflow(
             else:
                 reply = small_talk.reply
             _DEMO_JOBS[new_workflow_id] = {
+                "owner_user_id": user["id"],
                 "stage": "CHAT",
                 "message": reply,
                 "plan": None,
@@ -1615,14 +2219,75 @@ async def continue_demo_workflow(
     elif "payment_quote" in missing_fields:
         raise HTTPException(status_code=409, detail="Hệ thống chưa lấy được báo phí; người dùng không thể tự nhập.")
     else:
+        # Một câu hỏi tra cứu không phải dữ liệu field. Trả lời ngay trên cùng
+        # workflow và GIỮ clarification mở; nếu consume ở đây, người dùng vừa
+        # hỏi danh sách xong đã mất luôn chỗ để chọn dự án.
+        if request.message is not None and _asks_for_project_catalog(request.message, missing_fields):
+            if isinstance(response, DemoWorkflowResponse):
+                current = response
+            else:
+                current = await _public_view_from_db(workflow_id)
+            if current is None:
+                raise HTTPException(status_code=409, detail="Workflow chưa sẵn sàng để tiếp tục.")
+            answer = _project_catalog_answer()
+            conversational = current.model_copy(
+                update={
+                    "workflow_id": workflow_id,
+                    "answer": answer,
+                    "missing_fields": list(missing_fields),
+                    "response_state": "READY",
+                }
+            )
+            if previous is not None:
+                previous["response"] = conversational
+            await _save_answer_safely(
+                workflow_id,
+                answer=answer,
+                suggestions=[],
+                state="READY",
+                for_status="NEEDS_INFORMATION",
+            )
+            return conversational
+
         if request.fields:
             answers, unresolved = _extract_structured_follow_up_answers(request.fields, missing_fields)
         elif request.message is not None:
             answers, unresolved = _extract_follow_up_answers(request.message, missing_fields)
         else:
             answers, unresolved = {}, missing_fields
-        if not answers:
+        # Form có đủ tất cả ô đang hiển thị. Chấp nhận một phần ở đây sẽ tạo
+        # workflow con chỉ để Planner hỏi tiếp những ô còn trống, kéo theo một
+        # bubble Response Agent mới cho mỗi lần bấm gửi. Câu chat tự do vẫn có
+        # thể bổ sung từng phần; chỉ contract form structured là all-or-none.
+        if request.fields and unresolved:
+            # Chỉ log TÊN field để chẩn đoán contract UI/API. Không log giá trị
+            # người dùng nhập, goal, token hay body request.
+            logger.info(
+                "clarification rejected (expected=%s received=%s unresolved=%s)",
+                sorted(missing_fields),
+                sorted(request.fields),
+                sorted(unresolved),
+            )
             raise HTTPException(status_code=422, detail=_follow_up_validation_message(unresolved))
+        if not answers:
+            logger.info(
+                "clarification contained no usable answer (expected=%s received=%s)",
+                sorted(missing_fields),
+                sorted((request.fields or {}).keys()),
+            )
+            raise HTTPException(status_code=422, detail=_follow_up_validation_message(unresolved))
+
+        # Người dùng ĐÃ gửi tên dự án nhưng nó không khớp danh mục → phải nói
+        # ra. Bỏ qua im lặng còn tệ hơn 422: workflow đi tiếp thiếu dự án, rồi
+        # hỏi lại đúng câu vừa hỏi, và người dùng không biết mình sai ở đâu.
+        if "project_name" in (request.fields or {}) and "project_name" not in answers:
+            raise HTTPException(status_code=422, detail=_UNSUPPORTED_PROJECT_MESSAGE)
+
+        # Dịch trước khi consume clarification: tên dự án không hỗ trợ phải trả
+        # 422 mà KHÔNG đốt mất lượt hỏi — người dùng còn sửa lại được.
+        answers, bad_field = _resolve_public_answers(answers)
+        if bad_field is not None:
+            raise HTTPException(status_code=422, detail=_UNSUPPORTED_PROJECT_MESSAGE)
         context.update(answers)
 
     # CONSUME atomic ngay trước khi tạo child. Đây là điểm duy nhất quyết định
@@ -1635,7 +2300,15 @@ async def continue_demo_workflow(
     #
     # Đặt SAU bước validate là có chủ ý — câu trả lời sai không được đốt mất
     # lượt hỏi, người dùng vẫn sửa lại được.
-    claimed = await _consume_clarification(workflow_id)
+    # Child id sinh TRƯỚC để nó nằm trong cùng transaction với việc claim.
+    new_workflow_id = str(uuid4())
+    claimed = await _consume_and_create_child(
+        workflow_id,
+        child_workflow_id=new_workflow_id,
+        owner_user_id=user["id"],
+        session_id=session_id,
+        goal=goal,
+    )
     if claimed is None:
         # Không claim được row đã ghim. Hai khả năng:
         #
@@ -1650,7 +2323,16 @@ async def continue_demo_workflow(
             raise HTTPException(status_code=409, detail="Workflow không chờ thêm thông tin.")
         previous["clarification_claimed"] = True
 
-    new_workflow_id = str(uuid4())
+    # Đóng workflow CHA, kể cả khi việc claim đi qua nhánh dự phòng RAM.
+    #
+    # `consume_clarification_and_create_child` đã archive cha trong transaction
+    # của nó, nhưng nhánh (b) ở trên — chưa từng ghim được clarification —
+    # không đi qua đó. Thiếu dòng này, đúng những workflow không resume được
+    # sau restart lại là những workflow để lại một dòng `PENDING` vĩnh viễn.
+    #
+    # Idempotent nhờ `WHERE archived_at IS NULL`, nên gọi hai lần không sao.
+    await _archive_workflow_safely(parent_workflow_id)
+
     settings = get_settings()
     service_urls = {
         "resident": settings.resident_service_url,
@@ -1667,6 +2349,13 @@ async def continue_demo_workflow(
         "events": [],
         "goal": goal,
         "account_state": account_state,
+        # Workflow con PHẢI kế thừa chủ sở hữu của cha.
+        #
+        # Thiếu dòng này, con được tạo với `owner_user_id = NULL` và rơi vào
+        # nhóm "legacy không chủ" — `_require_workflow_owner` trả 404 cho CHÍNH
+        # người vừa trả lời câu hỏi bổ sung. Workflow vẫn chạy tới SUCCESS ở
+        # phía sau, nhưng người dùng không bao giờ nhìn thấy kết quả.
+        "owner_user_id": user["id"],
         "approve_mock_payment": pending_approve_payment,
         "existing_context": context,
         "contact_profile": dict(pending_contact_profile),
@@ -1685,7 +2374,7 @@ async def continue_demo_workflow(
             parent_workflow_id=parent_workflow_id,
         )
     )
-    _keep_demo_task(task)
+    _keep_demo_task(task, workflow_id=new_workflow_id)
     return DemoWorkflowResponse(
         workflow_id=new_workflow_id,
         status="PENDING",
@@ -1693,6 +2382,68 @@ async def continue_demo_workflow(
         message=_STAGE_MESSAGES["PLANNING"],
         session_id=session_id,
         parent_workflow_id=parent_workflow_id,
+    )
+
+
+async def _load_pending_payment(workflow_id: str) -> dict[str, Any] | None:
+    """Khoản thanh toán đang chờ duyệt của workflow, đọc từ PostgreSQL.
+
+    Dùng cho CẢ hai đường dựng response — job còn trong RAM và job đã mất sau
+    restart. Sửa mỗi đường restart sẽ để lại đúng nửa lỗi: người dùng chưa
+    reload vẫn không thấy báo giá.
+
+    DB lỗi trả None: mất báo giá thì màn hình thiếu thông tin, còn ném lỗi ra
+    route thì mất luôn cả workflow.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return await repository.get_pending_payment_view(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load pending payment failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+def _waiting_approval_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    pending: dict[str, Any],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow đang chờ người dùng duyệt thanh toán.
+
+    Một chỗ duy nhất dựng view này, để đường RAM và đường restart không lệch
+    nhau. `WAITING_APPROVAL` được SUY RA từ bảng `payment_approvals` — giống
+    cách clarification suy ra từ bảng con — chứ không đọc `workflows.status`,
+    cột đó vẫn là RUNNING trong lúc chờ.
+    """
+    tasks = _polling_task_views(plan, record)
+    for task in tasks:
+        # Bước thanh toán phải hiện rõ là đang chờ, không phải "đang chạy".
+        if task.task_id == pending.get("task_id"):
+            task.status = "WAITING_APPROVAL"
+
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_APPROVAL",
+        message=_STAGE_MESSAGES.get("WAITING_APPROVAL", "Đang chờ bạn xác nhận thanh toán."),
+        payment_quote={
+            "booking_id": pending["booking_id"],
+            "amount": pending["amount"],
+            "currency": pending["currency"],
+        },
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
     )
 
 
@@ -1727,8 +2478,29 @@ async def get_demo_workflow_status(
     if job is None and record is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
 
+    # Khoản thanh toán đang chờ duyệt quyết định view, bất kể job còn trong RAM
+    # hay đã mất sau restart. `workflows.status` vẫn là RUNNING trong lúc chờ,
+    # nên đọc cột đó sẽ báo "đang chạy" cho một workflow thực ra đang đợi người
+    # dùng bấm nút — và giao diện mất cả báo giá lẫn hai nút quyết định.
+    pending_payment = await _load_pending_payment(workflow_id)
+    if pending_payment is not None:
+        return await _with_stored_answer(
+            _waiting_approval_view(
+                workflow_id,
+                plan=_plan_from_job_or_record(job, record),
+                record=record,
+                pending=pending_payment,
+                events=_public_events(job),
+            ),
+            workflow_id,
+        )
+
     if job is not None and isinstance(job.get("response"), DemoWorkflowResponse):
         response = job["response"]
+        # Cache chưa có câu trả lời (ví dụ tiến trình này vừa khởi động lại và
+        # chỉ dựng lại một phần) thì đọc bản đã ghi trên workflow.
+        if response.answer is None:
+            response = await _with_stored_answer(response, workflow_id)
         return response.model_copy(
             update={
                 # workflow_id phải bám theo path, kể cả khi response terminal
@@ -1774,7 +2546,8 @@ async def get_demo_workflow_status(
     #
     # NEEDS_INFORMATION KHÔNG phải giá trị trong `WorkflowStatus`: nó được SUY
     # RA từ bảng con, đúng cách repair hint đang làm ở khối ngay trên.
-    if job is None and record is not None:
+    database_status = record["workflow"]["status"] if record is not None else None
+    if job is None and record is not None and database_status not in {"SUCCESS", "FAILED", "CANCELLED"}:
         pending = await _load_clarification_safely(workflow_id)
         if pending is not None:
             return DemoWorkflowResponse(
@@ -1796,23 +2569,40 @@ async def get_demo_workflow_status(
     task_views = _polling_task_views(plan, record)
     stage = job["stage"] if job is not None else "FINISHED"
     message = job["message"] if job is not None else _STAGE_MESSAGES["FINISHED"]
-    database_status = record["workflow"]["status"] if record is not None else None
     if database_status == "SUCCESS":
         status = "SUCCESS"
-    elif database_status in {"FAILED", "CANCELLED"}:
+    elif database_status == "CANCELLED":
+        status = "CANCELLED"
+    elif database_status == "FAILED":
         status = "FAILED"
     else:
         status = "RUNNING"
-    return DemoWorkflowResponse(
-        workflow_id=workflow_id,
-        status=status,
-        stage=stage,
-        message=message,
-        summary=message if status in {"SUCCESS", "FAILED"} else None,
-        persisted=record is not None,
-        plan=_plan_view(plan),
-        tasks=task_views,
-        events=_public_events(job),
+
+    # Lỗi đã ghim thì đọc lại từ PostgreSQL, kể cả khi `_DEMO_JOBS` đã mất.
+    #
+    # Đây là điểm khác biệt giữa "workflow hỏng" và "workflow đang chạy" sau
+    # một lần restart. Thiếu nhánh này, mọi thứ không SUCCESS đều thành RUNNING
+    # và giao diện poll vô hạn.
+    failure = failure_for_code(await _load_failure_code(workflow_id)) if status == "FAILED" else None
+    if failure is not None:
+        message = failure.message
+        stage = "EXECUTION_FAILED"
+
+    return await _with_stored_answer(
+        DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status=status,
+            stage=stage,
+            message=message,
+            summary=message if status in {"SUCCESS", "FAILED", "CANCELLED"} else None,
+            persisted=record is not None,
+            plan=_plan_view(plan),
+            tasks=task_views,
+            events=_public_events(job),
+            error_code=failure.code if failure else None,
+            retryable=failure.retryable if failure else None,
+        ),
+        workflow_id,
     )
 
 
@@ -1843,7 +2633,7 @@ async def list_demo_workflows_by_session(
     `_DEMO_JOBS` được loại khỏi danh sách sweep.
     """
     await sweep_zombie_workflows(live_ids=set(_DEMO_JOBS))
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         rows = await repository.list_workflows_by_session(session_id, owner_user_id=user["id"])
@@ -1895,45 +2685,151 @@ async def list_supported_projects() -> DemoProjectListResponse:
     return DemoProjectListResponse(projects=[project["project_name"] for project in PROJECTS])
 
 
+# Danh mục capability — MỘT nguồn duy nhất.
+#
+# Endpoint `/capabilities` và gợi ý của Response Agent đều đọc từ đây. Chép
+# thành hai bản thì sớm muộn giao diện mời người dùng một dịch vụ mà gợi ý
+# không biết tới, hoặc ngược lại.
+_CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
+    DemoCapabilityItem(
+        name="Đặt lịch tham quan dự án",
+        description="Chọn dự án, ngày và giờ muốn tham quan.",
+    ),
+    DemoCapabilityItem(
+        name="Đăng ký quan tâm / nhận tư vấn",
+        description="Gửi nhu cầu để bộ phận tư vấn liên hệ.",
+    ),
+    DemoCapabilityItem(
+        name="Đăng ký phương tiện và chỗ đỗ xe",
+        description="Liên kết phương tiện và đặt chỗ tại Khu A hoặc Khu B.",
+        requires_resident=True,
+    ),
+    DemoCapabilityItem(
+        name="Báo bảo trì / sửa chữa",
+        description="Tạo yêu cầu và hẹn lịch kỹ thuật viên.",
+        requires_resident=True,
+    ),
+    DemoCapabilityItem(
+        name="Đặt lịch chuyển nhà",
+        description="Đăng ký thời gian, thang máy và hỗ trợ vận chuyển.",
+        requires_resident=True,
+    ),
+    DemoCapabilityItem(
+        name="Thanh toán phí đỗ xe",
+        description="Xác nhận khoản phí do dịch vụ đặt chỗ báo.",
+        requires_resident=True,
+    ),
+)
+
+
 @router.get("/capabilities", response_model=DemoCapabilityListResponse)
-async def list_supported_capabilities() -> DemoCapabilityListResponse:
-    """Các mục tiêu public; không trả tên tool hoặc contract nội bộ."""
-    return DemoCapabilityListResponse(
-        capabilities=[
-            DemoCapabilityItem(
-                name="Đặt lịch tham quan dự án",
-                description="Chọn dự án, ngày và giờ muốn tham quan.",
-            ),
-            DemoCapabilityItem(
-                name="Đăng ký quan tâm / nhận tư vấn",
-                description="Gửi nhu cầu để bộ phận tư vấn liên hệ.",
-            ),
-            DemoCapabilityItem(
-                name="Tìm gợi ý bất động sản",
-                description="Lọc căn hộ hoặc phòng theo nhu cầu và ngân sách.",
-            ),
-            DemoCapabilityItem(
-                name="Đăng ký phương tiện và chỗ đỗ xe",
-                description="Liên kết phương tiện và đặt chỗ tại Khu A hoặc Khu B.",
-                requires_resident=True,
-            ),
-            DemoCapabilityItem(
-                name="Báo bảo trì / sửa chữa",
-                description="Tạo yêu cầu và hẹn lịch kỹ thuật viên.",
-                requires_resident=True,
-            ),
-            DemoCapabilityItem(
-                name="Đặt lịch chuyển nhà",
-                description="Đăng ký thời gian, thang máy và hỗ trợ vận chuyển.",
-                requires_resident=True,
-            ),
-            DemoCapabilityItem(
-                name="Thanh toán phí đỗ xe",
-                description="Xác nhận khoản phí do dịch vụ đặt chỗ báo.",
-                requires_resident=True,
-            ),
-        ]
+async def list_supported_capabilities(
+    user: dict = Depends(get_current_user),
+) -> DemoCapabilityListResponse:
+    """Mục tiêu người dùng giao được, kèm cái nào đang mở với CHÍNH tài khoản này.
+
+    Cần token: `available` phụ thuộc liên kết cư dân, nên trả nó cho người ẩn
+    danh là vừa vô nghĩa vừa tiết lộ mô hình quyền.
+
+    Capability bị khoá vẫn được LIỆT KÊ, kèm lý do. Ẩn hẳn thì người dùng không
+    biết dịch vụ tồn tại và cũng không biết cần làm gì để mở nó.
+
+    Admin KHÔNG được cộng quyền cư dân: role và liên kết căn hộ là hai trục
+    độc lập. Người vận hành hệ thống không phải chủ căn hộ nào.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        identity = await get_verified_identity(pool, user["id"])
+        status = await get_link_status(pool, user["id"])
+    finally:
+        await pool.close()
+
+    is_resident = identity is not None
+    blocked_reason = {
+        "PENDING": "Hồ sơ cư dân của bạn đang chờ ban quản lý duyệt.",
+        "REJECTED": "Hồ sơ cư dân chưa được duyệt. Vui lòng liên hệ ban quản lý.",
+    }.get(status.value if status is not None else "", "Cần liên kết hồ sơ cư dân đã xác minh.")
+
+    def _resolve(item: DemoCapabilityItem) -> DemoCapabilityItem:
+        if not item.requires_resident or is_resident:
+            return item
+        return item.model_copy(update={"available": False, "blocked_reason": blocked_reason})
+
+    return DemoCapabilityListResponse(capabilities=[_resolve(item) for item in _CAPABILITY_CATALOGUE])
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/cancel",
+    response_model=DemoWorkflowResponse,
+)
+async def cancel_demo_workflow(
+    workflow_id: str,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Huỷ một yêu cầu chưa kết thúc, không giả lập rollback.
+
+    Task đã SUCCESS và side effect nghiệp vụ của nó được giữ nguyên. Task chưa
+    hoàn tất chuyển CANCELLED. Nếu workflow đang chờ thanh toán, thao tác này
+    dùng cùng policy với quyết định từ chối: không thu tiền và vẫn giữ booking.
+    """
+    await _require_workflow_owner(workflow_id, user)
+
+    pending_payment = await _load_pending_payment(workflow_id)
+    if pending_payment is not None:
+        try:
+            await reject_payment(workflow_id)
+            outcome: dict[str, Any] | None = {
+                "cancelled": True,
+                "previous_status": "WAITING_APPROVAL",
+            }
+        except ResumeError as exc:
+            if exc.code != "ALREADY_DECIDED":
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            outcome = {"cancelled": False, "previous_status": "CANCELLED"}
+    else:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            outcome = await repository.cancel_workflow(workflow_id, owner_user_id=user["id"])
+        finally:
+            await pool.close()
+
+    if outcome is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+    previous_status = outcome.get("previous_status")
+    if not outcome.get("cancelled") and previous_status != "CANCELLED":
+        raise HTTPException(status_code=409, detail="Yêu cầu đã kết thúc nên không thể huỷ.")
+
+    # Dừng coroutine đúng workflow trong tiến trình hiện tại. Sau restart không
+    # có task RAM nào; PostgreSQL vừa được chốt CANCELLED là nguồn sự thật.
+    running_task = _DEMO_WORKFLOW_TASKS.get(workflow_id)
+    if running_task is not None and not running_task.done():
+        running_task.cancel()
+
+    record = await read_demo_workflow(workflow_id)
+    plan = _plan_from_job_or_record(_DEMO_JOBS.get(workflow_id), record)
+    response = DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="CANCELLED",
+        stage="FINISHED",
+        message=_DEFAULT_BASELINE["CANCELLED"],
+        summary=_DEFAULT_BASELINE["CANCELLED"],
+        persisted=True,
+        plan=_plan_view(plan),
+        tasks=_polling_task_views(plan, record),
     )
+
+    job = _DEMO_JOBS.get(workflow_id)
+    answer_job = job if job is not None else {"owner_user_id": user["id"], "goal": ""}
+    answer_job["response"] = response
+    answer_job["stage"] = "FINISHED"
+    answer_job["message"] = response.summary
+    answer_job["cancel_requested"] = True
+    if job is not None:
+        _append_job_event(job, "FINISHED")
+    _keep_demo_task(asyncio.create_task(_attach_answer(answer_job, workflow_id, goal=answer_job.get("goal") or "")))
+    return response
 
 
 @router.post(
@@ -2007,6 +2903,20 @@ async def decide_demo_payment(
     if job is not None:
         _append_job_event(job, "FINISHED")
         job["message"] = response.summary
+        job["response"] = response
+
+    # Duyệt thanh toán là ĐIỂM DỪNG người dùng chú ý nhất — họ vừa đồng ý trả
+    # tiền. KHÔNG đặt trong `if job is not None`: sau một lần restart,
+    # `_DEMO_JOBS` trống, nên đúng những workflow sống sót qua restart lại là
+    # những workflow không bao giờ có câu trả lời cho trạng thái cuối.
+    #
+    # Response trả NGAY cho người vừa bấm nút; câu trả lời tới ở lượt poll kế
+    # tiếp, cùng đường với background job.
+    _keep_demo_task(
+        asyncio.create_task(
+            _attach_answer(job if job is not None else {}, workflow_id, goal=(job or {}).get("goal") or "")
+        )
+    )
     return response
 
 
@@ -2024,6 +2934,28 @@ _LIST_FILTERS: dict[str, tuple[str, ...]] = {
 }
 
 _LIST_LIMIT_MAX = 50
+
+
+def _assistant_fields(row: Any) -> dict[str, Any]:
+    """Câu trả lời đã ghi, ở dạng dùng được cho danh sách.
+
+    Chỉ trả câu viết cho ĐÚNG trạng thái hiện tại của workflow. Một câu viết
+    cho WAITING_APPROVAL mà workflow đã SUCCESS thì đã lỗi thời — hiển thị
+    lại nó nghĩa là nói với người dùng rằng vẫn đang chờ, trong khi tiền đã
+    thu xong.
+
+    Trả kèm trong DANH SÁCH, không bắt gọi thêm một request cho từng
+    workflow: màn hình chính dựng lại vài cuộc hội thoại cùng lúc, và N+1 ở
+    đó là N+1 người dùng phải ngồi chờ.
+    """
+    if row.get("assistant_for_status") != row.get("status"):
+        return {"answer": None, "suggestions": [], "response_state": None}
+    raw = row.get("assistant_suggestions")
+    return {
+        "answer": row.get("assistant_answer"),
+        "suggestions": json.loads(raw) if isinstance(raw, str) else list(raw or []),
+        "response_state": row.get("assistant_response_state"),
+    }
 
 
 def _goal_to_title(goal: str | None) -> str:
@@ -2068,7 +3000,7 @@ async def list_demo_workflows(
     # Live workflow trong `_DEMO_JOBS` không bị sweep.
     await sweep_zombie_workflows(live_ids=set(_DEMO_JOBS))
 
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         if session_id:
@@ -2099,6 +3031,8 @@ async def list_demo_workflows(
                 needs_attention=row["status"] in _ATTENTION_STATUSES,
                 created_at=row["created_at"].isoformat() if row.get("created_at") else None,
                 updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
+                goal=row.get("goal"),
+                **_assistant_fields(row),
             )
         )
     return DemoWorkflowListResponse(items=items)
@@ -2187,120 +3121,20 @@ async def _persist_draft(repository: Any, goal: str, plan: TaskPlan) -> dict:
     }
 
 
-@router.get("/workflows", response_model=WorkflowListResponse)
-async def list_workflows(
-    page: int = Query(1, ge=1),
-    limit: int = Query(10, ge=1, le=100),
-    runtime=Depends(get_runtime),
-    user: dict = Depends(get_current_user),
-):
-    """Liệt kê workflow active (mới nhất trước) — yêu cầu đăng nhập."""
-    _, repository = runtime
-    return await repository.list_workflows_page(page, limit)
-
-
-@router.post("/workflow/start")
-async def start_workflow(
-    req: StartWorkflowRequest,
-    runtime=Depends(get_runtime),
-    planner=Depends(get_planner),
-    user: dict = Depends(get_current_user),
-):
-    """Bắt đầu workflow (yêu cầu đăng nhập).
-
-    - Có `tasks`: dựng TaskPlan từ builder → validate → persist draft PENDING.
-    - Chỉ `goal`: LLM Planner sinh plan → NEEDS_INFORMATION hoặc draft PENDING.
-
-    Luôn trả bản nháp PENDING để review — KHÔNG tự thực thi.
-    """
-    _, repository = runtime
-
-    if req.tasks is not None:
-        plan = TaskPlan(goal=req.goal, tasks=req.tasks)
-        _validate_plan(plan)
-        return await _persist_draft(repository, req.goal, plan)
-
-    try:
-        result = await planner.plan(req.goal, existing_context={})
-    except LLMConfigurationError:
-        raise HTTPException(status_code=503, detail="LLM chưa được cấu hình.") from None
-    except PlannerError:
-        raise HTTPException(status_code=502, detail="Không lập được kế hoạch, thử lại sau.") from None
-
-    if not result.is_ready:
-        return {
-            "status": "NEEDS_INFORMATION",
-            "question": result.question,
-            "missing_fields": list(result.missing_fields),
-        }
-
-    plan = result.plan
-    _validate_plan(plan)
-    return await _persist_draft(repository, req.goal, plan)
-
-
-@router.get("/workflow/{workflow_id}/status", response_model=WorkflowStatusResponse)
-async def workflow_status(
-    workflow_id: str,
-    runtime=Depends(get_runtime),
-    user: dict = Depends(get_current_user),
-):
-    """Trả workflow + tasks + task_plan đã parse (raw string JSONB → object)."""
-    _, repository = runtime
-    try:
-        data = await repository.get_workflow(workflow_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Workflow không tồn tại.") from None
-
-    raw = data["workflow"].get("task_plan")
-    plan = json.loads(raw) if isinstance(raw, str) and raw.strip() else None
-    return {"workflow": data["workflow"], "tasks": data["tasks"], "plan": plan}
-
-
-@router.post("/workflow/{workflow_id}/execute", response_model=ExecuteResponse)
-async def execute_draft(
-    workflow_id: str,
-    body: ExecuteRequest | None = None,
-    runtime=Depends(get_runtime),
-    user: dict = Depends(get_current_user),
-):
-    """Duyệt & chạy bản nháp (yêu cầu đăng nhập).
-
-    Plan lấy từ body (bản user đã sửa trên review canvas) hoặc task_plan đã
-    persist ở /workflow/start. Snapshot plan đã duyệt vào DB TRƯỚC khi
-    `boundary.execute` — vì Executor's create_workflow chỉ update goal, không
-    update task_plan (ON CONFLICT DO UPDATE SET goal, updated_at).
-    """
-    boundary, repository = runtime
-    body = body or ExecuteRequest()
-
-    try:
-        data = await repository.get_workflow(workflow_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Workflow không tồn tại.") from None
-
-    if data["workflow"]["status"] != "PENDING":
-        raise HTTPException(status_code=409, detail="Workflow không ở trạng thái chờ duyệt (PENDING).")
-
-    if body.plan is not None:
-        plan = body.plan
-    else:
-        raw = data["workflow"].get("task_plan")
-        if not isinstance(raw, str) or not raw.strip():
-            raise HTTPException(status_code=409, detail="Không có bản nháp kế hoạch để thực thi.")
-        try:
-            plan = TaskPlan.model_validate(json.loads(raw))
-        except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from None
-
-    _validate_plan(plan)
-    await repository.update_workflow_task_plan(workflow_id, plan)
-
-    try:
-        await boundary.execute(plan, workflow_id=workflow_id)
-    except PlanRejectedError as exc:
-        # Boundary re-validate từ chối — message cố định, an toàn.
-        raise HTTPException(status_code=422, detail=str(exc)) from None
-
-    final = await repository.get_workflow(workflow_id)
-    return {"workflow_id": workflow_id, "status": final["workflow"]["status"]}
+# API workflow legacy `/workflow/*` và `GET /workflows` ĐÃ BỊ XOÁ — Phase C.
+#
+# Bốn route đó (`/workflow/start`, `/workflow/{id}/status`,
+# `/workflow/{id}/execute`, `GET /workflows`) là một đường vòng hoàn chỉnh qua
+# guard Phase B: chúng có `Depends(get_current_user)` nên trông như đã được bảo
+# vệ, nhưng KHÔNG kiểm chủ sở hữu — `/status` đọc workflow của bất kỳ ai, và
+# `GET /workflows` liệt kê workflow của toàn hệ thống. Đã tái hiện được cả hai.
+#
+# Chúng cũng nhận `tasks` do browser dựng, tức là cho client tự viết TaskPlan —
+# trái với mô hình "LLM đề xuất, code quyết định".
+#
+# Đường chính thức là `/workflows/demo/*`: có auth, có owner, có session, có
+# clarification và payment approval. React đã chuyển sang đó.
+#
+# `_reject_untrusted_pay_fee` phía trên được GIỮ LẠI: nó mã hoá luật provenance
+# "pay_fee phải lấy booking_id/amount/currency từ cùng một book_parking", và
+# luật đó vẫn đúng cho mọi plan. Coverage của nó chuyển sang unit test.

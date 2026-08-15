@@ -22,7 +22,7 @@ from src.common.task_plan import TaskPlan
 from src.connectors.payment import PaymentConnector
 from src.db.parking_payment_repository import payment_idempotency_key
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
-from src.orchestration.deps import build_execution_boundary, build_repository
+from src.orchestration.deps import build_execution_boundary
 from src.orchestration.payment_approval import (
     APPROVED,
     AWAITING,
@@ -36,6 +36,7 @@ from src.orchestration.payment_approval import (
     record_decision,
     save_pending_approval,
 )
+from src.orchestration.runtime_provider import acquire_repository
 from src.services.llm import get_llm, structured_output_method
 
 
@@ -521,7 +522,7 @@ async def run_demo_workflow(
 
 async def read_demo_workflow(workflow_id: str) -> dict[str, Any] | None:
     """Đọc workflow qua repository để API polling không viết SQL trực tiếp."""
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     try:
         try:
             return await repository.get_workflow(workflow_id)
@@ -547,7 +548,7 @@ async def persist_pending_approval(
     if quote is None or task_id is None:
         return None
 
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         await save_pending_approval(pool, workflow_id=workflow_id, task_id=task_id, quote=quote)
@@ -592,7 +593,7 @@ async def resume_payment_after_approval(
     đụng `uq_vehicles_plate`; chạy lại `book_parking` sẽ giữ chỗ lần hai và thu
     tiền lần hai.
     """
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         pending = await get_pending_approval(pool, workflow_id)
@@ -640,7 +641,7 @@ async def record_decision_or_fail(workflow_id: str, decision: str) -> bool:
     Đây là hàng rào chống hai lệnh duyệt đồng thời: lệnh đến sau thấy 0 row bị
     cập nhật và biết mình không phải người thắng.
     """
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         return await record_decision(pool, workflow_id, decision)
@@ -674,7 +675,7 @@ async def _execute_payment_only(
         },
     )
 
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         await repository.save_task_result(workflow_id, payment_task_id, result)
@@ -724,7 +725,7 @@ async def reject_payment(workflow_id: str) -> None:
     if not await record_decision_or_fail(workflow_id, REJECTED):
         raise ResumeError("ALREADY_DECIDED", "Yêu cầu thanh toán này đã được xử lý.")
 
-    repository = await build_repository(migrate=False)
+    repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         # Huỷ bước thanh toán VÀ mọi bước phụ thuộc nó. Để chúng ở

@@ -15,8 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.monitoring import usage_tracker
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
+from src.orchestration.runtime_provider import set_repository_provider
 
 
 def _aimessage_with_usage(*, input_tokens: int, output_tokens: int) -> SimpleNamespace:
@@ -112,7 +112,7 @@ async def test_flush_writes_rows_and_clears_pending(monkeypatch) -> None:
     async def _build_repository(*, migrate: bool = True):
         return _Repo()
 
-    monkeypatch.setattr(usage_tracker, "build_repository", _build_repository)
+    set_repository_provider(_build_repository)
 
     token = usage_context(workflow_id="wf-9", stage="plan")
     try:

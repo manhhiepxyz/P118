@@ -9,20 +9,30 @@ import {
 } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 
-import { setAuthToken } from './api'
-import { getMe, login as apiLogin, register as apiRegister } from './client'
+import {
+  getMe,
+  getStoredToken,
+  login as apiLogin,
+  logout as apiLogout,
+  register as apiRegister,
+} from './agentApi'
 import type { AuthUser } from './types'
 
 /* ---------------------------------------------------------------------------
    AuthContext — giữ trạng thái đăng nhập (user + token) cho toàn app.
 
-   - login/register: gọi client.ts facade (mock hoặc API thật), lưu token vào
-     localStorage + đồng bộ vào api.ts (setAuthToken cho Bearer header).
-   - Khởi tạo: đọc token từ localStorage → gọi getMe để khôi phục user.
+   - login/register: gọi `agentApi` — API thật, không còn facade mock.
+   - Token nằm trong sessionStorage (do `agentApi` quản), KHÔNG localStorage:
+     token sống tới 24h, và localStorage tồn tại qua cả lần đóng trình duyệt,
+     nên trên máy dùng chung một tab đóng lại vẫn để nguyên phiên cho người sau.
+     PRODUCTION nên dùng cookie HttpOnly + refresh flow; chưa làm ở Gate 2.
+   - Khởi tạo: có token → gọi getMe để khôi phục user + trạng thái liên kết cư dân.
    - ProtectedRoute: chặn route cần đăng nhập; AdminRoute: chỉ admin.
---------------------------------------------------------------------------- */
 
-const TOKEN_KEY = 'p118_access_token'
+   `isAdmin` chỉ nói về VAI TRÒ TÀI KHOẢN. Quyền dùng dịch vụ cư dân nằm ở
+   `user.resident_verification_status` — hai trục độc lập, và admin không tự
+   động là chủ căn hộ nào.
+--------------------------------------------------------------------------- */
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -41,22 +51,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null)
   const [initializing, setInitializing] = useState(true)
 
-  // Khôi phục phiên từ localStorage khi app load.
+  // Khôi phục phiên khi app load.
   useEffect(() => {
-    const stored = localStorage.getItem(TOKEN_KEY)
+    const stored = getStoredToken()
     if (!stored) {
       setInitializing(false)
       return
     }
     setToken(stored)
-    setAuthToken(stored)
-    getMe(stored)
+    getMe()
       .then((u) => setUser(u))
       .catch(() => {
-        // Token cũ/hết hạn → xoá để user đăng nhập lại.
-        localStorage.removeItem(TOKEN_KEY)
+        // Token cũ/hết hạn — `agentApi` đã xoá nó khi gặp 401.
+        apiLogout()
         setToken(null)
-        setAuthToken(null)
         setUser(null)
       })
       .finally(() => setInitializing(false))
@@ -64,10 +72,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await apiLogin(username, password)
-    localStorage.setItem(TOKEN_KEY, res.access_token)
-    setAuthToken(res.access_token)
     setToken(res.access_token)
-    setUser(res.user)
+    // Đọc lại qua /auth/me: response login chưa mang trạng thái liên kết cư
+    // dân, mà UI cần nó ngay để biết dịch vụ nào đang mở.
+    setUser(await getMe())
   }, [])
 
   const register = useCallback(async (username: string, password: string, email?: string) => {
@@ -77,8 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [login])
 
   const logout = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY)
-    setAuthToken(null)
+    apiLogout()
     setToken(null)
     setUser(null)
   }, [])
@@ -123,7 +130,7 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
-/** Chỉ admin — resident đã login nhưng không phải admin → về trang chủ. */
+/** Chỉ admin — customer đã login nhưng không phải admin → về trang chủ. */
 export function AdminRoute({ children }: { children: ReactNode }) {
   const { user, isAdmin, initializing } = useAuth()
 

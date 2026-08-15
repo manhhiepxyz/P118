@@ -14,12 +14,12 @@ import pytest_asyncio
 from src.common.enums import TaskStatus, WorkflowStatus
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.main import app
+from src.orchestration.runtime_provider import set_repository_provider
 
 
 @pytest_asyncio.fixture
 async def seeded(db_pool: asyncpg.Pool, monkeypatch):
     """Ba workflow ở ba nhóm trạng thái khác nhau."""
-    from src.api import routes
 
     repository = PostgreSQLWorkflowStateRepository(db_pool)
 
@@ -38,7 +38,7 @@ async def seeded(db_pool: asyncpg.Pool, monkeypatch):
     async def _fake_build_repository(**_kwargs):
         return repository
 
-    monkeypatch.setattr(routes, "build_repository", _fake_build_repository)
+    set_repository_provider(_fake_build_repository)
     # `demo_service` import `build_repository` vào namespace riêng của nó, nên
     # vá mỗi `routes` là chưa đủ: đường quyết định thanh toán vẫn mở kết nối tới
     # DATABASE_URL thật. Test ghi bản ghi chờ duyệt vào pool test rồi endpoint
@@ -48,7 +48,7 @@ async def seeded(db_pool: asyncpg.Pool, monkeypatch):
     from src.orchestration import demo_service
 
     for module in (demo_service, admin_routes):
-        monkeypatch.setattr(module, "build_repository", _fake_build_repository)
+        set_repository_provider(_fake_build_repository)
 
     # Chủ sở hữu THẬT cho các workflow được seed. Sau Phase B endpoint nào cũng
     # đòi token và lọc theo owner, nên fixture phải cấp một danh tính thật —
@@ -150,6 +150,22 @@ async def test_list_never_returns_the_task_plan_or_business_payload(seeded) -> N
     for leaked in ("task_plan", "input_data", "result_data", "plate_number", "resident_id"):
         assert leaked not in body, leaked
 
+    # Contract MỞ RỘNG, và đây là lý do từng field.
+    #
+    # Màn hình chính giờ dựng lại cuộc hội thoại từ chính danh sách này sau khi
+    # người dùng F5. Để làm được mà không gọi thêm một request cho từng
+    # workflow, danh sách phải mang đủ ba thứ: mục tiêu họ đã gõ, câu trả lời
+    # của P-118, và trạng thái của câu trả lời đó.
+    #
+    #   goal            — chữ của CHÍNH người dùng, và endpoint đã lọc theo chủ
+    #                     sở hữu. Đây là dữ liệu họ tự nhập, không phải dữ liệu
+    #                     nghiệp vụ backend suy ra.
+    #   answer          — câu đã qua bộ kiểm của Response Agent.
+    #   suggestions     — chỉ gồm tên capability server-side.
+    #   response_state  — PENDING/READY/FALLBACK, để giao diện không phải đoán.
+    #
+    # Điều KHÔNG đổi: `task_plan`, `input_data`, `result_data` vẫn bị cấm — đó
+    # mới là chỗ chứa dữ liệu nghiệp vụ mà một danh sách không cần.
     allowed = {
         "workflow_id",
         "title",
@@ -160,6 +176,10 @@ async def test_list_never_returns_the_task_plan_or_business_payload(seeded) -> N
         "needs_attention",
         "created_at",
         "updated_at",
+        "goal",
+        "answer",
+        "suggestions",
+        "response_state",
     }
     for item in response.json()["items"]:
         assert set(item) == allowed

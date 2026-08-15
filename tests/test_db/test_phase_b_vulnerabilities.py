@@ -15,6 +15,7 @@ import uuid
 
 import pytest
 
+from src.orchestration.runtime_provider import set_repository_provider
 from tests.test_db.conftest import _register_and_login
 
 
@@ -420,15 +421,64 @@ async def test_continue_never_reads_a_session_that_belongs_to_someone_else(clien
     async def _build(**_kwargs):
         return _Repo()
 
-    original = routes.build_repository
-    routes.build_repository = _build
+    # Fixture `client` đã đặt provider trỏ vào pool test; ở đây tạm thay bằng
+    # một repo mỏng rồi trả lại đúng provider cũ.
+    from src.orchestration import runtime_provider
+
+    original = runtime_provider._provider  # noqa: SLF001 - test khôi phục nguyên trạng
+    set_repository_provider(_build)
     try:
         as_owner = await routes._load_session(session_of_b, user_id=user_b)
         as_intruder = await routes._load_session(session_of_b, user_id=user_a)
     finally:
-        routes.build_repository = original
+        runtime_provider._provider = original  # noqa: SLF001
 
     assert as_owner is not None, "chủ phiên phải đọc được phiên của mình"
     assert as_intruder is None, "phiên của người khác phải fail-closed"
     # Fail-closed nghĩa là rơi về prospect, không phải kế thừa quyền cư dân của B.
     assert (as_intruder or {}).get("account_state", "prospect") == "prospect"
+
+
+@pytest.mark.asyncio
+async def test_a_continue_child_workflow_is_readable_by_its_own_creator(client, db_pool):
+    """Workflow con phải kế thừa chủ sở hữu của cha.
+
+    Bug đã xảy ra: `/continue` tạo workflow con KHÔNG có `owner_user_id`. Con
+    rơi vào nhóm "legacy không chủ", nên `_require_workflow_owner` trả 404 cho
+    chính người vừa trả lời câu hỏi bổ sung. Workflow vẫn chạy tới SUCCESS ở
+    phía sau — người dùng chỉ không bao giờ nhìn thấy kết quả.
+
+    Không test in-process nào bắt được vì chúng dựng workflow con trực tiếp.
+    Browser E2E mới thấy.
+    """
+    from src.api import routes
+
+    token = await _register_and_login(client, "nn_con_ke_thua")
+    owner_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'nn_con_ke_thua'")
+    assert token
+
+    parent_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
+    await routes._ensure_workflow_shell(
+        parent_id,
+        goal="Đặt chỗ đỗ xe",
+        session_id=session_id,
+        parent_workflow_id=None,
+        owner_user_id=str(owner_id),
+    )
+
+    # Con được tạo bằng CÙNG một helper mà đường `/continue` dùng.
+    child_id = str(uuid.uuid4())
+    await routes._ensure_workflow_shell(
+        child_id,
+        goal="Đặt chỗ đỗ xe",
+        session_id=session_id,
+        parent_workflow_id=parent_id,
+        owner_user_id=str(owner_id),
+    )
+
+    child_owner = await db_pool.fetchval("SELECT owner_user_id FROM workflows WHERE workflow_id = $1::uuid", child_id)
+    assert child_owner == owner_id, "workflow con mất chủ sở hữu"
+
+    seen = await client.get(f"/api/v1/workflows/demo/{child_id}", headers={"Authorization": f"Bearer {token}"})
+    assert seen.status_code == 200, "người tạo không đọc được workflow con của chính mình"

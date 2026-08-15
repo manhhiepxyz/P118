@@ -15,7 +15,6 @@ import pytest
 from fastapi import Depends
 
 from src.api.deps import get_current_user, get_planner, get_runtime, get_user_repository
-from src.common.task_plan import TaskPlan
 from src.main import app
 
 from .fakes import FakeExecutionBoundary, FakePlanner, FakeRepository, FakeUserRepository
@@ -181,50 +180,6 @@ async def test_me_with_garbage_token_401(client, auth_env):
 
 
 @pytest.mark.asyncio
-@pytest.mark.anonymous
-async def test_workflow_start_without_token_401(client, workflow_runtime_env):
-    """No-token → 401 (không phải 503) — get_runtime đã override trước.
-
-    `@pytest.mark.anonymous` bảo fixture `client` đừng gắn token: fixture giờ
-    mặc định mang token hợp lệ để các test nghiệp vụ đi qua cổng, còn test này
-    kiểm chính cái cổng.
-    """
-    res = await client.post("/api/v1/workflow/start", json={"goal": "Đăng ký cư dân"})
-    assert res.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_workflow_start_with_valid_token_200(client, auth_env, workflow_runtime_env):
-    """Full flow: register → login → token → /workflow/start pass qua auth."""
-    await _register(client)
-    token = (await _login(client)).json()["access_token"]
-
-    # Plan 1 bước hợp lệ (không cần LLM).
-    plan = TaskPlan(
-        goal="Đăng ký cư dân",
-        tasks=[
-            {
-                "task_id": "T1",
-                "tool": "register_resident",
-                "depends_on": [],
-                "input": {
-                    "full_name": "Nguyễn Văn An",
-                    "apartment_code": "A1201",
-                    "residential_area": "KĐT Vinhomes",
-                },
-            }
-        ],
-    )
-    res = await client.post(
-        "/api/v1/workflow/start",
-        json={"goal": plan.goal, "tasks": plan.model_dump(mode="json")["tasks"]},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert res.status_code == 200
-    assert res.json()["status"] == "PENDING"
-
-
-@pytest.mark.asyncio
 async def test_me_user_deleted_401(client, auth_env):
     """User bị archive giữa chừng → 401 khi dùng token cũ."""
     await _register(client)
@@ -281,3 +236,42 @@ async def test_require_roles_allows_admin_blocks_resident(client, auth_env):
         if getattr(route, "path", None) == "/admin-test":
             app.routes.remove(route)
             break
+
+
+# ---------------------------------------------------------------------------
+# API workflow canonical — thay cho `/workflow/start` đã bị xoá ở Phase C.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anonymous
+@pytest.mark.asyncio
+async def test_starting_a_workflow_without_a_token_is_401(client):
+    """Cổng vào của Agent phải từ chối người chưa đăng nhập."""
+    res = await client.post("/api/v1/workflows/demo/start", json={"goal": "Đăng ký cư dân"})
+
+    assert res.status_code == 401
+
+
+@pytest.mark.anonymous
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("post", "/api/v1/workflow/start"),
+        ("get", "/api/v1/workflow/wf-1/status"),
+        ("post", "/api/v1/workflow/wf-1/execute"),
+        ("get", "/api/v1/workflows?page=1&limit=10"),
+    ],
+)
+async def test_the_legacy_workflow_api_no_longer_exists(client, method, path):
+    """Bộ API legacy phải biến mất hẳn, không chỉ ngừng được gọi.
+
+    Bốn route này có `Depends(get_current_user)` nên trông như đã được bảo vệ,
+    nhưng không kiểm chủ sở hữu: `/status` đọc được workflow của bất kỳ ai và
+    `GET /workflows` liệt kê toàn hệ thống. Giữ lại là giữ một đường vòng qua
+    toàn bộ guard Phase B.
+    """
+    kwargs = {"json": {}} if method == "post" else {}
+    res = await getattr(client, method)(path, **kwargs)
+
+    assert res.status_code in {404, 405}, res.text

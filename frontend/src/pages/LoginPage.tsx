@@ -1,9 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { Eye, EyeOff, LogIn, ShieldCheck, Sparkles } from 'lucide-react'
+import { Eye, EyeOff, LogIn, Sparkles } from 'lucide-react'
 
 import { useAuth } from '../lib/auth'
-import { USE_MOCK } from '../lib/client'
 import { useToast } from '../lib/toast'
 
 /** Login — màn hình đăng nhập (Prompt 5.1). */
@@ -120,18 +119,6 @@ export function LoginPage() {
           </p>
         </div>
 
-        {USE_MOCK && (
-          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-            <div className="flex items-center gap-1.5 font-medium">
-              <ShieldCheck className="h-4 w-4" aria-hidden />
-              Tài khoản demo (chế độ mock)
-            </div>
-            <p className="mt-1 text-amber-700">
-              Admin: <span className="font-mono font-medium">admin / admin123</span> · Cư dân:{' '}
-              <span className="font-mono font-medium">resident / resident123</span>
-            </p>
-          </div>
-        )}
 
         <p className="mt-4 flex items-center justify-center gap-1.5 text-center text-xs text-gray-400">
           <Sparkles className="h-3.5 w-3.5" aria-hidden />

@@ -37,7 +37,7 @@ VALID_INPUTS: dict[str, dict] = {
     "register_property_interest": {
         "project_id": "PRJ-001",
         "interest_type": "consultation",
-        "preferred_contact_time": "afternoon",
+        "preferred_contact_time": "14:30",
         "consent": True,
     },
     "create_maintenance_request": {

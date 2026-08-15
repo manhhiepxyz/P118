@@ -162,6 +162,16 @@ class DemoWorkflowListItem(BaseModel):
     needs_attention: bool = False
     created_at: str | None = None
     updated_at: str | None = None
+    # Mục tiêu ĐẦY ĐỦ người dùng đã gõ, để dựng lại bubble của họ sau khi F5.
+    #
+    # `title` là bản cắt ngắn cho danh sách; dựng lại tin nhắn từ nó thì người
+    # dùng thấy chính câu mình vừa viết bị cụt.
+    goal: str | None = None
+    # Câu trả lời đã ghi, để dựng lại bubble của P-118 mà không cần gọi thêm
+    # một request cho từng workflow.
+    answer: str | None = None
+    suggestions: list[str] = Field(default_factory=list)
+    response_state: Literal["PENDING", "READY", "FALLBACK"] | None = None
 
 
 class DemoWorkflowListResponse(BaseModel):
@@ -180,6 +190,13 @@ class DemoCapabilityItem(BaseModel):
     name: str
     description: str
     requires_resident: bool = False
+    # Tính theo liên kết cư dân THẬT của người đang gọi.
+    #
+    # UI hiển thị capability bị khoá thay vì ẩn nó đi: ẩn hẳn khiến người dùng
+    # không biết dịch vụ có tồn tại và cũng không biết cần làm gì để mở. Khoá
+    # kèm lý do thì họ đọc được cả hai.
+    available: bool = True
+    blocked_reason: str | None = None
 
 
 class DemoCapabilityListResponse(BaseModel):
@@ -212,6 +229,7 @@ class DemoWorkflowResponse(BaseModel):
         "RUNNING",
         "SUCCESS",
         "FAILED",
+        "CANCELLED",
         "NEEDS_INFORMATION",
         # Tên CANONICAL, giống hệt `WorkflowStatus.WAITING_APPROVAL` và cột
         # workflows.status trong PostgreSQL. Trước đây API dùng
@@ -266,6 +284,40 @@ class DemoWorkflowResponse(BaseModel):
     # Báo giá authoritative đọc từ booking đã persist. Browser KHÔNG được gửi
     # amount/currency; nó chỉ hiển thị lại đúng con số backend đưa xuống.
     payment_quote: dict[str, Any] | None = None
+    # Mã lỗi ỔN ĐỊNH khi workflow hỏng: `LLM_CONFIGURATION_ERROR`,
+    # `PROVIDER_UNAVAILABLE`, … Dùng để đối chiếu log server và cho admin đọc.
+    # KHÔNG phải tên class exception — tên class là chi tiết cài đặt, đổi theo
+    # refactor; mã này là hợp đồng.
+    error_code: str | None = None
+    # Thử lại có ích không. Sai cấu hình thì gọi lại bao nhiêu lần cũng hỏng;
+    # provider bận thì thử lại là đúng. Giao diện dựa vào đây để quyết định có
+    # mời người dùng thử lại hay không.
+    retryable: bool | None = None
+    # Mã đối chiếu với log server. Người dùng đọc được nhưng không suy ra được
+    # gì về hệ thống — nó chỉ là định danh của một lần chạy.
+    request_id: str | None = None
+    # Câu trả lời tự nhiên do Response Agent viết từ kết quả ĐÃ được xác minh.
+    #
+    # KHÁC `message`: `message` là câu deterministic gắn với stage, giống nhau
+    # cho mọi workflow cùng stage. `answer` nói về CHÍNH yêu cầu này — đã làm
+    # được gì, đang vướng ở đâu, cần bạn làm gì tiếp.
+    #
+    # None nghĩa là chưa sinh (đang chạy) hoặc Response Agent không dùng được;
+    # giao diện khi đó hiển thị `message`. Không có nó, workflow vẫn đầy đủ.
+    answer: str | None = None
+    # Tối đa 3 việc gợi ý tiếp theo, mỗi cái là một câu người dùng bấm để dùng
+    # ngay. Chỉ gồm dịch vụ tài khoản này đang dùng được.
+    suggestions: list[str] = Field(default_factory=list)
+    # Câu trả lời đang ở đâu trong vòng đời của nó.
+    #
+    #   PENDING  — đang sinh; giao diện hiện "P-118 đang chuẩn bị câu trả lời…"
+    #   READY    — câu tự nhiên đã sẵn sàng
+    #   FALLBACK — dùng câu deterministic (mô hình lỗi, hoặc câu bị loại)
+    #
+    # Có trạng thái tường minh để giao diện KHÔNG phải đoán bằng số lần poll.
+    # Đoán bằng số lần poll là một protocol ngầm: đổi nhịp poll hay đổi tốc độ
+    # mô hình là nó sai, mà không chỗ nào báo.
+    response_state: Literal["PENDING", "READY", "FALLBACK"] | None = None
     plan: list[DemoPlanTask] = Field(default_factory=list)
     tasks: list[DemoTaskResult] = Field(default_factory=list)
     events: list[DemoWorkflowEvent] = Field(default_factory=list)

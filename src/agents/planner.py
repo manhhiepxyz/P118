@@ -31,7 +31,7 @@ Ranh giới HITL:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -39,7 +39,7 @@ from src.agents.prompts.planner_prompt import (
     PLANNER_SYSTEM_PROMPT,
     build_planner_user_message,
 )
-from src.common.task_plan import InputRef, TaskPlan
+from src.common.task_plan import AllowedTool, InputRef, TaskPlan
 
 PlannerStatus = Literal["READY", "NEEDS_INFORMATION"]
 
@@ -58,15 +58,24 @@ PAYMENT_QUOTE_REQUIRED_FIELD = "payment_quote"
 # Allowlist đóng cho `missing_fields`, kèm nhãn tiếng Việt để dựng câu hỏi.
 # LLM chỉ được chọn tên trong đây; mọi thứ khác bị từ chối. Nhờ khớp chính xác
 # nên chuỗi rỗng, whitespace, URL và credential marker đều tự động bị loại.
+# KHÔNG có `full_name`/`apartment_code`/`residential_area`: chúng chỉ dùng để
+# lập hồ sơ cư dân, việc nằm ngoài Agent. Giữ chúng ở đây nghĩa là Planner vẫn
+# hỏi được, và giao diện thì không có ô nhập nào cho chúng.
 MISSING_FIELD_LABELS: dict[str, str] = {
+    # Dùng cho `search_properties`. `register_resident` cũng nhận field này,
+    # nhưng tool đó đã bị loại khỏi không gian kế hoạch của Agent.
+    "residential_area": "tên khu đô thị",
     "transaction_type": "hình thức giao dịch (rent hoặc buy)",
     "property_type": "loại bất động sản (apartment hoặc room)",
     "max_price": "ngân sách tối đa",
+    # Nhãn nói "tên dự án", không nói "mã dự án": người dùng không biết PRJ-xxx.
+    # Việc đổi tên field sang `project_name` cho client là việc của biên API
+    # (`_to_public_missing_fields`); Planner không cần biết tới alias đó.
     "project_id": "tên dự án trong danh sách được hỗ trợ; tên khu vực chung chưa đủ",
     "viewing_date": "ngày muốn tham quan",
     "viewing_time": "giờ muốn tham quan",
     "interest_type": "nhu cầu mua, thuê hay chỉ nhận tư vấn",
-    "preferred_contact_time": "buổi muốn được liên hệ",
+    "preferred_contact_time": "giờ muốn được liên hệ",
     "consent": "đồng ý để bộ phận tư vấn liên hệ",
     "issue_type": "hạng mục cần bảo trì",
     "description": "mô tả sự cố",
@@ -78,9 +87,6 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "needs_elevator": "có cần đăng ký thang máy hay không",
     "needs_loading_support": "có cần hỗ trợ bốc dỡ hay không",
     "move_vehicle": "phương tiện chuyển nhà (none, van hoặc truck)",
-    "full_name": "họ tên cư dân",
-    "apartment_code": "mã căn hộ",
-    "residential_area": "tên khu đô thị",
     "resident_id": "mã cư dân",
     "plate_number": "biển số xe",
     "vehicle_type": "loại xe (ô tô hoặc xe máy)",
@@ -151,7 +157,107 @@ _MAX_CORRECTIVE_RETRIES = 1
 # nếu không, retry sẽ trở thành đường tuồn PII/secret ngược lại vào prompt.
 _CORRECTIVE_PREAMBLE = "Câu trả lời trước của bạn không hợp lệ. "
 
+# Field mà BACKEND đã validate trước khi đưa vào context (qua form clarification
+# hoặc qua chuẩn hoá câu trả lời). Chỉ những field này mới được coi là "đã có
+# giá trị" khi kiểm tính nhất quán của model.
+#
+# Cố ý KHÔNG có `resident_id`, `vehicle_id`, `booking_id`, `amount`, `currency`,
+# `owner_user_id`, `workflow_id`: chúng là dữ liệu có thẩm quyền của provider
+# hoặc của phiên đăng nhập. Cho câu trả lời người dùng trở thành nguồn của
+# chúng là mở lại đúng những lỗ hổng mà trust boundary sinh ra để chặn.
+_BACKEND_VALIDATED_FIELDS: frozenset[str] = frozenset(
+    {
+        "plate_number",
+        "vehicle_type",
+        "booking_date",
+        "parking_zone",
+        "project_id",
+        "viewing_date",
+        "viewing_time",
+        "interest_type",
+        "preferred_contact_time",
+        "consent",
+        "issue_type",
+        "description",
+        "location",
+        "preferred_date",
+        "preferred_time",
+        "move_date",
+        "move_time",
+        "move_vehicle",
+        "needs_elevator",
+        "needs_loading_support",
+    }
+)
+
+
+def _already_supplied(field: str, context: dict[str, Any]) -> bool:
+    """Field đã có giá trị dùng được trong context chưa.
+
+    Chuỗi rỗng và khoảng trắng KHÔNG tính là đã có — nếu tính, một giá trị rỗng
+    lọt vào context sẽ khiến guard im lặng chấp nhận và người dùng không bao giờ
+    được hỏi lại.
+    """
+    if field not in _BACKEND_VALIDATED_FIELDS or field not in context:
+        return False
+    value = context[field]
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value is not None
+
+
+# ---------------------------------------------------------------------------
+# Không gian kế hoạch của Agent
+# ---------------------------------------------------------------------------
+#
+# `AllowedTool` là contract PROVIDER — 9 tool mà hệ thống có connector phục vụ.
+# Đây là tập con mà PLANNER được phép lập kế hoạch, và nó nhỏ hơn một tool.
+#
+# `register_resident` bị loại: đăng ký / liên kết / xác minh hồ sơ cư dân xảy ra
+# NGOÀI Agent (đường admin/provider). Nếu Planner tự thêm nó, nó sẽ hỏi
+# `full_name`/`apartment_code`/`residential_area` — ba field mà giao diện không
+# có ô nhập và không nên có. Người dùng nhận một câu hỏi không có câu trả lời
+# hợp lệ, và workflow không bao giờ hội tụ.
+#
+# Đã quan sát trên DeepSeek thật: model KHÔNG tất định, có lần tự thêm
+# `register_resident` cho tài khoản đã VERIFIED dù prompt đã dặn ngược lại. Vì
+# vậy ràng buộc phải nằm ở code — prompt chỉ là gợi ý.
+PLANNER_FORBIDDEN_TOOLS: frozenset[str] = frozenset({"register_resident"})
+
+PLANNER_ALLOWED_TOOLS: frozenset[str] = frozenset(get_args(AllowedTool)) - PLANNER_FORBIDDEN_TOOLS
+
+# Field CHỈ tồn tại để tạo hồ sơ cư dân. Planner hỏi chúng nghĩa là nó đang cố
+# onboarding qua TaskPlan — việc mà kiến trúc đã đặt ra ngoài Agent.
+#
+# `residential_area` KHÔNG có ở đây dù nó cũng là input của `register_resident`:
+# nó đồng thời là input BẮT BUỘC của `search_properties`. Chặn nó sẽ phá luồng
+# tìm bất động sản hợp lệ — một field dùng chung giữa hai tool thì không thể
+# cấm theo tên. Thứ chặn được vòng lặp là `PLANNER_FORBIDDEN_TOOLS`: không có
+# `register_resident` trong kế hoạch thì `residential_area` chỉ còn ý nghĩa
+# tìm kiếm.
+PLANNER_FORBIDDEN_MISSING_FIELDS: frozenset[str] = frozenset({"full_name", "apartment_code"})
+
+
 _CORRECTIVE_INSTRUCTIONS: dict[str, str] = {
+    "FORBIDDEN_PLANNER_TOOL": (
+        "Kế hoạch của bạn chứa một bước đăng ký/liên kết hồ sơ cư dân. Việc đó "
+        "nằm NGOÀI phạm vi của bạn và do bộ phận quản lý thực hiện. Nếu phần "
+        "'Dữ liệu đã có' có resident_id, hãy dùng thẳng giá trị đó. Nếu không có, "
+        "đừng lập kế hoạch cho dịch vụ dành riêng cho cư dân."
+    ),
+    "FORBIDDEN_LINKING_CLARIFICATION": (
+        "Bạn hỏi thông tin dùng để tạo hồ sơ cư dân. Không được hỏi những thông "
+        "tin đó: hồ sơ cư dân do bộ phận quản lý lập, không thu thập trong hội "
+        "thoại này. Chỉ hỏi dữ liệu cần cho chính dịch vụ người dùng yêu cầu."
+    ),
+    "MISSING_FIELD_ALREADY_PROVIDED": (
+        "Bạn nêu field còn thiếu, nhưng những field đó ĐÃ có giá trị trong phần "
+        "'Dữ liệu đã có'. Đọc lại phần đó trước khi kết luận thiếu dữ liệu. Nếu "
+        "mọi field bắt buộc đều đã có, hãy trả status=READY kèm TaskPlan; chỉ nêu "
+        "field thật sự chưa có giá trị nào."
+    ),
     "READY_WITH_MISSING_FIELDS": (
         "Bạn trả status=READY nhưng vẫn nêu field còn thiếu. Hai trạng thái này "
         "loại trừ nhau. Rà lại 4 nguồn dữ liệu: field lấy được từ task trước phải "
@@ -651,6 +757,19 @@ class Planner:
             # (bỏ qua validation) hay model_construct (bỏ qua hoàn toàn).
             plan = TaskPlan(goal=goal, tasks=response.plan.tasks)
 
+            # Tool nằm ngoài không gian kế hoạch của Agent → response mâu thuẫn.
+            #
+            # KHÔNG xoá task rồi chạy phần còn lại: xoá một task làm đổi
+            # dependency của các task sau, và kế hoạch còn lại không còn là kế
+            # hoạch model đã lập. Từ chối và hỏi lại một lần.
+            forbidden = sorted({task.tool for task in plan.tasks if task.tool in PLANNER_FORBIDDEN_TOOLS})
+            if forbidden:
+                # Chỉ nêu TÊN TOOL — input của task chứa dữ liệu người dùng.
+                raise _InconsistentResponseError(
+                    "FORBIDDEN_PLANNER_TOOL",
+                    "Kế hoạch chứa bước nằm ngoài phạm vi Agent: " + ", ".join(forbidden) + ".",
+                )
+
             # Trust boundary: chặn trước khi plan rời khỏi Planner.
             self._reject_untrusted_payment_values(plan, existing_context)
 
@@ -663,12 +782,37 @@ class Planner:
                 "Planner trả NEEDS_INFORMATION nhưng vẫn kèm kế hoạch.",
             )
 
+        cleaned = self._clean_missing_fields(response.missing_fields)
+
+        # Model hỏi lại field đã có giá trị trong context → response mâu thuẫn.
+        #
+        # Đây là vòng lặp chết nhìn từ phía người dùng: họ trả lời biển số, hệ
+        # thống hỏi lại biển số, và không có gì họ gõ thêm thoát ra được. Sửa ở
+        # tầng Planner chứ không phải bằng if/else ở giao diện: giao diện lọc đi
+        # thì backend vẫn tin là đang thiếu, và bước thực thi vẫn không chạy.
+        #
+        # KHÔNG tự ý bỏ field ra khỏi danh sách rồi dựng plan: làm vậy là đoán
+        # thay model một kế hoạch mà nó chưa từng lập.
+        # Hỏi thông tin để tạo hồ sơ cư dân = đang onboarding qua TaskPlan.
+        # Giao diện không có ô nhập cho chúng, nên câu hỏi này không thể trả lời.
+        linking = [name for name in cleaned if name in PLANNER_FORBIDDEN_MISSING_FIELDS]
+        if linking:
+            raise _InconsistentResponseError(
+                "FORBIDDEN_LINKING_CLARIFICATION",
+                "Planner hỏi thông tin lập hồ sơ cư dân: " + ", ".join(sorted(linking)) + ".",
+            )
+
+        redundant = [name for name in cleaned if _already_supplied(name, existing_context)]
+        if redundant:
+            # Message chỉ có TÊN field. Giá trị (biển số, ngày, khu đỗ) là dữ
+            # liệu người dùng và không được đi vào log hay prompt retry.
+            raise _InconsistentResponseError(
+                "MISSING_FIELD_ALREADY_PROVIDED",
+                "Planner hỏi lại field đã có giá trị: " + ", ".join(sorted(redundant)) + ".",
+            )
+
         # `question` không truyền vào — `PlannerResult` tự dựng từ missing_fields.
-        return PlannerResult(
-            status="NEEDS_INFORMATION",
-            plan=None,
-            missing_fields=self._clean_missing_fields(response.missing_fields),
-        )
+        return PlannerResult(status="NEEDS_INFORMATION", plan=None, missing_fields=cleaned)
 
     @staticmethod
     def _clean_missing_fields(raw_fields: list[str]) -> tuple[str, ...]:

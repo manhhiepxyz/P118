@@ -7,6 +7,7 @@ Từ v0.2.0: mọi endpoint trả **envelope** dạng gần `StandardResult` (m�
 Request model giữ nguyên; response model cũ được thay bằng ``ApiEnvelope``.
 """
 
+import re
 from datetime import date, time
 from enum import StrEnum
 from typing import Any, Literal
@@ -20,7 +21,18 @@ def _reject_past(value: date) -> date:
     return value
 
 
+# Đúng dạng `HH:MM`, hai chữ số mỗi bên.
+#
+# `time.fromisoformat` rộng hơn thế: nó nhận cả "0800" và "08:00:00". Rộng hơn
+# nghe có vẻ tử tế, nhưng nó khiến provider và `TaskPlanValidator` — vốn dùng
+# đúng regex này — bất đồng về việc thế nào là hợp lệ. Hai tầng nói hai kiểu là
+# chỗ một giá trị lọt qua tầng này rồi chết ở tầng kia, hoặc tệ hơn, ngược lại.
+_HH_MM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+
+
 def _check_business_time(value: str, opens_at: time, closes_at: time) -> str:
+    if _HH_MM.fullmatch(value or "") is None:
+        raise ValueError("time must be HH:MM")
     parsed = time.fromisoformat(value)
     if not opens_at <= parsed <= closes_at:
         raise ValueError("time is outside service hours")
@@ -124,12 +136,22 @@ class SchedulePropertyViewingRequest(BaseModel):
 class RegisterPropertyInterestRequest(BaseModel):
     project_id: str = Field(..., min_length=1)
     interest_type: Literal["buy", "rent", "consultation"]
-    preferred_contact_time: Literal["morning", "afternoon", "evening"]
+    preferred_contact_time: str
     consent: Literal[True]
     full_name: str | None = Field(default=None, min_length=2, max_length=100)
     phone: str | None = Field(default=None, pattern=r"^\+?[0-9 ]{9,15}$")
     email: str | None = Field(default=None, max_length=254)
     note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("preferred_contact_time")
+    @classmethod
+    def contact_during_business_hours(cls, value: str) -> str:
+        """Giờ liên hệ phải là HH:MM trong khung 08:00–18:00.
+
+        Provider tự kiểm chứ không dựa vào Validator: không phải request nào
+        cũng đi qua Agent, và một endpoint chỉ an toàn khi nó tự an toàn.
+        """
+        return _check_business_time(value, time(8, 0), time(18, 0))
 
     _valid_interest_email = field_validator("email")(_validate_optional_email)
 

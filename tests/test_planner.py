@@ -7,6 +7,8 @@ nên test kiểm tra logic Planner chứ không kiểm tra khả năng parse JSO
 
 from __future__ import annotations
 
+import os
+from pathlib import Path as _Path
 from typing import Any
 
 import pytest
@@ -23,6 +25,8 @@ from src.agents.planner import (
 )
 from src.agents.planner import _PlannerResponse as PlannerResponse
 from src.common.task_plan import InputRef, Task, TaskPlan
+
+REPO_ROOT = _Path(__file__).parents[1]
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -124,22 +128,15 @@ def _full_flow_plan(goal: str = "kế hoạch do LLM đặt tên") -> TaskPlan:
     return TaskPlan(
         goal=goal,
         tasks=[
-            Task(
-                task_id="T1",
-                tool="register_resident",
-                depends_on=[],
-                input={
-                    "full_name": "Lâm Thành Bảo",
-                    "apartment_code": "A1201",
-                    "residential_area": "Vinhomes Ocean Park",
-                },
-            ),
+            # `register_resident` KHÔNG còn nằm trong không gian kế hoạch của
+            # Agent: liên kết hồ sơ cư dân xảy ra ngoài Agent, nên `resident_id`
+            # đến từ trusted context dưới dạng literal.
             Task(
                 task_id="T2",
                 tool="register_vehicle",
-                depends_on=["T1"],
+                depends_on=[],
                 input={
-                    "resident_id": InputRef(from_task="T1", field="resident_id"),
+                    "resident_id": "RES-001",
                     "plate_number": "51A-12345",
                     "vehicle_type": "car",
                 },
@@ -220,7 +217,7 @@ def _property_search_plan() -> TaskPlan:
                 input={
                     "transaction_type": "rent",
                     "property_type": "apartment",
-                    "residential_area": "Vinhomes Ocean Park",
+                    "parking_zone": "Vinhomes Ocean Park",
                     "max_price": 20_000_000,
                 },
             )
@@ -296,14 +293,9 @@ async def test_full_onboarding_returns_four_step_task_plan() -> None:
 
     plan = result.plan
     assert isinstance(plan, TaskPlan)
-    assert [t.task_id for t in plan.tasks] == ["T1", "T2", "T3", "T4"]
-    assert [t.tool for t in plan.tasks] == [
-        "register_resident",
-        "register_vehicle",
-        "book_parking",
-        "pay_fee",
-    ]
-    assert [t.depends_on for t in plan.tasks] == [[], ["T1"], ["T2"], ["T3"]]
+    assert [t.task_id for t in plan.tasks] == ["T2", "T3", "T4"]
+    assert [t.tool for t in plan.tasks] == ["register_vehicle", "book_parking", "pay_fee"]
+    assert [t.depends_on for t in plan.tasks] == [[], ["T2"], ["T3"]]
 
 
 @pytest.mark.asyncio
@@ -328,14 +320,19 @@ async def test_input_ref_is_parsed_as_input_ref_object() -> None:
     plan = result.plan
     assert plan is not None
 
-    resident_ref = plan.tasks[1].input["resident_id"]
-    assert isinstance(resident_ref, InputRef)
-    assert resident_ref.from_task == "T1"
-    assert resident_ref.field == "resident_id"
+    # Bám theo TOOL, không theo chỉ số: chuỗi canonical đã bỏ bước đăng ký cư
+    # dân nên vị trí task đổi, còn luật cần bảo vệ thì không.
+    by_tool = {task.tool: task for task in plan.tasks}
+    booking = by_tool["book_parking"]
 
-    amount_ref = plan.tasks[3].input["amount"]
+    vehicle_ref = booking.input["vehicle_id"]
+    assert isinstance(vehicle_ref, InputRef)
+    assert vehicle_ref.from_task == by_tool["register_vehicle"].task_id
+    assert vehicle_ref.field == "vehicle_id"
+
+    amount_ref = by_tool["pay_fee"].input["amount"]
     assert isinstance(amount_ref, InputRef)
-    assert amount_ref.from_task == "T3"
+    assert amount_ref.from_task == booking.task_id
     assert amount_ref.field == "amount"
 
 
@@ -952,24 +949,24 @@ async def test_any_payment_field_mismatching_context_is_rejected(field_name: str
 async def test_input_ref_must_point_at_a_book_parking_task() -> None:
     """InputRef trỏ tới task khác book_parking cũng không phải nguồn tin cậy."""
     plan = TaskPlan(
-        goal="Đăng ký cư dân rồi thanh toán.",
+        goal="Đăng ký xe rồi thanh toán.",
         tasks=[
+            # Task nguồn KHÔNG phải `book_parking` — đó mới là điểm test kiểm.
+            # Trước đây fixture dùng `register_resident`; tool đó đã rời không
+            # gian kế hoạch của Agent, và guard tool sẽ chặn trước khi tới guard
+            # provenance, làm test kiểm nhầm thứ.
             Task(
                 task_id="T1",
-                tool="register_resident",
+                tool="register_vehicle",
                 depends_on=[],
-                input={
-                    "full_name": "Lâm Thành Bảo",
-                    "apartment_code": "A1201",
-                    "residential_area": "Vinhomes Ocean Park",
-                },
+                input={"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"},
             ),
             Task(
                 task_id="T2",
                 tool="pay_fee",
                 depends_on=["T1"],
                 input={
-                    # T1 là register_resident, không sinh ra amount.
+                    # T1 là register_vehicle, không sinh ra amount.
                     "booking_id": InputRef(from_task="T1", field="booking_id"),
                     "amount": InputRef(from_task="T1", field="amount"),
                     "currency": InputRef(from_task="T1", field="currency"),
@@ -1563,13 +1560,30 @@ async def test_planner_only_calls_the_llm(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(llm.calls) == 1
 
 
-def test_importing_planner_does_not_require_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Import module không được khởi tạo ChatOpenAI hay đọc API key."""
-    import importlib
+def test_importing_planner_does_not_require_an_api_key() -> None:
+    """Import module không được khởi tạo ChatOpenAI hay đọc API key.
 
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    Chạy trong TIẾN TRÌNH RIÊNG. Bản trước dùng `importlib.reload` trên module
+    đang sống: reload rebind mọi lớp trong module, nên bất kỳ test nào đã
+    `from src.agents.planner import PlannerError` trước đó sẽ giữ một lớp CŨ, và
+    `pytest.raises(PlannerError)` của nó ngừng bắt được exception thật. Lỗi chỉ
+    xuất hiện khi chạy cả suite, không xuất hiện khi chạy file riêng — đúng loại
+    nhiễu chéo tốn nhiều giờ để lần ra.
 
-    import src.agents.planner as planner_module
+    Tiến trình riêng cũng đo đúng thứ cần đo hơn: một lần import sạch, không
+    phải một lần reload trong process đã nạp sẵn mọi thứ.
+    """
+    import subprocess
+    import sys
 
-    importlib.reload(planner_module)
-    assert planner_module.Planner is not None
+    env = {k: v for k, v in os.environ.items() if k not in {"OPENAI_API_KEY", "DEEPSEEK_API_KEY"}}
+    result = subprocess.run(
+        [sys.executable, "-c", "import src.agents.planner as m; assert m.Planner is not None"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr[-400:]

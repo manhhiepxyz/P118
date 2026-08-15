@@ -1,0 +1,9 @@
+# Tái hiện đúng sự cố đã gặp: `LLM_PROVIDER` trỏ một nhà cung cấp không có key.
+#
+# Dùng bởi `tests/e2e/browser_acceptance.mjs` (mục 5) và bằng chứng healthcheck.
+# KHÔNG bao giờ dùng file này cho stack thật.
+services:
+  backend:
+    environment:
+      LLM_PROVIDER: openrouter
+      OPENROUTER_API_KEY: ""

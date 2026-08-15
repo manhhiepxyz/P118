@@ -269,7 +269,7 @@ class TestExecutor:
                     input={
                         "project_id": "PRJ-001",
                         "interest_type": "consultation",
-                        "preferred_contact_time": "afternoon",
+                        "preferred_contact_time": "14:30",
                         "consent": True,
                     },
                 ),

@@ -2,7 +2,7 @@
 
 Hai lỗi thật được khoá lại ở đây:
 
-1. `_load_session()` gọi `build_repository()` NGOÀI try. Tạo pool là thao tác
+1. `_load_session()` gọi provider repository NGOÀI try. Tạo pool là thao tác
    chạm mạng, nên DB sập làm exception thoát thẳng ra route — trái cam kết
    "DB lỗi trả None và fail-closed về prospect".
 
@@ -16,13 +16,14 @@ from __future__ import annotations
 import pytest
 
 from src.api import routes
+from src.orchestration.runtime_provider import set_repository_provider
 
 # Chuỗi giả lập một secret rơi vào exception message của driver.
 LEAKY_SECRET = "postgresql://p118:sup3rs3cr3t@db:5432/p118_db"  # secret-fixture
 
 
 class _ExplodingBuildRepository:
-    """`build_repository()` raise kèm message có chứa DSN — như driver thật."""
+    """Provider raise kèm message có chứa DSN — như driver thật."""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -41,7 +42,7 @@ class _ExplodingBuildRepository:
 async def test_load_session_returns_none_when_pool_creation_fails(monkeypatch) -> None:
     """Lỗi tạo pool phải bị nuốt tại đây, không thoát ra route."""
     boom = _ExplodingBuildRepository()
-    monkeypatch.setattr(routes, "build_repository", boom)
+    set_repository_provider(boom)
 
     result = await routes._load_session("session-abc")
 
@@ -51,7 +52,7 @@ async def test_load_session_returns_none_when_pool_creation_fails(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_load_session_does_not_leak_the_connection_string(monkeypatch, caplog) -> None:
-    monkeypatch.setattr(routes, "build_repository", _ExplodingBuildRepository())
+    set_repository_provider(_ExplodingBuildRepository())
 
     with caplog.at_level("WARNING"):
         assert await routes._load_session("session-abc") is None
@@ -66,7 +67,7 @@ async def test_load_session_does_not_leak_the_connection_string(monkeypatch, cap
 @pytest.mark.asyncio
 async def test_session_context_fails_closed_to_prospect_when_db_is_down(monkeypatch) -> None:
     """Không đọc được session thì KHÔNG được đoán là cư dân."""
-    monkeypatch.setattr(routes, "build_repository", _ExplodingBuildRepository())
+    set_repository_provider(_ExplodingBuildRepository())
 
     # `_load_session` trả None khi DB sập; `_context_for_session` phải suy ra
     # persona ít đặc quyền nhất từ đó.
@@ -82,7 +83,7 @@ async def test_session_context_fails_closed_to_prospect_when_db_is_down(monkeypa
 @pytest.mark.asyncio
 async def test_start_endpoint_never_returns_a_raw_exception_when_db_is_down(client, monkeypatch) -> None:
     """Route không được trả DSN/exception ra client."""
-    monkeypatch.setattr(routes, "build_repository", _ExplodingBuildRepository())
+    set_repository_provider(_ExplodingBuildRepository())
 
     async def _no_job(*_args, **_kwargs):
         return None
@@ -137,7 +138,7 @@ async def test_workflow_record_survives_a_repair_hints_failure(client, monkeypat
 @pytest.mark.asyncio
 async def test_repair_hints_failure_degrades_to_empty_not_to_an_error(monkeypatch) -> None:
     """`_read_repair_hints` tự nuốt cả lỗi tạo pool, trả []."""
-    monkeypatch.setattr(routes, "build_repository", _ExplodingBuildRepository())
+    set_repository_provider(_ExplodingBuildRepository())
 
     assert await routes._read_repair_hints("wf-1") == []
 

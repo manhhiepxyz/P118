@@ -49,7 +49,7 @@ def test_property_tools_are_valid_canonical_tasks() -> None:
             input={
                 "project_id": "PRJ-001",
                 "interest_type": "consultation",
-                "preferred_contact_time": "afternoon",
+                "preferred_contact_time": "14:30",
                 "consent": True,
             },
         ),
@@ -100,7 +100,7 @@ def test_property_tools_reject_missing_required_input(tool: str, input_data: dic
             {
                 "property_id": "PROP-001",
                 "interest_type": "consultation",
-                "preferred_contact_time": "afternoon",
+                "preferred_contact_time": "14:30",
                 "consent": True,
             },
         ),
@@ -204,7 +204,7 @@ async def test_register_interest_uses_verified_provider_contact_without_pii_in_p
     input_data = {
         "project_id": "PRJ-003",
         "interest_type": "buy",
-        "preferred_contact_time": "morning",
+        "preferred_contact_time": "09:30",
         "consent": True,
     }
     async with httpx.AsyncClient(transport=transport, base_url="http://property") as client:
@@ -245,7 +245,7 @@ async def test_contact_override_goes_to_provider_but_not_task_input() -> None:
     input_data = {
         "project_id": "PRJ-003",
         "interest_type": "buy",
-        "preferred_contact_time": "morning",
+        "preferred_contact_time": "09:30",
         "consent": True,
     }
     profile = {
@@ -397,7 +397,7 @@ def test_demo_response_presents_interest_without_account_pii() -> None:
                 input={
                     "project_id": "PRJ-001",
                     "interest_type": "consultation",
-                    "preferred_contact_time": "afternoon",
+                    "preferred_contact_time": "14:30",
                     "consent": True,
                 },
             )
@@ -485,7 +485,7 @@ async def test_property_provider_rejects_invalid_contact_without_echoing_it() ->
             json={
                 "project_id": "PRJ-001",
                 "interest_type": "buy",
-                "preferred_contact_time": "afternoon",
+                "preferred_contact_time": "14:30",
                 "consent": True,
                 "phone": "not-a-phone",
                 "email": "secret-invalid-email",

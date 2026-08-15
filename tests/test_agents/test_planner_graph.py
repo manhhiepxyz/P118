@@ -86,48 +86,42 @@ GOAL = (
 
 
 def _valid_plan() -> TaskPlan:
-    """Plan 4 bước hợp lệ cả Pydantic lẫn business validation."""
+    """Chuỗi canonical 3 bước, hợp lệ cả Pydantic lẫn business validation.
+
+    Bản trước bắt đầu bằng `register_resident`. Tool đó đã rời không gian kế
+    hoạch của Agent (liên kết hồ sơ cư dân xảy ra ngoài Agent), nên `resident_id`
+    đến từ trusted context dưới dạng literal.
+
+    Giữ nguyên coverage: dependency, InputRef, propagation liên bước, và ba
+    InputRef của `pay_fee` cùng trỏ về một `book_parking`.
+    """
     return TaskPlan(
         goal=GOAL,
         tasks=[
             Task(
                 task_id="T1",
-                tool="register_resident",
+                tool="register_vehicle",
                 depends_on=[],
-                input={
-                    "full_name": "Lâm Thành Bảo",
-                    "apartment_code": "A1201",
-                    "residential_area": "Vinhomes Ocean Park",
-                },
+                input={"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"},
             ),
             Task(
                 task_id="T2",
-                tool="register_vehicle",
+                tool="book_parking",
                 depends_on=["T1"],
                 input={
-                    "resident_id": InputRef(from_task="T1", field="resident_id"),
-                    "plate_number": "51A-12345",
-                    "vehicle_type": "car",
-                },
-            ),
-            Task(
-                task_id="T3",
-                tool="book_parking",
-                depends_on=["T2"],
-                input={
-                    "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                    "booking_date": "2026-12-10",
+                    "vehicle_id": InputRef(from_task="T1", field="vehicle_id"),
+                    "booking_date": "2030-12-10",
                     "parking_zone": "ZONE_A",
                 },
             ),
             Task(
-                task_id="T4",
+                task_id="T3",
                 tool="pay_fee",
-                depends_on=["T3"],
+                depends_on=["T2"],
                 input={
-                    "booking_id": InputRef(from_task="T3", field="booking_id"),
-                    "amount": InputRef(from_task="T3", field="amount"),
-                    "currency": InputRef(from_task="T3", field="currency"),
+                    "booking_id": InputRef(from_task="T2", field="booking_id"),
+                    "amount": InputRef(from_task="T2", field="amount"),
+                    "currency": InputRef(from_task="T2", field="currency"),
                 },
             ),
         ],
@@ -137,14 +131,14 @@ def _valid_plan() -> TaskPlan:
 def _plan_missing_required_input() -> TaskPlan:
     """Hợp lệ với Pydantic nhưng thiếu required input theo contract."""
     return TaskPlan(
-        goal="Đăng ký cư dân giúp tôi.",
+        goal="Đặt chỗ đỗ xe giúp tôi.",
         tasks=[
             Task(
                 task_id="T1",
-                tool="register_resident",
+                tool="book_parking",
                 depends_on=[],
-                # thiếu `residential_area`
-                input={"full_name": "Lâm Thành Bảo", "apartment_code": "A1201"},
+                # thiếu `parking_zone`
+                input={"vehicle_id": "VEH-001", "booking_date": "2030-12-10"},
             )
         ],
     )
@@ -342,11 +336,13 @@ async def test_missing_user_input_returns_needs_information_without_execution() 
     boundary = FakeExecutionBoundary()
 
     graph = build_planner_graph(planner, boundary)
-    state = await graph.ainvoke({"goal": "Đăng ký cư dân giúp tôi.", "existing_context": {}})
+    state = await graph.ainvoke({"goal": "Đặt chỗ đỗ xe giúp tôi.", "existing_context": {}})
 
     assert state["planner_status"] == "NEEDS_INFORMATION"
-    assert state["missing_fields"] == ("residential_area",)
-    assert state["question"] == "Mình cần thêm thông tin để lập kế hoạch: tên khu đô thị. Bạn bổ sung giúp mình nhé?"
+    assert state["missing_fields"] == ("parking_zone",)
+    assert state["question"] == (
+        "Mình cần thêm thông tin để lập kế hoạch: khu vực đỗ xe (Khu A hoặc Khu B). Bạn bổ sung giúp mình nhé?"
+    )
     assert state["plan"] is None
     assert "validation_error" not in state
     assert state["plan_validated"] is False
@@ -484,10 +480,11 @@ async def test_validator_does_not_repair_a_bad_plan() -> None:
     boundary = FakeExecutionBoundary()
 
     graph = build_planner_graph(planner, boundary)
-    state = await graph.ainvoke({"goal": "Đăng ký cư dân giúp tôi.", "existing_context": {}})
+    state = await graph.ainvoke({"goal": "Đặt chỗ đỗ xe giúp tôi.", "existing_context": {}})
 
     assert state["plan"] is None
-    assert bad_plan.tasks[0].input == {"full_name": "Lâm Thành Bảo", "apartment_code": "A1201"}
+    # Input giữ NGUYÊN: validator không được tự điền field còn thiếu.
+    assert bad_plan.tasks[0].input == {"vehicle_id": "VEH-001", "booking_date": "2030-12-10"}
     assert boundary.calls == []
 
 
@@ -693,7 +690,7 @@ async def test_injected_plan_validated_flag_cannot_bypass_validator() -> None:
     graph = build_planner_graph(planner, boundary)
     state = await graph.ainvoke(
         {
-            "goal": "Đăng ký cư dân giúp tôi.",
+            "goal": "Đặt chỗ đỗ xe giúp tôi.",
             "existing_context": {},
             "plan_validated": True,  # cố ý inject
         }
@@ -702,7 +699,7 @@ async def test_injected_plan_validated_flag_cannot_bypass_validator() -> None:
     # plan_node ghi đè về False; Validator chỉ chuyển sang hỏi bổ sung, không chạy.
     assert state["plan_validated"] is False
     assert state["planner_status"] == "NEEDS_INFORMATION"
-    assert state["missing_fields"] == ("residential_area",)
+    assert state["missing_fields"] == ("parking_zone",)
     assert boundary.calls == []
     assert "workflow_id" not in state
 

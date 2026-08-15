@@ -82,7 +82,7 @@ PUBLIC_TOOL_TASKS = {
     "register_property_interest": {
         "project_id": "PRJ-001",
         "interest_type": "buy",
-        "preferred_contact_time": "morning",
+        "preferred_contact_time": "09:30",
         "consent": True,
     },
 }
@@ -340,4 +340,68 @@ async def test_the_rejection_message_never_leaks_any_identifier() -> None:
 
     message = str(excinfo.value)
     for leaked in ("BK-BI-MAT-999", TRUSTED_RESIDENT, OTHER_RESIDENT, "SELECT", "postgresql://"):
+        assert leaked not in message, f"message rò {leaked!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_bypassing_the_planner_is_still_blocked_at_execution() -> None:
+    """Hai lớp độc lập: Planner chặn lúc lập kế hoạch, boundary chặn lúc chạy.
+
+    Planner giờ loại `register_resident` khỏi không gian kế hoạch. Nhưng một
+    TaskPlan có thể tới execution boundary mà KHÔNG đi qua Planner — plan dựng
+    thủ công, plan đọc lại từ snapshot, hoặc một đường API tương lai. Nếu chỉ có
+    guard ở Planner thì mọi đường đó là lỗ hổng.
+
+    Ở đây plan đi thẳng vào boundary, bỏ qua Planner hoàn toàn.
+    """
+    boundary, inner = _boundary(_verified_context())
+
+    with pytest.raises(ResidentLinkingOutsideAgentError):
+        await boundary.execute(
+            _plan(
+                Task(
+                    task_id="T1",
+                    tool="register_resident",
+                    depends_on=[],
+                    input={
+                        "full_name": "Nguyễn Văn Bỏ Qua",
+                        "apartment_code": "Z-9999",
+                        "residential_area": "Vinhomes Ocean Park",
+                    },
+                ),
+                Task(
+                    task_id="T2",
+                    tool="register_vehicle",
+                    depends_on=["T1"],
+                    input={"resident_id": TRUSTED_RESIDENT, "plate_number": "30A-55555", "vehicle_type": "car"},
+                ),
+            )
+        )
+
+    assert inner.executed == [], "Executor không được nhận plan có bước liên kết cư dân"
+
+
+@pytest.mark.asyncio
+async def test_the_execution_refusal_never_echoes_the_submitted_identity() -> None:
+    """Message không được lặp lại tên/căn hộ mà người gửi vừa khai."""
+    boundary, _ = _boundary(_verified_context())
+
+    with pytest.raises(ResidentLinkingOutsideAgentError) as excinfo:
+        await boundary.execute(
+            _plan(
+                Task(
+                    task_id="T1",
+                    tool="register_resident",
+                    depends_on=[],
+                    input={
+                        "full_name": "Nguyễn Văn Bỏ Qua",
+                        "apartment_code": "Z-9999",
+                        "residential_area": "Vinhomes Ocean Park",
+                    },
+                )
+            )
+        )
+
+    message = str(excinfo.value)
+    for leaked in ("Nguyễn Văn Bỏ Qua", "Z-9999", TRUSTED_RESIDENT):
         assert leaked not in message, f"message rò {leaked!r}"

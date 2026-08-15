@@ -8,9 +8,23 @@ from src.config import Settings, get_settings
 class LLMConfigurationError(RuntimeError):
     """Cấu hình provider LLM chưa đủ để tạo client.
 
-    Message chỉ nêu tên biến môi trường còn thiếu hoặc giá trị hợp lệ được
-    phép, KHÔNG bao giờ chứa API key.
+    Message chỉ nêu TÊN biến môi trường còn thiếu hoặc giá trị hợp lệ được
+    phép — KHÔNG chứa API key, và không chứa URL: URL là chỗ credential hay đi
+    nhờ dưới dạng `https://user:pass@host`.
     """
+
+
+class LLMAuthenticationError(RuntimeError):
+    """Nhà cung cấp từ chối khoá: hết hạn, bị thu hồi, hoặc sai tài khoản.
+
+    Khác `LLMConfigurationError`: ở đây cấu hình ĐÚNG hình dạng, chỉ là khoá
+    không còn dùng được. Cả hai đều không thử lại được, nhưng người xử lý khác
+    nhau — một bên sửa biến môi trường, một bên xin khoá mới.
+    """
+
+
+class LLMRateLimitedError(RuntimeError):
+    """Vượt hạn mức. Lỗi TẠM THỜI — thử lại sau là hợp lý."""
 
 
 # Gate 2 chốt đúng một model DeepSeek.
@@ -33,6 +47,63 @@ def _require_deepseek_model(value: str) -> str:
     if value.strip() != DEEPSEEK_ALLOWED_MODEL:
         raise LLMConfigurationError(f"DEEPSEEK_MODEL_NAME phải đúng '{DEEPSEEK_ALLOWED_MODEL}' trong Gate 2.")
     return value.strip()
+
+
+def _require_openrouter_model(value: str) -> str:
+    """OpenRouter định tuyến theo `nhà-cung-cấp/model`, nên tên phải có dấu `/`.
+
+    Quy tắc này cũng chặn đúng kiểu gõ nhầm đã gây sự cố: đổi `LLM_PROVIDER`
+    sang openrouter nhưng để nguyên tên model của DeepSeek. Không có dấu `/`
+    thì OpenRouter sẽ từ chối lúc gọi — tức là lỗi nổ ra khi người dùng đã bấm
+    nút, thay vì lúc khởi động.
+    """
+    model = value.strip()
+    if not model:
+        raise LLMConfigurationError("Thiếu biến môi trường OPENROUTER_MODEL_NAME.")
+    if "/" not in model:
+        raise LLMConfigurationError(
+            "OPENROUTER_MODEL_NAME phải có dạng 'nhà-cung-cấp/model'; "
+            "tên model của provider khác không dùng được ở đây."
+        )
+    return model
+
+
+def check_llm_configuration(settings: Settings | None = None) -> None:
+    """Kiểm cấu hình LLM mà KHÔNG gọi mạng. Sai thì raise.
+
+    Vì sao cần một hàm riêng: `get_llm()` là factory lazy — nó chỉ raise khi có
+    người gọi, mà người gọi đầu tiên là Planner, tức là sau khi người dùng đã
+    gửi mục tiêu và workflow đã được tạo. Trên Docker, container vẫn báo
+    healthy suốt thời gian đó.
+
+    Hàm này chạy được lúc khởi động và trong `/ready`, nên cấu hình sai bị chặn
+    trước khi hệ thống nhận việc. Nó dùng CHUNG các hàm kiểm với `get_llm()`,
+    để không có chuyện kiểm xanh mà tạo client vẫn hỏng.
+
+    Cố ý KHÔNG gọi thử một request tới nhà cung cấp: healthcheck lặp mỗi 30
+    giây sẽ đốt tiền và tự tạo rate limit. Kiểm khoá thật là việc của một lệnh
+    smoke chạy một lần khi deploy.
+    """
+    settings = settings or get_settings()
+    provider = settings.llm_provider
+
+    if provider == "deepseek":
+        _require_key(settings.deepseek_api_key, "DEEPSEEK_API_KEY")
+        _require_deepseek_model(settings.deepseek_model_name)
+        return
+
+    if provider == "openrouter":
+        _require_key(settings.openrouter_api_key, "OPENROUTER_API_KEY")
+        _require_openrouter_model(settings.openrouter_model_name)
+        return
+
+    if provider == "openai":
+        _require_key(settings.openai_api_key, "OPENAI_API_KEY")
+        if not settings.model_name.strip():
+            raise LLMConfigurationError("Thiếu biến môi trường MODEL_NAME.")
+        return
+
+    raise LLMConfigurationError("LLM_PROVIDER không hợp lệ; chỉ chấp nhận: openai, openrouter, deepseek.")
 
 
 def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = None) -> ChatOpenAI:
@@ -65,7 +136,7 @@ def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = N
 
     if provider == "openrouter":
         return ChatOpenAI(
-            model=settings.openrouter_model_name,
+            model=_require_openrouter_model(settings.openrouter_model_name),
             api_key=_require_key(settings.openrouter_api_key, "OPENROUTER_API_KEY"),
             base_url=settings.openrouter_base_url,
             temperature=settings.llm_temperature,

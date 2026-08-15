@@ -14,6 +14,7 @@ mâu thuẫn với quy tắc chuỗi dữ liệu. Các test dưới khoá phần
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -233,12 +234,21 @@ def test_full_flow_example_uses_three_input_refs_from_booking_task() -> None:
     assert '"vehicle_type": "car"' in example
     assert '"parking_zone": "ZONE_A"' in example
 
-    for field in ("booking_id", "amount", "currency"):
-        assert f'{{"from_task": "T3", "field": "{field}"}}' in example
+    # Ý định: `pay_fee` lấy ĐỦ BA field từ chính task `book_parking`.
+    #
+    # Không khoá vào số hiệu task cụ thể: ví dụ đã bỏ bước đăng ký cư dân (việc
+    # đó nằm ngoài Agent), nên T1..T4 cứng sẽ khoá test vào một ví dụ không còn
+    # tồn tại thay vì vào luật cần bảo vệ.
+    booking_task = re.search(r'\{"task_id": "(T\d+)", "tool": "book_parking"', example)
+    assert booking_task, "ví dụ phải có task book_parking"
+    source = booking_task.group(1)
 
-    # Đủ 4 task.
-    for task_id in ("T1", "T2", "T3", "T4"):
-        assert f'"task_id": "{task_id}"' in example
+    for field in ("booking_id", "amount", "currency"):
+        assert f'{{"from_task": "{source}", "field": "{field}"}}' in example
+
+    assert '"tool": "register_vehicle"' in example
+    assert '"tool": "pay_fee"' in example
+    assert '"tool": "register_resident"' not in example, "Agent không lập kế hoạch liên kết cư dân"
 
 
 def test_missing_information_example_returns_null_plan() -> None:

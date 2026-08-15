@@ -69,6 +69,8 @@ class TaskPlanValidator:
         "schedule_property_viewing": ("viewing_time", time(8, 0), time(17, 30)),
         "create_maintenance_request": ("preferred_time", time(8, 0), time(18, 0)),
         "schedule_move": ("move_time", time(7, 0), time(20, 0)),
+        # Giờ hẹn liên hệ nằm trong giờ làm việc của bộ phận tư vấn.
+        "register_property_interest": ("preferred_contact_time", time(8, 0), time(18, 0)),
     }
 
     ENUM_INPUTS: dict[tuple[str, str], frozenset[str]] = {

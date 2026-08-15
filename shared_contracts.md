@@ -114,7 +114,7 @@ Gate 2 mở rộng dùng đúng 9 tool nghiệp vụ:
 | `viewing_id`             | string             | Ví dụ: VIEW-001                                                      |
 | `viewing_status`         | enum string        | MVP dùng`SCHEDULED`                                                 |
 | `interest_type`          | enum string        | `buy`, `rent`, `consultation`                                    |
-| `preferred_contact_time` | enum string        | `morning`, `afternoon`, `evening`                                |
+| `preferred_contact_time` | string `HH:MM`     | `08:00`–`18:00`, ví dụ `14:30`                                   |
 | `consent`                | boolean            | Phải là`true`, không được Planner tự suy diễn                |
 | `interest_status`        | enum string        | MVP dùng`RECEIVED`                                                  |
 | `contact_name`           | string             | Tên liên hệ nghiệp vụ do provider trả về                        |
@@ -211,7 +211,7 @@ API boundary đối chiếu tên với danh mục dự án đóng rồi đưa ID
 {
   "project_id": "PRJ-001",
   "interest_type": "consultation",
-  "preferred_contact_time": "afternoon",
+  "preferred_contact_time": "14:30",
   "consent": true
 }
 

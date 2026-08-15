@@ -13,6 +13,7 @@ các hàm đọc/write bằng fake. Mục tiêu khoá:
 from __future__ import annotations
 
 from src.orchestration import sweeper
+from src.orchestration.runtime_provider import set_repository_provider
 
 
 class _FakePool:
@@ -54,6 +55,7 @@ class _FakeRepository:
         self.task_rows: list[dict] = []
         self.task_writes: list[tuple[str, str]] = []
         self.workflow_writes: list[tuple[str, str]] = []
+        self.failure_codes: list[tuple[str, str]] = []
 
     async def list_tasks(self, workflow_id: str) -> list[dict]:
         return self.task_rows
@@ -63,6 +65,15 @@ class _FakeRepository:
 
     async def update_workflow_status(self, workflow_id: str, status) -> None:
         self.workflow_writes.append((workflow_id, status.value))
+
+    async def mark_workflow_failed(self, workflow_id: str, error_code: str) -> None:
+        """Sweeper ghi FAILED KÈM lý do, không chỉ trạng thái.
+
+        Ghi lại cả `error_code` để test dưới đây khẳng định được rằng workflow
+        bị sweep nói được vì sao nó dừng.
+        """
+        self.workflow_writes.append((workflow_id, "FAILED"))
+        self.failure_codes.append((workflow_id, error_code))
 
 
 async def _noop_release(workflow_id: str) -> dict:
@@ -78,7 +89,7 @@ def _install(monkeypatch, *, approvals=None, zombies=None, enabled=True):
         repo._pool = pool
         return repo
 
-    monkeypatch.setattr(sweeper, "build_repository", _build_repository)
+    set_repository_provider(_build_repository)
     monkeypatch.setattr(sweeper, "release_on_failure", _noop_release)
 
     class _Settings:
@@ -137,3 +148,18 @@ def _run(monkeypatch, live_ids=None):
     import asyncio
 
     return asyncio.run(sweeper.sweep_zombie_workflows(live_ids=live_ids))
+
+
+def test_a_swept_zombie_records_why_it_failed(monkeypatch):
+    """FAILED không kèm lý do là quay lại đúng thứ lớp phân loại lỗi vừa xoá bỏ.
+
+    Sweeper từng gọi `update_workflow_status(FAILED)` và để `error_code` rỗng,
+    nên workflow đó đọc lên là "thất bại, không rõ vì sao" — và người dùng nhận
+    lại đúng câu chung chung mà cả lớp phân loại sinh ra để thay thế.
+    """
+    _pool, repo = _install(monkeypatch, zombies=["wf-zombie-1"])
+
+    summary = _run(monkeypatch)
+
+    assert summary["swept_workflows"] == ["wf-zombie-1"]
+    assert repo.failure_codes == [("wf-zombie-1", "EXECUTION_ERROR")]

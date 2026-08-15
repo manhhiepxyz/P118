@@ -20,6 +20,7 @@ import pytest_asyncio
 
 from src.api import routes
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+from src.orchestration.runtime_provider import set_repository_provider
 
 WORKFLOW_ID = "12121212-3434-5656-7878-909090909090"
 SESSION_ID = "session-clarify"
@@ -46,7 +47,7 @@ async def wired(db_pool: asyncpg.Pool, monkeypatch):
     async def _fake_build_repository(**_kwargs):
         return repository
 
-    monkeypatch.setattr(routes, "build_repository", _fake_build_repository)
+    set_repository_provider(_fake_build_repository)
     routes._DEMO_JOBS.clear()
     return {"pool": db_pool, "repository": repository}
 
