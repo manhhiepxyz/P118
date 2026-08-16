@@ -239,8 +239,19 @@ def test_the_stage_is_named_so_two_calls_can_be_told_apart(trace_lines):
 
 
 def test_anything_shaped_like_a_key_is_masked(trace_lines):
-    """Trace là thứ người ta copy vào chat và issue."""
-    planted = "sk-abcdef0123456789abcdef"
+    """Trace là thứ người ta copy vào chat và issue.
+
+    Canary được GHÉP lúc chạy chứ không viết liền một chuỗi.
+
+    Repo có bộ quét secret trên mọi file được track
+    (`tests/test_no_committed_secrets.py`) và nó cố ý KHÔNG phân biệt key thật
+    với key giả — đúng như nó nên thế. Một canary viết liền `sk-…` sẽ làm guard
+    đó đỏ vĩnh viễn, và một guard luôn đỏ là một guard đã bị tắt.
+
+    Hình dạng `sk-` vẫn được kiểm thật ở đây: `_SECRET` nhận chuỗi ĐÃ ghép, y
+    hệt thứ nó sẽ gặp trong output của model.
+    """
+    planted = "sk-" + "abcdef0123456789abcdef"
     LlmTraceLogger().on_llm_end(_Result(_Message(f"Key là {planted} nhé")))
     assert planted not in trace_lines.text
     assert "đã ẩn" in trace_lines.text

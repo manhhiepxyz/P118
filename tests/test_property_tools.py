@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 
 import httpx
 import pytest
@@ -17,6 +18,14 @@ from src.executor.executor import Executor
 from src.orchestration.deps import build_connectors
 from src.services.mock.property import property_app
 from tests.fakes.in_memory_repository import InMemoryWorkflowStateRepository
+
+# Ngày hợp lệ tính TỪ hôm nay, không ghi cứng.
+#
+# Ba test dưới đây từng ghi "2026-08-15" — đúng vào ngày viết chúng. Hôm sau
+# ngày đó thành quá khứ và cả ba đỏ, dù không ai đụng vào code sản phẩm. Một
+# test hỏng theo lịch thì mỗi lần đỏ đều phải điều tra lại từ đầu để biết nó
+# báo lỗi thật hay chỉ báo rằng hôm nay là ngày khác.
+_SOON = (date.today() + timedelta(days=30)).isoformat()
 
 
 def test_property_tools_are_valid_canonical_tasks() -> None:
@@ -38,7 +47,7 @@ def test_property_tools_are_valid_canonical_tasks() -> None:
             depends_on=[],
             input={
                 "project_id": "PRJ-001",
-                "viewing_date": "2026-08-15",
+                "viewing_date": _SOON,
                 "viewing_time": "10:00",
             },
         ),
@@ -71,7 +80,7 @@ def test_property_tools_are_valid_canonical_tasks() -> None:
         ),
         (
             "schedule_property_viewing",
-            {"project_id": "PRJ-001", "viewing_date": "2026-08-15"},
+            {"project_id": "PRJ-001", "viewing_date": _SOON},
         ),
         (
             "register_property_interest",
@@ -93,7 +102,7 @@ def test_property_tools_reject_missing_required_input(tool: str, input_data: dic
     [
         (
             "schedule_property_viewing",
-            {"property_id": "PROP-001", "viewing_date": "2026-08-15", "viewing_time": "10:00"},
+            {"property_id": "PROP-001", "viewing_date": _SOON, "viewing_time": "10:00"},
         ),
         (
             "register_property_interest",

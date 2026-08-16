@@ -18,14 +18,14 @@
         "Thanh toán phí=WAITING_APPROVAL"
       ],
       "db": [
-        "workflow cha 95ff4eb1… → con 920790db…",
+        "workflow cha 3c4b9df5… → con 070728af…",
         "vòng hỏi bổ sung = 1",
         "approval AWAITING = 1",
-        "biển số canary 51E-*** · ngày 2028-05-30 · Khu A"
+        "biển số canary 51E-*** · ngày 2028-03-16 · Khu A"
       ],
       "verdict": "PASS",
       "why": "Dừng đúng ở điểm chờ người dùng quyết định, kèm báo giá đọc từ chỗ đỗ xe đã giữ.",
-      "llm": "2 (plan=2)"
+      "llm": "3 (respond=1, plan=2)"
     },
     {
       "title": "2. Duyệt khoản thanh toán",
@@ -33,20 +33,12 @@
       "account": "chính chủ workflow, đã VERIFIED",
       "planner": "không gọi lại Planner — quyết định là hành động của người dùng",
       "missing": "—",
-      "tools": [
-        "Đăng ký phương tiện",
-        "Đặt chỗ đỗ xe",
-        "Thanh toán phí"
-      ],
+      "tools": [],
       "result": "HTTP 200 → SUCCESS",
-      "tasks": [
-        "Đăng ký phương tiện=SUCCESS",
-        "Đặt chỗ đỗ xe=SUCCESS",
-        "Thanh toán phí=SUCCESS"
-      ],
+      "tasks": [],
       "db": [
-        "payments toàn hệ thống 8 → 9",
-        "duyệt lần hai: HTTP 409, payments 9 → 9",
+        "payments toàn hệ thống 4 → 5",
+        "duyệt lần hai: HTTP 409, payments 5 → 5",
         "approval APPROVED = 1"
       ],
       "verdict": "PASS",
@@ -64,21 +56,21 @@
         "Đặt chỗ đỗ xe",
         "Thanh toán phí"
       ],
-      "result": "HTTP 200 → hiển thị FAILED (DB: CANCELLED)",
+      "result": "HTTP 200 → hiển thị CANCELLED (DB: CANCELLED)",
       "tasks": [
         "Đăng ký phương tiện=SUCCESS",
         "Đặt chỗ đỗ xe=SUCCESS",
-        "Thanh toán phí=PENDING"
+        "Thanh toán phí=CANCELLED"
       ],
       "db": [
-        "workflow con a4d663ca… · DB status = CANCELLED",
-        "payments 9 → 9 (không đổi)",
+        "workflow con 61e1a9b5… · DB status = CANCELLED",
+        "payments 5 → 5 (không đổi)",
         "chỗ đỗ xe đã giữ vẫn còn = 1",
-        "biển số canary 51F-*** · ngày 2028-05-31 · Khu B"
+        "biển số canary 51F-*** · ngày 2028-03-17 · Khu B"
       ],
       "verdict": "PASS",
       "why": "Từ chối huỷ workflow và không thu tiền, nhưng KHÔNG xoá chỗ đã giữ — huỷ chỗ là quyết định khác.",
-      "llm": "2 (plan=2)"
+      "llm": "3 (plan=2, respond=1)"
     },
     {
       "title": "4. Đặt lịch tham quan dự án với ngày/giờ hợp lệ",
@@ -94,9 +86,9 @@
         "Đặt lịch tham quan=SUCCESS"
       ],
       "db": [
-        "workflow 5537a3f1… · vòng hỏi = 1",
-        "ngày hẹn 2028-06-29 lúc 10:30 (giữ nguyên phút, không quy về buổi)",
-        "kết quả provider đã ghi vào workflow_tasks: 2028-06-29 10:30 · Vinhomes Ocean Park (PRJ-007)",
+        "workflow 0fee6a4f… · vòng hỏi = 1",
+        "ngày hẹn 2028-04-15 lúc 10:30 (giữ nguyên phút, không quy về buổi)",
+        "kết quả provider đã ghi vào workflow_tasks: 2028-04-15 10:30 · Vinhomes Ocean Park (PRJ-007)",
         "số điện thoại đầu mối do provider giữ, không đưa vào báo cáo"
       ],
       "verdict": "PASS",
@@ -105,7 +97,7 @@
     },
     {
       "title": "5. Lỗi có chủ ý — đặt chỗ cho một ngày đã qua",
-      "goal": "Đăng ký ô tô, đặt chỗ đỗ xe và thanh toán phí. (người dùng chọn ngày 2026-07-16, đã qua)",
+      "goal": "Đăng ký ô tô, đặt chỗ đỗ xe và thanh toán phí. (người dùng chọn ngày 2026-07-17, đã qua)",
       "account": "customer đã VERIFIED",
       "planner": "NEEDS_INFORMATION cho vòng hỏi đầu; input sai bị chặn trước khi gọi provider",
       "missing": "biển số xe, loại xe, ngày đặt chỗ, khu vực đỗ xe",
@@ -113,16 +105,16 @@
       "result": "HTTP_422 — Ngày đặt chỗ chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.",
       "tasks": [],
       "db": [
-        "vòng hỏi = 1",
+        "vòng hỏi = 0",
         "chỗ đỗ xe được tạo cho ngày quá khứ = 0 (phải là 0)",
         "biển số canary 51G-***"
       ],
       "verdict": "PASS",
       "why": "Không tạo chỗ đỗ xe cho ngày đã qua, và nói cho người dùng biết cần sửa gì.",
-      "llm": "2 (plan=2)"
+      "llm": "1 (plan=1)"
     }
   ],
-  "resident_masked": "RES-EV-77…",
-  "apartment_masked": "E-7254",
-  "user_masked": "4074f424…"
+  "resident_masked": "RES-EV-72…",
+  "apartment_masked": "E-2848",
+  "user_masked": "857332c8…"
 }
