@@ -190,3 +190,55 @@ def test_no_message_leaks_internal_vocabulary(code):
     )
     for leaked in ("PRJ-007", "schedule_property_viewing", "Traceback", "http", "_"):
         assert leaked not in message, f"{code}: rò {leaked!r} → {message}"
+
+
+def test_both_project_not_found_paths_say_the_same_thing():
+    """Hai đường cùng dẫn tới "dự án không có" thì phải nói giống nhau.
+
+    Trước đây nhánh hỏi-bổ-sung liệt kê 7 dự án, còn nhánh bước-hỏng chỉ bảo
+    "chọn trong danh sách được hỗ trợ" — mà trong hội thoại thì không có danh
+    sách nào để nhìn. Người dùng gặp đường nào là may rủi, và đường kém hơn để
+    họ đoán tiếp.
+    """
+    from src.api.routes import _UNSUPPORTED_PROJECT_MESSAGE
+    from src.common.projects import PROJECTS
+
+    failure = task_failure_message(
+        _Task("schedule_property_viewing", project_name="Vinhomes Sky Garden"),
+        "Đặt lịch tham quan",
+        ErrorCode.PROJECT_NOT_FOUND,
+    )
+    for project in PROJECTS:
+        assert project["project_name"] in failure, f"{project['project_name']} thiếu ở nhánh bước-hỏng"
+        assert project["project_name"] in _UNSUPPORTED_PROJECT_MESSAGE, "thiếu ở nhánh hỏi-bổ-sung"
+
+
+def test_it_names_the_project_the_user_actually_typed():
+    """Input thật mang tên ở `project_id`, không phải `project_name`.
+
+    Đọc từ DB lúc sự cố:
+
+        {"project_id": "Vinhomes Sky Garden", "viewing_date": ...}
+
+    Planner điền TÊN vào `project_id`, và Validator chỉ đổi sang mã khi tên có
+    trong danh mục — đúng những lần hỏng thì nó không đổi được. Chỉ đọc
+    `project_name` nên câu trả lời thành "Dự án đã chọn…", không nói được cái
+    tên người dùng vừa gõ.
+    """
+    message = task_failure_message(
+        _Task("schedule_property_viewing", project_id="Vinhomes Sky Garden"),
+        "Đặt lịch tham quan",
+        ErrorCode.PROJECT_NOT_FOUND,
+    )
+    assert "Vinhomes Sky Garden" in message, message
+
+
+def test_the_internal_project_code_is_never_shown():
+    """`PRJ-007` là mã nội bộ — người dùng không gõ nó và không cần biết nó."""
+    message = task_failure_message(
+        _Task("schedule_property_viewing", project_id="PRJ-999"),
+        "Đặt lịch tham quan",
+        ErrorCode.PROJECT_NOT_FOUND,
+    )
+    assert "PRJ-999" not in message
+    assert "Dự án đã chọn" in message

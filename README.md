@@ -202,16 +202,137 @@ pip install -e ".[dev]"
 
 # 4. Cấu hình environment
 cp .env.example .env
-# Chọn một LLM provider trong .env:
-#   LLM_PROVIDER=openai      + OPENAI_API_KEY=sk-...
-# hoặc
-#   LLM_PROVIDER=openrouter  + OPENROUTER_API_KEY=sk-or-v1-...
-# OpenRouter mặc định dùng openrouter/free để smoke test structured output.
+# Điền ĐÚNG key của provider đang chọn — xem bảng "Biến môi trường" bên dưới.
 # Không commit file .env.
 
 # 5. Cài AI logging hooks (chạy một lần)
 bash scripts/setup_hooks.sh
 ```
+
+---
+
+## Biến môi trường
+
+`.env.example` là bản đầy đủ có chú thích. Bảng dưới là những biến **bắt buộc**
+để chạy được:
+
+| Biến | Mặc định | Ghi chú |
+|---|---|---|
+| `LLM_PROVIDER` | `deepseek` | `deepseek` \| `openai` \| `openrouter` |
+| `DEEPSEEK_API_KEY` | *(trống)* | Bắt buộc khi provider là `deepseek` |
+| `DEEPSEEK_MODEL_NAME` | `deepseek-v4-flash` | Ghim đúng model này |
+| `DATABASE_URL` | `postgresql://p118:p118pass@localhost:5432/p118_db` | Docker Compose tự override sang host `postgres` |
+| `TEST_DATABASE_URL` | `…/p118_test_db` | **Phải khác** `DATABASE_URL` — fixture pytest có `TRUNCATE` |
+| `JWT_SECRET` | `change-me-…` | **Bắt buộc đổi** — auth trả 500 nếu để trống |
+| `P118_LLM_TRACE` | `0` | `1` để xem log model lúc demo (đặt trong shell hoặc `docker-compose.yml`) |
+
+Cấu hình sai thì hệ thống **dừng ngay lúc khởi động**, không đợi tới lúc người
+dùng bấm nút: `check_llm_configuration()` từ chối provider không có key tương
+ứng, và `/ready` báo đỏ. Đây là bài học từ một lần Docker Compose báo mọi
+service healthy trong khi backend chạy với provider không có key.
+
+Key **không bao giờ** nằm trong `docker-compose.yml` — file đó chỉ tham chiếu
+biến môi trường.
+
+---
+
+## Sample queries
+
+Người dùng gõ tiếng Việt tự nhiên vào ô chat. Ba nhóm dưới đây phủ đủ các nhánh
+đáng xem trong một buổi demo.
+
+> **Một khung giờ chỉ đặt được một lần.** Chạy lại y nguyên câu bên dưới lần thứ
+> hai sẽ nhận *"Khung giờ … đã có người đặt"* — đó là hệ thống làm đúng, không
+> phải lỗi. Đổi ngày hoặc giờ là chạy tiếp được. Tương tự, mỗi tài khoản chỉ
+> đăng ký quan tâm một dự án một lần.
+
+### Nhóm 1 — Chạy thẳng (không cần liên kết căn hộ)
+
+```
+Đặt lịch tham quan dự án Vinhomes Ocean Park ngày 2026-09-20 lúc 10:00
+```
+→ `READY` · 1 tác vụ · `SUCCESS`.
+
+```
+Đăng ký quan tâm dự án Vinhomes Pearl Bay, tôi muốn mua, đồng ý để bộ phận tư vấn liên hệ lúc 14:30
+```
+→ `READY` · 1 tác vụ · `SUCCESS`.
+
+Chữ **"đồng ý"** là bắt buộc: `consent` không được suy diễn hộ người dùng. Bỏ nó
+đi thì agent hỏi lại chứ không tự đánh dấu là đã đồng ý cho người khác liên hệ.
+
+### Nhóm 2 — Agent hỏi lại rồi chạy tiếp
+
+```
+đặt lịch tham quan dự án
+```
+→ `NEEDS_INFORMATION` — thiếu dự án, ngày, giờ. Trả lời ngay trong chat:
+```
+vinhomes sài gòn park ngày 2026-09-20 lúc 10:00
+```
+→ tạo workflow con và chạy tiếp. Câu trả lời bổ sung **đè** lên giá trị suy từ
+goal cũ, nên đổi giờ giữa chừng cũng không mất ngày đã nói.
+
+### Nhóm 3 — Ca hỏng, để xem agent giải thích thế nào
+
+```
+Đặt lịch tham quan dự án Vinhomes Sky Garden ngày 2026-09-20 lúc 10:00
+```
+→ Agent **không bịa** một dự án không tồn tại. Kết quả rơi vào một trong hai
+nhánh, tuỳ Planner nhận ra sớm hay muộn — cả hai đều liệt kê 7 dự án đang hỗ trợ:
+
+- `NEEDS_INFORMATION` — nhận ra ngay lúc lập kế hoạch, hỏi lại tên dự án
+- `FAILED` — provider từ chối, agent nêu đúng tên bạn đã gõ và danh mục thay thế
+
+Planner là LLM nên nhánh nào xảy ra là không tất định; điều **được bảo đảm** là
+không có lịch tham quan nào được tạo, và câu trả lời không bảo bạn "thử lại" một
+việc không bao giờ chạy được.
+
+```
+đặt chỗ đỗ xe Khu A ngày 2026-08-22     # cần tài khoản ĐÃ liên kết căn hộ
+```
+→ Khu A hết chỗ ngày đó (sức chứa 3, đã đặt 3). Agent nêu lý do và chỉ đường đi
+tiếp: *"Khu A đã hết chỗ ngày 2026-08-22. Bạn thử Khu B hoặc chọn ngày khác"* —
+không hỏi lại thông tin bạn vừa cho.
+
+Với tài khoản **chưa** liên kết, cùng câu này dừng sớm hơn ở tầng quyền (xem dưới).
+
+```
+đặt chỗ đỗ xe          # với tài khoản CHƯA liên kết căn hộ
+```
+→ bị chặn ở tầng quyền, và giải thích đúng lý do: cần liên kết căn hộ trước.
+
+### Gọi thẳng bằng HTTP
+
+```bash
+BASE=http://localhost:8080/api/v1
+
+# 1. Đăng ký + đăng nhập
+curl -s -X POST $BASE/auth/register -H 'Content-Type: application/json' \
+  -d '{"username":"demo01","password":"Matkhau123!"}'
+TOKEN=$(curl -s -X POST $BASE/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"demo01","password":"Matkhau123!"}' | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+# 2. Gửi goal — body CHỈ mang goal, không mang gì quyết định quyền
+WF=$(curl -s -X POST $BASE/workflows/demo/start -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"goal":"Đặt lịch tham quan dự án Vinhomes Ocean Park ngày 2026-09-20 lúc 10:00"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["workflow_id"])')
+
+# 3. Poll trạng thái
+curl -s $BASE/workflows/demo/$WF -H "Authorization: Bearer $TOKEN" | python -m json.tool
+
+# 4. Trả lời câu hỏi bổ sung (khi status = NEEDS_INFORMATION)
+curl -s -X POST $BASE/workflows/demo/$WF/continue -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"message":"vinhomes ocean park ngày 2026-09-20 lúc 10:00"}'
+
+# 5. Duyệt thanh toán (khi status = WAITING_APPROVAL)
+curl -s -X POST $BASE/workflows/demo/$WF/payment-decision -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"decision":"APPROVED"}'
+```
+
+Đặt chỗ đỗ xe cần tài khoản đã được ban quản lý duyệt liên kết căn hộ — gửi yêu
+cầu ở trang **Liên kết căn hộ**, rồi duyệt bằng tài khoản `admin`.
 
 ---
 

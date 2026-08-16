@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.common.projects import PROJECTS
+
 
 def _text(value: Any) -> str | None:
     """Chỉ nhận scalar để presentation layer không phát tán raw object."""
@@ -59,9 +61,27 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
     if code == "INVALID_INPUT":
         return f"Thông tin của bước “{title}” chưa hợp lệ. Hãy kiểm tra lại dữ liệu đã nhập."
     if code == "PROJECT_NOT_FOUND":
-        project = _text(inputs.get("project_name"))
+        # Đọc cả `project_id`, không chỉ `project_name`.
+        #
+        # Trong input thật, tên người dùng gõ nằm ở `project_id`: Planner điền
+        # tên vào đó, và Validator chỉ đổi được sang mã khi tên CÓ trong danh
+        # mục — đúng những lần hỏng thì nó không đổi được. Chỉ đọc
+        # `project_name` nên câu trả lời thành "Dự án đã chọn không có trong
+        # danh mục", tức là không nói được cái tên mà người dùng vừa gõ.
+        #
+        # Mã nội bộ (`PRJ-007`) thì KHÔNG đưa ra: người dùng không gõ nó và
+        # không cần biết nó.
+        raw = _text(inputs.get("project_name")) or _text(inputs.get("project_id"))
+        project = raw if raw and not raw.upper().startswith("PRJ-") else None
         subject = f"Dự án “{project}”" if project else "Dự án đã chọn"
-        return f"{subject} không có trong danh mục. Hãy chọn một dự án trong danh sách được hỗ trợ."
+        # Liệt kê luôn danh mục, giống hệt câu ở nhánh hỏi-bổ-sung.
+        #
+        # Hai đường đều dẫn tới "dự án không có" nhưng trước đây nói khác nhau:
+        # một bên liệt kê 7 dự án, một bên chỉ bảo "chọn trong danh sách được
+        # hỗ trợ" — trong hội thoại thì không có danh sách nào để nhìn. Người
+        # dùng gặp đường nào là may rủi, và đường kém hơn để họ đoán tiếp.
+        catalogue = ", ".join(project["project_name"] for project in PROJECTS)
+        return f"{subject} không có trong danh mục. Hãy chọn một trong các dự án đang có: {catalogue}."
     if code == "VIEWING_ALREADY_BOOKED":
         viewing_date = _text(inputs.get("viewing_date"))
         viewing_time = _text(inputs.get("viewing_time"))

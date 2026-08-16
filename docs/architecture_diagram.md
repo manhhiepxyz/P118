@@ -4,10 +4,208 @@
 
 **Mã đề tài:** PTNT-02 — STT 158
 
-**Stack:** LangGraph · FastAPI · PostgreSQL · React · WebSocket
-**Cập nhật:** 31/07/2026
+**Stack:** LangGraph · FastAPI · PostgreSQL · React
+**Cập nhật:** 16/08/2026
 
 ---
+
+> **Đọc tài liệu này thế nào**
+>
+> Nó có hai phần, và trộn hai phần lại là cách nhanh nhất để hiểu sai hệ thống:
+>
+> | Phần | Nội dung | Trạng thái |
+> |---|---|---|
+> | **A. Kiến trúc as-built (Gate 2)** | Đúng thứ đang chạy trong `src/` | Đã xây, chạy được end-to-end |
+> | **B. Thiết kế mục tiêu (Gate 1)** | Policy Engine, HITL Manager, Saga Compensator, WebSocket | **Chưa xây** — là roadmap |
+>
+> Phần B viết ngày 31/07 và giữ nguyên làm định hướng. Những gì nó mô tả mà
+> phần A không có thì **chưa tồn tại trong code**. Ví dụ: hệ thống hiện dùng
+> polling chứ không WebSocket, có cổng duyệt thanh toán chứ chưa có Policy
+> Engine tổng quát, và chưa có Compensator trong đường chạy thật.
+
+---
+
+# PHẦN A — Kiến trúc as-built (Gate 2)
+
+## A1. Data flow đầy đủ
+
+```mermaid
+graph TB
+    subgraph FE["React SPA — Vite"]
+        CHAT["HomePage — hội thoại<br/>Thẻ workflow nhúng trong chat"]
+        WFS["WorkflowsPage — lịch sử<br/>Tiếp tục · Xem kết quả · Xoá"]
+        LINK["ApartmentLinkPage<br/>Gửi yêu cầu liên kết căn hộ"]
+        POLL["useWorkflowPolling<br/>Một vòng poll dùng chung"]
+    end
+
+    subgraph BE["FastAPI — :8080 → :8000 trong container"]
+        AUTH["/api/v1/auth/*<br/>JWT · đăng ký · đăng nhập"]
+        WF["/api/v1/workflows/demo/*<br/>start · continue · payment-decision<br/>cancel · DELETE · list"]
+        ADM["/api/v1/admin/*<br/>Duyệt liên kết căn hộ"]
+        READY["/ready · /health<br/>Sẵn sàng vs còn sống"]
+    end
+
+    subgraph GRAPH["LangGraph StateGraph"]
+        ANALYZE["analyze<br/>Small talk hay tác vụ?"]
+        PLAN["plan — LLM<br/>Chỉ sinh TaskPlan"]
+        FIX["Sửa xác định sau plan<br/>project_id tên→mã<br/>user_answers đè goal cũ<br/>Ghép pay_fee sau book_parking"]
+        VALIDATE["validate<br/>TaskPlanValidator"]
+        EXECUTE["execute<br/>Qua execution boundary"]
+        RESPOND["respond — LLM<br/>Response Agent"]
+    end
+
+    subgraph GUARD["Cổng chặn — deterministic"]
+        RB["ResidentAccessBoundary<br/>Cư dân đã xác minh?<br/>Tài nguyên có phải của họ?"]
+        PAY["Payment Approval<br/>WAITING_APPROVAL → chờ người dùng"]
+        RG["Response guard<br/>Loại câu lộ nội bộ, bịa số,<br/>khẳng định đã xong khi chưa"]
+    end
+
+    subgraph EXEC["Executor + Connector"]
+        EX["Executor<br/>Thứ tự phụ thuộc · InputRef<br/>Retry lỗi transient"]
+        CONN["Connector<br/>HTTP → StandardResult<br/>Ánh xạ mã lỗi provider"]
+    end
+
+    subgraph PG["PostgreSQL — p118_db"]
+        T1[("workflows · workflow_tasks")]
+        T2[("payment_approvals · payments")]
+        T3[("users · residents<br/>user_resident_links<br/>resident_link_requests")]
+        T4[("llm_usage · execution_logs")]
+    end
+
+    subgraph MOCK["Mock Provider — 8 service"]
+        MS["resident :8001 · transport :8002<br/>payment :8003 · ownership :8004<br/>tour :8005 · resident-services :8006<br/>consultation :8007 · property :8008"]
+    end
+
+    LLMP["DeepSeek V4 Flash<br/>json_mode"]
+
+    CHAT --> WF
+    WFS --> WF
+    LINK --> ADM
+    POLL -.->|1.5s| WF
+    CHAT --> AUTH
+
+    WF --> ANALYZE
+    ANALYZE --> PLAN
+    PLAN <-.->|prompt / TaskPlan| LLMP
+    PLAN --> FIX
+    FIX --> VALIDATE
+    VALIDATE --> RB
+    RB --> EXECUTE
+    EXECUTE --> EX
+    EX --> CONN
+    CONN --> MS
+    EX --> PAY
+    PAY -.->|người dùng duyệt| WF
+    EXECUTE --> RESPOND
+    RESPOND <-.->|ReplyView / answer| LLMP
+    RESPOND --> RG
+    RG --> WF
+
+    EX --> T1
+    PAY --> T2
+    AUTH --> T3
+    ADM --> T3
+    PLAN --> T4
+    RESPOND --> T4
+    READY --> PG
+```
+
+## A2. Hai chỗ dùng LLM, và ranh giới của chúng
+
+Toàn bộ `src/agents/` **không có một dòng nào** chạm database: không `asyncpg`,
+không `repository`, không `SELECT`. LLM không có tool đọc DB, không gọi HTTP tới
+provider. Mọi dữ liệu nó thấy đều do backend lọc rồi đưa vào.
+
+| | Planner | Response Agent |
+|---|---|---|
+| File | `src/agents/planner.py` | `src/agents/response_agent.py` |
+| Nhận | `goal` + `existing_context` | `ReplyView` (đã lọc) |
+| Trả | `TaskPlan` hoặc `missing_fields` | `answer` + tối đa 3 gợi ý |
+| Không được | soạn câu hỏi cho người dùng, thực thi bất cứ gì | đổi trạng thái, đổi số tiền |
+
+`_PlannerResponse` và `ReplyView` đều có `extra="forbid"` — model thêm field lạ
+là Pydantic ném ngay, không lọt vào hệ thống.
+
+## A3. Bảy cổng chặn, theo thứ tự đi qua
+
+| # | Cổng | File | Chặn gì |
+|---|---|---|---|
+| 1 | Tool allowlist | `agents/validator.py` | Đúng 9 tool, không hơn |
+| 2 | Tool Contract | `common/tool_contract.py` | Kiểu, enum, khung giờ, trần ngày |
+| 3 | TaskPlanValidator | `agents/validator.py` | URL/credential, chu trình, InputRef ngoài `depends_on` |
+| 4 | Lọc câu hỏi | `agents/graph.py` | ID nội bộ không bao giờ thành câu hỏi cho người dùng |
+| 5 | ResidentAccessBoundary | `orchestration/demo_service.py` | Quyền cư dân; `resident_id` do LLM sinh bị từ chối |
+| 6 | Payment approval | `orchestration/payment_approval.py` | Không đồng nào đi trước khi người dùng bấm duyệt |
+| 7 | Response guard | `agents/response_agent.py` | Lộ nội bộ, bịa số, khẳng định đã xong khi chưa |
+
+Nguyên tắc chung: **LLM đề xuất, code quyết định.** Ba thứ quan trọng nhất đều
+không đi qua model — quyền đến từ mapping đã xác minh trong PostgreSQL, số tiền
+đến từ provider qua `InputRef`, và `project_id` do Validator tra từ danh mục.
+
+## A4. Vòng đời một workflow
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: POST /workflows/demo/start
+    PENDING --> NEEDS_INFORMATION: Planner thiếu dữ liệu
+    NEEDS_INFORMATION --> PENDING: /continue tạo workflow CON<br/>(cha được archive)
+    PENDING --> RUNNING: plan hợp lệ, qua các cổng
+    RUNNING --> WAITING_APPROVAL: có bước pay_fee
+    WAITING_APPROVAL --> SUCCESS: người dùng duyệt
+    WAITING_APPROVAL --> CANCELLED: người dùng từ chối<br/>(booking được GIỮ, không thu tiền)
+    RUNNING --> SUCCESS: mọi bước xong
+    RUNNING --> FAILED: bước hỏng, có error_code
+    NEEDS_INFORMATION --> CANCELLED: huỷ yêu cầu
+    SUCCESS --> [*]
+    FAILED --> [*]
+    CANCELLED --> [*]
+```
+
+Trạng thái kết thúc là kết thúc: không có đường quay lại `RUNNING`. Một
+workflow bị bỏ dở quá TTL được sweeper đánh dấu `FAILED` kèm mã lỗi, không nằm
+`PENDING` vĩnh viễn.
+
+## A5. Luồng liên kết căn hộ — nằm NGOÀI agent
+
+Đây là quyết định kiến trúc có chủ ý: cấp quyền cư dân **không** đi qua LLM.
+
+```mermaid
+sequenceDiagram
+    participant U as Khách hàng
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    participant AD as Ban quản lý
+
+    U->>API: Gửi yêu cầu liên kết (căn hộ, khu, tên)
+    API->>DB: resident_link_requests = PENDING
+    Note over DB: Partial unique index —<br/>mỗi user chỉ MỘT yêu cầu chờ
+    AD->>API: Duyệt
+    API->>DB: user_resident_links = VERIFIED<br/>(cùng một transaction)
+    U->>API: Giờ mới dùng được dịch vụ cư dân
+```
+
+`register_resident` và các tool liên kết bị chặn khỏi TaskPlan
+(`ResidentLinkingOutsideAgentError`) — LLM không có đường nào tự cấp quyền cho
+người dùng.
+
+## A6. Quan sát được
+
+| Kênh | Nội dung | Bật thế nào |
+|---|---|---|
+| `llm_usage` (bảng) | stage, token, độ trễ mỗi lần gọi | luôn bật |
+| `p118.llm.trace` (stdout) | plan quyết gì · tác vụ nào hỏng vì sao · câu trả lời | `P118_LLM_TRACE=1` |
+| `/ready` | cấu hình LLM · DB · migration · 7 connector | luôn bật |
+| `execution_logs` | vết chạy từng bước | luôn bật |
+
+`llm_usage` cố ý **không** lưu prompt hay câu trả lời: nó nằm trong DB nghiệp vụ,
+và prompt mang dữ liệu người dùng. Muốn xem nội dung thì dùng trace ra stdout.
+
+---
+
+# PHẦN B — Thiết kế mục tiêu (Gate 1, 31/07/2026)
+
+> Phần dưới đây là **định hướng**, không phải mô tả code hiện tại. Đối chiếu với
+> phần A trước khi dùng nó để hiểu hệ thống.
 
 ## Core Contribution
 

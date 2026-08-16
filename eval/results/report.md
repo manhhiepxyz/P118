@@ -1,6 +1,7 @@
 # P-118 — Manual eval Gate 2
 
-**Thời điểm chạy:** 2026-08-15 (chạy lại trên Docker sau khi thêm /ready, phân loại lỗi, luồng liên kết căn hộ)
+**Thời điểm chạy:** 2026-08-16 (chạy lại trên Docker sau khi thêm trần ngày đặt trước,
+ghép bước xác nhận thanh toán vào mọi lần đặt chỗ, và sửa nhóm lỗi câu chữ phát hiện khi demo)
 **Môi trường:** **stack Docker Compose** — backend container cổng 8080 · PostgreSQL `p118_db`
 · 7 mock provider container trên cổng canonical (8001 resident / 8002 transport / 8003 payment /
 8005 tour / 8006 resident-services / 8007 consultation / 8008 property)
@@ -44,14 +45,14 @@ Danh tính cư dân do server dựng từ token — client không gửi và khô
 | Chuỗi việc (user-facing) | Đăng ký phương tiện → Đặt chỗ đỗ xe → Thanh toán phí |
 | Kết quả workflow | `WAITING_APPROVAL` · báo giá **150.000 VND** |
 | Kết quả từng bước | Đăng ký phương tiện = SUCCESS · Đặt chỗ đỗ xe = SUCCESS · Thanh toán phí = WAITING_APPROVAL |
-| Số lần gọi mô hình | 2 (đều ở stage `plan`) · 0 lượt sửa sai |
+| Số lần gọi mô hình | 3 (respond=1, plan=2) · 0 lượt sửa sai |
 
 **Bằng chứng PostgreSQL (đã mask)**
 
-- workflow cha 95ff4eb1… → con 920790db…
+- workflow cha 3c4b9df5… → con 070728af…
 - vòng hỏi bổ sung = 1
 - approval AWAITING = 1
-- biển số canary 51E-*** · ngày 2028-05-30 · Khu A
+- biển số canary 51E-*** · ngày 2028-03-16 · Khu A
 
 **PASS.** Workflow dừng đúng ở điểm chờ người dùng quyết định, kèm báo giá đọc từ chỗ đỗ xe
 đã giữ chứ không phải từ một con số Planner tự nêu.
@@ -70,12 +71,12 @@ Danh tính cư dân do server dựng từ token — client không gửi và khô
 | Chuỗi việc (user-facing) | Đăng ký phương tiện → Đặt chỗ đỗ xe → Thanh toán phí |
 | Kết quả workflow | HTTP 200 → `SUCCESS` |
 | Kết quả từng bước | cả ba bước = SUCCESS |
-| Số lần gọi mô hình | 1 (stage `plan`, thuộc lượt lập kế hoạch trước đó) |
+| Số lần gọi mô hình | 1 (plan=1) (thuộc lượt lập kế hoạch trước đó) |
 
 **Bằng chứng PostgreSQL (đã mask)**
 
-- payments toàn hệ thống 8 → 9
-- duyệt lần hai: HTTP 409, payments 9 → 9
+- payments toàn hệ thống 4 → 5
+- duyệt lần hai: HTTP 409, payments 5 → 5
 - approval APPROVED = 1
 
 **PASS.** Đúng một khoản thu được tạo. Lần duyệt thứ hai bị chặn ở 409 chứ không âm thầm
@@ -93,22 +94,23 @@ thu thêm — bảo vệ nằm ở PostgreSQL, không phải ở việc giao di�
 | Planner status | `NEEDS_INFORMATION` → `READY` |
 | Missing fields | biển số xe, loại xe, ngày đặt chỗ, khu vực đỗ xe |
 | Chuỗi việc (user-facing) | Đăng ký phương tiện → Đặt chỗ đỗ xe → Thanh toán phí |
-| Kết quả workflow | HTTP 200 → hiển thị `FAILED` (DB: `CANCELLED`) |
-| Kết quả từng bước | Đăng ký phương tiện = SUCCESS · Đặt chỗ đỗ xe = SUCCESS · Thanh toán phí = PENDING |
-| Số lần gọi mô hình | 2 (stage `plan`) |
+| Kết quả workflow | HTTP 200 → hiển thị CANCELLED (DB: CANCELLED) |
+| Kết quả từng bước | Đăng ký phương tiện = SUCCESS · Đặt chỗ đỗ xe = SUCCESS · Thanh toán phí = CANCELLED |
+| Số lần gọi mô hình | 3 (plan=2, respond=1) |
 
 **Bằng chứng PostgreSQL (đã mask)**
 
-- workflow con a4d663ca… · DB status = CANCELLED
-- payments 9 → 9 (không đổi)
+- workflow con 61e1a9b5… · DB status = CANCELLED
+- payments 5 → 5 (không đổi)
 - chỗ đỗ xe đã giữ vẫn còn = 1
-- biển số canary 51F-*** · ngày 2028-05-31 · Khu B
+- biển số canary 51F-*** · ngày 2028-03-17 · Khu B
 
 **PASS.** Từ chối huỷ workflow và không thu tiền, nhưng **không xoá chỗ đã giữ** — huỷ chỗ là
 một quyết định khác, người dùng chưa yêu cầu.
 
-**Ghi chú contract:** DB lưu `CANCELLED`, API công khai trả `FAILED`. Contract công khai chỉ có
-ba trạng thái kết thúc, nên `CANCELLED` được gộp vào `FAILED`; giao diện hiển thị "Không thành công".
+**Ghi chú contract:** `CANCELLED` nay là một trạng thái kết thúc CÔNG KHAI, không còn bị gộp
+vào `FAILED` như bản báo cáo trước. Gộp hai thứ lại khiến "bạn đã từ chối thanh toán" trông
+giống hệt "hệ thống hỏng" — hai chuyện khác nhau hoàn toàn với người đọc.
 
 ---
 
@@ -124,13 +126,13 @@ ba trạng thái kết thúc, nên `CANCELLED` được gộp vào `FAILED`; gia
 | Chuỗi việc (user-facing) | Đặt lịch tham quan |
 | Kết quả workflow | `SUCCESS` |
 | Kết quả từng bước | Đặt lịch tham quan = SUCCESS |
-| Số lần gọi mô hình | 2 (stage `plan`) |
+| Số lần gọi mô hình | 2 (plan=2) |
 
 **Bằng chứng PostgreSQL (đã mask)**
 
-- workflow 5537a3f1… · vòng hỏi = 1
-- ngày hẹn 2028-06-29 lúc 10:30 (giữ nguyên phút, không quy về buổi)
-- kết quả provider đã ghi vào workflow_tasks: 2028-06-29 10:30 · Vinhomes Ocean Park (PRJ-007)
+- workflow 0fee6a4f… · vòng hỏi = 1
+- ngày hẹn 2028-04-15 lúc 10:30 (giữ nguyên phút, không quy về buổi)
+- kết quả provider đã ghi vào workflow_tasks: 2028-04-15 10:30 · Vinhomes Ocean Park (PRJ-007)
 - số điện thoại đầu mối do provider giữ, không đưa vào báo cáo
 
 **PASS.** Giờ hẹn đi tới provider ở dạng `HH:MM` và quay về nguyên vẹn — **không bị quy về
@@ -155,11 +157,11 @@ là nơi kết quả provider được lưu lại.
 | Chuỗi việc (user-facing) | (không có bước nào chạy) |
 | Kết quả workflow | **HTTP 422** — "Ngày đặt chỗ chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi." |
 | Kết quả từng bước | — |
-| Số lần gọi mô hình | 2 (stage `plan`) |
+| Số lần gọi mô hình | 1 (plan=1) |
 
 **Bằng chứng PostgreSQL (đã mask)**
 
-- vòng hỏi = 1
+- vòng hỏi = 0
 - chỗ đỗ xe được tạo cho ngày quá khứ = 0 (phải là 0)
 - biển số canary 51G-***
 

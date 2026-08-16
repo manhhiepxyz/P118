@@ -16,11 +16,20 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+
+# Chạy được bằng `python eval/run_manual_eval.py` từ gốc repo mà không cần đặt
+# PYTHONPATH — người chạy eval không nên phải biết chuyện đóng gói.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from src.agents.validator import TaskPlanValidator  # noqa: E402
+
+MAX_HORIZON_DAYS = TaskPlanValidator.MAX_HORIZON_DAYS
 
 BASE = os.environ.get("P118_API", "http://127.0.0.1:8080/api/v1")
 DB = os.environ.get("P118_DB", "p118_db")
@@ -161,7 +170,15 @@ def main() -> int:
     # sẽ nhận NO_AVAILABILITY và làm hỏng happy path.
     # Mốc tính TỪ HÔM NAY. Lần trước mốc tính từ 1970 nên rơi vào 2025 — validator
     # từ chối đúng, còn eval thì báo FAIL cho một hệ thống đang hoạt động bình thường.
-    base_day = 400 + (int(STAMP) % 3000)
+    # Ngày rải rộng để hai lượt chạy không đụng nhau, NHƯNG phải nằm trong trần
+    # ngày đặt trước của hệ thống (`TaskPlanValidator.MAX_HORIZON_DAYS`).
+    #
+    # Bản trước rải tới +3399 ngày (~9,3 năm). Lúc chưa có trần thì nó chạy;
+    # từ khi hệ thống từ chối ngày vô lý, chính harness sinh ra dữ liệu mà sản
+    # phẩm phải từ chối — và eval đỏ vì lỗi của harness chứ không phải của sản
+    # phẩm. Đọc trần từ nguồn thay vì chép số, để hai bên không lệch lại.
+    span = MAX_HORIZON_DAYS - 60  # chừa chỗ cho day(+30)
+    base_day = 30 + (int(STAMP) % span)
     day = lambda off: sql(f"SELECT (CURRENT_DATE + {base_day + off})::text")[0]  # noqa: E731
 
     def run_parking(plate: str, date: str, zone: str) -> tuple[str, str, dict, int]:
