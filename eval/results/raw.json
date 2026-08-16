@@ -18,14 +18,14 @@
         "Thanh toán phí=WAITING_APPROVAL"
       ],
       "db": [
-        "workflow cha 3c4b9df5… → con 070728af…",
+        "workflow cha e986a051… → con 062a64a6…",
         "vòng hỏi bổ sung = 1",
         "approval AWAITING = 1",
-        "biển số canary 51E-*** · ngày 2028-03-16 · Khu A"
+        "biển số canary 51E-*** · ngày 2030-01-24 · Khu A"
       ],
       "verdict": "PASS",
       "why": "Dừng đúng ở điểm chờ người dùng quyết định, kèm báo giá đọc từ chỗ đỗ xe đã giữ.",
-      "llm": "3 (respond=1, plan=2)"
+      "llm": "3 (plan=2, respond=1)"
     },
     {
       "title": "2. Duyệt khoản thanh toán",
@@ -37,8 +37,8 @@
       "result": "HTTP 200 → SUCCESS",
       "tasks": [],
       "db": [
-        "payments toàn hệ thống 4 → 5",
-        "duyệt lần hai: HTTP 409, payments 5 → 5",
+        "payments toàn hệ thống 3 → 4",
+        "duyệt lần hai: HTTP 409, payments 4 → 4",
         "approval APPROVED = 1"
       ],
       "verdict": "PASS",
@@ -63,10 +63,10 @@
         "Thanh toán phí=CANCELLED"
       ],
       "db": [
-        "workflow con 61e1a9b5… · DB status = CANCELLED",
-        "payments 5 → 5 (không đổi)",
+        "workflow con 91912052… · DB status = CANCELLED",
+        "payments 4 → 4 (không đổi)",
         "chỗ đỗ xe đã giữ vẫn còn = 1",
-        "biển số canary 51F-*** · ngày 2028-03-17 · Khu B"
+        "biển số canary 51F-*** · ngày 2030-01-25 · Khu B"
       ],
       "verdict": "PASS",
       "why": "Từ chối huỷ workflow và không thu tiền, nhưng KHÔNG xoá chỗ đã giữ — huỷ chỗ là quyết định khác.",
@@ -86,13 +86,14 @@
         "Đặt lịch tham quan=SUCCESS"
       ],
       "db": [
-        "workflow 0fee6a4f… · vòng hỏi = 1",
-        "ngày hẹn 2028-04-15 lúc 10:30 (giữ nguyên phút, không quy về buổi)",
-        "kết quả provider đã ghi vào workflow_tasks: 2028-04-15 10:30 · Vinhomes Ocean Park (PRJ-007)",
+        "workflow 5c4b6fe1… · vòng hỏi = 1",
+        "ngày hẹn 2030-02-23 lúc 10:30 (giữ nguyên phút, không quy về buổi)",
+        "dừng ở cổng duyệt đơn vị = True · đơn vị đã duyệt = True",
+        "kết quả provider đã ghi vào workflow_tasks: 2030-02-23 10:30 · Vinhomes Ocean Park (PRJ-007)",
         "số điện thoại đầu mối do provider giữ, không đưa vào báo cáo"
       ],
       "verdict": "PASS",
-      "why": "Giờ hẹn đi qua tới provider ở dạng HH:MM, không bị quy về MORNING/AFTERNOON.",
+      "why": "Dừng đúng ở cổng duyệt của ĐƠN VỊ (approval_actor=PROVIDER, khách không có nút quyết định), chỉ thành công sau khi đơn vị duyệt. Giờ hẹn đi qua tới provider ở dạng HH:MM, không bị quy về MORNING/AFTERNOON.",
       "llm": "2 (plan=2)"
     },
     {
@@ -114,7 +115,7 @@
       "llm": "1 (plan=1)"
     }
   ],
-  "resident_masked": "RES-EV-72…",
-  "apartment_masked": "E-2848",
-  "user_masked": "857332c8…"
+  "resident_masked": "RES-EV-08…",
+  "apartment_masked": "E-8827",
+  "user_masked": "feb6def1…"
 }

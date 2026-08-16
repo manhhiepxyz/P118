@@ -333,6 +333,28 @@ def main() -> int:
         c4 = child["workflow_id"]
         r4 += 1
         s4 = poll(token, c4)
+    # Lịch tham quan giờ DỪNG ở `WAITING_APPROVAL` chờ ĐƠN VỊ duyệt — đó là
+    # kiến trúc, không phải lỗi. Case này vì vậy phải đi hết đường: xác nhận nó
+    # dừng đúng chỗ với `approval_actor = PROVIDER`, rồi ĐÓNG VAI đơn vị bấm
+    # duyệt, rồi mới đòi SUCCESS.
+    #
+    # Bản trước chấm `PASS if status == "SUCCESS"` ngay sau khi khách gửi yêu
+    # cầu. Kỳ vọng đó có từ thời chưa có cổng duyệt; giữ nguyên thì eval báo đỏ
+    # cho một hành vi đúng, và tệ hơn — nó sẽ báo xanh nếu ai đó lỡ bỏ mất cổng
+    # duyệt.
+    gated4 = s4.get("status") == "WAITING_APPROVAL" and s4.get("approval_actor") == "PROVIDER"
+    approved4 = False
+    if gated4:
+        reviewer = f"eval_provider_{int(time.time())}"
+        call("POST", "/auth/register", None, {"username": reviewer, "email": f"{reviewer}@example.test", "password": PASSWORD})
+        sql(f"UPDATE users SET role = 'provider' WHERE username = '{reviewer}'")
+        _, tok = call("POST", "/auth/login", None, {"username": reviewer, "password": PASSWORD})
+        rtoken = tok.get("access_token")
+        code_d, _ = call("POST", f"/viewing-approvals/{c4}/decide", rtoken, {"decision": "approve"})
+        approved4 = code_d == 200
+        if approved4:
+            s4 = poll(token, c4)
+
     # Provider tour giữ lịch trong BỘ NHỚ của tiến trình mock, không ghi
     # `tour_bookings`. Bằng chứng bền vững nằm ở phía P-118: `workflow_tasks`
     # lưu kết quả provider trả về, và nó chứa đủ ngày/giờ/dự án để đối chiếu.
@@ -354,11 +376,16 @@ def main() -> int:
             "db": [
                 f"workflow {mask(c4)} · vòng hỏi = {r4}",
                 f"ngày hẹn {tour_date} lúc 10:30 (giữ nguyên phút, không quy về buổi)",
+                f"dừng ở cổng duyệt đơn vị = {gated4} · đơn vị đã duyệt = {approved4}",
                 f"kết quả provider đã ghi vào workflow_tasks: {' | '.join(viewings)}",
                 "số điện thoại đầu mối do provider giữ, không đưa vào báo cáo",
             ],
-            "verdict": "PASS" if s4.get("status") == "SUCCESS" else "FAIL",
-            "why": "Giờ hẹn đi qua tới provider ở dạng HH:MM, không bị quy về MORNING/AFTERNOON.",
+            "verdict": "PASS" if (gated4 and approved4 and s4.get("status") == "SUCCESS") else "FAIL",
+            "why": (
+                "Dừng đúng ở cổng duyệt của ĐƠN VỊ (approval_actor=PROVIDER, khách không có nút "
+                "quyết định), chỉ thành công sau khi đơn vị duyệt. Giờ hẹn đi qua tới provider ở "
+                "dạng HH:MM, không bị quy về MORNING/AFTERNOON."
+            ),
             "llm": llm_calls([p4, c4]),
         }
     )

@@ -32,15 +32,17 @@
 ```mermaid
 graph TB
     subgraph FE["React SPA — Vite"]
-        CHAT["HomePage — hội thoại<br/>Thẻ workflow nhúng trong chat"]
+        WS["JourneyWorkspacePage — /workspace<br/>Canvas hành trình · hội thoại<br/>Thẻ việc đang chờ ở cột phải"]
         WFS["WorkflowsPage — lịch sử<br/>Tiếp tục · Xem kết quả · Xoá"]
         LINK["ApartmentLinkPage<br/>Gửi yêu cầu liên kết căn hộ"]
-        POLL["useWorkflowPolling<br/>Một vòng poll dùng chung"]
+        REV["ProviderReviewPage — /review<br/>Đơn vị duyệt: căn hộ · xe · tham quan"]
+        MAP["lib/liveJourney.ts<br/>Lớp DUY NHẤT đọc AgentWorkflowResponse<br/>→ chặng · cạnh · việc đang chờ"]
     end
 
     subgraph BE["FastAPI — :8080 → :8000 trong container"]
         AUTH["/api/v1/auth/*<br/>JWT · đăng ký · đăng nhập"]
         WF["/api/v1/workflows/demo/*<br/>start · continue · payment-decision<br/>cancel · DELETE · list"]
+        VA["/api/v1/viewing-approvals/*<br/>Đơn vị duyệt lịch tham quan"]
         ADM["/api/v1/admin/*<br/>Duyệt liên kết căn hộ"]
         READY["/ready · /health<br/>Sẵn sàng vs còn sống"]
     end
@@ -56,7 +58,8 @@ graph TB
 
     subgraph GUARD["Cổng chặn — deterministic"]
         RB["ResidentAccessBoundary<br/>Cư dân đã xác minh?<br/>Tài nguyên có phải của họ?"]
-        PAY["Payment Approval<br/>WAITING_APPROVAL → chờ người dùng"]
+        PAY["Payment Approval<br/>WAITING_APPROVAL · approval_actor=USER"]
+        VG["Viewing Approval<br/>WAITING_APPROVAL · approval_actor=PROVIDER<br/>Khách KHÔNG có nút quyết định"]
         RG["Response guard<br/>Loại câu lộ nội bộ, bịa số,<br/>khẳng định đã xong khi chưa"]
     end
 
@@ -78,11 +81,14 @@ graph TB
 
     LLMP["DeepSeek V4 Flash<br/>json_mode"]
 
-    CHAT --> WF
+    WS --> WF
+    WS -.->|1.5s poll| WF
+    WF --> MAP
+    MAP --> WS
     WFS --> WF
     LINK --> ADM
-    POLL -.->|1.5s| WF
-    CHAT --> AUTH
+    REV --> VA
+    WS --> AUTH
 
     WF --> ANALYZE
     ANALYZE --> PLAN
@@ -96,6 +102,8 @@ graph TB
     CONN --> MS
     EX --> PAY
     PAY -.->|người dùng duyệt| WF
+    EX --> VG
+    VA -.->|đơn vị duyệt → đặt xe → ghi câu chốt → SUCCESS| EX
     EXECUTE --> RESPOND
     RESPOND <-.->|ReplyView / answer| LLMP
     RESPOND --> RG
@@ -126,6 +134,29 @@ provider. Mọi dữ liệu nó thấy đều do backend lọc rồi đưa vào.
 `_PlannerResponse` và `ReplyView` đều có `extra="forbid"` — model thêm field lạ
 là Pydantic ném ngay, không lọt vào hệ thống.
 
+### Câu trả lời bổ sung THẮNG văn bản goal cũ
+
+Khi người dùng đáp một câu hỏi bổ sung ("Khu B" sau khi Khu A hết chỗ), giá trị
+ấy được ép đè lên kế hoạch bằng **code**, không nhờ model đọc lại:
+
+```
+POST /continue {"fields": {"parking_zone": "ZONE_B"}}
+  → _extract_structured_follow_up_answers  (nhận thẳng giá trị đã đúng enum)
+  → job["user_answers"]
+  → AgentState.user_answers          ← PHẢI khai trong TypedDict
+  → _apply_user_answers(plan, ...)   ← đè lên giá trị Planner suy từ goal
+```
+
+`AgentState` là TypedDict của LangGraph, và **LangGraph loại bỏ mọi khoá không
+được khai báo**. Thiếu một dòng khai `user_answers`, cả chuỗi trên vẫn chạy
+không lỗi ở đâu cả và plan node đọc ra một dict rỗng — mọi câu trả lời bổ sung
+bị bỏ im lặng, Planner lập lại kế hoạch từ goal cũ, và lượt chạy lại hỏng y hệt
+lượt trước.
+
+Hai giới hạn cố ý của `_apply_user_answers`: chỉ đè khi task ĐÃ CÓ field đó
+(thêm field mới là sửa kế hoạch, không phải sửa giá trị), và không bao giờ ghi
+đè `InputRef` — làm vậy cắt đứt dây chuyền dữ liệu giữa các bước.
+
 ## A3. Bảy cổng chặn, theo thứ tự đi qua
 
 | # | Cổng | File | Chặn gì |
@@ -136,7 +167,45 @@ là Pydantic ném ngay, không lọt vào hệ thống.
 | 4 | Lọc câu hỏi | `agents/graph.py` | ID nội bộ không bao giờ thành câu hỏi cho người dùng |
 | 5 | ResidentAccessBoundary | `orchestration/demo_service.py` | Quyền cư dân; `resident_id` do LLM sinh bị từ chối |
 | 6 | Payment approval | `orchestration/payment_approval.py` | Không đồng nào đi trước khi người dùng bấm duyệt |
-| 7 | Response guard | `agents/response_agent.py` | Lộ nội bộ, bịa số, khẳng định đã xong khi chưa |
+| 7 | Viewing approval | `orchestration/viewing_approval.py` | Lịch tham quan chỉ thành thật khi ĐƠN VỊ duyệt |
+| 8 | Response guard | `agents/response_agent.py` | Lộ nội bộ, bịa số, khẳng định đã xong khi chưa |
+
+### `approval_actor` — ai đang cần hành động
+
+`WAITING_APPROVAL` nói "đang chờ duyệt" nhưng **không** nói ai duyệt, và hai
+người duyệt khác nhau là hai màn hình khác nhau. Response mang thêm
+`approval_actor`:
+
+| Giá trị | Ai quyết | Giao diện |
+|---|---|---|
+| `USER` | chủ workflow | "Chờ bạn" + nút Xác nhận / Từ chối |
+| `PROVIDER` | đơn vị dịch vụ | "Đang chờ đơn vị" — **không có nút** |
+| `ADMIN` | ban quản lý | "Đang chờ ban quản lý" |
+
+Trước khi có trường này, giao diện phải ĐOÁN bằng cách xem `payment_quote` hay
+`viewing_approval` khác null. Suy diễn ấy đúng với đúng hai loại chờ đang có và
+sai ngay khi xuất hiện loại thứ ba — mà cái giá của việc sai là dựng nút "Xác
+nhận" cho một quyết định người dùng không có quyền ra.
+
+### Danh mục năng lực ≠ danh sách tool
+
+`_CAPABILITY_CATALOGUE` là thứ NGƯỜI DÙNG chọn được; `ALLOWED_TOOLS` là thứ hệ
+thống chạy được. Hai cái không bằng nhau, và cố tình như vậy:
+
+| Tool | Có trong catalogue? | Vì sao |
+|---|---|---|
+| `book_shuttle` | **không** | cần `viewing_id` — chỉ tồn tại sau khi có lịch. Là mục riêng thì người chưa đặt lịch chọn vào ngõ cụt. Planner tự thêm task khi khách nói cần xe đón. |
+| `pay_fee` | **không** | trả phí là bước xác nhận trong luồng đặt chỗ, không phải việc đi tìm từ menu. |
+
+UX tích hợp, kiến trúc vẫn tách tool.
+
+### Chạy lại được là một yêu cầu, không phải may mắn
+
+Mỗi câu trả lời bổ sung khiến backend lập lại kế hoạch **từ đầu** và gọi lại
+những tool đã chạy thành công ở lượt trước. Nên các tool ghi dữ liệu phải bất
+biến với chính chủ: `register_vehicle` đăng ký lại biển của mình trả về đúng xe
+cũ thay vì báo trùng. Biển của **người khác** vẫn xung đột — trả xe của người
+khác ra là rò rỉ dữ liệu, không phải tiện lợi.
 
 Nguyên tắc chung: **LLM đề xuất, code quyết định.** Ba thứ quan trọng nhất đều
 không đi qua model — quyền đến từ mapping đã xác minh trong PostgreSQL, số tiền
@@ -150,9 +219,12 @@ stateDiagram-v2
     PENDING --> NEEDS_INFORMATION: Planner thiếu dữ liệu
     NEEDS_INFORMATION --> PENDING: /continue tạo workflow CON<br/>(cha được archive)
     PENDING --> RUNNING: plan hợp lệ, qua các cổng
-    RUNNING --> WAITING_APPROVAL: có bước pay_fee
-    WAITING_APPROVAL --> SUCCESS: người dùng duyệt
-    WAITING_APPROVAL --> CANCELLED: người dùng từ chối<br/>(booking được GIỮ, không thu tiền)
+    RUNNING --> WAIT_USER: có bước pay_fee
+    RUNNING --> WAIT_PROVIDER: có bước tham quan
+    WAIT_USER --> SUCCESS: người dùng duyệt
+    WAIT_USER --> CANCELLED: người dùng từ chối<br/>(booking được GIỮ, không thu tiền)
+    WAIT_PROVIDER --> SUCCESS: đơn vị duyệt → đặt xe →<br/>ghi câu chốt → RỒI MỚI SUCCESS
+    WAIT_PROVIDER --> FAILED: đơn vị từ chối, hoặc<br/>khung giờ đã mất khi hoàn tất duyệt
     RUNNING --> SUCCESS: mọi bước xong
     RUNNING --> FAILED: bước hỏng, có error_code
     NEEDS_INFORMATION --> CANCELLED: huỷ yêu cầu
@@ -161,9 +233,37 @@ stateDiagram-v2
     CANCELLED --> [*]
 ```
 
+`WAIT_USER` và `WAIT_PROVIDER` là **cùng một status** `WAITING_APPROVAL`, phân
+biệt bằng `approval_actor` (xem A3). Không phát minh trạng thái mới cho mỗi loại
+chờ: thêm status là thêm một giá trị mà mọi nơi đọc status phải học.
+
 Trạng thái kết thúc là kết thúc: không có đường quay lại `RUNNING`. Một
 workflow bị bỏ dở quá TTL được sweeper đánh dấu `FAILED` kèm mã lỗi, không nằm
 `PENDING` vĩnh viễn.
+
+### Thứ tự ghi khi đơn vị duyệt — không được đảo
+
+```
+đơn vị bấm Duyệt
+  → materialize lịch qua Tour provider
+  → Executor chạy nốt DAG (finalize=False — KHÔNG tự chốt SUCCESS)
+  → ghi kết quả nghiệp vụ vào workflow_tasks
+  → sinh + ghi câu trả lời cuối (assistant_for_status = SUCCESS)
+  → RỒI MỚI update_workflow_status(SUCCESS)
+```
+
+Đảo hai bước cuối tạo ra một khoảng — dài bằng một nhịp poll — mà workflow đã
+xong còn câu người dùng đọc vẫn là câu của lúc chờ. Đo được trong database trước
+khi sửa: `status = SUCCESS` nhưng `assistant_for_status = WAITING_APPROVAL`, và
+khách đọc "Đơn vị tour đang xác nhận lịch" cho một việc đã hoàn tất. Bất biến này
+được giữ bằng test (`finalize is False` trong `test_viewing_approval_routes.py`).
+
+### Vòng đời hàng chờ duyệt
+
+`AWAITING → APPROVED | REJECTED | EXPIRED`. `EXPIRED` **không phải** quyết định
+của con người nên nó tách khỏi `REJECTED`: yêu cầu quá ngày tự rời hàng chờ khi
+cổng `/review` tải danh sách. Không xoá dòng nào — bằng chứng ai yêu cầu gì vẫn
+giữ nguyên.
 
 ## A5. Luồng liên kết căn hộ — nằm NGOÀI agent
 
@@ -196,6 +296,12 @@ người dùng.
 | `p118.llm.trace` (stdout) | plan quyết gì · tác vụ nào hỏng vì sao · câu trả lời | `P118_LLM_TRACE=1` |
 | `/ready` | cấu hình LLM · DB · migration · 7 connector | luôn bật |
 | `execution_logs` | vết chạy từng bước | luôn bật |
+| Tự duyệt lịch tham quan | bỏ qua bước chờ đơn vị sau N giây | `P118_AUTO_APPROVE_VIEWING_SECONDS=30` |
+
+Tự duyệt là **tiện ích demo, mặc định TẮT**. Bật lên nghĩa là mọi lịch tham quan
+đều được chấp thuận mà không ai xem — trong hệ thống thật đó là bỏ hẳn một bước
+kiểm soát. Nó đi qua ĐÚNG `resume_viewing_after_approval` mà đơn vị dùng, và ghi
+`decided_by = "auto-demo"` để nhìn vào database là biết quyết định do máy đưa ra.
 
 `llm_usage` cố ý **không** lưu prompt hay câu trả lời: nó nằm trong DB nghiệp vụ,
 và prompt mang dữ liệu người dùng. Muốn xem nội dung thì dùng trace ra stdout.
