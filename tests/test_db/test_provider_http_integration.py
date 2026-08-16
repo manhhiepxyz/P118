@@ -147,11 +147,37 @@ async def test_register_vehicle_rejects_an_unknown_resident(transport) -> None:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_plate_is_rejected(transport) -> None:
-    await _register_vehicle(transport, "51E-20002")
+async def test_registering_the_same_plate_again_returns_the_same_vehicle(transport) -> None:
+    """Chủ xe đăng ký lại biển của mình → nhận lại đúng chiếc xe cũ.
+
+    Không phải sự tiện lợi mà là điều kiện để CHẠY LẠI một kế hoạch: mỗi lần
+    người dùng trả lời câu hỏi bổ sung, backend lập lại kế hoạch từ đầu và gọi
+    lại `register_vehicle` cho biển đã đăng ký ở lượt trước.
+    """
+    vehicle_id = await _register_vehicle(transport, "51E-20002")
     response = await transport.post(
         "/api/vehicles",
         json={"resident_id": SEEDED_RESIDENT, "plate_number": "51E-20002", "vehicle_type": "car"},
+    )
+    assert response.status_code == 201
+    assert response.json()["data"]["vehicle_id"] == vehicle_id
+
+
+@pytest.mark.asyncio
+async def test_duplicate_plate_from_another_resident_is_rejected(transport, seeded_pool) -> None:
+    """Ranh giới: biển của NGƯỜI KHÁC vẫn xung đột, không trả xe ra ngoài."""
+    await _register_vehicle(transport, "51E-20003")
+    async with seeded_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO residents (resident_id, full_name, apartment_code, residential_area)
+            VALUES ('RES-OTHER', 'Nguoi Khac', 'X0101', 'Khu Khac')
+            ON CONFLICT DO NOTHING
+            """
+        )
+    response = await transport.post(
+        "/api/vehicles",
+        json={"resident_id": "RES-OTHER", "plate_number": "51E-20003", "vehicle_type": "car"},
     )
     assert response.status_code == 409
     assert response.json()["error_code"] == "VEHICLE_ALREADY_EXISTS"

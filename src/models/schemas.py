@@ -308,6 +308,15 @@ class DemoWorkflowResponse(BaseModel):
     # nhưng KHÔNG quyết định được (người duyệt là provider qua /review). Cùng
     # status WAITING_APPROVAL như thanh toán — giao diện phân biệt bằng field này.
     viewing_approval: DemoViewingApproval | None = None
+    # AI đang cần hành động khi status = WAITING_APPROVAL.
+    #
+    # `WAITING_APPROVAL` nói "đang chờ duyệt" nhưng KHÔNG nói ai duyệt, và hai
+    # người duyệt khác nhau là hai màn hình khác nhau: người dùng thấy nút xác
+    # nhận, còn khi đơn vị duyệt thì họ không được thấy nút nào. Trước khi có
+    # trường này giao diện phải ĐOÁN bằng cách xem `payment_quote` hay
+    # `viewing_approval` khác null — một suy diễn sẽ sai ngay khi có loại chờ
+    # thứ ba.
+    approval_actor: Literal["USER", "PROVIDER", "ADMIN"] | None = None
     # Mã lỗi ỔN ĐỊNH khi workflow hỏng: `LLM_CONFIGURATION_ERROR`,
     # `PROVIDER_UNAVAILABLE`, … Dùng để đối chiếu log server và cho admin đọc.
     # KHÔNG phải tên class exception — tên class là chi tiết cài đặt, đổi theo

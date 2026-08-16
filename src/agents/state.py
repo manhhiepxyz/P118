@@ -30,6 +30,22 @@ class AgentState(TypedDict, total=False):
     goal: str
     existing_context: dict[str, Any]
 
+    # Câu người dùng vừa trả lời cho câu hỏi bổ sung — PHẢI khai ở đây.
+    #
+    # `AgentState` là TypedDict của LangGraph, và LangGraph LOẠI BỎ mọi khoá
+    # không được khai báo khi dựng state. Thiếu dòng này, `run_demo_workflow`
+    # truyền `user_answers` vào `initial_state` một cách hoàn toàn hợp lệ, không
+    # có lỗi nào ở đâu cả, và plan node đọc ra một dict RỖNG.
+    #
+    # Hệ quả nhìn thấy được: người dùng đáp "Khu B" sau khi Khu A hết chỗ,
+    # backend nhận đúng câu trả lời (`answers=['parking_zone']`), nhưng Planner
+    # lập lại kế hoạch từ goal cũ và đặt ZONE_A lần nữa — hỏng y hệt lượt trước.
+    # Đo được bằng ba mốc log liền nhau:
+    #     CONTINUE answers= ['parking_zone']
+    #     RUNJOB    answers= ['parking_zone']
+    #     APPLY_ANSWERS keys= []      ← mất ở đây
+    user_answers: dict[str, Any]
+
     # --- Kết quả bước Planner -----------------------------------------------
     planner_status: PlannerStatus
     plan: TaskPlan

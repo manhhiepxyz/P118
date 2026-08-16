@@ -245,18 +245,54 @@ async def create_vehicle(
 
         vehicle_id = await _next_id(conn, "VEH")
         try:
-            await conn.execute(
-                """
-                INSERT INTO vehicles (vehicle_id, resident_id, plate_number, vehicle_type)
-                VALUES ($1, $2, $3, $4)
-                """,
-                vehicle_id,
-                resident_id,
-                plate_number,
-                vehicle_type,
-            )
+            # SAVEPOINT quanh INSERT: một `UniqueViolation` làm HỎNG cả
+            # transaction, và mọi câu lệnh sau đó — kể cả câu tra cứu để xử lý
+            # đúng lỗi ấy — đều bị từ chối với InFailedSQLTransactionError.
+            # Transaction lồng của asyncpg chính là savepoint, nên chỉ phần
+            # INSERT bị cuộn lại.
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO vehicles (vehicle_id, resident_id, plate_number, vehicle_type)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    vehicle_id,
+                    resident_id,
+                    plate_number,
+                    vehicle_type,
+                )
         except asyncpg.UniqueViolationError as exc:
             if _violated(exc, "uq_vehicles_plate"):
+                # Đăng ký lại CHÍNH xe của mình là thao tác BẤT BIẾN: trả về xe
+                # đã có, không báo trùng.
+                #
+                # Trước đây mọi lần đăng ký lại đều hỏng, kể cả khi người đăng
+                # ký là chủ cũ. Điều đó làm hỏng mọi đường CHẠY LẠI một kế
+                # hoạch: khi người dùng trả lời câu hỏi bổ sung ("đổi sang Khu
+                # B"), backend lập lại kế hoạch từ đầu và chạy lại
+                # `register_vehicle` cho biển số vừa đăng ký thành công ở lượt
+                # trước — bước ấy hỏng, `book_parking` phụ thuộc vào nó hỏng
+                # theo, và người dùng không bao giờ đổi được khu.
+                #
+                # Đo được: workflow cha `register_vehicle=SUCCESS`, workflow con
+                # `register_vehicle=FAILED book_parking=FAILED`.
+                #
+                # Biển số của NGƯỜI KHÁC thì vẫn xung đột — đó là xung đột thật,
+                # và trả về xe của người khác là rò rỉ dữ liệu.
+                existing = await conn.fetchrow(
+                    """
+                    SELECT vehicle_id, resident_id, plate_number, vehicle_type
+                    FROM vehicles WHERE plate_number = $1
+                    """,
+                    plate_number,
+                )
+                if existing is not None and existing["resident_id"] == resident_id:
+                    return Vehicle(
+                        vehicle_id=existing["vehicle_id"],
+                        resident_id=existing["resident_id"],
+                        plate_number=existing["plate_number"],
+                        vehicle_type=existing["vehicle_type"],
+                    )
                 raise BookingError("VEHICLE_ALREADY_EXISTS", "Plate number is already registered") from exc
             raise BookingError("INVALID_INPUT", "Vehicle could not be registered") from exc
 

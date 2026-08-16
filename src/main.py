@@ -26,6 +26,7 @@ from src.orchestration.runtime_provider import (
     clear_repository_provider,
     set_repository_provider,
 )
+from src.orchestration.auto_approve import auto_approve_due_viewings
 from src.orchestration.sweeper import sweep_zombie_workflows
 from src.services.llm import LLMConfigurationError, check_llm_configuration
 
@@ -77,6 +78,27 @@ async def lifespan(app: FastAPI):
 
         sweep_task = asyncio.create_task(_sweep_forever())
         print("Zombie sweep loop started")
+
+    # Tự duyệt lịch tham quan — CHỈ khi được bật tường minh. Xem
+    # `src/orchestration/auto_approve.py` để biết vì sao mặc định là tắt.
+    auto_task = None
+    if settings.auto_approve_viewing_seconds > 0:
+        delay = settings.auto_approve_viewing_seconds
+
+        async def _auto_approve_forever() -> None:
+            while True:
+                try:
+                    await auto_approve_due_viewings(delay)
+                except Exception as exc:  # noqa: BLE001 - vòng lặp không được chết
+                    print(f"auto-approve error: {type(exc).__name__}")
+                # Nhịp quét bằng 1/3 độ trễ, tối thiểu 5 giây: chờ đúng bằng
+                # `delay` thì thời gian thực tế có thể gấp đôi khi yêu cầu đến
+                # ngay sau một lượt quét, và người demo sẽ ngồi nhìn màn hình
+                # lâu gấp đôi con số đã hứa.
+                await asyncio.sleep(max(5, delay // 3))
+
+        auto_task = asyncio.create_task(_auto_approve_forever())
+        print(f"Auto-approve viewing loop started ({delay}s) — CHẾ ĐỘ DEMO")
     yield
 
     clear_repository_provider()
@@ -84,10 +106,12 @@ async def lifespan(app: FastAPI):
     # Đóng pool THẬT đúng một lần, ở đúng nơi đã tạo ra nó.
     await repository._pool._inner.close()  # noqa: SLF001 - composition root sở hữu pool
 
-    if sweep_task is not None:
-        sweep_task.cancel()
+    for task in (sweep_task, auto_task):
+        if task is None:
+            continue
+        task.cancel()
         try:
-            await sweep_task
+            await task
         except asyncio.CancelledError:
             pass
     print("Shutting down...")

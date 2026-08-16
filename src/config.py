@@ -2,6 +2,7 @@ from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -84,6 +85,33 @@ class Settings(BaseSettings):
     # sống) khi poll danh sách; tắt trong test để tránh sweep đụng DB thật.
     payment_approval_ttl_hours: int = 24
     zombie_sweep_enabled: bool = True
+
+    # `auto_approve_viewing_seconds`: tự duyệt lịch tham quan sau N giây.
+    #
+    # 0 = TẮT, và đó là mặc định. Đây thuần tuý là tiện ích DEMO: khi trình bày
+    # một mình thì không có ai ngồi ở cổng /review để bấm nút, và dừng lại giải
+    # thích "giờ tôi đăng nhập bằng tài khoản khác" làm đứt mạch.
+    #
+    # Mặc định phải là tắt vì bật nó lên nghĩa là MỌI lịch tham quan đều được
+    # chấp thuận mà không ai xem — trong một hệ thống thật thì đó là bỏ hẳn
+    # bước kiểm soát, không phải một tuỳ chọn tiện lợi.
+    #
+    # Cổng /review vẫn hoạt động bình thường khi bật: ai bấm trước thì tính,
+    # vì cả hai đường đi qua cùng `resume_viewing_after_approval` và cùng khoá
+    # `WHERE status='AWAITING'`.
+    #
+    # Nhận cả `P118_AUTO_APPROVE_VIEWING_SECONDS` lẫn tên trần: settings ở đây
+    # không có `env_prefix`, nên đặt tên có tiền tố P118_ (cho khớp
+    # `P118_LLM_TRACE`) sẽ KHÔNG được đọc nếu không khai alias — và một biến
+    # môi trường bị bỏ qua trong im lặng là kiểu lỗi mất nhiều thời gian nhất
+    # để nhận ra: log không nói gì, tính năng chỉ đơn giản không chạy.
+    auto_approve_viewing_seconds: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "P118_AUTO_APPROVE_VIEWING_SECONDS",
+            "AUTO_APPROVE_VIEWING_SECONDS",
+        ),
+    )
     zombie_sweep_interval_seconds: int = 300
     zombie_running_ttl_hours: float = 0.5
 

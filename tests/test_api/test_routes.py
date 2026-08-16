@@ -254,7 +254,14 @@ async def test_capability_catalog_is_user_facing_and_marks_resident_services(cli
     assert response.status_code == 200
     body = response.json()
     assert any(item["name"] == "Đặt lịch tham quan dự án" for item in body["capabilities"])
-    assert any(item["name"] == "Đặt xe đưa đón tham quan" for item in body["capabilities"])
+    # Xe đưa đón KHÔNG phải một năng lực đứng riêng.
+    #
+    # `book_shuttle` cần `viewing_id` — id chỉ tồn tại sau khi lịch tham quan
+    # đã được tạo. Rao nó như một mục độc lập là mời người chưa có lịch chọn
+    # một việc họ không có cách nào hoàn thành. Tool vẫn còn trong
+    # `ALLOWED_TOOLS`; Planner tự thêm task khi khách nói cần xe đón trong lúc
+    # đặt lịch. UX tích hợp, kiến trúc vẫn tách tool.
+    assert not any(item["name"] == "Đặt xe đưa đón tham quan" for item in body["capabilities"])
     assert any(item["requires_resident"] for item in body["capabilities"])
     assert not any(item["name"] == "Tìm gợi ý bất động sản" for item in body["capabilities"])
     assert "register_vehicle" not in response.text

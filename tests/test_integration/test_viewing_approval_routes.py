@@ -108,8 +108,12 @@ class _FakeTour:
 class _FakeExecutor:
     """Thay `Executor`: ghi nhận seed rồi trả kết quả đặt xe 4 thông tin tài xế.
 
-    Emulate `finalize=True` bằng cách đẩy workflow về SUCCESS — Executor thật
-    làm đúng việc này; nếu không, workflow đứng yên ở WAITING_APPROVAL.
+    Bản giả phải cập nhật TRẠNG THÁI TASK giống Executor thật, vì phía gọi đọc
+    lại `workflow_tasks` để quyết định workflow SUCCESS hay FAILED. Bản trước
+    chỉ emulate `finalize=True` bằng cách đẩy thẳng workflow về SUCCESS; khi
+    caller chuyển sang `finalize=False` và tự chốt trạng thái từ task rows, một
+    bản giả không ghi task row sẽ làm mọi task trông như còn PENDING và workflow
+    thành FAILED — một thất bại của ĐỒ GIẢ, không phải của sản phẩm.
     """
 
     instances: list["_FakeExecutor"] = []
@@ -138,6 +142,9 @@ class _FakeExecutor:
                 "seed_results": seed_results,
             }
         )
+        # Executor thật đánh SUCCESS cho từng task nó chạy xong.
+        for task in getattr(plan, "tasks", []):
+            await self.repository.update_task_status(workflow_id, task.task_id, TaskStatus.SUCCESS)
         if finalize:
             await self.repository.update_workflow_status(workflow_id, WorkflowStatus.SUCCESS)
         return workflow_id, {"T2": StandardResult.ok(data=dict(_SHUTTLE_RESULT))}
@@ -346,7 +353,14 @@ async def test_approve_materializes_and_resumes_with_driver_details(
     # Resume chạy đúng một lần với seed đầy đủ.
     call = _executor_call()
     assert call["workflow_id"] == workflow_id
-    assert call["finalize"] is True
+    # `finalize=False` là CỐ Ý, và đây là chỗ giữ nó.
+    #
+    # Executor không được tự chốt SUCCESS ở nhánh này. Nếu nó chốt, workflow
+    # chuyển sang SUCCESS trước khi câu trả lời cuối được ghi — và khách đọc
+    # được "Đơn vị tour đang xác nhận lịch" cho một việc đã xong hẳn. Đó là lỗi
+    # thật đã đo được trong database (`assistant_for_status` còn kẹt ở
+    # WAITING_APPROVAL trong khi `status` đã là SUCCESS).
+    assert call["finalize"] is False, "Executor không được tự chốt SUCCESS trước khi có câu trả lời cuối"
     assert call["seed_statuses"] == {"T1": TaskStatus.SUCCESS}
     seeded_viewing = call["seed_results"]["T1"]
     assert seeded_viewing.data["viewing_id"] == "VIEW-001"
@@ -377,9 +391,24 @@ async def test_approve_materializes_and_resumes_with_driver_details(
         assert row["status"] == "APPROVED"
         assert row["decided_by"] == provider["username"]
         wf = await conn.fetchrow(
-            "SELECT status FROM workflows WHERE workflow_id = $1", workflow_id
+            """
+            SELECT status, assistant_for_status, assistant_answer
+            FROM workflows WHERE workflow_id = $1
+            """,
+            workflow_id,
         )
         assert wf["status"] == "SUCCESS"
+
+        # Câu trả lời cuối phải được ghi TRƯỚC khi trạng thái thành SUCCESS.
+        #
+        # Không có ràng buộc này thì tồn tại một khoảng — dài bằng cả một nhịp
+        # poll — mà workflow đã xong còn câu khách đọc vẫn là câu của lúc chờ.
+        # Đo được đúng như vậy trong database trước khi sửa:
+        #   status = SUCCESS, assistant_for_status = WAITING_APPROVAL
+        assert wf["assistant_for_status"] == "SUCCESS", (
+            "câu trả lời vẫn thuộc về trạng thái cũ khi workflow đã SUCCESS"
+        )
+        assert "đang xác nhận" not in (wf["assistant_answer"] or "")
 
 
 @pytest.mark.asyncio
@@ -476,3 +505,41 @@ async def test_reject_fails_chain_and_records_reason(viewing_env, viewing_client
         )
         # Viewing + shuttle phụ thuộc đều FAILED — không giữ "chỗ đỗ" nào.
         assert {t["status"] for t in tasks} == {"FAILED"}
+
+
+@pytest.mark.asyncio
+async def test_stale_approvals_leave_the_queue(viewing_env, viewing_client):
+    """Yêu cầu quá ngày không được nằm mãi trong hàng chờ.
+
+    Người duyệt không có cách nào nhìn ra một yêu cầu đã hết hiệu lực: nó trông
+    y hệt yêu cầu hợp lệ. Bấm Duyệt xong mới vỡ ở Tour provider và trả 502 —
+    một lỗi không nói được gì cho người đang đứng trước màn hình. Đã gặp đúng
+    tình huống này khi chạy e2e: hàng chờ còn một yêu cầu cũ, test bấm nhầm vào
+    nó, và bốn kiểm tra đỏ vì lý do không liên quan đến sản phẩm.
+    """
+    from src.orchestration.viewing_approval import (
+        APPROVAL_EXPIRED,
+        EXPIRED,
+        expire_stale_viewing_approvals,
+    )
+
+    customer = await _register_customer(viewing_client)
+    workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
+
+    async with viewing_env.repo._pool.acquire() as conn:  # noqa: SLF001
+        await conn.execute(
+            "UPDATE viewing_approvals SET viewing_date = CURRENT_DATE - 1 WHERE workflow_id = $1",
+            uuid.UUID(workflow_id),
+        )
+        changed = await expire_stale_viewing_approvals(viewing_env.repo._pool)  # noqa: SLF001
+        assert changed == 1
+        row = await conn.fetchrow(
+            "SELECT status, reject_reason FROM viewing_approvals WHERE workflow_id = $1",
+            uuid.UUID(workflow_id),
+        )
+
+    assert row["status"] == EXPIRED
+    assert row["reject_reason"] == APPROVAL_EXPIRED
+
+    # Không xoá dữ liệu — bằng chứng ai yêu cầu gì vẫn phải còn.
+    assert row is not None

@@ -70,3 +70,17 @@ async def seed_resident(wire_provider_pool: asyncpg.Pool) -> str:
             """
         )
     return "RES-MOCK"
+
+
+@pytest_asyncio.fixture
+async def seed_second_resident(wire_provider_pool: asyncpg.Pool) -> str:
+    """Một cư dân KHÁC — để kiểm ranh giới của tính bất biến khi đăng ký xe."""
+    async with wire_provider_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO residents (resident_id, full_name, apartment_code, residential_area)
+            VALUES ('RES-MOCK-2', 'Cu Dan Khac', 'M1202', 'Khu Mock')
+            ON CONFLICT DO NOTHING
+            """
+        )
+    return "RES-MOCK-2"

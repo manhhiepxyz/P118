@@ -18,10 +18,13 @@ Ranh giới ba tầng:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from langgraph.graph import END, StateGraph
+
+logger = logging.getLogger(__name__)
 
 from src.agents.nodes.example_node import analyze_node, respond_node
 from src.agents.planner import Planner, PlannerError, build_question

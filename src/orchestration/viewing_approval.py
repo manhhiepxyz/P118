@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 AWAITING = "AWAITING"
 APPROVED = "APPROVED"
 REJECTED = "REJECTED"
+# Yêu cầu không còn duyệt được nữa — xem `expire_stale_viewing_approvals`.
+EXPIRED = "EXPIRED"
+
+# Lý do một yêu cầu bị loại khỏi hàng chờ. Ghi vào `reject_reason` để người
+# duyệt và khách đọc được cùng một câu, thay vì một dòng trống khó hiểu.
+APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
 
 
 class ViewingApprovalRequiredError(PolicyInterruptionError):
@@ -223,6 +229,47 @@ async def list_viewing_approvals(
             limit,
         )
     return [_row_to_pending(row) for row in rows]
+
+
+async def expire_stale_viewing_approvals(pool: asyncpg.Pool) -> int:
+    """Loại khỏi hàng chờ các yêu cầu đã QUÁ NGÀY. Trả số dòng đã đổi.
+
+    Duyệt một buổi tham quan của tuần trước là vô nghĩa, và một yêu cầu như vậy
+    nằm lại trong hàng chờ trông y hệt yêu cầu hợp lệ.
+
+    Phạm vi dừng ở đây một cách CÓ Ý THỨC — không kiểm "khung giờ đã bị người
+    khác đặt mất":
+
+    Bản đầu của hàm này có thêm một nhánh `SLOT_NO_LONGER_AVAILABLE` đối chiếu
+    với bảng `tour_bookings`. Nhánh ấy không bao giờ chạy được: provider Tour là
+    mock giữ lịch trong BỘ NHỚ tiến trình (`src/services/mock/tour.py` dùng
+    `Store()` riêng), còn `tour_bookings` trong p118_db thì trống — đã kiểm và
+    đếm được 0 dòng. Một guard luôn im lặng còn tệ hơn không có guard: nó khiến
+    người đọc code tin rằng trường hợp ấy đã được xử lý.
+
+    Trường hợp trùng khung giờ vẫn KHÔNG làm hỏng demo, chỉ là nó được xử lý ở
+    chỗ khác — lúc bấm Duyệt: `record_viewing_decision` đã ghi quyết định trước
+    khi gọi provider, nên yêu cầu rời hàng chờ ngay; còn provider từ chối thì
+    người duyệt nhận đúng câu "Khung giờ tham quan đã hết chỗ khi hoàn tất
+    duyệt" chứ không phải một lỗi trống.
+    """
+    rows = await pool.fetch(
+        """
+        UPDATE viewing_approvals
+        SET status = $1,
+            reject_reason = $2,
+            decided_at = NOW()
+        WHERE status = $3
+          AND viewing_date < CURRENT_DATE
+        RETURNING workflow_id
+        """,
+        EXPIRED,
+        APPROVAL_EXPIRED,
+        AWAITING,
+    )
+    if rows:
+        logger.info("đã loại %d yêu cầu tham quan quá ngày khỏi hàng chờ", len(rows))
+    return len(rows)
 
 
 async def record_viewing_decision(

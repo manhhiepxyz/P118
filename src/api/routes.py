@@ -19,6 +19,7 @@ from src.api.small_talk import SmallTalk, SpeechType, answer_capability_question
 from src.common.enums import ErrorCode, WorkflowStatus
 from src.common.failure_messages import repair_question, task_failure_message
 from src.common.failures import classify_failure, failure_for_code
+from src.common.tool_contract import TOOL_CONTRACTS
 from src.common.projects import PROJECTS, find_project_id, project_name, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
 from src.config import get_settings
@@ -300,6 +301,19 @@ def _resolve_public_answers(answers: dict[str, Any]) -> tuple[dict[str, Any], st
     return resolved, None
 
 
+def _is_canonical_enum(field: str, value: str) -> bool:
+    """Giá trị này đã là một giá trị hợp lệ của contract cho field đó chưa.
+
+    Đọc thẳng `TOOL_CONTRACTS` — nguồn sự thật duy nhất cho enum — thay vì chép
+    một bảng thứ hai ở đây rồi để hai bảng lệch nhau.
+    """
+    for contract in TOOL_CONTRACTS.values():
+        spec = contract.inputs.get(field)
+        if spec is not None and spec.enum is not None and value in spec.enum:
+            return True
+    return False
+
+
 def _extract_structured_follow_up_answers(
     fields: dict[str, str | bool | int | float],
     missing_fields: list[str],
@@ -316,7 +330,20 @@ def _extract_structured_follow_up_answers(
             unresolved.append(name)
             continue
         raw = fields[name]
-        if name in _BOOLEAN_FIELDS and isinstance(raw, str) and raw.casefold() in {"true", "false"}:
+        if isinstance(raw, str) and _is_canonical_enum(name, raw):
+            # Giá trị ĐÃ ở dạng chuẩn của contract (`ZONE_B`, `car`, `buy`).
+            #
+            # Không đưa nó qua bộ phân tích văn bản: bộ ấy được viết để hiểu
+            # tiếng Việt của người dùng ("khu B", "ô tô"), nên gặp chính giá trị
+            # chuẩn thì nó không nhận ra và trả về "chưa hiểu" — câu trả lời bị
+            # BỎ ÂM THẦM, Planner giữ nguyên giá trị cũ, và lượt chạy lại hỏng
+            # y hệt lượt trước.
+            #
+            # Đo được: người dùng đáp "Khu B", giao diện gửi
+            # `{"parking_zone": "ZONE_B"}`, backend trả PENDING như đã nhận —
+            # rồi `book_parking` vẫn đặt ZONE_A và hỏng NO_AVAILABILITY.
+            answers[name] = raw
+        elif name in _BOOLEAN_FIELDS and isinstance(raw, str) and raw.casefold() in {"true", "false"}:
             answers[name] = raw.casefold() == "true"
         elif isinstance(raw, str):
             parsed, missing = _extract_follow_up_answers(raw, [name])
@@ -2109,6 +2136,8 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                 else "Đã giữ chỗ đỗ xe. Bạn xác nhận thanh toán để mình hoàn tất nhé."
             ),
             payment_quote=quote.as_public_dict() if quote is not None else None,
+            # Chính CHỦ workflow quyết khoản tiền của mình.
+            approval_actor="USER",
             plan=plan_view,
         )
     if policy_error == "VIEWING_APPROVAL_REQUIRED":
@@ -2130,6 +2159,9 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             workflow_id=state.get("workflow_id"),
             summary=summary,
             viewing_approval=DemoViewingApproval(**approval),
+            # ĐƠN VỊ tham quan quyết, không phải khách. Giao diện đọc trường
+            # này để KHÔNG dựng nút xác nhận cho khách.
+            approval_actor="PROVIDER",
             plan=plan_view,
         )
     if policy_error is not None:
@@ -2757,6 +2789,9 @@ def _waiting_approval_view(
             "amount": pending["amount"],
             "currency": pending["currency"],
         },
+        # Tiền của khách thì khách quyết — cùng lý do như nhánh tham quan, đặt
+        # ở cả đường dựng lại từ database.
+        approval_actor="USER",
         plan=_plan_view(plan),
         tasks=tasks,
         persisted=True,
@@ -2835,6 +2870,13 @@ def _waiting_viewing_approval_view(
         stage="WAITING_APPROVAL",
         message="Đang chờ đơn vị xác nhận lịch tham quan.",
         viewing_approval=DemoViewingApproval(**pending),
+        # PHẢI đặt ở cả đường dựng-lại-từ-DB này, không chỉ ở đường đầu tiên.
+        #
+        # Lượt gọi đầu đi qua policy và có `approval_actor`; mọi lượt poll sau
+        # đó dựng lại response từ database. Thiếu ở đây thì sau đúng một nhịp
+        # poll, giao diện mất thông tin ai đang duyệt và quay về hiển thị
+        # "Chờ bạn" cho một quyết định của đơn vị. Đo được ở e2e.
+        approval_actor="PROVIDER",
         plan=_plan_view(plan),
         tasks=tasks,
         persisted=True,
@@ -3123,10 +3165,6 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
         description="Chọn dự án, ngày và giờ muốn tham quan.",
     ),
     DemoCapabilityItem(
-        name="Đặt xe đưa đón tham quan",
-        description="Đặt xe cho buổi tham quan dự án sau khi đã có lịch.",
-    ),
-    DemoCapabilityItem(
         name="Đăng ký quan tâm / nhận tư vấn",
         description="Gửi nhu cầu để bộ phận tư vấn liên hệ.",
     ),
@@ -3146,6 +3184,16 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
         requires_resident=True,
     ),
 )
+
+# "Đặt xe đưa đón tham quan" đã được gỡ khỏi danh mục.
+#
+# Nó cần `viewing_id` — một id chỉ tồn tại SAU khi lịch tham quan đã được tạo.
+# Là một mục đứng riêng, nó chỉ dùng được bởi người đã đặt lịch từ trước; người
+# mới chọn nó sẽ vướng một yêu cầu họ không có cách nào đáp ứng.
+#
+# Tool `book_shuttle` KHÔNG bị gỡ: khi người dùng nói cần xe đón trong lúc đặt
+# lịch tham quan, Planner tự thêm task `book_shuttle` nối bằng InputRef vào
+# `viewing_id`. UX tích hợp, kiến trúc vẫn tách tool.
 
 # "Thanh toán phí đỗ xe" đã được gỡ khỏi danh mục.
 #
@@ -3392,7 +3440,13 @@ async def decide_demo_payment(
 
 # Trạng thái nào thuộc nhóm nào trên giao diện tổng quan.
 _ACTIVE_STATUSES = ("PENDING", "RUNNING")
-_ATTENTION_STATUSES = ("WAITING_APPROVAL",)
+# `NEEDS_INFORMATION` PHẢI nằm ở đây.
+#
+# Thiếu nó, một yêu cầu đang chờ chính người dùng trả lời không thuộc nhóm nào:
+# không "đang chạy", không "cần chú ý", không "đã xong". Nó chỉ hiện khi lọc
+# "tất cả" — nghĩa là đúng thứ cần bạn nhất lại là thứ dễ biến mất nhất khỏi
+# danh sách.
+_ATTENTION_STATUSES = ("WAITING_APPROVAL", "NEEDS_INFORMATION")
 _COMPLETED_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
 
 _LIST_FILTERS: dict[str, tuple[str, ...]] = {

@@ -40,6 +40,7 @@ from src.api.deps import require_roles
 from src.api.routes import _DEMO_JOBS
 from src.config import get_settings
 from src.orchestration.demo_service import reject_viewing, resume_viewing_after_approval
+from src.orchestration.viewing_approval import expire_stale_viewing_approvals
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.viewing_approval import list_viewing_approvals
 
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/viewing-approvals", tags=["viewing-approvals"])
 
-_STATUSES = {"AWAITING", "APPROVED", "REJECTED"}
+_STATUSES = {"AWAITING", "APPROVED", "REJECTED", "EXPIRED"}
 
 
 class _DecideBody(BaseModel):
@@ -90,6 +91,14 @@ async def list_viewing_approval_records(
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
+        # Dọn hàng chờ TRƯỚC khi trả danh sách.
+        #
+        # Người duyệt không có cách nào biết một yêu cầu đã hết hiệu lực chỉ
+        # bằng cách nhìn: nó trông y hệt yêu cầu hợp lệ. Bấm Duyệt xong mới vỡ
+        # ở Tour provider, và lỗi trả về là 502 — không nói được gì cho người
+        # đang đứng trước màn hình. Lọc ở đây thì thứ không duyệt được không
+        # bao giờ xuất hiện như thể duyệt được.
+        await expire_stale_viewing_approvals(pool)
         items = await list_viewing_approvals(pool, status)
     finally:
         await pool.close()

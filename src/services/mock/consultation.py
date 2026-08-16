@@ -141,10 +141,25 @@ def register_property_interest(
     except UnknownProjectError as exc:
         raise not_found("PROJECT_NOT_FOUND", str(exc)) from exc
 
-    # Chống trùng theo (DỰ ÁN, loại quan tâm). Bản cũ khoá theo (cư dân, loại)
-    # nên quan tâm dự án thứ hai cùng loại bị từ chối nhầm.
-    if any(
-        c.get("project_id") == project.project_id and c.get("interest_type") == payload.interest_type
+    # Chống trùng theo (NGƯỜI ĐĂNG KÝ, dự án, loại quan tâm).
+    #
+    # Bản trước khoá theo (dự án, loại) và bỏ qua hoàn toàn người gửi. Hệ quả:
+    # NGƯỜI ĐẦU TIÊN quan tâm "mua Ocean Park" khoá luôn dịch vụ đó cho tất cả
+    # những người còn lại — ai đăng ký sau cũng nhận `INTEREST_ALREADY_EXISTS`,
+    # kể cả tài khoản vừa tạo. Đo được: đăng ký tư vấn hỏng ở mọi lượt demo cho
+    # tới khi restart container.
+    #
+    # Hai người cùng quan tâm một dự án là chuyện bình thường; chỉ CÙNG MỘT
+    # NGƯỜI đăng ký hai lần mới là trùng. Danh tính lấy từ số điện thoại (rồi
+    # tới email/tên) — đó là thứ một đơn vị tư vấn thật dùng để nhận ra khách.
+    #
+    # Không có thông tin liên hệ nào thì KHÔNG chặn: chặn dựa trên một danh
+    # tính mình không biết chính là lỗi vừa sửa ở trên.
+    who = (payload.phone or payload.email or payload.full_name or "").strip().casefold()
+    if who and any(
+        c.get("project_id") == project.project_id
+        and c.get("interest_type") == payload.interest_type
+        and (c.get("contact_key") or "") == who
         for c in store.consultations.values()
     ):
         raise conflict(
@@ -162,6 +177,8 @@ def register_property_interest(
             # Chỉ tới được đây khi schema đã xác nhận consent is True.
             "consent": True,
             "interest_status": "RECEIVED",
+            # Khoá nhận diện người đăng ký, dùng cho lần kiểm trùng sau.
+            "contact_key": who,
             # Từ vựng nội bộ giữ lại để lịch sử dữ liệu cũ vẫn đọc được.
             "consultation_type": None,
             "buy_sub_type": None,

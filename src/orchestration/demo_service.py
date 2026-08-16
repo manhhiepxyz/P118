@@ -27,6 +27,7 @@ from src.executor.executor import Executor
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.deps import build_connectors, build_execution_boundary
+from src.orchestration.final_answer import compose as compose_final_answer
 from src.orchestration.payment_approval import (
     APPROVED,
     AWAITING,
@@ -621,10 +622,38 @@ async def resume_payment_after_approval(
         # Nguồn sự thật là `workflow_tasks` cộng với `payment_approvals`: bước
         # thanh toán và báo giá đều đã được persist tường minh.
         task_rows = await repository.list_tasks(workflow_id)
+
+        # Chỉ những bước mà THANH TOÁN THỰC SỰ PHỤ THUỘC mới phải xong trước.
+        #
+        # Bản trước đòi MỌI task khác `pay_fee` đều SUCCESS. Luật đó sai khi một
+        # yêu cầu gộp nhiều việc độc lập: người dùng nói "đặt lịch tham quan và
+        # đăng ký chỗ đỗ xe" thì plan có cả `schedule_property_viewing` (đang
+        # chờ ĐƠN VỊ duyệt, nên còn PENDING) lẫn `book_parking` (đã xong, đang
+        # chờ NGƯỜI DÙNG trả tiền). Hai cổng duyệt khoá lẫn nhau: thanh toán bị
+        # từ chối vì bước tham quan chưa chạy, còn bước tham quan thì phải chờ
+        # đơn vị — người dùng bấm Xác nhận và chỉ nhận về 409.
+        #
+        # Đo được đúng như vậy: T1 schedule_property_viewing=PENDING,
+        # T2 register_vehicle=SUCCESS, T3 book_parking=SUCCESS,
+        # T4 pay_fee=WAITING_APPROVAL → mọi lần bấm duyệt đều 409.
+        #
+        # Luật đúng là bao đóng phụ thuộc của chính task `pay_fee`: trả tiền cho
+        # chỗ đỗ không liên quan gì tới một buổi tham quan chưa được duyệt.
+        depends = {row["task_id"]: list(row.get("depends_on") or []) for row in task_rows}
+        pay_ids = [row["task_id"] for row in task_rows if row.get("tool") == "pay_fee"]
+        needed: set[str] = set()
+        queue = [parent for task_id in pay_ids for parent in depends.get(task_id, [])]
+        while queue:
+            current = queue.pop()
+            if current in needed:
+                continue
+            needed.add(current)
+            queue.extend(depends.get(current, []))
+
         unfinished_prefix = [
             row["task_id"]
             for row in task_rows
-            if row.get("tool") != "pay_fee" and row.get("status") != TaskStatus.SUCCESS.value
+            if row["task_id"] in needed and row.get("status") != TaskStatus.SUCCESS.value
         ]
         if unfinished_prefix:
             raise ResumeError("PREFIX_INCOMPLETE", "Các bước trước thanh toán chưa hoàn tất.")
@@ -997,13 +1026,50 @@ async def _materialize_and_run_remaining(
             shuttle_url=shuttle_url,
         )
         executor = Executor(connectors, repository)
+        # `finalize=False` — Executor KHÔNG được tự chốt SUCCESS ở đây.
+        #
+        # Thứ tự cũ là: chạy task → set SUCCESS → (không ai sinh lại câu trả
+        # lời). Hệ quả đo được trong database: `status = SUCCESS` nhưng
+        # `assistant_for_status = WAITING_APPROVAL`, nên câu cuối cùng khách
+        # đọc vẫn là "Đơn vị tour đang xác nhận lịch" trong khi mọi việc đã
+        # xong và xe đã đặt.
+        #
+        # Thứ tự đúng: kết quả nghiệp vụ → câu trả lời cuối → RỒI MỚI SUCCESS.
+        # Khi giao diện nhìn thấy SUCCESS thì mọi thứ nó cần đã nằm sẵn trong
+        # database; không còn khoảng thời gian nào mà trạng thái đã xong còn
+        # nội dung thì chưa.
         final_workflow_id, task_results = await executor.execute(
             plan,
             workflow_id,
-            finalize=True,
+            finalize=False,
             seed_statuses={pending.task_id: TaskStatus.SUCCESS},
             seed_results={pending.task_id: result},
         )
+
+        statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
+        all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
+        final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
+
+        # Câu trả lời cuối, GHI TRƯỚC khi đổi trạng thái.
+        #
+        # Dùng thẳng `repository` đang mở thay vì `write_final_answer()`: hàm
+        # kia tự mở pool riêng, mà ở đây pool đã có — mở lồng nhau là cách chắc
+        # chắn để cạn connection dưới tải.
+        try:
+            await repository.save_assistant_response(
+                workflow_id,
+                answer=compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                suggestions=[],
+                state="FALLBACK",
+                for_status=final_status.value,
+            )
+        except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+            # Ghi hỏng thì khách đọc câu cũ. Ném lỗi thì workflow treo ở
+            # WAITING_APPROVAL trong khi lịch và xe đã đặt thật — tệ hơn nhiều.
+            logger.info("không ghi được câu chốt (%s)", type(exc).__name__)
+
+        await repository.update_workflow_status(workflow_id, final_status)
+
         return {
             "workflow_id": final_workflow_id,
             "viewing_task_id": pending.task_id,

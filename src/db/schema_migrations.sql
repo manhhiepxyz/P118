@@ -152,7 +152,7 @@ BEGIN
             workflow_id      UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
             task_id          VARCHAR(20)  NOT NULL,
             status           VARCHAR(20)  NOT NULL DEFAULT 'AWAITING'
-                                 CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED')),
+                                 CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED', 'EXPIRED')),
             project_id       VARCHAR(20)  NOT NULL,
             project_name     VARCHAR(200),
             viewing_date     DATE         NOT NULL,
@@ -687,5 +687,31 @@ BEGIN
     CREATE UNIQUE INDEX IF NOT EXISTS uq_verif_pending_vehicle
         ON verification_records (record_type, (claimed_data->>'plate_number'))
         WHERE status = 'PENDING';
+END
+$$;
+
+
+-- =============================================================
+-- 2026-08 — Vòng đời hàng chờ duyệt lịch tham quan: thêm EXPIRED
+-- =============================================================
+--
+-- Một yêu cầu AWAITING có thể mất hiệu lực mà không ai quyết định gì: ngày
+-- tham quan trôi qua, hoặc khung giờ bị người khác đặt mất. Trước đây nó nằm
+-- lại trong hàng chờ và trông y hệt yêu cầu hợp lệ — người duyệt bấm Duyệt rồi
+-- mới vỡ ở Tour provider với một lỗi 502 không nói được gì.
+--
+-- EXPIRED là một trạng thái KHÔNG PHẢI quyết định của con người, nên nó tách
+-- khỏi REJECTED: từ chối có người chịu trách nhiệm và có lý do gửi cho khách,
+-- còn hết hạn thì không.
+--
+-- Chỉ NỚI ràng buộc, không xoá dòng nào: bằng chứng ai yêu cầu gì vẫn giữ.
+DO $$
+BEGIN
+    IF to_regclass('viewing_approvals') IS NOT NULL THEN
+        ALTER TABLE viewing_approvals DROP CONSTRAINT IF EXISTS viewing_approvals_status_check;
+        ALTER TABLE viewing_approvals
+            ADD CONSTRAINT viewing_approvals_status_check
+            CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED', 'EXPIRED'));
+    END IF;
 END
 $$;
