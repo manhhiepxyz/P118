@@ -201,12 +201,39 @@ class VerifyOwnershipRequest(BaseModel):
     residential_area: str = Field(..., min_length=1, description="Tên khu đô thị")
 
 
+# ---- verification_records (provider duyệt — xác thực căn hộ / xe) ----
+class VerificationRecordCreate(BaseModel):
+    record_type: Literal["apartment", "vehicle"] = Field(
+        ...,
+        description="Loại hồ sơ xác thực",
+    )
+    record_id: str | None = Field(
+        default=None,
+        description="ID record do main app sinh (upload ảnh cần URL ổn định /uploads/{record_id}/...). Rỗng thì provider tự sinh.",
+    )
+    applicant_user_id: str | None = Field(
+        default=None,
+        description="ID tài khoản P-118 người yêu cầu (main app đặt từ JWT, browser không gửi)",
+    )
+    claimed_data: dict[str, Any] = Field(
+        ...,
+        description="apartment: {apartment_code, residential_area, full_name} — vehicle: {plate_number, vehicle_type}",
+    )
+    proof_image_urls: list[str] = Field(default_factory=list, description="URL ảnh giấy tờ minh chứng")
+
+
+class VerificationRecordDecision(BaseModel):
+    decision: Literal["approve", "reject"]
+    reject_reason: str | None = Field(default=None, description="Bắt buộc khi reject")
+    decided_by: str = Field(..., min_length=1, description="Username người duyệt (main app đặt từ JWT)")
+
+
 # ---- API Envelope (mục 6 shared_contracts.md) ----
 class ApiEnvelope(BaseModel):
     """Envelope response dạng gần ``StandardResult`` cho mọi endpoint mock."""
 
     success: bool
-    data: dict[str, Any] | None = None
+    data: dict[str, Any] | list[Any] | None = None
     error_code: str | None = None
     message: str | None = None
     retryable: bool = False
@@ -237,7 +264,9 @@ class BookTourRequest(BaseModel):
 
 # ---- book_shuttle (đặt xe tham quan căn hộ) ----
 class BookShuttleRequest(BaseModel):
-    tour_id: str = Field(..., min_length=1, description="Mã đặt lịch tham quan")
+    # Field canonical cho lịch xem nhà. `tour_id` là tên nội bộ của endpoint
+    # legacy book_tour; contract public nói `viewing_id`.
+    viewing_id: str = Field(..., min_length=1, description="Mã lịch xem nhà")
     tour_date: date = Field(..., description="Ngày tham quan, định dạng YYYY-MM-DD")
     passenger_count: int = Field(..., ge=1, le=30, description="Số người đi xe (1–30)")
 

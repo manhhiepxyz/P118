@@ -40,6 +40,7 @@ class TaskPlanValidator:
             "register_vehicle",
             "book_parking",
             "pay_fee",
+            "book_shuttle",
         }
     )
 
@@ -57,6 +58,7 @@ class TaskPlanValidator:
         "register_vehicle": frozenset({"resident_id", "plate_number", "vehicle_type"}),
         "book_parking": frozenset({"vehicle_id", "booking_date", "parking_zone"}),
         "pay_fee": frozenset({"booking_id", "amount", "currency"}),
+        "book_shuttle": frozenset({"viewing_id", "tour_date", "passenger_count"}),
     }
 
     # Xa nhất được đặt trước. Trị số rộng rãi là cố ý; điều quan trọng là CÓ
@@ -79,6 +81,7 @@ class TaskPlanValidator:
         "book_parking": "booking_date",
         "create_maintenance_request": "preferred_date",
         "schedule_move": "move_date",
+        "book_shuttle": "tour_date",
     }
 
     TIME_INPUTS: dict[str, tuple[str, time, time]] = {

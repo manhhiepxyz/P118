@@ -42,6 +42,8 @@ PROVIDER_CODES = [
     "VIEWING_ALREADY_BOOKED",
     "VIEWING_SLOT_NOT_FOUND",
     "INTEREST_ALREADY_EXISTS",
+    "SHUTTLE_ALREADY_BOOKED",
+    "VIEWING_NOT_FOUND",
 ]
 
 
@@ -63,6 +65,25 @@ def test_the_consultation_connector_recognises_a_missing_project():
 
     mapped = ConsultationConnector(base_url="http://consultation")._map_error_code("PROJECT_NOT_FOUND")
     assert mapped != ErrorCode.UNKNOWN_EXTERNAL_ERROR
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["NO_AVAILABILITY", "SHUTTLE_ALREADY_BOOKED", "VIEWING_NOT_FOUND", "TOUR_NOT_FOUND"],
+)
+def test_the_shuttle_connector_recognises_real_provider_codes(code):
+    from src.connectors.shuttle import ShuttleConnector
+
+    mapped = ShuttleConnector(base_url="http://shuttle")._map_error_code(code)
+    assert mapped != ErrorCode.UNKNOWN_EXTERNAL_ERROR, f"{code} vẫn bị gộp vào 'không rõ'"
+
+
+def test_the_tour_connector_recognises_a_missing_viewing():
+    """Standalone tour GET phát VIEWING_NOT_FOUND; connector phải giữ mã."""
+    from src.connectors.tour import TourConnector
+
+    mapped = TourConnector(base_url="http://tour")._map_error_code("VIEWING_NOT_FOUND")
+    assert mapped == ErrorCode.VIEWING_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +120,36 @@ def test_a_duplicate_interest_says_so():
     )
     assert "Vinhomes Ocean Park" in message
     assert "thử lại" not in message.lower()
+
+
+def test_a_shuttle_already_booked_says_so():
+    message = task_failure_message(
+        _Task("book_shuttle", viewing_id="VIEW-001"),
+        "Đặt xe đưa đón tham quan",
+        ErrorCode.SHUTTLE_ALREADY_BOOKED,
+    )
+    assert "đã được đặt xe" in message, message
+    assert "thử lại" not in message.lower(), "đặt lại cùng một lịch sẽ không bao giờ chạy"
+
+
+def test_a_missing_viewing_says_to_book_the_viewing_first():
+    message = task_failure_message(
+        _Task("book_shuttle"),
+        "Đặt xe đưa đón tham quan",
+        ErrorCode.VIEWING_NOT_FOUND,
+    )
+    assert "không tìm thấy lịch tham quan" in message.lower(), message
+    assert "đặt lịch tham quan trước" in message.lower(), "không nói việc cần làm"
+
+
+def test_shuttle_capacity_full_says_which_day_and_what_to_do():
+    message = task_failure_message(
+        _Task("book_shuttle", tour_date="2026-08-22"),
+        "Đặt xe đưa đón tham quan",
+        ErrorCode.NO_AVAILABILITY,
+    )
+    assert "2026-08-22" in message
+    assert "ngày khác" in message.lower()
 
 
 # ---------------------------------------------------------------------------

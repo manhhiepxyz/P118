@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2, CircleDot, Lock, ShieldAlert, XCircle } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, CircleDot, Loader2, Lock, ShieldAlert, XCircle } from 'lucide-react'
 
 import { ClarificationReply } from '../components/ClarificationReply'
 import { StatusBadge } from '../components/StatusBadge'
 import { continueWorkflow, decidePayment } from '../lib/agentApi'
+import type { AgentTaskStatus } from '../lib/types'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
 /**
@@ -35,6 +36,51 @@ function formatVnd(amount: number | undefined, currency: string | undefined): st
   if (typeof amount !== 'number') return '—'
   const formatted = new Intl.NumberFormat('vi-VN').format(amount)
   return currency === 'VND' || !currency ? `${formatted} ₫` : `${formatted} ${currency}`
+}
+
+/** Nhãn trạng thái cho TỪNG bước — user thấy ngay bước nào chờ duyệt / đã xong. */
+const TASK_LABEL: Record<AgentTaskStatus, string> = {
+  PENDING: 'Chờ bước trước',
+  RUNNING: 'Đang thực hiện',
+  WAITING_APPROVAL: 'Chờ phê duyệt',
+  SUCCESS: 'Hoàn thành',
+  FAILED: 'Không thành công',
+  CANCELLED: 'Đã huỷ',
+  NOT_RUN: 'Chưa thực hiện',
+}
+
+function taskChipClass(status: AgentTaskStatus): string {
+  switch (status) {
+    case 'SUCCESS':
+      return 'bg-teal-100 text-teal-800 dark:bg-teal-950/40 dark:text-teal-300'
+    case 'WAITING_APPROVAL':
+      return 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
+    case 'FAILED':
+      return 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300'
+    case 'RUNNING':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
+    default:
+      return 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+  }
+}
+
+function formatTaskTime(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+}
+
+/** Nhãn + giờ cho một bước. `pay_fee` là bước DUY NHẤT có phê duyệt thật — sau
+ * khi xong, nói "Đã phê duyệt" chứ không chỉ "Hoàn thành", kèm giờ duyệt. */
+function taskStatusMeta(task: { tool: string; status: AgentTaskStatus; updated_at?: string | null }) {
+  if (task.tool === 'pay_fee' && task.status === 'SUCCESS') {
+    return { label: 'Đã phê duyệt', timePrefix: 'lúc', chip: taskChipClass('SUCCESS') }
+  }
+  if (task.status === 'WAITING_APPROVAL') {
+    return { label: TASK_LABEL[task.status], timePrefix: 'từ', chip: taskChipClass(task.status) }
+  }
+  return { label: TASK_LABEL[task.status] ?? '—', timePrefix: 'lúc', chip: taskChipClass(task.status) }
 }
 
 export function WorkflowPage() {
@@ -104,7 +150,11 @@ export function WorkflowPage() {
   if (!data) return null
 
   const quote = data.payment_quote ?? {}
-  const isWaitingPayment = data.status === 'WAITING_APPROVAL'
+  // Cùng status WAITING_APPROVAL với thanh toán nhưng là chờ ĐƠN VỊ xác nhận
+  // (người duyệt là provider/admin qua /review, khách chỉ xem). Phân biệt bằng
+  // `viewing_approval` — KHÔNG dùng status riêng.
+  const isWaitingViewing = data.status === 'WAITING_APPROVAL' && data.viewing_approval != null
+  const isWaitingPayment = data.status === 'WAITING_APPROVAL' && !isWaitingViewing
   const needsInfo = data.status === 'NEEDS_INFORMATION'
 
   return (
@@ -118,7 +168,9 @@ export function WorkflowPage() {
           <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
             {data.summary || data.message || 'Yêu cầu của bạn'}
           </h1>
-          <p className="mt-1 text-sm text-gray-500">{STATUS_LABEL[data.status] ?? 'Đang xử lý'}</p>
+          <p className="mt-1 text-sm text-gray-500">
+            {isWaitingViewing ? 'Chờ đơn vị xác nhận lịch tham quan' : STATUS_LABEL[data.status] ?? 'Đang xử lý'}
+          </p>
         </div>
         <StatusBadge status={data.status} />
       </header>
@@ -129,6 +181,52 @@ export function WorkflowPage() {
             {data.answer || data.question}
           </p>
           <ClarificationReply onSubmit={handleClarification} />
+        </section>
+      )}
+
+      {isWaitingViewing && data.viewing_approval && (
+        <section className="rounded-2xl border border-blue-200 bg-blue-50 p-5 dark:border-blue-900/50 dark:bg-blue-950/30">
+          <div className="flex items-start gap-3">
+            <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-blue-600" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                Đang chờ đơn vị xác nhận lịch tham quan
+              </h2>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                Đơn vị tour đang xác nhận lịch. Bạn sẽ thấy kết quả ở đây.
+              </p>
+              <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+                {data.viewing_approval.project_name && (
+                  <>
+                    <dt className="text-gray-500 dark:text-gray-400">Dự án</dt>
+                    <dd className="font-medium text-gray-900 dark:text-gray-100">
+                      {data.viewing_approval.project_name}
+                    </dd>
+                  </>
+                )}
+                <dt className="text-gray-500 dark:text-gray-400">Thời gian</dt>
+                <dd className="font-medium text-gray-900 dark:text-gray-100">
+                  {data.viewing_approval.viewing_date} · {data.viewing_approval.viewing_time}
+                </dd>
+                {data.viewing_approval.passenger_count != null && (
+                  <>
+                    <dt className="text-gray-500 dark:text-gray-400">Số khách</dt>
+                    <dd className="font-medium text-gray-900 dark:text-gray-100">
+                      {data.viewing_approval.passenger_count} người
+                    </dd>
+                  </>
+                )}
+                {data.viewing_approval.wants_shuttle && (
+                  <>
+                    <dt className="text-gray-500 dark:text-gray-400">Xe đưa đón</dt>
+                    <dd className="font-medium text-gray-900 dark:text-gray-100">
+                      Sẽ đặt sau khi duyệt
+                    </dd>
+                  </>
+                )}
+              </dl>
+            </div>
+          </div>
         </section>
       )}
 
@@ -178,23 +276,51 @@ export function WorkflowPage() {
         <section className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
           <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Các bước</h2>
           <ol className="mt-3 space-y-3">
-            {data.tasks.map((task) => (
-              <li key={task.task_id} className="flex items-start gap-3">
-                {task.status === 'SUCCESS' ? (
-                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-teal-600" aria-hidden />
-                ) : task.status === 'FAILED' ? (
-                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-hidden />
-                ) : task.status === 'WAITING_APPROVAL' ? (
-                  <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden />
-                ) : (
-                  <CircleDot className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden />
-                )}
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{task.title}</p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">{task.message}</p>
-                </div>
-              </li>
-            ))}
+            {data.tasks.map((task) => {
+              const meta = taskStatusMeta(task)
+              const time = formatTaskTime(task.updated_at)
+              return (
+                <li key={task.task_id} className="flex items-start gap-3">
+                  {task.status === 'SUCCESS' ? (
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-teal-600" aria-hidden />
+                  ) : task.status === 'FAILED' ? (
+                    <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-hidden />
+                  ) : task.status === 'WAITING_APPROVAL' ? (
+                    <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden />
+                  ) : task.status === 'RUNNING' ? (
+                    <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-blue-600" aria-hidden />
+                  ) : (
+                    <CircleDot className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{task.title}</p>
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${meta.chip}`}
+                      >
+                        {meta.label}
+                      </span>
+                      {time && (
+                        <span className="text-xs text-gray-400 dark:text-gray-500">
+                          {meta.timePrefix} {time}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 text-sm text-gray-600 dark:text-gray-400">{task.message}</p>
+                    {task.details && task.details.length > 0 && (
+                      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+                        {task.details.map((item, index) => (
+                          <div key={`${task.task_id}-${index}`} className="contents">
+                            <dt className="text-gray-500 dark:text-gray-400">{item.label}</dt>
+                            <dd className="font-medium text-gray-900 dark:text-gray-100">{item.value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
+                  </div>
+                </li>
+              )
+            })}
           </ol>
         </section>
       )}

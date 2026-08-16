@@ -760,5 +760,122 @@ class TestExecutorEdgeCases:
         assert captured["retryable"] is False
 
 
+class TestExecutorResumeSeeds:
+    """Resume sau chờ duyệt lịch tham quan: task đã seed không chạy lại.
+
+    `_materialize_and_run_remaining` gọi `Executor.execute(..., seed_statuses=...,
+    seed_results=...)`: bước tham quan đã được materialize và ghi SUCCESS trong
+    lượt trước, nên lượt resume chỉ được chạy `book_shuttle`. Task seeded phải
+    (1) không chạy lại connector (đặt hai lịch tham quan = dữ liệu rác), (2)
+    vẫn nằm trong `task_statuses` SUCCESS để dependency và finalize tính đúng,
+    (3) output của nó phải có trong `completed_results` để InputRef resolve.
+    """
+
+    @staticmethod
+    def _viewing_plan() -> TaskPlan:
+        return TaskPlan(
+            goal="Tham quan rồi đặt xe",
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="schedule_property_viewing",
+                    depends_on=[],
+                    input={"project_id": "PRJ-001", "viewing_date": "2026-12-10", "viewing_time": "09:30"},
+                ),
+                Task(
+                    task_id="T2",
+                    tool="book_shuttle",
+                    depends_on=["T1"],
+                    input={
+                        "viewing_id": InputRef(from_task="T1", field="viewing_id"),
+                        "tour_date": "2026-12-11",
+                        "passenger_count": 4,
+                    },
+                ),
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_seeded_task_is_not_rerun_and_input_resolves_from_seed(self, repository):
+        viewing_connector = MockConnector(
+            "schedule_property_viewing",
+            create_success_response({"viewing_id": "VIEW-RESUME"}),
+        )
+        shuttle_connector = MockConnector(
+            "book_shuttle",
+            create_success_response(
+                {
+                    "shuttle_id": "SHUTTLE-001",
+                    "viewing_id": "VIEW-RESUME",
+                    "tour_date": "2026-12-11",
+                    "passenger_count": 4,
+                    "driver_name": "Anh Tuấn",
+                    "license_plate": "29A-456.78",
+                    "vehicle_type": "Ô tô 7 chỗ",
+                    "pickup_time": "07:30",
+                }
+            ),
+        )
+        executor = Executor([viewing_connector, shuttle_connector], repository)
+        viewing_result = StandardResult.ok(
+            {
+                "viewing_id": "VIEW-RESUME",
+                "project_id": "PRJ-001",
+                "project_name": "Vinhomes Ocean Park",
+                "viewing_date": "2026-12-10",
+                "viewing_time": "09:30",
+                "viewing_status": "SCHEDULED",
+            }
+        )
+
+        workflow_id, results = await executor.execute(
+            self._viewing_plan(),
+            "wf-resume",
+            finalize=True,
+            seed_statuses={"T1": TaskStatus.SUCCESS},
+            seed_results={"T1": viewing_result},
+        )
+
+        # Task đã materialize không được gọi lại connector (không đặt lịch hai lần).
+        assert viewing_connector.call_count == 0
+        # book_shuttle chạy đúng một lần, nhận viewing_id từ SEED.
+        assert shuttle_connector.call_count == 1
+        assert shuttle_connector.last_input["viewing_id"] == "VIEW-RESUME"
+        assert results["T2"].success is True
+
+        workflow = await repository.get_workflow(workflow_id)
+        assert workflow["status"] == WorkflowStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_seeded_status_without_result_fails_dependency(self, repository):
+        """Seed status mà quên seed result → InputRef không resolve → DEPENDENCY_ERROR.
+
+        Đây là guard bắt đúng lỗi 'seed_statuses khai nhưng seed_results thiếu':
+        resume không bao giờ được chạy book_shuttle với viewing_id rỗng.
+        """
+        shuttle_connector = MockConnector(
+            "book_shuttle",
+            create_success_response(
+                {"shuttle_id": "SHUTTLE-001", "viewing_id": "VIEW", "tour_date": "2026-12-11", "passenger_count": 4}
+            ),
+        )
+        executor = Executor([shuttle_connector], repository)
+
+        _, results = await executor.execute(
+            self._viewing_plan(),
+            "wf-resume",
+            finalize=True,
+            seed_statuses={"T1": TaskStatus.SUCCESS},
+            seed_results={},
+        )
+
+        assert shuttle_connector.call_count == 0
+        assert results["T2"].success is False
+        assert results["T2"].error_code == ErrorCode.DEPENDENCY_ERROR
+
+        workflow = await repository.get_workflow("wf-resume")
+        assert workflow["status"] == WorkflowStatus.FAILED.value
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

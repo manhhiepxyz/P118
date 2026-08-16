@@ -39,6 +39,10 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
         subject = f"Biển số {plate}" if plate else "Biển số này"
         return f"{subject} đã được đăng ký. Hãy sử dụng phương tiện đã liên kết hoặc kiểm tra lại biển số."
     if code == "NO_AVAILABILITY":
+        if task.tool == "book_shuttle":
+            tour_date = _text(inputs.get("tour_date"))
+            suffix = f" ngày {tour_date}" if tour_date else ""
+            return f"Xe tham quan đã hết chỗ{suffix}. Hãy chọn ngày khác."
         if task.tool == "schedule_property_viewing":
             viewing_date = _text(inputs.get("viewing_date"))
             viewing_time = _text(inputs.get("viewing_time"))
@@ -68,6 +72,10 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
         project = _text(inputs.get("project_name"))
         subject = f"dự án “{project}”" if project else "dự án này"
         return f"Bạn đã đăng ký quan tâm {subject} rồi. Bộ phận tư vấn sẽ liên hệ với bạn."
+    if code == "SHUTTLE_ALREADY_BOOKED":
+        return "Lịch xem nhà này đã được đặt xe đưa đón rồi. Bạn hãy đặt xe cho một lịch tham quan khác."
+    if code == "VIEWING_NOT_FOUND":
+        return "Không tìm thấy lịch tham quan để đặt xe đưa đón. Bạn hãy đặt lịch tham quan trước."
     if code in {"SERVICE_UNAVAILABLE", "SERVICE_TIMEOUT"}:
         return f"Dịch vụ cho bước “{title}” đang tạm gián đoạn. Bạn thử lại sau ít phút giúp mình nhé."
 
@@ -104,6 +112,10 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
     inputs = task_input or {}
 
     if code == "NO_AVAILABILITY":
+        if task_tool == "book_shuttle":
+            date = _text(inputs.get("tour_date"))
+            when = f" ngày {date}" if date else ""
+            return f"Xe tham quan đã hết chỗ{when}. Bạn chọn ngày khác giúp mình nhé."
         if task_tool == "book_parking":
             zone = str(inputs.get("parking_zone") or "")
             label = _ZONE_LABELS.get(zone, "Khu vực bạn chọn")
@@ -131,5 +143,8 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
 
     if code == "RESIDENT_ALREADY_EXISTS":
         return "Căn hộ này đã được đăng ký. Bạn kiểm tra lại mã căn hộ giúp mình nhé."
+
+    if code == "SHUTTLE_ALREADY_BOOKED":
+        return "Lịch tham quan này đã có xe đưa đón rồi. Bạn đặt xe cho một lịch tham quan khác giúp mình nhé."
 
     return None

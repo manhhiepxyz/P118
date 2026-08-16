@@ -38,7 +38,7 @@ def test_property_tools_are_valid_canonical_tasks() -> None:
             depends_on=[],
             input={
                 "project_id": "PRJ-001",
-                "viewing_date": "2026-08-15",
+                "viewing_date": "2027-01-10",
                 "viewing_time": "10:00",
             },
         ),
@@ -71,7 +71,7 @@ def test_property_tools_are_valid_canonical_tasks() -> None:
         ),
         (
             "schedule_property_viewing",
-            {"project_id": "PRJ-001", "viewing_date": "2026-08-15"},
+            {"project_id": "PRJ-001", "viewing_date": "2027-01-10"},
         ),
         (
             "register_property_interest",
@@ -93,7 +93,7 @@ def test_property_tools_reject_missing_required_input(tool: str, input_data: dic
     [
         (
             "schedule_property_viewing",
-            {"property_id": "PROP-001", "viewing_date": "2026-08-15", "viewing_time": "10:00"},
+            {"property_id": "PROP-001", "viewing_date": "2027-01-10", "viewing_time": "10:00"},
         ),
         (
             "register_property_interest",
@@ -176,7 +176,7 @@ async def test_schedule_viewing_through_real_connector_and_provider() -> None:
             "schedule_property_viewing",
             {
                 "project_id": "PRJ-002",
-                "viewing_date": "2026-08-16",
+                "viewing_date": "2027-01-10",
                 "viewing_time": "14:30",
             },
         )

@@ -105,6 +105,42 @@ def test_account_context_never_selects_a_default_property_for_free_chat() -> Non
         assert "project_name" not in context
 
 
+def test_book_shuttle_presentation_shows_driver_details() -> None:
+    """Xác nhận xe phải hiện đủ 4 thông tin tài xế dưới dạng dòng details riêng.
+
+    Dữ liệu tới từ kết quả provider (StandardResult.data), không phải suy diễn
+    của Agent — đây là contract bắt buộc của tool book_shuttle.
+    """
+    task = Task(
+        task_id="T2",
+        tool="book_shuttle",
+        depends_on=["T1"],
+        input={"viewing_id": "VIEW-001", "tour_date": "2026-08-20", "passenger_count": 4},
+    )
+    result = StandardResult.ok(
+        data={
+            "shuttle_id": "SHUTTLE-001",
+            "viewing_id": "VIEW-001",
+            "tour_date": "2026-08-20",
+            "passenger_count": 4,
+            "driver_name": "Anh Tuấn",
+            "license_plate": "29A-456.78",
+            "vehicle_type": "Ô tô 7 chỗ",
+            "pickup_time": "07:30",
+        }
+    )
+
+    title, message, details = routes._task_presentation(task, result)
+
+    assert title == "Đặt xe đưa đón tham quan"
+    assert "Đã đặt xe đưa đón" in message
+    by_label = {item.label: item.value for item in details}
+    assert by_label["Tài xế"] == "Anh Tuấn"
+    assert by_label["Biển số xe"] == "29A-456.78"
+    assert by_label["Loại xe"] == "Ô tô 7 chỗ"
+    assert by_label["Giờ đón"] == "07:30"
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -218,10 +254,12 @@ async def test_capability_catalog_is_user_facing_and_marks_resident_services(cli
     assert response.status_code == 200
     body = response.json()
     assert any(item["name"] == "Đặt lịch tham quan dự án" for item in body["capabilities"])
+    assert any(item["name"] == "Đặt xe đưa đón tham quan" for item in body["capabilities"])
     assert any(item["requires_resident"] for item in body["capabilities"])
     assert not any(item["name"] == "Tìm gợi ý bất động sản" for item in body["capabilities"])
     assert "register_vehicle" not in response.text
     assert "pay_fee" not in response.text
+    assert "book_shuttle" not in response.text
 
 
 def test_follow_up_does_not_silently_map_unsupported_zone() -> None:
@@ -230,6 +268,22 @@ def test_follow_up_does_not_silently_map_unsupported_zone() -> None:
     assert answers == {}
     assert unresolved == ["parking_zone"]
     assert "Khu A hoặc Khu B" in routes._follow_up_validation_message(unresolved)
+
+
+def test_follow_up_extracts_passenger_count_within_range() -> None:
+    answers, unresolved = routes._extract_follow_up_answers("4 người", ["passenger_count"])
+
+    assert answers == {"passenger_count": 4}
+    assert unresolved == []
+
+
+def test_follow_up_rejects_out_of_range_passenger_count() -> None:
+    """Sức chứa xe 1–30; ngoài khoảng là trả về unresolved để hỏi lại."""
+    for text in ("0 người", "40 người"):
+        answers, unresolved = routes._extract_follow_up_answers(text, ["passenger_count"])
+
+        assert answers == {}
+        assert unresolved == ["passenger_count"]
 
 
 def test_follow_up_rejects_past_date_and_outside_business_hours() -> None:
@@ -706,6 +760,9 @@ async def test_demo_workflow_returns_safe_success_view(client, monkeypatch):
                 {"label": "Khu dân cư", "value": "TEST_AREA"},
                 {"label": "Mã cư dân", "value": "RES-001"},
             ],
+            # Task chưa từng được persist (kế hoạch vừa lập, chạy trong-memory)
+            # nên không có thời điểm ghi trạng thái.
+            "updated_at": None,
         }
     ]
     # Token của provider và dữ liệu thô của tool KHÔNG được lọt ra view.
@@ -939,7 +996,14 @@ async def test_background_payment_approval_is_not_reported_as_failure_or_finishe
         workflow_id,
         "Đặt chỗ và thanh toán",
         False,
-        {"resident": "", "transport": "", "payment": "", "property": "", "resident_services": ""},
+        {
+            "resident": "",
+            "transport": "",
+            "payment": "",
+            "property": "",
+            "resident_services": "",
+            "shuttle": "",
+        },
         "resident",
     )
 
@@ -1271,6 +1335,96 @@ def test_awaiting_approval_response_carries_the_quote() -> None:
     assert "150.000 VND" in response.summary
     for leak in ("pay_fee", "InputRef", "PostgreSQL", "AWAITING", "booking_id"):
         assert leak not in response.summary
+
+
+def _viewing_plan(wants_shuttle: bool = True) -> TaskPlan:
+    """Canonical plan [schedule_property_viewing → book_shuttle] như Planner sinh."""
+    from src.common.task_plan import InputRef
+
+    tasks = [
+        Task(
+            task_id="T1",
+            tool="schedule_property_viewing",
+            depends_on=[],
+            input={
+                "project_id": "PRJ-001",
+                "viewing_date": "2026-08-20",
+                "viewing_time": "09:30",
+                "passenger_count": 4,
+            },
+        )
+    ]
+    if wants_shuttle:
+        tasks.append(
+            Task(
+                task_id="T2",
+                tool="book_shuttle",
+                depends_on=["T1"],
+                input={
+                    "viewing_id": InputRef(from_task="T1", field="viewing_id"),
+                    "passenger_count": 4,
+                },
+            )
+        )
+    return TaskPlan(goal="Đặt lịch tham quan và đặt xe đưa đón.", tasks=tasks)
+
+
+def test_viewing_approval_signal_renders_as_a_waiting_view_with_the_request() -> None:
+    """`policy_error=VIEWING_APPROVAL_REQUIRED` phải thành view chờ duyệt kèm
+    lịch tham quan — người duyệt là provider qua /review, khách chỉ xem.
+
+    Khách KHÔNG thấy PII người yêu cầu (applicant_name/phone); view chỉ chứa
+    lịch + dự án + số khách. Khi plan có đặt xe thì summary nhắc việc xe được
+    đặt sau khi duyệt.
+    """
+    body = routes._demo_response(
+        {
+            "planner_status": "READY",
+            "plan": _viewing_plan(wants_shuttle=True),
+            "policy_error": "VIEWING_APPROVAL_REQUIRED",
+            "workflow_id": "wf-viewing",
+        },
+        payment_approved=False,
+    )
+
+    assert body.status == "WAITING_APPROVAL"
+    assert body.workflow_id == "wf-viewing"
+    approval = body.viewing_approval
+    assert approval is not None
+    assert approval.task_id == "T1"
+    assert approval.project_id == "PRJ-001"
+    assert approval.project_name == "Vinhomes Sài Gòn Park"
+    assert approval.viewing_date == "2026-08-20"
+    assert approval.viewing_time == "09:30"
+    assert approval.passenger_count == 4
+    assert approval.wants_shuttle is True
+    # Không được phơi PII người yêu cầu ở view khách.
+    assert "applicant" not in approval.model_dump_json()
+    # Có book_shuttle trong plan → summary nhắc xe sẽ được đặt.
+    assert "đặt xe" in body.summary
+    for leak in ("task_plan", "from_task", "InputRef", "AWAITING", "postgresql", "applicant_name"):
+        assert leak not in body.summary
+
+
+def test_viewing_approval_without_shuttle_stays_a_pure_viewing_wait() -> None:
+    """Không có book_shuttle thì view chờ vẫn đầy đủ, summary không nhắc xe."""
+    body = routes._demo_response(
+        {
+            "planner_status": "READY",
+            "plan": _viewing_plan(wants_shuttle=False),
+            "policy_error": "VIEWING_APPROVAL_REQUIRED",
+            "workflow_id": "wf-viewing-noshuttle",
+        },
+        payment_approved=False,
+    )
+
+    assert body.status == "WAITING_APPROVAL"
+    approval = body.viewing_approval
+    assert approval is not None
+    assert approval.wants_shuttle is False
+    assert approval.passenger_count == 4  # passenger_count vẫn đọc từ task tham quan
+    assert "xe" not in body.summary
+    assert "tham quan" in body.summary
 
 
 def test_approval_decision_status_is_a_separate_axis_from_workflow_status() -> None:

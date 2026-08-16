@@ -17,9 +17,11 @@ Test: override `get_user_repository` bằng FakeUserRepository qua
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from src.api.auth import create_access_token, hash_password, verify_password
 from src.api.deps import get_current_user, get_user_repository
@@ -46,14 +48,30 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _USERNAME_OR_PASSWORD = "Tên đăng nhập hoặc mật khẩu không đúng."
 
 
+def _clean(value: str | None) -> str | None:
+    """Strip optional string field; None và chuỗi rỗng đều → None (không ghi)."""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def _to_user_response(user: dict) -> UserResponse:
     """Dict user (có thể kèm password_hash) → UserResponse (bỏ hash)."""
+    dob = user.get("date_of_birth")
     return UserResponse(
         id=str(user["id"]),
         username=user["username"],
         email=user.get("email"),
         role=user["role"],
         created_at=user["created_at"],
+        full_name=user.get("full_name"),
+        phone=user.get("phone"),
+        address=user.get("address"),
+        date_of_birth=dob.isoformat() if hasattr(dob, "isoformat") else dob,
+        gender=user.get("gender"),
+        cccd_last4=user.get("cccd_last4"),
+        avatar_url=user.get("avatar_url"),
     )
 
 
@@ -80,6 +98,12 @@ async def register(
             password_hash=password_hash,
             role="customer",
             email=email,
+            full_name=_clean(req.full_name),
+            phone=_clean(req.phone),
+            address=_clean(req.address),
+            date_of_birth=_clean(req.date_of_birth),
+            gender=_clean(req.gender),
+            cccd_last4=_clean(req.cccd_last4),
         )
     except UserAlreadyExistsError:
         raise HTTPException(status_code=409, detail="Tên đăng nhập đã tồn tại.") from None
@@ -212,3 +236,78 @@ async def my_resident_link_request(user: dict = Depends(get_current_user)) -> Li
         created_at=found.created_at.isoformat() if found.created_at else None,
         decided_at=found.decided_at.isoformat() if found.decided_at else None,
     )
+
+
+# ===========================================================================
+# /users — profile tự khai (Phase D). Router riêng vì PATCH /users/me nằm
+# NGOÀI prefix /auth (UI gọi thẳng /api/v1/users/me).
+# ===========================================================================
+
+users_router = APIRouter(prefix="/users", tags=["users"])
+
+# Avatar + ảnh giấy tờ dùng chung một root; avatar con riêng để dễ dọn khi
+# user thay ảnh (xóa avatar cũ nếu nằm trong thư mục avatar của họ).
+AVATAR_ROOT = Path("./data/uploads/avatars")
+_ALLOWED_AVATAR_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_MAX_AVATAR_BYTES = 5 * 1024 * 1024
+
+
+@users_router.patch("/me", response_model=UserResponse, summary="Cập nhật hồ sơ cá nhân")
+async def update_my_profile(
+    full_name: str | None = Form(default=None, max_length=200),
+    phone: str | None = Form(default=None, max_length=20),
+    address: str | None = Form(default=None, max_length=255),
+    date_of_birth: str | None = Form(default=None, description="YYYY-MM-DD"),
+    gender: str | None = Form(default=None, max_length=10),
+    cccd_last4: str | None = Form(default=None, min_length=4, max_length=4),
+    avatar: UploadFile | None = File(default=None),
+    user: dict = Depends(get_current_user),
+    users: Any = Depends(get_user_repository),
+) -> UserResponse:
+    """Cập nhật thông tin tự khai. Multipart: fields optional + ảnh avatar.
+
+    Avatar lưu vào `./data/uploads/avatars/{user_id}/`, filename `uuid4.jpg`.
+    Không bao giờ dùng filename gốc của client (chống path traversal). Avatar
+    cũ của chính user bị xoá khi thay cái mới.
+    """
+    avatar_url = None
+    if avatar is not None and avatar.filename:
+        data = await avatar.read()
+        if avatar.content_type not in _ALLOWED_AVATAR_TYPES:
+            raise HTTPException(status_code=422, detail="Avatar phải là ảnh JPEG, PNG hoặc WEBP.")
+        if len(data) > _MAX_AVATAR_BYTES:
+            raise HTTPException(status_code=422, detail="Avatar vượt quá 5MB.")
+        if data:
+            avatar_url = _save_avatar(user["id"], avatar.content_type, data)
+
+    updated = await users.update_profile(
+        user["id"],
+        full_name=_clean(full_name),
+        phone=_clean(phone),
+        address=_clean(address),
+        date_of_birth=_clean(date_of_birth),
+        gender=_clean(gender),
+        cccd_last4=_clean(cccd_last4),
+        avatar_url=avatar_url,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Tài khoản không tồn tại.")
+    return _to_user_response(updated)
+
+
+def _save_avatar(user_id: str, content_type: str, data: bytes) -> str:
+    """Lưu avatar của user; xoá avatar cũ của họ; trả URL công khai."""
+    import re
+
+    safe_user = re.sub(r"[^0-9a-fA-F-]", "", str(user_id)) or "anon"
+    avatar_dir = AVATAR_ROOT / safe_user
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+
+    # Xoá ảnh cũ (nếu có) để không tích tụ file khi user đổi avatar nhiều lần.
+    for old in avatar_dir.iterdir():
+        old.unlink(missing_ok=True)
+
+    ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[content_type]
+    filename = f"{uuid4().hex}{ext}"
+    (avatar_dir / filename).write_bytes(data)
+    return f"/uploads/avatars/{safe_user}/{filename}"

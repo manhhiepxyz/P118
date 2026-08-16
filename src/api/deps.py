@@ -28,7 +28,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.api.auth import decode_access_token
 
-bearer_scheme = HTTPBearer(auto_error=True)  # thiếu/sai header → 401 + WWW-Authenticate
+bearer_scheme = HTTPBearer(auto_error=False)  # thiếu header → None; get_current_user tự trả 401
 
 
 async def get_runtime(request: Request) -> tuple[Any, Any]:
@@ -83,8 +83,28 @@ async def get_user_repository(request: Request) -> Any:
     return users
 
 
+async def _require_credentials(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> HTTPAuthorizationCredentials:
+    """Tách "thiếu token → 401" ra dependency RIÊNG, đứng TRƯỚC get_user_repository.
+
+    HTTPBearer(auto_error=True) mặc định trả 403 cho thiếu header — sai ngữ nghĩa
+    (caller chưa đăng nhập, không phải đã đăng nhập rồi bị cấm). auto_error=False
+    cho None, và đây là nơi biến None thành 401.
+
+    Vì FastAPI giải dependency theo thứ tự khai báo và lan truyền exception ngay
+    khi gặp, đặt check này trước `get_user_repository` đảm bảo anonymous caller
+    nhận 401 thay vì 503 "runtime chưa khởi tạo" khi app chạy test qua ASGITransport
+    (lifespan không fire → app.state.runtime None).
+    """
+
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Bạn chưa đăng nhập.")
+    return credentials
+
+
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials = Depends(_require_credentials),
     users: Any = Depends(get_user_repository),
 ) -> dict:
     """Giải mã Bearer token → tra user → trả user dict.

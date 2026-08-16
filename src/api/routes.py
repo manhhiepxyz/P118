@@ -35,6 +35,7 @@ from src.models.schemas import (
     DemoProjectListResponse,
     DemoSessionListResponse,
     DemoTaskResult,
+    DemoViewingApproval,
     DemoWorkflowContinueRequest,
     DemoWorkflowEvent,
     DemoWorkflowListItem,
@@ -47,6 +48,7 @@ from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
     ResumeError,
     persist_pending_approval,
+    persist_pending_viewing_approval,
     read_demo_workflow,
     reject_payment,
     resume_payment_after_approval,
@@ -57,6 +59,7 @@ from src.orchestration.repair import RepairHint, RepairManager, repair_missing_f
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.sweeper import sweep_zombie_workflows
 from src.services.llm import get_llm, structured_output_method
+from src.utils.display import goal_to_title
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -65,7 +68,7 @@ _DEMO_JOBS: dict[str, dict[str, Any]] = {}
 _DEMO_TASKS: set[asyncio.Task[None]] = set()
 _DEMO_WORKFLOW_TASKS: dict[str, asyncio.Task[None]] = {}
 
-_DATE_FIELDS = frozenset({"viewing_date", "booking_date", "preferred_date", "move_date"})
+_DATE_FIELDS = frozenset({"viewing_date", "booking_date", "preferred_date", "move_date", "tour_date"})
 _TIME_FIELDS = frozenset({"viewing_time", "preferred_time", "move_time"})
 _BOOLEAN_FIELDS = frozenset({"consent", "needs_elevator", "needs_loading_support"})
 _SUPPORTED_PROJECTS_MESSAGE = (
@@ -91,6 +94,7 @@ _FOLLOW_UP_VALIDATION_MESSAGES = {
     "parking_zone": "Hãy chọn Khu A hoặc Khu B.",
     "plate_number": "Vui lòng nhập biển số xe, ví dụ 59A-12345.",
     "vehicle_type": "Hãy cho biết phương tiện là ô tô hoặc xe máy.",
+    "passenger_count": "Số người đi xe phải là một số từ 1 đến 30.",
 }
 
 
@@ -151,6 +155,21 @@ def _extract_vehicle_type(text: str) -> str | None:
     if re.search(car, lowered):
         return "car"
     return None
+
+
+def _extract_passenger_count(text: str) -> int | None:
+    """Số người đi xe tham quan: số đi kèm 'người'/'khách', hoặc số đứng riêng.
+
+    Sức chứa xe là 1–30 (provider ép). Ngoài khoảng là không giải quyết được —
+    trả None để backend hỏi lại thay vì đẩy giá trị vô lý xuống provider. Số
+    trong ngày tháng (2026-08-20) bị loại bằng yêu cầu số đứng một mình.
+    """
+    with_unit = re.search(r"\b(\d{1,3})\s*(?:người|khách|nguoi|khach)\b", text, re.IGNORECASE)
+    match = with_unit or re.search(r"(?<![-\d])(\d{1,2})(?![-\d])", text)
+    if not match:
+        return None
+    count = int(match.group(1))
+    return count if 1 <= count <= 30 else None
 
 
 # Xa nhất người dùng được đặt trước. Không có trần thì "2199-12-31" là một ngày
@@ -218,6 +237,8 @@ def _extract_follow_up_answers(message: str, missing_fields: list[str]) -> tuple
             value = _extract_plate_number(text)
         elif field == "vehicle_type":
             value = _extract_vehicle_type(text)
+        elif field == "passenger_count":
+            value = _extract_passenger_count(text)
         elif field in _BOOLEAN_FIELDS:
             lowered = text.casefold()
             value = True if any(word in lowered for word in ("có", "đồng ý", "yes")) else None
@@ -304,6 +325,10 @@ def _extract_structured_follow_up_answers(
             else:
                 answers.update(parsed)
         elif name in _BOOLEAN_FIELDS and isinstance(raw, bool):
+            answers[name] = raw
+        elif name == "passenger_count" and isinstance(raw, int):
+            # Giá trị số nguyên từ form hợp lệ luôn (1–30 đã ép ở UI/provider);
+            # không chạy lại parser chat cho một con số đã chuẩn.
             answers[name] = raw
         else:
             unresolved.append(name)
@@ -627,6 +652,10 @@ _TOOL_PRESENTATION = {
         "Đặt chỗ đỗ xe",
         "Đặt chỗ theo ngày và khu vực đã yêu cầu.",
     ),
+    "book_shuttle": (
+        "Đặt xe đưa đón tham quan",
+        "Đặt xe cho buổi tham quan sau khi đã có lịch.",
+    ),
     "pay_fee": (
         "Thanh toán phí",
         "Thanh toán đúng khoản phí do dịch vụ đặt chỗ trả về.",
@@ -681,13 +710,35 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
         viewing_date = _text(data.get("viewing_date")) or _text(inputs.get("viewing_date"))
         viewing_time = _text(data.get("viewing_time")) or _text(inputs.get("viewing_time"))
         project = project_name
-        message = f"Đã đặt lịch tham quan{f' dự án {project}' if project else ' dự án đã chọn'}."
+        # 4 thông tin người đón tiếp do provider cấp trong bước xác nhận. Dữ
+        # liệu này tới từ response của provider tour, không phải Agent tự dựng.
+        receptionist = _text(data.get("receptionist_name")) or _text(data.get("contact_name"))
+        phone = _text(data.get("receptionist_phone")) or _text(data.get("contact_phone"))
+        area = _text(data.get("reception_area"))
+        when = _text(data.get("reception_time")) or viewing_time
+        reception_details = " · ".join(
+            value
+            for value in (
+                f"Người đón tiếp: {receptionist}" if receptionist else "",
+                f"SĐT: {phone}" if phone else "",
+                f"khu {area}" if area else "",
+                f"lúc {when}" if when else "",
+            )
+            if value
+        )
+        subject = f" dự án {project}" if project else " dự án đã chọn"
+        message = (
+            f"Đã xác nhận lịch tham quan{subject}."
+            + (f" {reception_details}." if reception_details else "")
+        )
         candidates = [
             _detail("Mã lịch xem", data.get("viewing_id")),
             _detail("Dự án", project),
             _detail("Thời gian", " ".join(value for value in (viewing_date, viewing_time) if value)),
-            _detail("Liên hệ", data.get("contact_name")),
-            _detail("Điện thoại", data.get("contact_phone")),
+            _detail("Người đón tiếp", receptionist),
+            _detail("Số điện thoại", phone),
+            _detail("Khu vực đón tiếp", area),
+            _detail("Giờ đón tiếp", when),
         ]
     elif task.tool == "register_property_interest":
         project_name = _text(data.get("project_name"))
@@ -761,6 +812,22 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
             _detail("Phương tiện", inputs.get("move_vehicle")),
             _detail("Trạng thái", data.get("move_status")),
         ]
+    elif task.tool == "book_shuttle":
+        shuttle_date = _text(data.get("tour_date")) or _text(inputs.get("tour_date"))
+        passengers = _text(data.get("passenger_count")) or _text(inputs.get("passenger_count"))
+        when = f" ngày {shuttle_date}" if shuttle_date else ""
+        who = f" cho {passengers} người" if passengers else ""
+        message = f"Đã đặt xe đưa đón tham quan{when}{who}."
+        candidates = [
+            _detail("Mã xe", data.get("shuttle_id")),
+            _detail("Tài xế", data.get("driver_name")),
+            _detail("Biển số xe", data.get("license_plate")),
+            _detail("Loại xe", data.get("vehicle_type")),
+            _detail("Giờ đón", data.get("pickup_time")),
+            _detail("Lịch tham quan", data.get("viewing_id")),
+            _detail("Ngày đón", shuttle_date),
+            _detail("Số khách", passengers),
+        ]
     else:  # pragma: no cover - Task.tool đã bị schema allowlist chặn
         message = "Tác vụ đã hoàn thành."
         candidates = []
@@ -832,7 +899,23 @@ def _plan_from_job_or_record(job: dict[str, Any] | None, record: dict[str, Any] 
         return None
 
 
-def _polling_task_views(plan: TaskPlan | None, record: dict[str, Any] | None) -> list[DemoTaskResult]:
+def _task_view_time(row: dict[str, Any]) -> str | None:
+    """ISO của `workflow_tasks.updated_at` — thời điểm trạng thái hiện tại được ghi.
+
+    None khi chưa có giá trị (task chưa bao giờ được persist) — UI không bịa giờ.
+    """
+    ts = row.get("updated_at")
+    if ts is None:
+        return None
+    return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+
+
+def _polling_task_views(
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    *,
+    show_waiting: bool = False,
+) -> list[DemoTaskResult]:
     if plan is None:
         return []
     rows = {row["task_id"]: row for row in (record or {}).get("tasks", [])}
@@ -851,6 +934,7 @@ def _polling_task_views(plan: TaskPlan | None, record: dict[str, Any] | None) ->
                 )
             )
             continue
+        updated_at = _task_view_time(row)
         status = row["status"]
         if status == "SUCCESS":
             _, message, details = _task_presentation(
@@ -865,6 +949,21 @@ def _polling_task_views(plan: TaskPlan | None, record: dict[str, Any] | None) ->
                     title=title,
                     message=message,
                     details=details,
+                    updated_at=updated_at,
+                )
+            )
+        elif status == "WAITING_APPROVAL" and show_waiting:
+            # Chỉ lộ "chờ duyệt" khi workflow ĐANG thật sự chờ. Sau khi đã quyết
+            # định, bước thanh toán về SUCCESS/CANCELLED; nếu row còn WAITING_
+            # APPROVAL mà hiện "chờ duyệt" là nói dối về việc đã xử lý xong.
+            views.append(
+                DemoTaskResult(
+                    task_id=task.task_id,
+                    tool=task.tool,
+                    status="WAITING_APPROVAL",
+                    title=title,
+                    message="Đang chờ bạn phê duyệt thanh toán.",
+                    updated_at=updated_at,
                 )
             )
         elif status == "FAILED":
@@ -878,6 +977,7 @@ def _polling_task_views(plan: TaskPlan | None, record: dict[str, Any] | None) ->
                     retryable=bool(row.get("retryable")),
                     title=title,
                     message=_task_failure_message(task, title, code),
+                    updated_at=updated_at,
                 )
             )
         elif status == "CANCELLED":
@@ -888,6 +988,7 @@ def _polling_task_views(plan: TaskPlan | None, record: dict[str, Any] | None) ->
                     status="CANCELLED",
                     title=title,
                     message="Bước này đã được huỷ trước khi hoàn tất.",
+                    updated_at=updated_at,
                 )
             )
         else:
@@ -902,9 +1003,34 @@ def _polling_task_views(plan: TaskPlan | None, record: dict[str, Any] | None) ->
                     status=safe_status,
                     title=title,
                     message=message,
+                    updated_at=updated_at,
                 )
             )
     return views
+
+
+async def _applicant_snapshot(user_id: str | None) -> dict[str, Any]:
+    """Thông tin người yêu cầu cho card duyệt trong /review.
+
+    Đọc từ bảng `users` — KHÔNG nhận từ body hay từ goal (khách tự khai trong
+    goal không phải thông tin đã xác minh). User không tồn tại (có thể đã bị
+    xoá) thì trả snapshot rỗng thay vì làm chết luồng chờ duyệt.
+    """
+    if not user_id:
+        return {"user_id": None, "full_name": None, "phone": None}
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        user = await repository.get_user_by_id(user_id)
+    finally:
+        await pool.close()
+    if user is None:
+        return {"user_id": user_id, "full_name": None, "phone": None}
+    return {
+        "user_id": user_id,
+        "full_name": user.get("full_name"),
+        "phone": user.get("phone"),
+    }
 
 
 async def _run_demo_job(
@@ -968,6 +1094,7 @@ async def _run_demo_job(
             payment_url=service_urls["payment"],
             property_url=service_urls["property"],
             resident_services_url=service_urls["resident_services"],
+            shuttle_url=service_urls["shuttle"],
             contact_profile=job.get("contact_profile"),
             session_id=session_id,
             parent_workflow_id=parent_workflow_id,
@@ -980,6 +1107,20 @@ async def _run_demo_job(
                 workflow_id,
                 state.get("task_results") or {},
                 state.get("plan") or state.get("draft_plan") or job.get("plan"),
+            )
+
+        # Chờ duyệt lịch tham quan: ghi ngữ cảnh + người yêu cầu xuống
+        # PostgreSQL. `state["plan"]` vẫn là plan ĐẦY ĐỦ (plan node set, boundary
+        # chỉ thêm policy_error) — không được lấy `job["plan"]` làm nguồn, vì
+        # on_stage ghi đè nó bằng plan prefix đã bỏ bước tham quan.
+        if state.get("policy_error") == "VIEWING_APPROVAL_REQUIRED":
+            applicant = await _applicant_snapshot(job.get("owner_user_id"))
+            await persist_pending_viewing_approval(
+                workflow_id,
+                state.get("plan") or state.get("draft_plan"),
+                applicant_user_id=applicant.get("user_id"),
+                applicant_name=applicant.get("full_name"),
+                applicant_phone=applicant.get("phone"),
             )
 
         # Repair Loop: gom hint từ RepairManager, merge vào state trước khi
@@ -1829,6 +1970,42 @@ def _resident_link_required_message(state: dict[str, Any]) -> str | None:
     return _LINK_REQUIRED_TEMPLATE.format(service=service) if service else None
 
 
+def _viewing_approval_from_plan(plan: TaskPlan | None) -> dict[str, Any] | None:
+    """Ngữ cảnh lịch tham quan đang chờ duyệt, rút từ canonical plan.
+
+    Tour provider chưa được gọi ở điểm này nên KHÔNG có kết quả nào để đọc —
+    mọi thứ nằm trong input của task `schedule_property_viewing`. `passenger_count`
+    thuộc input của `book_shuttle` (contract xe), không thuộc task tham quan.
+    """
+    if plan is None:
+        return None
+    viewing = next((t for t in plan.tasks if t.tool == "schedule_property_viewing"), None)
+    if viewing is None:
+        return None
+    inputs = dict(viewing.input)
+    project_id = str(inputs.get("project_id") or "")
+    viewing_date = str(inputs.get("viewing_date") or "")
+    viewing_time = str(inputs.get("viewing_time") or "")
+    if not project_id or not viewing_date or not viewing_time:
+        return None
+    shuttle = next((t for t in plan.tasks if t.tool == "book_shuttle"), None)
+    wants_shuttle = shuttle is not None
+    passenger_count = None
+    if wants_shuttle and isinstance(shuttle.input.get("passenger_count"), int):
+        passenger_count = shuttle.input["passenger_count"]
+    elif isinstance(inputs.get("passenger_count"), int):
+        passenger_count = inputs["passenger_count"]
+    return {
+        "task_id": viewing.task_id,
+        "project_id": project_id,
+        "project_name": project_name(project_id),
+        "viewing_date": viewing_date,
+        "viewing_time": viewing_time,
+        "passenger_count": passenger_count,
+        "wants_shuttle": wants_shuttle,
+    }
+
+
 def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflowResponse:
     """Chuyển AgentState thành view model chỉ chứa field nghiệp vụ allowlist."""
     plan = state.get("plan")
@@ -1932,6 +2109,27 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                 else "Đã giữ chỗ đỗ xe. Bạn xác nhận thanh toán để mình hoàn tất nhé."
             ),
             payment_quote=quote.as_public_dict() if quote is not None else None,
+            plan=plan_view,
+        )
+    if policy_error == "VIEWING_APPROVAL_REQUIRED":
+        # Lịch chưa được materialize (Tour provider chưa được gọi) — thông tin
+        # rút từ canonical plan, không từ kết quả provider. Người duyệt là
+        # provider/admin qua /review; khách chỉ xem, KHÔNG có nút quyết định.
+        approval = _viewing_approval_from_plan(plan)
+        if approval is None:
+            return DemoWorkflowResponse(status="EXECUTION_ERROR", plan=plan_view)
+        wants_shuttle = approval.get("wants_shuttle", False)
+        summary = (
+            "Mình đã gửi yêu cầu tham quan. Đơn vị tour đang xác nhận lịch — "
+            "khi được duyệt, mình sẽ đặt xe đưa đón cho bạn."
+            if wants_shuttle
+            else "Mình đã gửi yêu cầu tham quan. Đơn vị tour đang xác nhận lịch — bạn chờ chút nhé."
+        )
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            workflow_id=state.get("workflow_id"),
+            summary=summary,
+            viewing_approval=DemoViewingApproval(**approval),
             plan=plan_view,
         )
     if policy_error is not None:
@@ -2197,6 +2395,7 @@ async def start_demo_workflow(
                 "payment": settings.payment_service_url,
                 "property": settings.property_service_url,
                 "resident_services": settings.resident_services_service_url,
+                "shuttle": settings.shuttle_service_url,
             },
             account_state,
             session_id=session_id,
@@ -2451,6 +2650,7 @@ async def continue_demo_workflow(
         "payment": settings.payment_service_url,
         "property": settings.property_service_url,
         "resident_services": settings.resident_services_service_url,
+        "shuttle": settings.shuttle_service_url,
     }
     _DEMO_JOBS[new_workflow_id] = {
         "stage": "PLANNING",
@@ -2538,11 +2738,14 @@ def _waiting_approval_view(
     cách clarification suy ra từ bảng con — chứ không đọc `workflows.status`,
     cột đó vẫn là RUNNING trong lúc chờ.
     """
-    tasks = _polling_task_views(plan, record)
+    tasks = _polling_task_views(plan, record, show_waiting=True)
     for task in tasks:
         # Bước thanh toán phải hiện rõ là đang chờ, không phải "đang chạy".
+        # `show_waiting=True` đã làm đúng cho row WAITING_APPROVAL; override này
+        # giữ đúng cả khi row chưa tồn tại (plan vừa lập, chưa persist task).
         if task.task_id == pending.get("task_id"):
             task.status = "WAITING_APPROVAL"
+            task.message = "Đang chờ bạn phê duyệt thanh toán."
 
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
@@ -2554,6 +2757,84 @@ def _waiting_approval_view(
             "amount": pending["amount"],
             "currency": pending["currency"],
         },
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
+    )
+
+
+async def _load_pending_viewing(workflow_id: str) -> dict[str, Any] | None:
+    """Lịch tham quan đang chờ duyệt của workflow, đọc từ PostgreSQL.
+
+    Song song `_load_pending_payment`: dùng cho cả hai đường dựng response
+    (job còn RAM / đã mất sau restart). DB lỗi trả None — mất thông tin chờ
+    duyệt thì màn hình thiếu phần tham quan, còn ném lỗi ra route thì mất cả
+    workflow.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return await repository.get_pending_viewing_view(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load pending viewing failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _load_rejected_viewing(workflow_id: str) -> dict[str, Any] | None:
+    """Lý do từ chối lịch tham quan, đọc từ PostgreSQL.
+
+    Workflow FAILED vì bị provider từ chối: `workflows.status = FAILED` nhưng
+    không có error_code ghim (reject không đi qua Executor), nên nhánh
+    `_load_failure_code` trả None và khách mất lý do vì sao. Đọc thẳng bảng
+    `viewing_approvals` — nguồn sự thật của quyết định. DB lỗi trả None (không
+    làm mất cả workflow).
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return await repository.get_rejected_viewing(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load rejected viewing failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+def _waiting_viewing_approval_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    pending: dict[str, Any],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow đang chờ provider/admin duyệt lịch tham quan.
+
+    KHÔNG có nút quyết định (người duyệt là provider qua /review, không phải
+    chủ workflow) — khách chỉ thấy lịch + dự án + dòng chờ. `WAITING_APPROVAL`
+    suy ra từ bảng `viewing_approvals`, không đọc `workflows.status` (cột vẫn
+    là RUNNING trong lúc chờ).
+    """
+    tasks = _polling_task_views(plan, record, show_waiting=True)
+    for task in tasks:
+        if task.task_id == pending.get("task_id"):
+            task.status = "WAITING_APPROVAL"
+            task.message = "Đang chờ đơn vị xác nhận lịch tham quan."
+
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_APPROVAL",
+        message="Đang chờ đơn vị xác nhận lịch tham quan.",
+        viewing_approval=DemoViewingApproval(**pending),
         plan=_plan_view(plan),
         tasks=tasks,
         persisted=True,
@@ -2592,6 +2873,24 @@ async def get_demo_workflow_status(
             record["repair_hints"] = []
     if job is None and record is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
+
+    # Lịch tham quan đang chờ duyệt quyết định view, bất kể job còn trong RAM hay
+    # đã mất sau restart. Check TRƯỚC payment: hai luồng không bao giờ cùng xuất
+    # hiện (tham quan là chuỗi khách, pay_fee là chuỗi cư dân), nhưng nếu vì lý
+    # do nào đó cả hai đều có row thì workflow đang dừng ở bước NÀO thì hiện
+    # đúng bước đó.
+    pending_viewing = await _load_pending_viewing(workflow_id)
+    if pending_viewing is not None:
+        return await _with_stored_answer(
+            _waiting_viewing_approval_view(
+                workflow_id,
+                plan=_plan_from_job_or_record(job, record),
+                record=record,
+                pending=pending_viewing,
+                events=_public_events(job),
+            ),
+            workflow_id,
+        )
 
     # Khoản thanh toán đang chờ duyệt quyết định view, bất kể job còn trong RAM
     # hay đã mất sau restart. `workflows.status` vẫn là RUNNING trong lúc chờ,
@@ -2703,6 +3002,19 @@ async def get_demo_workflow_status(
         message = failure.message
         stage = "EXECUTION_FAILED"
 
+    # Workflow FAILED vì lịch tham quan bị provider từ chối: không có error_code
+    # (reject không đi qua Executor), nên nhánh trên trả None và khách mất lý do.
+    # Lý do nằm ở bảng `viewing_approvals` — đọc thẳng nguồn sự thật của quyết định.
+    if status == "FAILED" and failure is None:
+        rejected = await _load_rejected_viewing(workflow_id)
+        if rejected is not None:
+            reason = (rejected.get("reject_reason") or "").strip()
+            message = (
+                "Lịch tham quan đã được gửi lại đơn vị tour, nhưng chưa được xác nhận. "
+                + (f"Lý do: {reason}." if reason else "Bạn có thể thử chọn khung giờ khác.")
+            )
+            stage = "EXECUTION_FAILED"
+
     return await _with_stored_answer(
         DemoWorkflowResponse(
             workflow_id=workflow_id,
@@ -2761,7 +3073,7 @@ async def list_demo_workflows_by_session(
         items.append(
             DemoWorkflowListItem(
                 workflow_id=workflow_id,
-                title=_goal_to_title(row.get("goal")),
+                title=goal_to_title(row.get("goal")),
                 status=row["status"],
                 current_step=None,
                 completed_tasks=int(row.get("completed_tasks") or 0),
@@ -2809,6 +3121,10 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
     DemoCapabilityItem(
         name="Đặt lịch tham quan dự án",
         description="Chọn dự án, ngày và giờ muốn tham quan.",
+    ),
+    DemoCapabilityItem(
+        name="Đặt xe đưa đón tham quan",
+        description="Đặt xe cho buổi tham quan dự án sau khi đã có lịch.",
     ),
     DemoCapabilityItem(
         name="Đăng ký quan tâm / nhận tư vấn",
@@ -3112,18 +3428,6 @@ def _assistant_fields(row: Any) -> dict[str, Any]:
     }
 
 
-def _goal_to_title(goal: str | None) -> str:
-    """Tiêu đề ngắn cho danh sách.
-
-    Goal là câu người dùng nhập; cắt ngắn để danh sách đọc được, KHÔNG diễn
-    giải lại hay đoán ý.
-    """
-    text = (goal or "").strip()
-    if not text:
-        return "Yêu cầu dịch vụ"
-    return text if len(text) <= 70 else text[:69].rstrip() + "…"
-
-
 @router.get("/workflows/demo", response_model=DemoWorkflowListResponse)
 async def list_demo_workflows(
     status: str = "active",
@@ -3176,7 +3480,7 @@ async def list_demo_workflows(
         items.append(
             DemoWorkflowListItem(
                 workflow_id=workflow_id,
-                title=_goal_to_title(row.get("goal")),
+                title=goal_to_title(row.get("goal")),
                 status=row["status"],
                 # Tên bước hiện tại lấy từ bảng trình bày nghiệp vụ, không phải tên tool.
                 current_step=_TOOL_PRESENTATION.get(tool, (None, ""))[0] if tool else None,

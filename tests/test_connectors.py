@@ -543,7 +543,7 @@ async def wire_provider_pool(provider_pool):
     finally:
         async with provider_pool.acquire() as conn:
             await conn.execute(
-                "TRUNCATE payments, parking_bookings, parking_capacity, vehicles, residents RESTART IDENTITY CASCADE"
+                "TRUNCATE verification_records, payments, parking_bookings, parking_capacity, vehicles, residents RESTART IDENTITY CASCADE"
             )
         override_pool(None)
 

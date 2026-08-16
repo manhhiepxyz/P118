@@ -136,6 +136,42 @@ BEGIN
 END
 $$;
 
+-- 2026-08 — viewing_approvals
+-- Ngữ cảnh chờ provider/admin duyệt lịch tham quan (`/review`), để resume KHÔNG
+-- phụ thuộc RAM.
+--
+-- Giống `payment_approvals` nhưng người duyệt là provider/admin (KHÔNG phải chủ
+-- workflow), và sau khi duyệt backend materialize lịch tour rồi chạy nốt các
+-- task phụ thuộc (book_shuttle). Bảng giữ đủ thông tin dựng lại lệnh đặt lịch
+-- từ số 0: project/ngày/giờ đọc từ task input lúc persist, applicant_name/phone
+-- là snapshot từ bảng `users` (đừng JOIN lúc sau — user có thể đổi họ tên).
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        CREATE TABLE IF NOT EXISTS viewing_approvals (
+            workflow_id      UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
+            task_id          VARCHAR(20)  NOT NULL,
+            status           VARCHAR(20)  NOT NULL DEFAULT 'AWAITING'
+                                 CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED')),
+            project_id       VARCHAR(20)  NOT NULL,
+            project_name     VARCHAR(200),
+            viewing_date     DATE         NOT NULL,
+            viewing_time     VARCHAR(5)   NOT NULL,
+            passenger_count  INTEGER,
+            wants_shuttle    BOOLEAN      NOT NULL DEFAULT FALSE,
+            applicant_user_id UUID,
+            applicant_name   VARCHAR(200),
+            applicant_phone  VARCHAR(20),
+            reject_reason    VARCHAR(500),
+            decided_by       VARCHAR(100),
+            created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            decided_at       TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_viewing_approvals_status ON viewing_approvals(status);
+    END IF;
+END
+$$;
+
 -- 2026-08 — Workflow session chain
 -- Link parent-child workflows. `/continue` tạo child workflow giữ cùng session_id
 -- và trỏ về workflow_id cũ, cho phép query lịch sử một cuộc hội thoại.
@@ -559,5 +595,97 @@ BEGIN
                 NOT VALID;
         END IF;
     END IF;
+END
+$$;
+
+-- =============================================================
+-- Phase D — hồ sơ user thực tế + role provider
+-- =============================================================
+--
+-- `users` chỉ có username/email trước đây; giờ bổ sung thông tin thực tế.
+-- CCCD lưu MẶT NẠ: chỉ 4 số cuối (`cccd_last4`), đủ để người dùng tự nhận diện
+-- mà không phơi toàn bộ giấy tờ ra. Toàn bộ cột nullable — hồ sơ tự khai, không
+-- bắt buộc lúc đăng ký.
+DO $$
+BEGIN
+    IF to_regclass('users') IS NOT NULL THEN
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name     VARCHAR(200);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS phone         VARCHAR(20);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS address       VARCHAR(255);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS gender        VARCHAR(10);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS cccd_last4    CHAR(4);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url    TEXT;
+    END IF;
+END
+$$;
+
+-- Role mới 'provider' — người duyệt hồ sơ xác thực (căn hộ / xe).
+--
+-- DROP rồi ADD lại thay vì IF NOT EXISTS: constraint cũ (từ schema.sql hoặc một
+-- lần chạy migration trước) chỉ chứa ('customer','admin'); phải thay toàn bộ,
+-- không thể nới thêm giá trị vào một CHECK đã tồn tại.
+DO $$
+BEGIN
+    IF to_regclass('users') IS NOT NULL THEN
+        ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_role;
+        ALTER TABLE users ADD CONSTRAINT ck_users_role
+            CHECK (role IN ('customer', 'admin', 'provider'));
+    END IF;
+END
+$$;
+
+-- =============================================================
+-- Phase D — verification_records: xác thực căn hộ / xe (provider duyệt)
+-- =============================================================
+--
+-- Nguồn sự thật cho xác thực CÓ BẰNG CHỨNG (ảnh giấy tờ). Provider sở hữu bảng
+-- này; main app proxy qua HTTP (`OwnershipConnector`).
+--
+-- Một record PENDING duy nhất mỗi (loại + khoá khai báo): chống spam nhiều đơn
+-- cùng biển số / cùng căn hộ đứng chờ duyệt. Khoá nằm trong `claimed_data` nên
+-- partial unique index đọc thẳng JSONB path.
+DO $$
+BEGIN
+    -- Khoá ngoại `applicant_user_id REFERENCES users(id)` chỉ thêm được khi bảng
+    -- `users` đã tồn tại — migration còn được test chạy trên schema cũ không có
+    -- users (test_schema_migrations_upgrades_legacy_table). Guard giống khối
+    -- user_resident_links bên trên.
+    IF to_regclass('users') IS NULL THEN
+        RETURN;
+    END IF;
+
+    CREATE TABLE IF NOT EXISTS verification_records (
+        record_id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        record_type       VARCHAR(20)  NOT NULL CHECK (record_type IN ('apartment', 'vehicle')),
+        status            VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+                              CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+        applicant_user_id UUID         REFERENCES users(id),
+        claimed_data      JSONB        NOT NULL,
+        proof_image_urls  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        reject_reason     TEXT,
+        decided_by        VARCHAR(50),
+        created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        decided_at        TIMESTAMPTZ
+    );
+END
+$$;
+
+-- Index chỉ dựng được khi bảng đã tồn tại — bảng bị guard bởi `users` bên trên,
+-- index này phải guard theo bảng để không nổ UndefinedTableError trên schema cũ
+-- (test_schema_migrations_upgrades_legacy_table).
+DO $$
+BEGIN
+    IF to_regclass('verification_records') IS NULL THEN
+        RETURN;
+    END IF;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_verif_pending_apartment
+        ON verification_records (record_type, (claimed_data->>'apartment_code'), (claimed_data->>'residential_area'))
+        WHERE status = 'PENDING';
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_verif_pending_vehicle
+        ON verification_records (record_type, (claimed_data->>'plate_number'))
+        WHERE status = 'PENDING';
 END
 $$;

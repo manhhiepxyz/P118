@@ -24,14 +24,14 @@ class InputRef(BaseModel):
 # A task input value is either a literal JSON-compatible scalar or an InputRef.
 InputValue = str | int | float | bool | None | InputRef
 
-# 9 tool canonical theo `shared_contracts.md`. Đây là contract PUBLIC mà Planner
-# được phép sinh ra.
+# 10 tool canonical theo `shared_contracts.md`. Đây là contract PUBLIC mà
+# Planner được phép sinh ra.
 #
 # `book_tour` và `register_consultation` KHÔNG có mặt: chúng là tên nội bộ của
 # implementation cũ, đã được adapter sang `schedule_property_viewing` và
-# `register_property_interest`. `book_shuttle` là capability thử nghiệm, chưa
-# có contract chính thức (nó cần `viewing_id`, không phải `tour_id`), nên chưa
-# reachable từ Agent.
+# `register_property_interest`. `book_shuttle` đi theo chuỗi
+# schedule_property_viewing → book_shuttle: nó nhận `viewing_id` (không phải
+# `tour_id`) qua InputRef từ lịch tham quan đã xác nhận.
 AllowedTool = Literal[
     "search_properties",
     "schedule_property_viewing",
@@ -42,6 +42,7 @@ AllowedTool = Literal[
     "register_vehicle",
     "book_parking",
     "pay_fee",
+    "book_shuttle",
 ]
 
 

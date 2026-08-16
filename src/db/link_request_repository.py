@@ -154,6 +154,91 @@ def _mask_name(name: str) -> str:
     return " ".join(p[0] + "*" * (len(p) - 1) for p in parts) or "—"
 
 
+async def _link_resident_to_user(
+    conn: asyncpg.Connection,
+    *,
+    user_id: Any,
+    apartment_code: str,
+    residential_area: str,
+    full_name: str,
+) -> str:
+    """Phần lõi mở quyền: tạo hồ sơ cư dân + ghi liên kết VERIFIED.
+
+    Dùng chung cho hai đường duyệt — admin cũ (`decide_request`) và provider
+    mới (duyệt verification_records type=apartment). Hàm này TIN caller đã mở
+    transaction trên `conn`: mọi ghi chạy chung một transaction để không có
+    chuyện đã duyệt mà quyền chưa mở.
+
+    Bước tạo resident dùng `ON CONFLICT DO NOTHING` trên ràng buộc
+    (apartment_code, residential_area) rồi đọc lại, thay vì "kiểm rồi chèn":
+    kiểm-rồi-chèn có khoảng trống giữa hai lệnh, và hai người duyệt cùng căn hộ
+    sẽ tạo hai hồ sơ cư dân cho một căn.
+
+    Returns:
+        `resident_id` — của hồ sơ được dùng cho liên kết.
+    """
+    resident_id = await conn.fetchval(
+        "SELECT resident_id FROM residents WHERE apartment_code = $1 AND residential_area = $2",
+        apartment_code,
+        residential_area,
+    )
+    if resident_id is None:
+        # Mã cư dân sinh ở SERVER. Cho khách hàng gửi mã nghĩa là cho họ
+        # trỏ vào hồ sơ của người khác.
+        resident_id = await conn.fetchval(
+            """
+            INSERT INTO residents (resident_id, full_name, apartment_code, residential_area)
+            VALUES ('RES-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)), $1, $2, $3)
+            ON CONFLICT (apartment_code, residential_area) DO NOTHING
+            RETURNING resident_id
+            """,
+            full_name,
+            apartment_code,
+            residential_area,
+        )
+        if resident_id is None:
+            # Một transaction khác vừa tạo trước. Đọc lại thay vì báo lỗi:
+            # kết quả mong muốn đã có, chỉ là do người khác làm.
+            resident_id = await conn.fetchval(
+                "SELECT resident_id FROM residents WHERE apartment_code = $1 AND residential_area = $2",
+                apartment_code,
+                residential_area,
+            )
+
+    await conn.execute(
+        """
+        INSERT INTO user_resident_links (user_id, resident_id, verification_status, verified_at)
+        VALUES ($1, $2, 'VERIFIED', NOW())
+        ON CONFLICT (user_id) DO UPDATE
+        SET resident_id = EXCLUDED.resident_id,
+            verification_status = 'VERIFIED',
+            verified_at = NOW()
+        """,
+        _uuid(user_id),
+        resident_id,
+    )
+    return resident_id
+
+
+async def materialize_resident_link(
+    pool: asyncpg.Pool,
+    *,
+    user_id: Any,
+    apartment_code: str,
+    residential_area: str,
+    full_name: str,
+) -> str:
+    """Mở quyền cư dân, đóng gói pool — cho caller không tự mở transaction."""
+    async with pool.acquire() as conn, conn.transaction():
+        return await _link_resident_to_user(
+            conn,
+            user_id=user_id,
+            apartment_code=apartment_code,
+            residential_area=residential_area,
+            full_name=full_name,
+        )
+
+
 async def decide_request(
     pool: asyncpg.Pool,
     request_id: Any,
@@ -169,13 +254,7 @@ async def decide_request(
     Khi duyệt, TẤT CẢ xảy ra trong một transaction:
 
       1. claim dòng yêu cầu (`WHERE status = 'PENDING'` … `RETURNING`)
-      2. tra hồ sơ cư dân theo (căn hộ, khu) — tạo mới nếu chưa có
-      3. ghi `user_resident_links` ở VERIFIED
-
-    Bước 2 dùng `ON CONFLICT DO NOTHING` trên ràng buộc (apartment_code,
-    residential_area) rồi đọc lại, thay vì "kiểm rồi chèn": kiểm-rồi-chèn có
-    khoảng trống giữa hai lệnh, và hai admin duyệt hai yêu cầu cùng căn hộ sẽ
-    tạo hai hồ sơ cư dân cho một căn.
+      2. mở quyền qua `_link_resident_to_user`
     """
     async with pool.acquire() as conn, conn.transaction():
         claimed = await conn.fetchrow(
@@ -194,44 +273,10 @@ async def decide_request(
         if not approve:
             return None
 
-        resident_id = await conn.fetchval(
-            "SELECT resident_id FROM residents WHERE apartment_code = $1 AND residential_area = $2",
-            claimed["apartment_code"],
-            claimed["residential_area"],
+        return await _link_resident_to_user(
+            conn,
+            user_id=claimed["user_id"],
+            apartment_code=claimed["apartment_code"],
+            residential_area=claimed["residential_area"],
+            full_name=claimed["full_name"],
         )
-        if resident_id is None:
-            # Mã cư dân sinh ở SERVER. Cho khách hàng gửi mã nghĩa là cho họ
-            # trỏ vào hồ sơ của người khác.
-            resident_id = await conn.fetchval(
-                """
-                INSERT INTO residents (resident_id, full_name, apartment_code, residential_area)
-                VALUES ('RES-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)), $1, $2, $3)
-                ON CONFLICT (apartment_code, residential_area) DO NOTHING
-                RETURNING resident_id
-                """,
-                claimed["full_name"],
-                claimed["apartment_code"],
-                claimed["residential_area"],
-            )
-            if resident_id is None:
-                # Một transaction khác vừa tạo trước. Đọc lại thay vì báo lỗi:
-                # kết quả mong muốn đã có, chỉ là do người khác làm.
-                resident_id = await conn.fetchval(
-                    "SELECT resident_id FROM residents WHERE apartment_code = $1 AND residential_area = $2",
-                    claimed["apartment_code"],
-                    claimed["residential_area"],
-                )
-
-        await conn.execute(
-            """
-            INSERT INTO user_resident_links (user_id, resident_id, verification_status, verified_at)
-            VALUES ($1, $2, 'VERIFIED', NOW())
-            ON CONFLICT (user_id) DO UPDATE
-            SET resident_id = EXCLUDED.resident_id,
-                verification_status = 'VERIFIED',
-                verified_at = NOW()
-            """,
-            claimed["user_id"],
-            resident_id,
-        )
-    return resident_id

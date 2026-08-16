@@ -5,7 +5,6 @@ import {
   Inbox,
   RotateCcw,
   Search,
-  TimerReset,
   Workflow,
   XCircle,
 } from 'lucide-react'
@@ -100,13 +99,6 @@ export function AdminDashboardPage() {
           <h1 className="text-xl font-semibold text-gray-900">Quản trị hệ thống</h1>
           <p className="mt-1 text-sm text-gray-500">Giám sát toàn bộ workflow và trạng thái vận hành.</p>
         </div>
-        <Link
-          to="/"
-          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-card px-3 py-1.5 text-xs font-medium text-gray-600 hover:text-teal-700"
-        >
-          <TimerReset className="h-3.5 w-3.5" aria-hidden />
-          Xem như người dùng
-        </Link>
       </div>
 
       {/* KPI */}

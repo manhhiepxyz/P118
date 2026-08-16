@@ -177,4 +177,7 @@ def test_whatever_the_check_rejects_the_factory_also_rejects():
 
 def test_structured_output_stays_json_mode_for_deepseek():
     assert structured_output_method(_settings()) == "json_mode"
-    assert structured_output_method(_settings(llm_provider="openai", openai_api_key="k")) is None
+    assert (
+        structured_output_method(_settings(llm_provider="openai", openai_api_key="k"))
+        == "function_calling"
+    )

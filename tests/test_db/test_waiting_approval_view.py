@@ -145,6 +145,161 @@ async def test_after_restart_a_waiting_workflow_still_reports_waiting_with_its_q
     assert quote.get("currency") == "VND"
 
 
+# ---------------------------------------------------------------------------
+# Lịch tham quan chờ provider duyệt — cùng tính chất "sống qua restart".
+# ---------------------------------------------------------------------------
+
+_VIEWING_PLAN = {
+    "goal": "Đặt lịch tham quan và đặt xe đưa đón.",
+    "tasks": [
+        {
+            "task_id": "T1",
+            "tool": "schedule_property_viewing",
+            "depends_on": [],
+            "input": {
+                "project_id": "PRJ-001",
+                "viewing_date": "2026-08-20",
+                "viewing_time": "09:30",
+                "passenger_count": 4,
+            },
+        },
+        {
+            "task_id": "T2",
+            "tool": "book_shuttle",
+            "depends_on": ["T1"],
+            "input": {
+                "viewing_id": {"from_task": "T1", "field": "viewing_id"},
+                "passenger_count": 4,
+            },
+        },
+    ],
+}
+
+
+async def _seed_waiting_viewing_workflow(db_pool, username: str) -> dict:
+    """Dựng trạng thái sau restart: workflow RUNNING + task chờ + viewing_approvals AWAITING."""
+    from datetime import date as _date
+
+    from src.api import routes
+
+    owner = await db_pool.fetchval("SELECT id FROM users WHERE username = $1", username)
+    workflow_id = str(uuid.uuid4())
+    await db_pool.execute(
+        "INSERT INTO workflows (workflow_id, goal, status, task_plan, session_id, owner_user_id) "
+        "VALUES ($1::uuid, $2, 'RUNNING', $3::jsonb, $4, $5)",
+        workflow_id,
+        _VIEWING_PLAN["goal"],
+        json.dumps(_VIEWING_PLAN),
+        str(uuid.uuid4()),
+        owner,
+    )
+
+    for task_id, tool, status, depends in (
+        ("T1", "schedule_property_viewing", "WAITING_APPROVAL", []),
+        ("T2", "book_shuttle", "PENDING", ["T1"]),
+    ):
+        await db_pool.execute(
+            "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, depends_on) "
+            "VALUES ($1::uuid, $2, $3, $4, $5::jsonb)",
+            workflow_id,
+            task_id,
+            tool,
+            status,
+            json.dumps(depends),
+        )
+
+    await db_pool.execute(
+        "INSERT INTO viewing_approvals "
+        "(workflow_id, task_id, status, project_id, project_name, viewing_date, viewing_time, "
+        " passenger_count, wants_shuttle, applicant_user_id, applicant_name, applicant_phone) "
+        "VALUES ($1::uuid, 'T1', 'AWAITING', 'PRJ-001', 'Vinhomes Sài Gòn Park', $2, '09:30', "
+        " 4, TRUE, $3, 'Lâm Thành Bảo', '0912345678')",
+        workflow_id,
+        _date.fromisoformat("2026-08-20"),
+        str(uuid.uuid4()),
+    )
+
+    routes._DEMO_JOBS.pop(workflow_id, None)
+    return {"workflow_id": workflow_id}
+
+
+@pytest.mark.asyncio
+async def test_after_restart_a_waiting_viewing_still_reports_waiting_with_its_request(client, db_pool):
+    """Defect 2 phiên bản tham quan: `_DEMO_JOBS` trống, approval còn AWAITING.
+
+    Khách thấy `status=WAITING_APPROVAL` + field `viewing_approval` (lịch + dự
+    án), KHÔNG thấy PII người yêu cầu — người duyệt là provider qua /review.
+    """
+    token = await _register_and_login(client, "nn_wa_viewing")
+    seeded = await _seed_waiting_viewing_workflow(db_pool, "nn_wa_viewing")
+
+    response = await client.get(
+        f"/api/v1/workflows/demo/{seeded['workflow_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["status"] == "WAITING_APPROVAL", "workflow chờ duyệt tham quan bị báo là đang chạy"
+    assert body["stage"] == "WAITING_APPROVAL"
+
+    approval = body.get("viewing_approval") or {}
+    assert approval.get("task_id") == "T1"
+    assert approval.get("project_id") == "PRJ-001"
+    assert approval.get("project_name") == "Vinhomes Sài Gòn Park"
+    assert approval.get("viewing_date") == "2026-08-20"
+    assert approval.get("viewing_time") == "09:30"
+    assert approval.get("passenger_count") == 4
+    assert approval.get("wants_shuttle") is True
+
+    # Task tham quan phải nói rõ nó đang chờ gì.
+    by_tool = {t["tool"]: t for t in body.get("tasks", [])}
+    viewing = by_tool.get("schedule_property_viewing")
+    assert viewing is not None and viewing["status"] == "WAITING_APPROVAL"
+    assert "đơn vị xác nhận" in viewing["message"]
+
+    # Khách không được thấy PII người yêu cầu ở bất kỳ đâu trong payload.
+    raw = response.text
+    for leaked in ("Lâm Thành Bảo", "0912345678", "applicant_name", "applicant_phone"):
+        assert leaked not in raw, f"response rò PII người yêu cầu {leaked!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_decided_viewing_approval_never_drags_back_to_waiting(client, db_pool):
+    """Đã duyệt lịch tham quan thì không được dựng lại màn chờ."""
+    token = await _register_and_login(client, "nn_wa_viewing_done")
+    seeded = await _seed_waiting_viewing_workflow(db_pool, "nn_wa_viewing_done")
+
+    from datetime import date as _date
+
+    await db_pool.execute(
+        "UPDATE viewing_approvals SET status = 'APPROVED', decided_at = NOW() "
+        "WHERE workflow_id = $1::uuid",
+        seeded["workflow_id"],
+    )
+    await db_pool.execute(
+        "UPDATE workflows SET status = 'SUCCESS' WHERE workflow_id = $1::uuid",
+        seeded["workflow_id"],
+    )
+    await db_pool.execute(
+        "UPDATE workflow_tasks SET status = 'SUCCESS' "
+        "WHERE workflow_id = $1::uuid AND task_id = 'T1'",
+        seeded["workflow_id"],
+    )
+
+    body = (
+        await client.get(
+            f"/api/v1/workflows/demo/{seeded['workflow_id']}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    ).json()
+
+    assert body["status"] != "WAITING_APPROVAL"
+    assert body.get("viewing_approval") is None
+    waiting_tasks = [t["task_id"] for t in body.get("tasks", []) if t.get("status") == "WAITING_APPROVAL"]
+    assert not waiting_tasks, f"bước {waiting_tasks} vẫn hiện là đang chờ duyệt"
+
+
 @pytest.mark.asyncio
 async def test_a_waiting_workflow_shows_every_step_it_has_run(client, db_pool):
     """Defect 1: người dùng phải thấy bước nào đã xong trước khi duyệt tiền."""

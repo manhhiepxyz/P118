@@ -96,6 +96,8 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "booking_id": "mã đặt chỗ",
     "amount": "số tiền",
     "currency": "loại tiền tệ",
+    "tour_date": "ngày muốn đặt xe tham quan",
+    "passenger_count": "số người đi xe (tối thiểu 1, tối đa 30)",
 }
 
 # `Literal` không được kiểm tra lúc chạy — giữ bản runtime để `PlannerResult`
@@ -187,6 +189,8 @@ _BACKEND_VALIDATED_FIELDS: frozenset[str] = frozenset(
         "move_vehicle",
         "needs_elevator",
         "needs_loading_support",
+        "tour_date",
+        "passenger_count",
     }
 )
 

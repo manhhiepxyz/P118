@@ -19,6 +19,14 @@ export function RegisterPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Hồ sơ tự khai — optional, lưu thẳng vào tài khoản khi tạo.
+  const [fullName, setFullName] = useState('')
+  const [phone, setPhone] = useState('')
+  const [address, setAddress] = useState('')
+  const [dob, setDob] = useState('')
+  const [gender, setGender] = useState('')
+  const [cccdLast4, setCccdLast4] = useState('')
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     if (submitting) return
@@ -39,7 +47,14 @@ export function RegisterPage() {
 
     setSubmitting(true)
     try {
-      await register(username.trim(), password, email.trim() || undefined)
+      await register(username.trim(), password, email.trim() || undefined, {
+        full_name: fullName.trim() || undefined,
+        phone: phone.trim() || undefined,
+        address: address.trim() || undefined,
+        date_of_birth: dob || undefined,
+        gender: gender || undefined,
+        cccd_last4: cccdLast4.replace(/\D/g, '').slice(0, 4) || undefined,
+      })
       toast.push('success', 'Tạo tài khoản thành công!')
       navigate('/', { replace: true })
     } catch (err) {
@@ -136,6 +151,111 @@ export function RegisterPage() {
                 placeholder="Nhập lại mật khẩu"
                 className={inputClass}
               />
+            </div>
+
+            {/* Hồ sơ tự khai — tất cả không bắt buộc, có thể khai sau ở trang Hồ sơ. */}
+            <div className="border-t border-gray-100 pt-4 dark:border-gray-800">
+              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                Thông tin thêm <span className="font-normal text-gray-400">(không bắt buộc)</span>
+              </p>
+              <div className="mt-3 space-y-4">
+                <div>
+                  <label htmlFor="reg-name" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Họ và tên
+                  </label>
+                  <input
+                    id="reg-name"
+                    type="text"
+                    autoComplete="name"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="Nguyễn Văn A"
+                    className={inputClass}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="reg-phone" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Số điện thoại
+                  </label>
+                  <input
+                    id="reg-phone"
+                    type="tel"
+                    autoComplete="tel"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="0981 234 567"
+                    className={inputClass}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="reg-address" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Địa chỉ
+                  </label>
+                  <input
+                    id="reg-address"
+                    type="text"
+                    autoComplete="street-address"
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    placeholder="Số nhà, phường, quận…"
+                    className={inputClass}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="reg-dob" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Ngày sinh
+                    </label>
+                    <input
+                      id="reg-dob"
+                      type="date"
+                      value={dob}
+                      onChange={(e) => setDob(e.target.value)}
+                      className={inputClass}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="reg-gender" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Giới tính
+                    </label>
+                    <select
+                      id="reg-gender"
+                      value={gender}
+                      onChange={(e) => setGender(e.target.value)}
+                      className={inputClass}
+                    >
+                      <option value="">—</option>
+                      <option value="nam">Nam</option>
+                      <option value="nu">Nữ</option>
+                      <option value="khac">Khác</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="reg-cccd" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    4 số cuối CCCD
+                  </label>
+                  <input
+                    id="reg-cccd"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={cccdLast4}
+                    onChange={(e) =>
+                      setCccdLast4(e.target.value.replace(/\D/g, '').slice(0, 4))
+                    }
+                    placeholder="Chỉ 4 số cuối"
+                    className={inputClass}
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    Hệ thống chỉ lưu 4 số cuối để nhận diện hồ sơ, không lưu số CCCD đầy đủ.
+                  </p>
+                </div>
+              </div>
             </div>
 
             {error && (

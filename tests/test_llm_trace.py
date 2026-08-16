@@ -240,7 +240,7 @@ def test_the_stage_is_named_so_two_calls_can_be_told_apart(trace_lines):
 
 def test_anything_shaped_like_a_key_is_masked(trace_lines):
     """Trace là thứ người ta copy vào chat và issue."""
-    planted = "sk-abcdef0123456789abcdef"
+    planted = "sk-abcdef0123456789abcdef"  # secret-fixture - canary cho test masking
     LlmTraceLogger().on_llm_end(_Result(_Message(f"Key là {planted} nhé")))
     assert planted not in trace_lines.text
     assert "đã ẩn" in trace_lines.text
@@ -272,7 +272,7 @@ def test_usage_still_records_no_prompt_text():
     import pathlib
 
     ddl = pathlib.Path(__file__).resolve().parent.parent / "src" / "db" / "schema.sql"
-    table = ddl.read_text()
+    table = ddl.read_text(encoding="utf-8")
     table = table[table.find("CREATE TABLE IF NOT EXISTS llm_usage") :]
     table = table[: table.find(");")]
     for content_column in ("prompt ", "prompt_text", "completion ", "response_text", "reasoning"):

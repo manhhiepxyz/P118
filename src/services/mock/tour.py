@@ -236,6 +236,13 @@ def schedule_property_viewing(
             # có hồ sơ vẫn nhận được người để liên hệ.
             "contact_name": contact.contact_name,
             "contact_phone": contact.contact_phone,
+            # 4 thông tin người đón tiếp do provider xác nhận — nguồn sự thật
+            # nằm ở provider, không phải Agent tự dựng. Người đón tiếp chính là
+            # đầu mối tư vấn của dự án; khu vực đón = khu đô thị của dự án.
+            "receptionist_name": contact.contact_name,
+            "receptionist_phone": contact.contact_phone,
+            "reception_area": project.residential_area,
+            "reception_time": payload.viewing_time,
         },
         message="Created",
     )
@@ -261,6 +268,10 @@ def get_property_viewing(viewing_id: str) -> schemas.ApiEnvelope:
             "viewing_status": viewing.get("viewing_status", "SCHEDULED"),
             "contact_name": contact.contact_name,
             "contact_phone": contact.contact_phone,
+            "receptionist_name": contact.contact_name,
+            "receptionist_phone": contact.contact_phone,
+            "reception_area": viewing.get("residential_area"),
+            "reception_time": viewing.get("viewing_time"),
         },
         message="Found",
     )

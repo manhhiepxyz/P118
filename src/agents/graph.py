@@ -88,6 +88,34 @@ def _ensure_payment_is_offered(plan: Any) -> None:
         )
 
 
+def _inject_trusted_identity(plan: Any, existing_context: dict[str, Any]) -> None:
+    """Điền `resident_id` cho `register_vehicle` từ trusted context nếu LLM bỏ sót.
+
+    `resident_id` là dữ liệu HỆ THỐNG: backend dựng nó từ `user_resident_links`
+    VERIFIED, không phải thứ LLM (hay người dùng) khai. Prompt Planner đã yêu cầu
+    lấy từ existing_context (nguồn 2), nhưng nếu LLM vẫn trả plan thiếu field này,
+    Validator sẽ hạ READY xuống NEEDS_INFORMATION — và vì resident_id là field nội
+    bộ, graph không thể hỏi người dùng, phải trả câu "chưa đủ cơ sở" khó hiểu.
+
+    Code điền literal từ context thay thế, đúng tinh thần `_ensure_payment_is_offered`
+    và `_apply_user_answers`: sửa plan bằng code, không tin LLM.
+
+    Chỉ điền khi THIẾU (None/rỗng) và không ghi đè InputRef — nếu LLM đã trỏ
+    `resident_id` sang task khác, plan sai chỗ khác, không vá ở đây.
+    """
+    resident_id = existing_context.get("resident_id")
+    if not resident_id:
+        return
+    for task in getattr(plan, "tasks", ()) or ():
+        if getattr(task, "tool", None) != "register_vehicle":
+            continue
+        current = task.input.get("resident_id")
+        is_reference = isinstance(current, dict) and "from_task" in current
+        is_reference = is_reference or getattr(current, "from_task", None) is not None
+        if not is_reference and not current:
+            task.input["resident_id"] = resident_id
+
+
 def _apply_user_answers(plan: Any, user_answers: dict[str, Any]) -> None:
     """Ép giá trị người dùng VỪA trả lời đè lên giá trị Planner suy từ goal.
 
@@ -156,6 +184,8 @@ _USER_PROVIDED_FIELDS: frozenset[str] = frozenset(
         "project_id",
         "viewing_date",
         "viewing_time",
+        "tour_date",
+        "passenger_count",
         "interest_type",
         "preferred_contact_time",
         "consent",
@@ -186,6 +216,8 @@ _USER_FIELD_ORDER: tuple[str, ...] = (
     "max_price",
     "viewing_date",
     "viewing_time",
+    "tour_date",
+    "passenger_count",
     "interest_type",
     "preferred_contact_time",
     "consent",
@@ -216,11 +248,16 @@ def _missing_fields_for_user(
 
     `vehicle_id` là ID nội bộ. Khi account đã có resident context nhưng chưa có
     phương tiện, người dùng chỉ cần cung cấp biển số và loại xe; Planner sẽ tạo
-    bước register_vehicle rồi truyền ID bằng InputRef. Các ID nội bộ khác và
+    bước register_vehicle rồi truyền ID bằng InputRef. `viewing_id` của
+    book_shuttle cũng là ID nội bộ nhưng KHÔNG có thông tin thay thế để hỏi —
+    nguồn duy nhất là output task schedule_property_viewing qua InputRef, nên
+    thiếu là lỗi lập kế hoạch và rơi vào câu hỏi chung. Các ID nội bộ khác và
     dữ liệu thanh toán không được biến thành câu hỏi cho người dùng.
     """
     public_fields: list[str] = []
     for name in missing_fields:
+        if name == "viewing_id":
+            return None
         if name == "vehicle_id":
             if not existing_context.get("resident_id"):
                 return None
@@ -376,6 +413,7 @@ def build_planner_graph(
 
         if result.is_ready:
             _apply_user_answers(result.plan, state.get("user_answers") or {})
+            _inject_trusted_identity(result.plan, state.get("existing_context", {}))
             _ensure_payment_is_offered(result.plan)
             # READY: không đặt `question` — không có gì để hỏi người dùng.
             # `plan_validated=False` ghi đè mọi giá trị caller truyền vào initial
@@ -473,7 +511,7 @@ def build_planner_graph(
             # trả một khoản tiền mà họ không nhìn thấy.
             # Chờ người dùng duyệt không phải lỗi thực thi. Ghi nó thành lỗi
             # khiến UI vừa hiện báo giá vừa nói workflow đã dừng giữa chừng.
-            if exc.code == "PAYMENT_APPROVAL_REQUIRED":
+            if exc.code in {"PAYMENT_APPROVAL_REQUIRED", "VIEWING_APPROVAL_REQUIRED"}:
                 await emit("WAITING_APPROVAL")
             else:
                 await emit("EXECUTION_FAILED")

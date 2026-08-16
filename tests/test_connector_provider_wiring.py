@@ -23,11 +23,14 @@ from httpx import ASGITransport, AsyncClient
 from src.connectors.consultation import ConsultationConnector
 from src.connectors.property import PropertyConnector
 from src.connectors.resident_services import ResidentServicesConnector
+from src.connectors.shuttle import ShuttleConnector
 from src.connectors.tour import TourConnector
 from src.services.mock.consultation import consultation_app
 from src.services.mock.property import property_app
 from src.services.mock.resident_services import resident_services_app
+from src.services.mock.shuttle import shuttle_app
 from src.services.mock.tour import tour_app
+from src.services.mock import shuttle as shuttle_module
 
 # Ngày trong tương lai: provider từ chối ngày quá khứ, và một hằng số ngày cứng
 # sẽ biến test thành quả bom hẹn giờ.
@@ -59,6 +62,12 @@ async def consultation_client():
 @pytest_asyncio.fixture
 async def resident_services_client():
     async with _client(resident_services_app) as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def shuttle_client():
+    async with _client(shuttle_app) as c:
         yield c
 
 
@@ -95,7 +104,51 @@ async def test_schedule_property_viewing_reaches_the_tour_provider(tour_client):
         "viewing_status",
         "contact_name",
         "contact_phone",
+        "receptionist_name",
+        "receptionist_phone",
+        "reception_area",
+        "reception_time",
     }
+
+
+@pytest.mark.asyncio
+async def test_book_shuttle_reaches_the_shuttle_provider(monkeypatch, shuttle_client):
+    # Provider giả lập điều phối 30s — test không chờ thật.
+    monkeypatch.setattr(shuttle_module, "SHUTTLE_BOOKING_DELAY_SECONDS", 0)
+    result = await ShuttleConnector(client=shuttle_client).execute(
+        "book_shuttle",
+        # Standalone shuttle không check viewing_id tồn tại (cross-provider); giá
+        # trị riêng để không dính check chống đặt trùng trong store module-level.
+        {"viewing_id": "VIEW-WIRING-0001", "tour_date": FUTURE, "passenger_count": 2},
+    )
+
+    assert result.success is True, result.message
+    # Contract 8 field: 4 core + 4 thông tin tài xế.
+    assert set(result.data) == {
+        "shuttle_id",
+        "viewing_id",
+        "tour_date",
+        "passenger_count",
+        "driver_name",
+        "license_plate",
+        "vehicle_type",
+        "pickup_time",
+    }
+
+
+@pytest.mark.asyncio
+async def test_book_shuttle_rejects_a_double_booking(monkeypatch, shuttle_client):
+    """Cùng một viewing_id chỉ được đặt xe một lần (provider giữ luật)."""
+    monkeypatch.setattr(shuttle_module, "SHUTTLE_BOOKING_DELAY_SECONDS", 0)
+    connector = ShuttleConnector(client=shuttle_client)
+    shared_input = {"viewing_id": "VIEW-WIRING-0002", "tour_date": FUTURE, "passenger_count": 1}
+
+    first = await connector.execute("book_shuttle", shared_input)
+    assert first.success is True, first.message
+
+    second = await connector.execute("book_shuttle", shared_input)
+    assert second.success is False
+    assert second.error_code.value == "SHUTTLE_ALREADY_BOOKED"
 
 
 @pytest.mark.asyncio

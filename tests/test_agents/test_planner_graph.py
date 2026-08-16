@@ -233,6 +233,118 @@ async def test_ready_plan_flows_through_validate_to_execute() -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_resident_id_is_injected_from_trusted_context() -> None:
+    """LLM trả plan thiếu `resident_id` — code điền literal từ trusted context.
+
+    `resident_id` là dữ liệu HỆ THỐNG (backend dựng từ liên kết VERIFIED), không
+    phải thứ người dùng cung cấp. Nếu để Validator chặn, graph phải trả câu
+    "chưa đủ cơ sở" vì không thể hỏi user field nội bộ — người dùng thấy lỗi
+    khó hiểu dù tài khoản đã xác minh. Code tự vá từ context để workflow chạy
+    tiếp, không phụ thuộc LLM nhớ dán field này vào plan.
+    """
+    plan = TaskPlan(
+        goal=GOAL,
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="register_vehicle",
+                depends_on=[],
+                input={"plate_number": "51A-12345", "vehicle_type": "car"},
+            ),
+            Task(
+                task_id="T2",
+                tool="book_parking",
+                depends_on=["T1"],
+                input={
+                    "vehicle_id": InputRef(from_task="T1", field="vehicle_id"),
+                    "booking_date": "2030-12-10",
+                    "parking_zone": "ZONE_A",
+                },
+            ),
+        ],
+    )
+    planner = FakePlanner(PlannerResult(status="READY", plan=plan))
+    boundary = FakeExecutionBoundary(workflow_id="wf-abc", task_results=_success_results())
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke(
+        {
+            "goal": GOAL,
+            "existing_context": {"resident_id": "RES-001", "resident_verification_status": "VERIFIED"},
+        }
+    )
+
+    assert state["planner_status"] == "READY"
+    assert state["plan_validated"] is True
+    assert not state.get("clarification_error")
+    assert len(boundary.calls) == 1
+    vehicle_task = next(t for t in boundary.calls[0].tasks if t.tool == "register_vehicle")
+    assert vehicle_task.input["resident_id"] == "RES-001"
+
+
+@pytest.mark.asyncio
+async def test_present_resident_id_is_not_overridden() -> None:
+    """Context có resident_id KHÁC plan — không ghi đè giá trị LLM đã đưa.
+
+    Chỉ vá khi THIẾU. Ghi đè giá trị sẵn có là sửa plan theo cách khác và dễ
+    làm test lệch khỏi kỳ vọng về canonical plan.
+    """
+    plan = TaskPlan(
+        goal=GOAL,
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="register_vehicle",
+                depends_on=[],
+                input={"resident_id": "RES-002", "plate_number": "51A-12345", "vehicle_type": "car"},
+            ),
+        ],
+    )
+    planner = FakePlanner(PlannerResult(status="READY", plan=plan))
+    boundary = FakeExecutionBoundary(workflow_id="wf-abc", task_results=_success_results())
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke(
+        {"goal": GOAL, "existing_context": {"resident_id": "RES-001", "resident_verification_status": "VERIFIED"}}
+    )
+
+    assert state["plan_validated"] is True
+    vehicle_task = next(t for t in boundary.calls[0].tasks if t.tool == "register_vehicle")
+    assert vehicle_task.input["resident_id"] == "RES-002"
+
+
+@pytest.mark.asyncio
+async def test_missing_resident_id_without_context_still_rejected() -> None:
+    """Context KHÔNG có resident_id thì vẫn đi vào NEEDS_INFORMATION fail-closed.
+
+    Không điền khi không có nguồn tin cậy: tự bịa resident_id còn tệ hơn là
+    từ chối. Đây là trường hợp account chưa liên kết căn hộ — người dùng thấy
+    câu hướng dẫn liên kết căn hộ ở tầng route, không phải câu hỏi field.
+    """
+    plan = TaskPlan(
+        goal=GOAL,
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="register_vehicle",
+                depends_on=[],
+                input={"plate_number": "51A-12345", "vehicle_type": "car"},
+            ),
+        ],
+    )
+    planner = FakePlanner(PlannerResult(status="READY", plan=plan))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": GOAL, "existing_context": {"resident_verification_status": "NOT_LINKED"}})
+
+    # Không thực thi, không bịa mã cư dân.
+    assert boundary.calls == []
+    assert state.get("clarification_error") == CLARIFICATION_UNAVAILABLE_MESSAGE
+    assert state.get("plan_validated") is False
+
+
+@pytest.mark.asyncio
 async def test_goal_and_context_reach_the_planner() -> None:
     planner = FakePlanner(PlannerResult(status="READY", plan=_valid_plan()))
     boundary = FakeExecutionBoundary()

@@ -94,15 +94,17 @@ async def test_demo_journey_mock_api() -> None:
         assert tour_data["tour_slot"] == SLOT
         tour_id = tour_data["tour_id"]
 
-        # Bước 2: đặt xe để đi tham quan căn hộ
+        # Bước 2: đặt xe để đi tham quan căn hộ. Monolith không có
+        # /api/property/viewings nên lịch xem do /api/tours/bookings dựng;
+        # viewing_id chính là giá trị tour_id trả về.
         shuttle = await ac.post(
             "/api/shuttles/bookings",
-            json={"tour_id": tour_id, "tour_date": TOUR_DATE, "passenger_count": 4},
+            json={"viewing_id": tour_id, "tour_date": TOUR_DATE, "passenger_count": 4},
         )
         assert shuttle.status_code == 201
         shuttle_data = shuttle.json()["data"]
         assert shuttle_data["shuttle_id"].startswith("SHUTTLE-")
-        assert shuttle_data["tour_id"] == tour_id
+        assert shuttle_data["viewing_id"] == tour_id
         assert shuttle_data["passenger_count"] == 4
 
         # Bước 3: đăng ký tư vấn (mua — đầu tư)
@@ -126,7 +128,7 @@ async def test_demo_journey_mock_api() -> None:
 
         dup_shuttle = await ac.post(
             "/api/shuttles/bookings",
-            json={"tour_id": tour_id, "tour_date": TOUR_DATE, "passenger_count": 4},
+            json={"viewing_id": tour_id, "tour_date": TOUR_DATE, "passenger_count": 4},
         )
         assert dup_shuttle.status_code == 409
         assert dup_shuttle.json()["error_code"] == "SHUTTLE_ALREADY_BOOKED"

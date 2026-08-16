@@ -30,9 +30,9 @@ def book_shuttle(
     if fail:
         raise inject_failure(fail)
 
-    # Cross-check (cùng app): lịch tham quan phải tồn tại.
-    if payload.tour_id not in store.tour_bookings:
-        raise not_found("TOUR_NOT_FOUND", f"Tour {payload.tour_id} not found")
+    # Cross-check (cùng app): lịch xem nhà phải tồn tại.
+    if payload.viewing_id not in store.tour_bookings:
+        raise not_found("VIEWING_NOT_FOUND", f"Viewing {payload.viewing_id} not found")
 
     tour_date = payload.tour_date.isoformat()
 
@@ -43,17 +43,17 @@ def book_shuttle(
             f"Shuttle capacity exceeded on {tour_date} ({SHUTTLE_DAILY_CAPACITY} passengers/day)",
         )
 
-    if any(b["tour_id"] == payload.tour_id for b in store.shuttle_bookings.values()):
+    if any(b["viewing_id"] == payload.viewing_id for b in store.shuttle_bookings.values()):
         raise conflict(
             "SHUTTLE_ALREADY_BOOKED",
-            f"Shuttle already booked for tour {payload.tour_id}",
+            f"Shuttle already booked for viewing {payload.viewing_id}",
         )
 
     shuttle_id = new_shuttle_id()
     with store._lock:
         store.shuttle_bookings[shuttle_id] = {
             "shuttle_id": shuttle_id,
-            "tour_id": payload.tour_id,
+            "viewing_id": payload.viewing_id,
             "tour_date": tour_date,
             "passenger_count": payload.passenger_count,
         }
@@ -63,7 +63,7 @@ def book_shuttle(
         success=True,
         data={
             "shuttle_id": shuttle_id,
-            "tour_id": payload.tour_id,
+            "viewing_id": payload.viewing_id,
             "tour_date": tour_date,
             "passenger_count": payload.passenger_count,
         },
@@ -80,7 +80,7 @@ def get_shuttle(shuttle_id: str) -> schemas.ApiEnvelope:
         success=True,
         data={
             "shuttle_id": shuttle["shuttle_id"],
-            "tour_id": shuttle["tour_id"],
+            "viewing_id": shuttle["viewing_id"],
             "tour_date": shuttle["tour_date"],
             "passenger_count": shuttle["passenger_count"],
         },

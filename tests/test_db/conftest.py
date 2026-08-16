@@ -66,6 +66,7 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
                 parking_bookings,
                 vehicles,
                 residents,
+                verification_records,
                 users
             RESTART IDENTITY CASCADE
             """

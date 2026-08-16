@@ -99,7 +99,9 @@ export function QuickActionForm({ capabilities, submitting, onSubmit, onCancel }
   const [error, setError] = useState<string | null>(null)
   const needsProjects = capabilities.some((capability) => {
     const name = capability.name.toLocaleLowerCase('vi-VN')
-    return name.includes('tham quan') || name.includes('quan tâm')
+    // "Đặt xe đưa đón tham quan" không cần chọn dự án — nó đi theo lịch tham
+    // quan đã có; chỉ các dịch vụ chọn dự án mới tải danh sách.
+    return name.includes('quan tâm') || (name.includes('tham quan') && !name.includes('đặt xe'))
   })
 
   useEffect(() => {
@@ -119,6 +121,11 @@ export function QuickActionForm({ capabilities, submitting, onSubmit, onCancel }
   function buildSegment(capability: Capability): string {
     const name = capability.name.toLocaleLowerCase('vi-VN')
     const value = (field: string) => getValue(capability, field)
+    // Phải đứng TRƯỚC nhánh 'tham quan': tên "Đặt xe đưa đón tham quan" cũng
+    // chứa "tham quan", nếu để sau sẽ bị nuốt vào nhánh đặt lịch xem.
+    if (name.includes('đặt xe')) {
+      return `đặt xe đưa đón tham quan ngày ${value('date')} cho ${value('passengers')} người`
+    }
     if (name.includes('tham quan')) {
       return `đặt lịch tham quan dự án ${value('project')} ngày ${value('date')} lúc ${value('time')}`
     }
@@ -159,6 +166,12 @@ export function QuickActionForm({ capabilities, submitting, onSubmit, onCancel }
     const value = (field: string) => getValue(capability, field)
     const change = (field: string) => (next: string) => setValue(capability, field, next)
 
+    if (name.includes('đặt xe')) return (
+      <>
+        <InputField label="Ngày đón" type="date" value={value('date')} onChange={change('date')} />
+        <InputField label="Số người đi xe (1–30)" type="text" value={value('passengers')} placeholder="Ví dụ: 4" onChange={change('passengers')} />
+      </>
+    )
     if (name.includes('tham quan')) return (
       <>
         <SelectField label="Dự án" value={value('project')} options={projectOptions} onChange={change('project')} />

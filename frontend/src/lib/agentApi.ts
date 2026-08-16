@@ -19,13 +19,21 @@
  */
 
 import type {
-  AdminLinkRequestItem,
   AgentWorkflowListResponse,
   AgentWorkflowResponse,
   AuthUser,
   Capability,
-  LinkRequestView,
   LoginResponse,
+  NotificationSummary,
+  VerificationClaim,
+  VerificationDecision,
+  VerificationRecord,
+  VerificationRecordType,
+  VerificationStatus,
+  ViewingApprovalDecision,
+  ViewingApprovalListResponse,
+  ViewingApprovalRecord,
+  ViewingApprovalStatus,
 } from './types'
 
 const BASE = '/api/v1'
@@ -114,6 +122,7 @@ const SAFE_VALIDATION_MESSAGES = [
   'Hãy cho biết phương tiện',
   'Dự án bạn chọn chưa nằm trong danh sách',
   'Giờ liên hệ phải theo định dạng',
+  'Số người đi xe phải là một số từ 1 đến 30.',
   'Thông tin bổ sung chưa đúng định dạng',
 ]
 
@@ -188,6 +197,44 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await response.json()) as T
 }
 
+/**
+ * Request dạng multipart/form-data (upload ảnh, PATCH profile).
+ *
+ * KHÔNG set `Content-Type`: trình duyệt tự sinh boundary. Để nguyên header mặc
+ * định mà vẫn JSON.stringify thì form file sẽ gửi nhầm như chuỗi.
+ */
+async function requestFormData<T>(path: string, form: FormData, method = 'POST'): Promise<T> {
+  const headers: Record<string, string> = {}
+  const token = getStoredToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  let response: Response
+  try {
+    response = await fetch(`${BASE}${path}`, { method, headers, body: form })
+  } catch {
+    throw new ApiError(0, 'Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.')
+  }
+
+  if (response.status === 401) {
+    storeToken(null)
+    throw new ApiError(401, 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.')
+  }
+
+  if (!response.ok) {
+    let fallback = 'Đã có lỗi xảy ra. Vui lòng thử lại.'
+    if (response.status === 422) {
+      try {
+        fallback = safeValidationDetail(await response.clone().json()) ?? fallback
+      } catch {
+        // Body không phải JSON: giữ câu generic.
+      }
+    }
+    throw new ApiError(response.status, messageForStatus(response.status, fallback))
+  }
+
+  return (await response.json()) as T
+}
+
 /* ------------------------------------------------------------------ */
 /* Auth                                                                */
 /* ------------------------------------------------------------------ */
@@ -205,14 +252,30 @@ export async function login(username: string, password: string): Promise<LoginRe
   return data
 }
 
-export async function register(username: string, password: string, email?: string): Promise<AuthUser> {
+/** Profile tự khai ở form đăng ký — tất cả optional, backend chấp nhận null. */
+export interface RegisterProfileInput {
+  full_name?: string
+  phone?: string
+  address?: string
+  date_of_birth?: string
+  gender?: string
+  cccd_last4?: string
+}
+
+export async function register(
+  username: string,
+  password: string,
+  email?: string,
+  profile: RegisterProfileInput = {},
+): Promise<AuthUser> {
   // Backend luôn tạo role `customer`. Browser không chọn được role, và cũng
   // không tạo được liên kết cư dân — việc đó thuộc đường admin/provider.
-  return request<AuthUser>('/auth/register', {
-    method: 'POST',
-    body: email ? { username, password, email } : { username, password },
-    anonymous: true,
-  })
+  const body: Record<string, unknown> = { username, password }
+  if (email) body.email = email
+  for (const [key, value] of Object.entries(profile)) {
+    if (value) body[key] = value
+  }
+  return request<AuthUser>('/auth/register', { method: 'POST', body, anonymous: true })
 }
 
 export async function getMe(): Promise<AuthUser> {
@@ -326,60 +389,130 @@ export async function listProjects(): Promise<string[]> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Admin — liên kết cư dân                                             */
+/* Profile tự khai — PATCH /users/me (multipart + avatar)              */
 /* ------------------------------------------------------------------ */
 
-export async function setResidentLink(
-  userId: string,
-  residentId: string,
-  verificationStatus: 'PENDING' | 'VERIFIED' | 'REJECTED',
-): Promise<{ user_id: string; verification_status: string }> {
-  // Không gửi apartment/khu: dữ liệu căn hộ đọc từ bản ghi cư dân qua
-  // `resident_id`. Nhận từ form là tạo nguồn sự thật thứ hai về ai ở căn nào.
-  return request(`/admin/resident-links/${encodeURIComponent(userId)}`, {
-    method: 'POST',
-    body: { resident_id: residentId, verification_status: verificationStatus },
-  })
+export interface ProfileUpdateInput {
+  full_name?: string | null
+  phone?: string | null
+  address?: string | null
+  date_of_birth?: string | null
+  gender?: string | null
+  cccd_last4?: string | null
+}
+
+/** Cập nhật profile tự khai (form fields + optional avatar file). */
+export async function updateProfile(
+  input: ProfileUpdateInput,
+  avatar?: File,
+): Promise<AuthUser> {
+  const form = new FormData()
+  for (const [key, value] of Object.entries(input)) {
+    if (value !== null && value !== undefined) form.append(key, String(value))
+  }
+  if (avatar) form.append('avatar', avatar)
+  return requestFormData<AuthUser>('/users/me', form, 'PATCH')
 }
 
 /* ------------------------------------------------------------------ */
-/* Liên kết căn hộ — khách hàng xin, admin duyệt                       */
+/* Thông báo — summary (poll) cho bell; stream (SSE) ở NotificationProvider */
 /* ------------------------------------------------------------------ */
 
 /**
- * Gửi yêu cầu liên kết căn hộ.
+ * Snapshot "việc cần chú ý" của user đang đăng nhập.
  *
- * Body chỉ có thông tin người dùng ĐỌC ĐƯỢC: mã căn hộ, khu đô thị, họ tên.
- * Không có `resident_id` (mã nội bộ) và không có trạng thái xác minh — quyền
- * chỉ mở ở đường duyệt của admin, và backend từ chối 422 nếu browser gửi kèm.
+ * `request` tự gắn Bearer từ sessionStorage — cùng token với stream SSE. Đây là
+ * nguồn dự phòng khi kết nối SSE mất.
  */
-export async function requestApartmentLink(input: {
-  apartment_code: string
-  residential_area: string
-  full_name: string
-}): Promise<LinkRequestView> {
-  return request<LinkRequestView>('/auth/resident-link-requests', { method: 'POST', body: input })
+export async function fetchNotificationSummary(): Promise<NotificationSummary> {
+  return request<NotificationSummary>('/notifications/summary')
 }
 
-/** Trạng thái yêu cầu của CHÍNH mình. Không nhận user_id — không dò được người khác. */
-export async function myApartmentLinkRequest(): Promise<LinkRequestView | null> {
-  return request<LinkRequestView | null>('/auth/resident-link-requests/me')
+/* ------------------------------------------------------------------ */
+/* Xác thực căn hộ / xe có ảnh — verification-records (Path B)         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Gửi đơn xác thực kèm ảnh giấy tờ.
+ *
+ * Body multipart: `record_type` + `claimed_data` (JSON string). Browser KHÔNG
+ * gửi `applicant_user_id`/`verification_status` — backend đặt từ JWT.
+ * `record_type=vehicle` yêu cầu đã liên kết căn hộ VERIFIED (backend 403).
+ */
+export async function createVerificationRecord(
+  recordType: VerificationRecordType,
+  claimedData: VerificationClaim,
+  files: File[],
+): Promise<{ item: VerificationRecord }> {
+  const form = new FormData()
+  form.append('record_type', recordType)
+  form.append('claimed_data', JSON.stringify(claimedData))
+  for (const file of files) form.append('files', file)
+  return requestFormData<{ item: VerificationRecord }>('/verification-records', form)
 }
 
-export async function listLinkRequests(status = 'PENDING'): Promise<AdminLinkRequestItem[]> {
-  const data = await request<{ items: AdminLinkRequestItem[] }>(
-    `/admin/resident-link-requests?status=${encodeURIComponent(status)}`,
+/** Đơn xác thực của CHÍNH mình — không nhận user_id, không dò được người khác. */
+export async function myVerificationRecords(): Promise<VerificationRecord[]> {
+  const data = await request<{ items: VerificationRecord[] }>('/verification-records/my')
+  return data.items
+}
+
+/** Danh sách hồ sơ cho người duyệt (provider/admin). */
+export async function listVerificationRecords(
+  recordType?: VerificationRecordType,
+  status?: VerificationStatus,
+): Promise<VerificationRecord[]> {
+  const params = new URLSearchParams()
+  if (recordType) params.set('record_type', recordType)
+  if (status) params.set('status', status)
+  const qs = params.toString()
+  const data = await request<{ items: VerificationRecord[] }>(
+    `/verification-records${qs ? `?${qs}` : ''}`,
   )
   return data.items
 }
 
-/** Duyệt/từ chối. Chỉ gửi quyết định — tài khoản và căn hộ đọc từ dòng yêu cầu. */
-export async function decideLinkRequest(
-  requestId: string,
-  decision: 'approve' | 'reject',
-): Promise<{ request_id: string; decision: string }> {
-  return request(`/admin/resident-link-requests/${encodeURIComponent(requestId)}/decision`, {
-    method: 'POST',
-    body: { decision },
-  })
+/** Duyệt / từ chối một hồ sơ. Chỉ gửi quyết định — từ chối bắt buộc lý do. */
+export async function decideVerificationRecord(
+  recordId: string,
+  body: VerificationDecision,
+): Promise<{ item: VerificationRecord }> {
+  return request<{ item: VerificationRecord }>(
+    `/verification-records/${encodeURIComponent(recordId)}/decide`,
+    { method: 'POST', body },
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Lịch tham quan chờ duyệt — viewing-approvals (cổng /review)         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Danh sách yêu cầu lịch tham quan cho người duyệt (provider/admin).
+ *
+ * Khách KHÔNG gọi được (backend chặn `require_roles`). `status` lọc theo vòng
+ * đời quyết định: AWAITING / APPROVED / REJECTED; bỏ qua để lấy cả ba.
+ */
+export async function listViewingApprovals(
+  status?: ViewingApprovalStatus,
+): Promise<ViewingApprovalRecord[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : ''
+  const data = await request<ViewingApprovalListResponse>(`/viewing-approvals${qs}`)
+  return data.items
+}
+
+/**
+ * Duyệt / từ chối một lịch tham quan.
+ *
+ * Duyệt mất ~30 giây (backend chạy nốt book_shuttle đồng bộ) — UI phải báo
+ * "Đang xử lý…". Chỉ gửi quyết định; `decided_by` backend lấy từ JWT.
+ */
+export async function decideViewingApproval(
+  workflowId: string,
+  body: ViewingApprovalDecision,
+): Promise<{ summary: string; status: string }> {
+  return request<{ summary: string; status: string }>(
+    `/viewing-approvals/${encodeURIComponent(workflowId)}/decide`,
+    { method: 'POST', body },
+  )
 }

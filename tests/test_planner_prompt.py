@@ -284,7 +284,31 @@ def test_prompt_has_self_check_before_output() -> None:
     assert "amount, currency" in checklist  # nhắc đúng cặp hay sai nhất
     assert "InputRef" in checklist
     assert "pay_fee" in checklist
-    assert "9 tool" in checklist
+    assert "10 tool" in checklist
+    assert "book_shuttle" in checklist
+
+
+def test_tool_table_lists_book_shuttle_and_receptionist_fields() -> None:
+    tool_section = PROMPT.split("## Tool được phép dùng", 1)[1].split("## Định dạng giá trị", 1)[0]
+
+    assert "| book_shuttle |" in tool_section
+    assert "viewing_id" in tool_section
+    assert "passenger_count" in tool_section
+    assert "receptionist_name" in tool_section
+    assert "receptionist_phone" in tool_section
+    assert "reception_area" in tool_section
+    assert "reception_time" in tool_section
+
+
+def test_prompt_documents_the_viewing_to_shuttle_chain() -> None:
+    section = PROMPT.split("## Quy tắc schedule_property_viewing -> book_shuttle", 1)[1]
+    section = section.split("## Thanh toán độc lập", 1)[0]
+
+    assert "viewing_id" in section
+    assert "InputRef" in section
+    assert "depends_on" in section
+    assert "KHÔNG hỏi người dùng" in section
+    assert "MIỄN PHÍ" in section
 
 
 def test_property_search_is_read_only_and_never_auto_schedules() -> None:

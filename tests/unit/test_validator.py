@@ -678,6 +678,7 @@ EXPECTED_TOOLS = frozenset(
         "register_vehicle",
         "book_parking",
         "pay_fee",
+        "book_shuttle",
     }
 )
 

@@ -160,7 +160,12 @@ def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = N
 def structured_output_method(settings: Settings | None = None) -> str | None:
     """Cơ chế structured output phù hợp với provider đang dùng.
 
-    Trả None nghĩa là dùng mặc định của LangChain (function calling).
+    Không bao giờ trả None cho provider OpenAI-compatible: langchain-openai
+    0.3+ mặc định `with_structured_output` chuyển sang strict structured output
+    (`response_format: json_schema`), chế độ này từ chối schema có `Task.input`
+    là dict tự do ("Extra required key 'input' supplied"). `function_calling`
+    là cơ chế LangChain cũ, chấp nhận schema lỏng hơn và vẫn validate bằng
+    Pydantic.
 
     DeepSeek V4 Flash chạy thinking mode: nó từ chối forced `tool_choice`
     ("Thinking mode does not support this tool_choice") và chưa mở
@@ -169,4 +174,8 @@ def structured_output_method(settings: Settings | None = None) -> str | None:
     Pydantic model — đổi cơ chế truyền tải, không nới lỏng kiểm tra.
     """
     settings = settings or get_settings()
-    return "json_mode" if settings.llm_provider == "deepseek" else None
+    if settings.llm_provider == "deepseek":
+        return "json_mode"
+    # openai, openrouter: dùng function calling để tránh strict json_schema
+    # từ chối schema TaskPlan.
+    return "function_calling"

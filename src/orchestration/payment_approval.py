@@ -191,6 +191,34 @@ def downstream_of(plan: TaskPlan, task_id: str) -> set[str]:
     return affected - {task_id}
 
 
+def plan_without(plan: TaskPlan, excluded_task_ids: set[str]) -> TaskPlan | None:
+    """Plan chỉ còn các task KHÔNG phụ thuộc (trực tiếp hay gián tiếp) vào excluded.
+
+    Bỏ một task mà giữ lại task phụ thuộc nó sẽ tạo `depends_on` trỏ vào hư
+    không — Validator từ chối, và Executor cũng không resolve được InputRef.
+
+    Dùng chung cho cả hai boundary pause/resume (`PaymentApprovalBoundary` và
+    `ViewingApprovalBoundary`): cả hai đều cần chạy "phần trước" rồi dừng lại hỏi.
+    """
+    dropped = set(excluded_task_ids)
+    # TaskPlan giữ thứ tự topo sau khi qua Validator, nhưng không dựa vào đó:
+    # lặp tới khi tập `dropped` ổn định.
+    changed = True
+    while changed:
+        changed = False
+        for task in plan.tasks:
+            if task.task_id in dropped:
+                continue
+            if any(dep in dropped for dep in task.depends_on):
+                dropped.add(task.task_id)
+                changed = True
+
+    remaining = [task for task in plan.tasks if task.task_id not in dropped]
+    if not remaining:
+        return None
+    return TaskPlan(goal=plan.goal, tasks=remaining)
+
+
 async def persist_full_plan(
     repository: Any,
     workflow_id: str,

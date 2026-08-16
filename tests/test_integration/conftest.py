@@ -61,7 +61,8 @@ async def clean_e2e_tables(e2e_pool: asyncpg.Pool) -> None:
                 parking_capacity,
                 parking_bookings,
                 vehicles,
-                residents
+                residents,
+                verification_records
             RESTART IDENTITY CASCADE
             """
         )

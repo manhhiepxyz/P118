@@ -120,6 +120,26 @@ class DemoTaskResult(BaseModel):
     title: str
     message: str
     details: list[DemoDetailItem] = Field(default_factory=list)
+    # Thời điểm trạng thái hiện tại được ghi (`workflow_tasks.updated_at`). UI
+    # dùng để nói "chờ phê duyệt từ lúc" / "đã phê duyệt lúc" cho từng bước.
+    # None khi task chưa từng được persist (kế hoạch vừa lập, chưa chạy).
+    updated_at: str | None = None
+
+
+class DemoViewingApproval(BaseModel):
+    """Ngữ cảnh lịch tham quan đang chờ provider/admin duyệt (khách thấy).
+
+    KHÔNG chứa PII của người yêu cầu (applicant_name/phone) — người duyệt thấy
+    PII qua `/viewing-approvals` của cổng /review, khách chỉ thấy lịch + dự án.
+    """
+
+    task_id: str
+    project_id: str
+    project_name: str | None = None
+    viewing_date: str
+    viewing_time: str
+    passenger_count: int | None = None
+    wants_shuttle: bool = False
 
 
 class DemoWorkflowEvent(BaseModel):
@@ -284,6 +304,10 @@ class DemoWorkflowResponse(BaseModel):
     # Báo giá authoritative đọc từ booking đã persist. Browser KHÔNG được gửi
     # amount/currency; nó chỉ hiển thị lại đúng con số backend đưa xuống.
     payment_quote: dict[str, Any] | None = None
+    # Lịch tham quan đang chờ provider/admin duyệt. Khách đọc được lịch + dự án
+    # nhưng KHÔNG quyết định được (người duyệt là provider qua /review). Cùng
+    # status WAITING_APPROVAL như thanh toán — giao diện phân biệt bằng field này.
+    viewing_approval: DemoViewingApproval | None = None
     # Mã lỗi ỔN ĐỊNH khi workflow hỏng: `LLM_CONFIGURATION_ERROR`,
     # `PROVIDER_UNAVAILABLE`, … Dùng để đối chiếu log server và cho admin đọc.
     # KHÔNG phải tên class exception — tên class là chi tiết cài đặt, đổi theo

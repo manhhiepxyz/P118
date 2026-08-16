@@ -244,14 +244,18 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
     monkeypatch.setattr(demo_service, "get_llm", lambda **_: llm)
     monkeypatch.setattr(demo_service, "Planner", lambda received, **_kwargs: planner if received is llm else None)
 
-    async def _build_boundary(*urls: str, on_task_progress=None, on_failure=None):
+    async def _build_boundary(*urls: str, on_task_progress=None, on_failure=None, shuttle_url=None):
         assert on_task_progress is not None
         events.append(("runtime", urls))
         return runtime_boundary, _Repository()
 
     def _build_graph(received_planner, received_boundary, *, on_stage=None, **kwargs):
         assert received_planner is planner
-        assert isinstance(received_boundary, demo_service.PaymentApprovalBoundary)
+        # Boundary ngoài cùng là viewing (chặn schedule_property_viewing TRƯỚC
+        # mọi guard khác); bên trong nó là chuỗi payment → resident → runtime.
+        assert isinstance(received_boundary, demo_service.ViewingApprovalBoundary)
+        inner = received_boundary._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        assert isinstance(inner, demo_service.PaymentApprovalBoundary)
         assert on_stage is None
         assert kwargs.get("parent_workflow_id") is None
         assert kwargs.get("session_id") is None

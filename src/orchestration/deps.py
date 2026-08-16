@@ -16,7 +16,7 @@ Cổng mặc định khớp docker-compose.yml — MỘT tool một owner, một
   TourConnector             → 8005  schedule_property_viewing
   ResidentServicesConnector → 8006  create_maintenance_request, schedule_move
   ConsultationConnector     → 8007  register_property_interest
-  ShuttleConnector          → 8009  EXPERIMENTAL, không đăng ký runtime
+  ShuttleConnector          → 8009  book_shuttle
 
 Trước đây PropertyConnector và TourConnector cùng trỏ 8005 (mock-tour không có
 /api/properties/search) còn ResidentServicesConnector trỏ 8006 nơi Docker chạy
@@ -37,6 +37,7 @@ from src.connectors.payment import PaymentConnector
 from src.connectors.property import PropertyConnector
 from src.connectors.resident import ResidentConnector
 from src.connectors.resident_services import ResidentServicesConnector
+from src.connectors.shuttle import ShuttleConnector
 from src.connectors.tour import TourConnector
 from src.connectors.transport import TransportConnector
 from src.db.migrations import run_migrations
@@ -53,6 +54,7 @@ def build_connectors(
     resident_services_url: str = "http://localhost:8006",
     tour_url: str = "http://localhost:8005",
     consultation_url: str = "http://localhost:8007",
+    shuttle_url: str = "http://localhost:8009",
     contact_profile: dict[str, Any] | None = None,
 ) -> list[Any]:
     """Dựng các Connector thật trỏ tới Mock Provider.
@@ -61,9 +63,10 @@ def build_connectors(
         resident_url : Base URL Resident service (mặc định cổng 8001)
         transport_url: Base URL Transport service (mặc định cổng 8002)
         payment_url  : Base URL Payment service (mặc định cổng 8003)
+        shuttle_url  : Base URL Shuttle service (mặc định cổng 8009)
 
     Returns:
-        List Connector cho năm provider nghiệp vụ.
+        List Connector cho các provider nghiệp vụ.
     """
     return [
         ResidentConnector(base_url=resident_url),
@@ -73,9 +76,7 @@ def build_connectors(
         TourConnector(base_url=tour_url),
         ResidentServicesConnector(base_url=resident_services_url),
         ConsultationConnector(base_url=consultation_url),
-        # ShuttleConnector KHÔNG đăng ký — experimental, xem ADR trong
-        # src/connectors/shuttle.py (nó còn đòi `tour_id`, id đã bị contract
-        # public loại bỏ).
+        ShuttleConnector(base_url=shuttle_url),
     ]
 
 
@@ -103,6 +104,7 @@ async def build_execution_boundary(
     payment_url: str = "http://localhost:8003",
     property_url: str = "http://localhost:8005",
     resident_services_url: str = "http://localhost:8006",
+    shuttle_url: str | None = None,
     contact_profile: dict[str, Any] | None = None,
     on_task_progress: Callable[[str, str, TaskStatus], Awaitable[None]] | None = None,
     on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
@@ -119,6 +121,7 @@ async def build_execution_boundary(
         property_url,
         resident_services_url,
         contact_profile=contact_profile,
+        shuttle_url=shuttle_url,
     )
     executor = Executor(connectors, repository, on_progress=on_task_progress, on_failure=on_failure)
     return ValidatedExecutionBoundary(executor), repository
@@ -132,6 +135,7 @@ async def build_runtime(
     resident_services_url: str | None = None,
     tour_url: str | None = None,
     consultation_url: str | None = None,
+    shuttle_url: str | None = None,
     contact_profile: dict[str, Any] | None = None,
 ) -> tuple[list[Any], PostgreSQLWorkflowStateRepository]:
     """Dựng toàn bộ runtime: connectors + repository.
@@ -155,6 +159,7 @@ async def build_runtime(
         resident_services_url=resident_services_url or settings.resident_services_service_url,
         tour_url=tour_url or settings.tour_service_url,
         consultation_url=consultation_url or settings.consultation_service_url,
+        shuttle_url=shuttle_url or settings.shuttle_service_url,
         contact_profile=contact_profile,
     )
     repository = await build_repository()

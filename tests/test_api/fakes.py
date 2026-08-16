@@ -165,8 +165,9 @@ class FakeUserRepository:
         self,
         username: str,
         password_hash: str,
-        role: str = "resident",
+        role: str = "customer",
         email: str | None = None,
+        **profile: object,
     ) -> dict:
         if username in self._by_username:
             raise UserAlreadyExistsError(username)
@@ -178,9 +179,49 @@ class FakeUserRepository:
             "password_hash": password_hash,
             "created_at": _iso(),
             "archived_at": None,
+            # Profile tự khai (Phase D) — khớp _PROFILE_COLUMNS của repo thật.
+            "full_name": profile.get("full_name"),
+            "phone": profile.get("phone"),
+            "address": profile.get("address"),
+            "date_of_birth": profile.get("date_of_birth"),
+            "gender": profile.get("gender"),
+            "cccd_last4": profile.get("cccd_last4"),
+            "avatar_url": profile.get("avatar_url"),
         }
         self._users[user["id"]] = user
         self._by_username[username] = user
+        return {k: v for k, v in user.items() if k != "password_hash"}
+
+    async def update_profile(
+        self,
+        user_id: str,
+        *,
+        full_name: str | None = None,
+        phone: str | None = None,
+        address: str | None = None,
+        date_of_birth: str | None = None,
+        gender: str | None = None,
+        cccd_last4: str | None = None,
+        avatar_url: str | None = None,
+    ) -> dict | None:
+        """Chỉ set cột được truyền; cccd_last4 không ghi đè nếu đã có (như thật)."""
+        user = self._users.get(user_id)
+        if user is None:
+            return None
+        updates = {
+            "full_name": full_name,
+            "phone": phone,
+            "address": address,
+            "date_of_birth": date_of_birth,
+            "gender": gender,
+            "avatar_url": avatar_url,
+        }
+        for key, value in updates.items():
+            if value is not None:
+                user[key] = value
+        if cccd_last4 is not None:
+            user["cccd_last4"] = user.get("cccd_last4") or cccd_last4
+        user["updated_at"] = _iso()
         return {k: v for k, v in user.items() if k != "password_hash"}
 
     async def get_user_by_username(self, username: str) -> dict | None:

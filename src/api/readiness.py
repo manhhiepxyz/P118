@@ -11,7 +11,7 @@ Bốn thứ được kiểm, đều KHÔNG gọi mạng ra ngoài:
   1. cấu hình LLM  — provider, key, model có khớp nhau không
   2. PostgreSQL    — kết nối được không
   3. migration     — các bảng bắt buộc đã có chưa
-  4. connector     — bảy provider có URL đầy đủ và đúng dạng không
+  4. connector     — tám provider có URL đầy đủ và đúng dạng không
 
 Cố ý KHÔNG gọi thử LLM: healthcheck lặp mỗi 30 giây sẽ đốt tiền và tự tạo rate
 limit cho chính mình. Kiểm khoá thật là việc của lệnh smoke chạy một lần khi
@@ -47,9 +47,9 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "sessions",
 )
 
-# Bảy provider canonical. `book_shuttle` (8009) là experimental và không được
-# đăng ký, nên nó KHÔNG nằm ở đây — thêm vào sẽ khiến hệ thống báo chưa sẵn
-# sàng vì thiếu một dịch vụ mà nó cố tình không chạy.
+# Tám provider canonical. `book_shuttle` (8009) đã là tool thứ 10 của contract
+# public và được đăng ký với Executor, nên nó nằm trong danh sách bắt buộc —
+# thiếu shuttle là hệ thống không hoàn thành được chuỗi tham quan → xe.
 REQUIRED_SERVICE_URLS: tuple[str, ...] = (
     "resident_service_url",
     "transport_service_url",
@@ -58,6 +58,8 @@ REQUIRED_SERVICE_URLS: tuple[str, ...] = (
     "resident_services_service_url",
     "consultation_service_url",
     "property_service_url",
+    "ownership_service_url",
+    "shuttle_service_url",
 )
 
 

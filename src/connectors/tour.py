@@ -102,6 +102,11 @@ class TourConnector(Connector):
                                 "viewing_status",
                                 "contact_name",
                                 "contact_phone",
+                                # 4 thông tin người đón tiếp do provider xác nhận.
+                                "receptionist_name",
+                                "receptionist_phone",
+                                "reception_area",
+                                "reception_time",
                             ),
                             # Đầu mối tư vấn phải dùng được. `None` ở đây nghĩa là
                             # provider hỏng, không phải "khách chưa là cư dân".
@@ -111,6 +116,10 @@ class TourConnector(Connector):
                                 "viewing_time",
                                 "contact_name",
                                 "contact_phone",
+                                "receptionist_name",
+                                "receptionist_phone",
+                                "reception_area",
+                                "reception_time",
                             ),
                         )
                     except OutputContractError as exc:
@@ -180,6 +189,9 @@ class TourConnector(Connector):
             "RESIDENT_NOT_FOUND": ErrorCode.RESIDENT_NOT_FOUND,
             "INVALID_DATA": ErrorCode.INVALID_INPUT,
             "SERVICE_UNAVAILABLE": ErrorCode.SERVICE_UNAVAILABLE,
+            # Monolith phát VIEWING_NOT_FOUND khi không thấy lịch xem nhà; tour
+            # standalone không phát (cross-provider), mapping này để phòng thủ.
+            "VIEWING_NOT_FOUND": ErrorCode.VIEWING_NOT_FOUND,
         }
         try:
             return ErrorCode(code)

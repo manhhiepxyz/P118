@@ -1,4 +1,4 @@
-"""Ma trận contract cho cả 9 tool: schema ↔ Validator ↔ Connector cùng một luật.
+"""Ma trận contract cho cả 10 tool: schema ↔ Validator ↔ Connector cùng một luật.
 
 Trước khi có `src/common/tool_contract.py`, luật của một tool nằm rải ở ba nơi
 và không nơi nào biết nơi kia. Validator chấp nhận `transaction_type="hack"`,
@@ -70,6 +70,11 @@ VALID_INPUTS: dict[str, dict] = {
         "parking_zone": "ZONE_A",
     },
     "pay_fee": {"booking_id": "BOOK-001", "amount": 150_000, "currency": "VND"},
+    "book_shuttle": {
+        "viewing_id": "VIEW-001",
+        "tour_date": "2030-12-11",
+        "passenger_count": 4,
+    },
 }
 
 ALL_TOOLS = sorted(TOOL_CONTRACTS)
@@ -84,8 +89,8 @@ def _plan(tool: str, input_data: dict) -> TaskPlan:
 # ---------------------------------------------------------------------------
 
 
-def test_contract_covers_exactly_the_nine_shared_tools() -> None:
-    assert len(ALL_TOOLS) == 9
+def test_contract_covers_exactly_the_ten_shared_tools() -> None:
+    assert len(ALL_TOOLS) == 10
     assert set(ALL_TOOLS) == TaskPlanValidator.ALLOWED_TOOLS
 
 
@@ -117,6 +122,10 @@ def test_connector_output_fields_match_the_contract() -> None:
             "viewing_status",
             "contact_name",
             "contact_phone",
+            "receptionist_name",
+            "receptionist_phone",
+            "reception_area",
+            "reception_time",
         },
         "register_property_interest": {
             "interest_id",
@@ -136,6 +145,16 @@ def test_connector_output_fields_match_the_contract() -> None:
         "register_vehicle": {"vehicle_id"},
         "book_parking": {"booking_id", "parking_zone", "booking_date", "amount", "currency"},
         "pay_fee": {"payment_id", "payment_status"},
+        "book_shuttle": {
+            "shuttle_id",
+            "viewing_id",
+            "tour_date",
+            "passenger_count",
+            "driver_name",
+            "license_plate",
+            "vehicle_type",
+            "pickup_time",
+        },
     }
     for tool, fields in declared.items():
         assert set(TOOL_CONTRACTS[tool].outputs) == fields, tool
@@ -152,6 +171,7 @@ EXPECTED_OWNERS: dict[str, str] = {
     "pay_fee": "PaymentConnector",
     "create_maintenance_request": "ResidentServicesConnector",
     "schedule_move": "ResidentServicesConnector",
+    "book_shuttle": "ShuttleConnector",
 }
 
 
@@ -181,26 +201,26 @@ def test_every_tool_is_owned_by_exactly_one_connector() -> None:
     assert {tool: names[0] for tool, names in owners.items()} == EXPECTED_OWNERS
 
 
-def test_runtime_exposes_exactly_the_nine_canonical_tools() -> None:
+def test_runtime_exposes_exactly_the_ten_canonical_tools() -> None:
     connectors = build_connectors()
 
     registered = [tool for connector in connectors for tool in connector.tool_names]
 
-    assert len(registered) == 9, f"số tool đăng ký lệch: {sorted(registered)}"
+    assert len(registered) == 10, f"số tool đăng ký lệch: {sorted(registered)}"
     assert set(registered) == set(ALL_TOOLS)
 
 
-def test_shuttle_connector_is_absent_from_the_default_runtime() -> None:
-    """`book_shuttle` là experimental — runtime mặc định không được biết tới nó.
+def test_shuttle_connector_is_registered_in_the_default_runtime() -> None:
+    """`book_shuttle` là tool thứ 10 — runtime mặc định PHẢI có ShuttleConnector.
 
-    Source vẫn nằm trong repo nên đọc code dễ tưởng tool còn dùng được. Ràng
-    buộc thật nằm ở registry: nó phải vắng mặt. Bật lại mà chưa đổi `tour_id`
-    thành `viewing_id` sẽ tạo một tool Planner không cấp nổi input.
+    Xe đưa đón tham quan nối qua `viewing_id` của lịch xem; nếu runtime thiếu
+    connector thì chuỗi tham quan → xe lập kế hoạch được nhưng không bao giờ
+    thực thi được.
     """
     connectors = build_connectors()
 
-    assert not any(type(c).__name__ == "ShuttleConnector" for c in connectors)
-    assert "book_shuttle" not in {tool for c in connectors for tool in c.tool_names}
+    assert any(type(c).__name__ == "ShuttleConnector" for c in connectors)
+    assert "book_shuttle" in {tool for c in connectors for tool in c.tool_names}
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +258,10 @@ INVALID_CASES = [
     ("full_name toàn khoảng trắng", "register_resident", {"full_name": "  "}, "full_name"),
     ("booking_date sai định dạng", "book_parking", {"booking_date": "10-12-2030"}, "booking_date"),
     ("viewing_time sai định dạng", "schedule_property_viewing", {"viewing_time": "25:99"}, "viewing_time"),
+    ("passenger_count bằng 0", "book_shuttle", {"passenger_count": 0}, "passenger_count"),
+    ("passenger_count là chuỗi '4'", "book_shuttle", {"passenger_count": "4"}, "passenger_count"),
+    ("passenger_count là bool", "book_shuttle", {"passenger_count": True}, "passenger_count"),
+    ("viewing_id rỗng", "book_shuttle", {"viewing_id": ""}, "viewing_id"),
 ]
 
 
@@ -335,6 +359,61 @@ def test_correct_payment_chain_still_passes() -> None:
     )
 
     assert TaskPlanValidator.validate(plan) is plan
+
+
+def test_viewing_shuttle_chain_still_passes() -> None:
+    """Chuỗi schedule_property_viewing → book_shuttle: viewing_id qua InputRef."""
+    plan = TaskPlan(
+        goal="Tham quan rồi đặt xe đưa đón",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="schedule_property_viewing",
+                depends_on=[],
+                input=VALID_INPUTS["schedule_property_viewing"],
+            ),
+            Task(
+                task_id="T2",
+                tool="book_shuttle",
+                depends_on=["T1"],
+                input={
+                    "viewing_id": InputRef(from_task="T1", field="viewing_id"),
+                    "tour_date": "2030-12-11",
+                    "passenger_count": 4,
+                },
+            ),
+        ],
+    )
+
+    assert TaskPlanValidator.validate(plan) is plan
+
+
+def test_book_shuttle_viewing_id_must_come_from_the_viewing_task() -> None:
+    """viewing_id là ID nội bộ — không được nối từ field lạ như booking_id."""
+    plan = TaskPlan(
+        goal="Tham quan rồi đặt xe đưa đón",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="schedule_property_viewing",
+                depends_on=[],
+                input=VALID_INPUTS["schedule_property_viewing"],
+            ),
+            Task(
+                task_id="T2",
+                tool="book_shuttle",
+                depends_on=["T1"],
+                input={
+                    "viewing_id": InputRef(from_task="T1", field="booking_id"),
+                    "tour_date": "2030-12-11",
+                    "passenger_count": 4,
+                },
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="does not return"):
+        TaskPlanValidator.validate(plan)
 
 
 # ---------------------------------------------------------------------------

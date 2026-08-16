@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
-  Bell,
+  Car,
   Home,
-  Inbox,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -16,10 +15,11 @@ import {
   Workflow,
   X,
 } from 'lucide-react'
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { Link, Navigate, NavLink, Outlet, useNavigate } from 'react-router-dom'
 
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
+import { NotificationBell } from './NotificationBell'
 
 /* ---------------------------------------------------------------------------
    AppLayout — Header trên + Navbar trái (ĐEN) + Nội dung phải.
@@ -35,7 +35,8 @@ const COLLAPSED_KEY = 'p118_sidebar_collapsed'
 const USER_NAV_ITEMS = [
   { to: '/', label: 'Trang chủ', icon: LayoutDashboard, end: true },
   { to: '/profile', label: 'Hồ sơ & Tài sản', icon: UserCheck, end: true },
-  { to: '/apartment-link', label: 'Liên kết căn hộ', icon: Home, end: true },
+  { to: '/apartment-link', label: 'Xác minh căn hộ', icon: Home, end: true },
+  { to: '/vehicle-register', label: 'Đăng ký xe', icon: Car, end: true },
   { to: '/approvals', label: 'Chờ duyệt', icon: TimerReset, end: false },
   { to: '/workflows', label: 'Workflows', icon: Workflow, end: true },
 ]
@@ -134,57 +135,49 @@ function NavItem({
 /** Sidebar nội dung — dùng chung cho desktop (lg+) và drawer mobile. */
 function SidebarContent({
   onNavigate,
-  isAdmin,
+  role,
   collapsed,
   onToggleCollapsed,
 }: {
   onNavigate?: () => void
-  isAdmin: boolean
+  role: 'customer' | 'admin' | 'provider' | null
   collapsed: boolean
   onToggleCollapsed?: () => void
 }) {
+  // Admin không dùng app cư dân: sidebar chỉ còn Quản trị. Provider không bao
+  // giờ render AppLayout (bị redirect về `/review`), nhưng nếu rơi vào đây thì
+  // để sidebar trống tránh hiện mục sai role. Ẩn menu là tiện dụng, không phải
+  // kiểm soát truy cập — backend chặn bằng `require_roles`.
+  const isCustomer = role === 'customer'
+  const isAdmin = role === 'admin'
+
   return (
     <div className="flex h-full flex-col">
       <nav className="flex-1 space-y-1 px-3 py-4" aria-label="Điều hướng chính">
-        {USER_NAV_ITEMS.map(({ to, label, icon, end }) => (
-          <NavItem
-            key={to}
-            to={to}
-            label={label}
-            icon={icon}
-            end={end}
-            collapsed={collapsed}
-            onClick={onNavigate}
-          />
-        ))}
+        {isCustomer &&
+          USER_NAV_ITEMS.map(({ to, label, icon, end }) => (
+            <NavItem
+              key={to}
+              to={to}
+              label={label}
+              icon={icon}
+              end={end}
+              collapsed={collapsed}
+              onClick={onNavigate}
+            />
+          ))}
 
         {/* Điều hướng quản trị chỉ hiện với admin. Route cũng được chặn bằng
             `AdminRoute`, và backend chặn lần nữa bằng `require_roles("admin")` —
             ẩn menu là tiện dụng, không phải kiểm soát truy cập. */}
         {isAdmin && (
-          <>
-            <NavItem
-              to="/admin"
-              label="Quản trị"
-              icon={ShieldCheck}
-              collapsed={collapsed}
-              onClick={onNavigate}
-            />
-            <NavItem
-              to="/admin/link-requests"
-              label="Yêu cầu liên kết"
-              icon={Inbox}
-              collapsed={collapsed}
-              onClick={onNavigate}
-            />
-            <NavItem
-              to="/admin/resident-links"
-              label="Liên kết cư dân"
-              icon={ShieldCheck}
-              collapsed={collapsed}
-              onClick={onNavigate}
-            />
-          </>
+          <NavItem
+            to="/admin"
+            label="Quản trị"
+            icon={ShieldCheck}
+            collapsed={collapsed}
+            onClick={onNavigate}
+          />
         )}
       </nav>
 
@@ -223,10 +216,18 @@ export function AppLayout() {
   const [collapsed, setCollapsed] = useState<boolean>(
     () => localStorage.getItem(COLLAPSED_KEY) === '1',
   )
-  const { user, isAdmin, logout } = useAuth()
+  const { user, logout } = useAuth()
   const { theme, toggle: toggleTheme } = useTheme()
   const navigate = useNavigate()
   const toast = useToast()
+
+  const role = user?.role === 'admin' ? 'admin' : user?.role === 'provider' ? 'provider' : 'customer'
+
+  // Provider là "bên thứ 3" duyệt hồ sơ — không dùng app cư dân. Bất kỳ đường
+  // nào trong AppLayout đều bị đưa về cổng xác thực `/review`.
+  if (role === 'provider') {
+    return <Navigate to="/review" replace />
+  }
 
   function toggleCollapsed() {
     setCollapsed((v) => {
@@ -279,14 +280,8 @@ export function AppLayout() {
               )}
             </button>
 
-            <button
-              type="button"
-              aria-label="Thông báo"
-              className="relative rounded-lg p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-            >
-              <Bell className="h-5 w-5" aria-hidden />
-              <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" aria-hidden />
-            </button>
+            {/* Thông báo realtime — badge theo số việc cần chú ý, click xem dropdown. */}
+            <NotificationBell tone="light" />
 
             {/* Avatar + đăng xuất — chuyển lên header bên phải */}
             <div className="ml-1 flex items-center gap-2 border-l border-gray-200 pl-2 dark:border-slate-800">
@@ -309,7 +304,11 @@ export function AppLayout() {
                     {user?.username ?? 'Khách'}
                   </p>
                   <p className="text-xs text-gray-400 dark:text-gray-500">
-                    {user?.role === 'admin' ? 'Quản trị viên' : 'Cư dân'}
+                    {user?.role === 'admin'
+                      ? 'Quản trị viên'
+                      : user?.role === 'provider'
+                        ? 'Đối tác xác thực'
+                        : 'Cư dân'}
                   </p>
                 </div>
               </div>
@@ -338,7 +337,11 @@ export function AppLayout() {
             collapsed ? 'w-[76px]' : 'w-60'
           }`}
         >
-          <SidebarContent isAdmin={isAdmin} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
+          <SidebarContent
+            role={role}
+            collapsed={collapsed}
+            onToggleCollapsed={toggleCollapsed}
+          />
         </aside>
 
         {/* Main content — bên phải, chiếm hết chiều rộng còn lại */}
@@ -369,7 +372,11 @@ export function AppLayout() {
                 <X className="h-5 w-5" aria-hidden />
               </button>
             </div>
-            <SidebarContent onNavigate={() => setMobileOpen(false)} isAdmin={isAdmin} collapsed={false} />
+            <SidebarContent
+              onNavigate={() => setMobileOpen(false)}
+              role={role}
+              collapsed={false}
+            />
           </div>
         </div>
       )}

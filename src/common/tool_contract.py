@@ -198,6 +198,12 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
                 "viewing_status": FieldSpec(kind="enum", enum=frozenset({"SCHEDULED"})),
                 "contact_name": _STRING,
                 "contact_phone": _STRING,
+                # 4 thông tin người đón tiếp do provider xác nhận — nguồn sự thật
+                # nằm ở mock tour provider, không phải Agent tự dựng.
+                "receptionist_name": _STRING,
+                "receptionist_phone": _STRING,
+                "reception_area": _STRING,
+                "reception_time": _TIME,
             },
         ),
         "register_property_interest": _contract(
@@ -299,6 +305,30 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
             outputs={
                 "payment_id": _STRING,
                 "payment_status": FieldSpec(kind="enum", enum=frozenset({"PENDING", "PAID", "FAILED", "REFUNDED"})),
+            },
+        ),
+        "book_shuttle": _contract(
+            inputs={
+                # `viewing_id` đến từ InputRef của task schedule_property_viewing
+                # — id nội bộ do provider cấp, KHÔNG phải field người dùng khai.
+                "viewing_id": _STRING,
+                "tour_date": _DATE,
+                # Sức chứa xe tham quan: tối thiểu 1 người. Cận trên 30 ép ở
+                # provider (`BookShuttleRequest.ge=30`); FieldSpec không có
+                # maximum nên đây là luật tầng dưới, không phải tầng contract.
+                "passenger_count": FieldSpec(kind="integer", minimum=1),
+            },
+            outputs={
+                "shuttle_id": _STRING,
+                "viewing_id": _STRING,
+                "tour_date": _DATE,
+                "passenger_count": FieldSpec(kind="integer", minimum=1),
+                # 4 thông tin tài xế deterministic do provider tự sinh (roster
+                # theo shuttle_id) — xác nhận xe phải hiện rõ cho người đặt.
+                "driver_name": _STRING,
+                "license_plate": _STRING,
+                "vehicle_type": _STRING,
+                "pickup_time": _STRING,
             },
         ),
     }

@@ -77,6 +77,7 @@ services:
       RESIDENT_SERVICES_SERVICE_URL: http://mock-resident-services:8006
       TOUR_SERVICE_URL: http://mock-tour:8005
       CONSULTATION_SERVICE_URL: http://mock-consultation:8007
+      SHUTTLE_SERVICE_URL: http://mock-shuttle:8009
       # Bật để xem prompt / chuỗi suy luận / câu trả lời của model ngay trong
       # `docker compose logs -f backend`. Mặc định TẮT: trace in cả nội dung
       # người dùng gõ, không phải thứ nên chạy thường trực.
@@ -115,7 +116,7 @@ services:
   #   TourConnector             → 8005  schedule_property_viewing
   #   ResidentServicesConnector → 8006  create_maintenance_request, schedule_move
   #   ConsultationConnector     → 8007  register_property_interest
-  #   (8009 mock-shuttle: experimental, profile riêng, không chạy mặc định)
+  #   ShuttleConnector          → 8009  book_shuttle
   # ----------------------------------------------------------------
   mock-resident:
     build:
@@ -263,7 +264,8 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Mock Shuttle Provider — 8009. EXPERIMENTAL, không chạy mặc định.
+  # Mock Shuttle Provider — 8009. `book_shuttle` là tool thứ 10 của contract
+  # public (chuỗi schedule_property_viewing → book_shuttle), chạy mặc định.
   # ----------------------------------------------------------------
   mock-shuttle:
     build:
@@ -285,10 +287,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    # EXPERIMENTAL: `book_shuttle` không nằm trong 9 tool canonical và không
-    # được đăng ký với Executor. Profile riêng để `docker compose up` mặc
-    # định KHÔNG chạy nó — một service không ai gọi vẫn tốn cổng và RAM.
-    profiles: ["experimental"]
+    # Không còn experimental: shuttle đã đăng ký với Executor và là chuỗi bắt
+    # buộc của lịch tham quan, nên `docker compose up` chạy nó mặc định.
     restart: unless-stopped
 
   # ----------------------------------------------------------------

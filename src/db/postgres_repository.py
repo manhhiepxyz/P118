@@ -142,6 +142,64 @@ class PostgreSQLWorkflowStateRepository:
             "currency": row["currency"],
         }
 
+    async def get_pending_viewing_view(self, workflow_id: str) -> dict | None:
+        """Lịch tham quan đang chờ duyệt của workflow, hoặc None.
+
+        Mọi field nằm trong chính bảng `viewing_approvals` — không cần JOIN như
+        payment (số tiền payment đọc lại từ booking; ở đây không có nguồn thật
+        nào khác ngoài snapshot, vì Tour provider chưa được gọi cho tới khi
+        duyệt).
+
+        Chỉ trả khi `status = 'AWAITING'`. Approval đã quyết định không được kéo
+        một workflow đã kết thúc quay lại màn chờ duyệt.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT task_id, project_id, project_name, viewing_date,
+                       viewing_time, passenger_count, wants_shuttle
+                FROM viewing_approvals
+                WHERE workflow_id = $1 AND status = 'AWAITING'
+                """,
+                _uuid(workflow_id),
+            )
+        if row is None:
+            return None
+        viewing_date = row["viewing_date"]
+        return {
+            "task_id": row["task_id"],
+            "project_id": row["project_id"],
+            "project_name": row["project_name"],
+            "viewing_date": viewing_date.isoformat() if hasattr(viewing_date, "isoformat") else str(viewing_date),
+            "viewing_time": row["viewing_time"],
+            "passenger_count": row["passenger_count"],
+            "wants_shuttle": bool(row["wants_shuttle"]),
+        }
+
+    async def get_rejected_viewing(self, workflow_id: str) -> dict | None:
+        """Lý do từ chối lịch tham quan của workflow, hoặc None.
+
+        Chỉ trả khi quyết định là REJECTED. `reject_reason` có thể NULL (provider
+        bấm từ chối bằng API khi không bắt buộc ở tầng dữ liệu) — khi đó trả bản
+        chép với reason rỗng, caller tự dựng câu mặc định.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT task_id, status, reject_reason
+                FROM viewing_approvals
+                WHERE workflow_id = $1 AND status = 'REJECTED'
+                """,
+                _uuid(workflow_id),
+            )
+        if row is None:
+            return None
+        return {
+            "task_id": row["task_id"],
+            "status": row["status"],
+            "reject_reason": row["reject_reason"],
+        }
+
     async def get_workflow_owner(self, workflow_id: str) -> str | None:
         """Chủ sở hữu workflow, đọc thẳng PostgreSQL.
 

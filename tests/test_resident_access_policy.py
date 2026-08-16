@@ -85,6 +85,11 @@ PUBLIC_TOOL_TASKS = {
         "preferred_contact_time": "09:30",
         "consent": True,
     },
+    "book_shuttle": {
+        "viewing_id": "VIEW-001",
+        "tour_date": "2030-05-05",
+        "passenger_count": 2,
+    },
 }
 
 RESIDENT_TOOL_TASKS = {
@@ -109,7 +114,7 @@ RESIDENT_TOOL_TASKS = {
 
 
 def test_the_policy_covers_every_canonical_tool() -> None:
-    """Chín tool canonical phải được phân loại hết — không tool nào rơi ra ngoài.
+    """Mười tool canonical phải được phân loại hết — không tool nào rơi ra ngoài.
 
     Một tool không nằm trong nhóm nào sẽ chạy được với MỌI quyền, kể cả prospect.
     """

@@ -162,9 +162,9 @@ async def test_the_correction_and_error_never_echo_user_or_apartment_data():
 
 
 def test_the_planner_tool_space_excludes_resident_linking() -> None:
-    """Tám tool Agent được phép lập kế hoạch — `register_resident` không nằm trong đó.
+    """Chín tool Agent được phép lập kế hoạch — `register_resident` không nằm trong đó.
 
-    KHÔNG đụng tới contract provider: `AllowedTool` vẫn giữ đủ 9 tool cho
+    KHÔNG đụng tới contract provider: `AllowedTool` vẫn giữ đủ 10 tool cho
     registry toàn hệ thống. "Provider capability" và "Agent planner capability"
     là hai tập khác nhau.
     """
@@ -178,7 +178,7 @@ def test_the_planner_tool_space_excludes_resident_linking() -> None:
     assert "register_resident" in provider_tools, "contract provider không được thu hẹp"
     assert "register_resident" not in PLANNER_ALLOWED_TOOLS
     assert PLANNER_ALLOWED_TOOLS == provider_tools - {"register_resident"}
-    assert len(PLANNER_ALLOWED_TOOLS) == 8
+    assert len(PLANNER_ALLOWED_TOOLS) == 9
 
 
 def test_linking_fields_are_not_askable_by_the_planner() -> None:

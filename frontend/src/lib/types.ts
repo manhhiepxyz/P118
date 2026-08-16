@@ -3,7 +3,7 @@
  * KHÔNG dùng tên status cũ trong wireframe Gate 1 (COMPLETED / AWAITING_APPROVAL / ...).
  */
 
-export type UserRole = 'customer' | 'admin'
+export type UserRole = 'customer' | 'admin' | 'provider'
 
 export interface AuthUser {
   id: string
@@ -16,6 +16,15 @@ export interface AuthUser {
   /** Chỉ có giá trị khi VERIFIED. Backend không trả `resident_id` nội bộ. */
   apartment_code: string | null
   residential_area: string | null
+
+  /* Profile tự khai (Phase D). `cccd_last4` là MẶT NẠ — chỉ 4 số cuối. */
+  full_name: string | null
+  phone: string | null
+  address: string | null
+  date_of_birth: string | null
+  gender: string | null
+  cccd_last4: string | null
+  avatar_url: string | null
 }
 
 /** Response POST /auth/login — access token + thông tin user. */
@@ -114,6 +123,14 @@ export interface AgentTaskResult {
   retryable: boolean
   title: string
   message: string
+  /**
+   * Chi tiết kết quả provider dạng dòng nhãn-giá trị, render riêng dưới message.
+   * Ví dụ xác nhận xe: "Tài xế / Biển số xe / Loại xe / Giờ đón". Chỉ có với
+   * task SUCCESS — dữ liệu đến từ kết quả provider, không phải lời suy diễn.
+   */
+  details?: { label: string; value: string }[]
+  /** Thời điểm trạng thái hiện tại được ghi (ISO). UI dùng cho "chờ từ lúc" / "đã xong lúc". */
+  updated_at?: string | null
 }
 
 export interface AgentWorkflowEvent {
@@ -130,6 +147,21 @@ export interface AgentPaymentQuote {
   [key: string]: string | number | undefined
 }
 
+/**
+ * Lịch tham quan đang chờ provider/admin duyệt — khách CHỈ XEM, không quyết định.
+ * KHÔNG chứa PII người yêu cầu (applicant_name/phone) — người duyệt thấy PII
+ * qua `/viewing-approvals` của cổng /review.
+ */
+export interface AgentViewingApproval {
+  task_id: string
+  project_id: string
+  project_name: string | null
+  viewing_date: string
+  viewing_time: string
+  passenger_count: number | null
+  wants_shuttle: boolean
+}
+
 export interface AgentWorkflowResponse {
   status: AgentWorkflowStatus
   stage?: AgentWorkflowStage | null
@@ -141,6 +173,12 @@ export interface AgentWorkflowResponse {
   question: string | null
   missing_fields: string[]
   payment_quote: AgentPaymentQuote | null
+  /**
+   * Cùng status WAITING_APPROVAL với thanh toán nhưng KHÁC loại chờ: lịch tham
+   * quan đang chờ provider duyệt trong /review. Khác null → hiển thị màn chờ
+   * tham quan (không có nút quyết định) thay vì màn chờ thanh toán.
+   */
+  viewing_approval: AgentViewingApproval | null
   /**
    * Câu trả lời tự nhiên do Response Agent viết từ kết quả đã được xác minh.
    *
@@ -199,23 +237,114 @@ export interface Capability {
   blocked_reason: string | null
 }
 
-/** Yêu cầu liên kết căn hộ, phía khách hàng. Không có mã cư dân. */
-export interface LinkRequestView {
-  request_id: string
-  apartment_code: string
-  residential_area: string
-  status: 'PENDING' | 'APPROVED' | 'REJECTED'
-  created_at: string | null
-  decided_at: string | null
-}
+/* ==========================================================================
+ * Xác thực căn hộ / xe có ảnh (Path B song song với Agent) — verification-records.
+ *
+ * Response do Mock Ownership Provider (8004) sinh, main app proxy qua
+ * `/api/v1/verification-records`. KHÔNG chứa `owner_name`: so khớp chủ hộ chỉ
+ * có `ownership_match: bool` — đủ để người duyệt quyết định, không phơi PII.
+ * ========================================================================== */
 
-/** Một dòng trong hàng chờ của admin. `full_name` đã được backend mask. */
-export interface AdminLinkRequestItem {
-  request_id: string
-  username: string
+export type VerificationRecordType = 'apartment' | 'vehicle'
+export type VerificationStatus = 'PENDING' | 'APPROVED' | 'REJECTED'
+
+/** Claim của người nộp đơn — browser chỉ gửi những gì người dùng tự biết. */
+export interface ApartmentClaim {
   apartment_code: string
   residential_area: string
   full_name: string
+}
+
+export interface VehicleClaim {
+  plate_number: string
+  vehicle_type: 'car' | 'motorcycle'
+}
+
+export type VerificationClaim = ApartmentClaim | VehicleClaim
+
+export interface VerificationRecord {
+  record_id: string
+  record_type: VerificationRecordType
+  status: VerificationStatus
+  /** UUID tài khoản người nộp đơn — do backend đặt từ JWT, browser không gửi. */
+  applicant_user_id: string | null
+  claimed_data: VerificationClaim
+  proof_image_urls: string[]
+  reject_reason: string | null
+  decided_by: string | null
+  created_at: string
+  decided_at: string | null
+  /** Chỉ có với record_type=apartment khi liệt kê cho người duyệt. */
+  ownership_match?: boolean | null
+  /** Chỉ khi duyệt thành công — xe thì kèm vehicle_id đã tạo. */
+  materialized?: { vehicle_id?: string } | null
+}
+
+/** Body duyệt/từ chối — từ chối bắt buộc lý do. */
+export interface VerificationDecision {
+  decision: 'approve' | 'reject'
+  reject_reason?: string
+}
+
+/* ==========================================================================
+ * Thông báo — GET /api/v1/notifications/summary + SSE /stream.
+ *
+ * Payload là "việc cần chú ý" của CHÍNH user đang đăng nhập: workflow đang chờ
+ * họ hành động (duyệt thanh toán / bổ sung thông tin) và — chỉ với provider/
+ * admin — số đơn xác thực PENDING. KHÔNG chứa PII, không chứa `owner_name`.
+ * ========================================================================== */
+
+export type NotificationKind = 'payment_approval' | 'clarification'
+
+export interface NotificationWorkflowItem {
+  workflow_id: string
+  /** Tiêu đề đã cắt ngắn (goal ≤ 70 ký tự) — hiển thị trực tiếp. */
+  title: string
   status: string
-  created_at: string | null
+  kind: NotificationKind
+  /** Thời điểm trạng thái hiện tại được ghi (ISO) — "chờ từ lúc". */
+  updated_at: string | null
+}
+
+export interface NotificationSummary {
+  workflows: NotificationWorkflowItem[]
+  verification_pending_count: number
+  /** Chỉ khác 0 với provider/admin — số lịch tham quan đang chờ duyệt trong /review. */
+  viewing_pending_count: number
+}
+
+/* ==========================================================================
+ * Lịch tham quan chờ duyệt — GET /api/v1/viewing-approvals (cổng /review).
+ *
+ * Người duyệt là provider/admin; khách chỉ xem `viewing_approval` trong
+ * AgentWorkflowResponse (KHÔNG có PII). Record này phục vụ TAB "Tham quan" của
+ * ProviderReviewPage — gồm applicant PII vì người duyệt cần gọi/nhận diện khách.
+ * ========================================================================== */
+
+export type ViewingApprovalStatus = 'AWAITING' | 'APPROVED' | 'REJECTED'
+
+export interface ViewingApprovalRecord {
+  workflow_id: string
+  task_id: string
+  status: ViewingApprovalStatus
+  project_id: string
+  project_name: string | null
+  viewing_date: string
+  viewing_time: string
+  passenger_count: number | null
+  wants_shuttle: boolean
+  applicant_name: string | null
+  applicant_phone: string | null
+  reject_reason: string | null
+  decided_by: string | null
+}
+
+/** Body duyệt/từ chối lịch tham quan — từ chối bắt buộc lý do. */
+export interface ViewingApprovalDecision {
+  decision: 'approve' | 'reject'
+  reject_reason?: string
+}
+
+export interface ViewingApprovalListResponse {
+  items: ViewingApprovalRecord[]
 }

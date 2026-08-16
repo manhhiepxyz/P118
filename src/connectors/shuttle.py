@@ -4,28 +4,26 @@ Owner: Hoàng Anh (Tầng Dịch vụ — tạm thời; connector vốn thuộc 
 của Mạnh Hiệp, xem `src/connectors/base.py`).
 
 Vai trò trong luồng demo:
-  [User] → book_shuttle → [ShuttleConnector] → POST /api/shuttles/bookings (port 8006)
+  [User] → book_shuttle → [ShuttleConnector]
+         → POST /api/shuttles/bookings (port 8009)
 
 Quy tắc mock (app độc lập `src/services/mock/shuttle.py`):
   - Sức chứa tối đa 30 khách/ngày → vượt trả 409 NO_AVAILABILITY.
-  - Một lịch tham quan (tour_id) chỉ đặt được 1 xe → 409 SHUTTLE_ALREADY_BOOKED.
-  - Provider này KHÔNG check `tour_id` tồn tại — là dữ liệu provider khác.
+  - Một lịch tham quan (viewing_id) chỉ đặt được 1 xe → 409 SHUTTLE_ALREADY_BOOKED.
+  - Provider này KHÔNG check `viewing_id` tồn tại — là dữ liệu provider khác.
 
 Contract output (canonical field):
-  {"shuttle_id", "tour_id", "tour_date", "passenger_count"}
+  {"shuttle_id", "viewing_id", "tour_date", "passenger_count",
+   "driver_name", "license_plate", "vehicle_type", "pickup_time"}
 
-TRẠNG THÁI: EXPERIMENTAL — KHÔNG ĐƯỢC ĐĂNG KÝ VỚI EXECUTOR.
+`book_shuttle` là tool thứ 10 của contract public Gate 2, đi theo chuỗi
+schedule_property_viewing → book_shuttle: `viewing_id` đến từ output của task
+tham quan qua InputRef. Đã đăng ký với Executor (xem `src/orchestration/deps.py`).
 
-Contract public Gate 2 gồm đúng 9 tool và `book_shuttle` không nằm trong đó.
-Source được giữ lại vì implementation vẫn đúng, không phải vì tool còn dùng
-được: nó không có mặt trong allowlist của Planner, trong prompt, hay trong
-registry của Executor.
-
-TODO trước khi kích hoạt lại: đổi input `tour_id` → `viewing_id`. Sau khi
-`book_tour` được adapter thành `schedule_property_viewing`, id trả về cho
-Agent là `viewing_id`; connector này vẫn đòi `tour_id`, một field không còn
-tồn tại ở phía ngoài Connector. Bật lại mà không sửa sẽ tạo một tool mà
-Planner không bao giờ nối được InputRef vào.
+Thời gian: provider đặt xe "xử lý" ~30 giây (`SHUTTLE_BOOKING_DELAY_SECONDS`);
+default timeout 60s đủ cho sleep 30s + overhead. `book_shuttle` KHÔNG retry-safe
+(nó ghi booking) → Executor chạy 1 attempt; timeout phải > 30s để không rơi
+nhầm vào SERVICE_TIMEOUT trong một lần gọi hợp lệ.
 """
 
 from contextlib import asynccontextmanager
@@ -47,8 +45,8 @@ class ShuttleConnector(Connector):
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8006",
-        timeout: float = 30.0,
+        base_url: str = "http://localhost:8009",
+        timeout: float = 60.0,
         client: httpx.AsyncClient | None = None,
     ):
         # Xóa trailing slash để tránh double-slash khi nối URL
@@ -91,7 +89,16 @@ class ShuttleConnector(Connector):
                         return self._build_envelope_failure(env_error)
 
                     # Kiểm tra required output field theo contract.
-                    required_keys = ["shuttle_id", "tour_id", "tour_date", "passenger_count"]
+                    required_keys = [
+                        "shuttle_id",
+                        "viewing_id",
+                        "tour_date",
+                        "passenger_count",
+                        "driver_name",
+                        "license_plate",
+                        "vehicle_type",
+                        "pickup_time",
+                    ]
                     missing = [k for k in required_keys if k not in data]
                     if missing:
                         return StandardResult.fail(
@@ -147,15 +154,19 @@ class ShuttleConnector(Connector):
     def _map_error_code(self, code: str) -> ErrorCode:
         """Map error code từ API sang ErrorCode nội bộ.
 
-        NO_AVAILABILITY đã khớp trực tiếp với ErrorCode enum. Các code demo
-        (SHUTTLE_ALREADY_BOOKED, TOUR_NOT_FOUND) chưa có trong ErrorCode → map
-        sang code gần nhất hoặc fallback UNKNOWN_EXTERNAL_ERROR.
+        NO_AVAILABILITY, SHUTTLE_ALREADY_BOOKED, VIEWING_NOT_FOUND đều khớp
+        trực tiếp với ErrorCode enum. TOUR_NOT_FOUND là tên cũ monolith phát ra
+        trước khi đổi tên field → alias sang VIEWING_NOT_FOUND, không rơi về
+        UNKNOWN_EXTERNAL_ERROR.
         """
         mapping = {
             "VALIDATION_ERROR": ErrorCode.INVALID_INPUT,
             "NO_AVAILABILITY": ErrorCode.NO_AVAILABILITY,
             "INVALID_DATA": ErrorCode.INVALID_INPUT,
             "SERVICE_UNAVAILABLE": ErrorCode.SERVICE_UNAVAILABLE,
+            "SHUTTLE_ALREADY_BOOKED": ErrorCode.SHUTTLE_ALREADY_BOOKED,
+            "VIEWING_NOT_FOUND": ErrorCode.VIEWING_NOT_FOUND,
+            "TOUR_NOT_FOUND": ErrorCode.VIEWING_NOT_FOUND,
         }
         try:
             return ErrorCode(code)

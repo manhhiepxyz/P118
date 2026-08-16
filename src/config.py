@@ -56,13 +56,16 @@ class Settings(BaseSettings):
     payment_service_url: str = "http://localhost:8003"
     property_service_url: str = "http://localhost:8005"
     resident_services_service_url: str = "http://localhost:8006"
+    # Mock ownership provider — xác thực căn hộ + verification_records (provider duyệt).
+    ownership_service_url: str = "http://localhost:8004"
     # Mỗi tool một service, mỗi service một cổng. Trước đây PropertyConnector và
     # TourConnector cùng trỏ 8005 nhưng mock-tour không có /api/properties/search,
     # còn ResidentServicesConnector trỏ 8006 nơi Docker đang chạy shuttle — cả hai
     # là 404 lúc chạy thật mà test in-process không thấy.
     tour_service_url: str = "http://localhost:8005"
     consultation_service_url: str = "http://localhost:8007"
-    # Experimental, không chạy mặc định (compose profile `experimental`).
+    # Đặt xe đưa đón tham quan — tool `book_shuttle`, chạy mặc định (compose
+    # service mock-shuttle đã bỏ profile experimental).
     shuttle_service_url: str = "http://localhost:8009"
 
     # Auth (JWT-like HMAC token — stdlib only, xem src/api/auth.py)

@@ -15,6 +15,7 @@ import {
   login as apiLogin,
   logout as apiLogout,
   register as apiRegister,
+  type RegisterProfileInput,
 } from './agentApi'
 import type { AuthUser } from './types'
 
@@ -39,8 +40,17 @@ interface AuthContextValue {
   token: string | null
   initializing: boolean
   isAdmin: boolean
+  /** provider hoặc admin — cả hai được duyệt hồ sơ xác thực. */
+  isProvider: boolean
   login: (username: string, password: string) => Promise<void>
-  register: (username: string, password: string, email?: string) => Promise<void>
+  register: (
+    username: string,
+    password: string,
+    email?: string,
+    profile?: RegisterProfileInput,
+  ) => Promise<void>
+  /** Đọc lại user qua /auth/me — dùng sau PATCH /users/me để UI cập nhật ngay. */
+  refreshUser: () => Promise<void>
   logout: () => void
 }
 
@@ -78,11 +88,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(await getMe())
   }, [])
 
-  const register = useCallback(async (username: string, password: string, email?: string) => {
-    // Register trả user (không token) — tự login sau để có phiên.
-    await apiRegister(username, password, email)
-    await login(username, password)
-  }, [login])
+  const register = useCallback(
+    async (
+      username: string,
+      password: string,
+      email?: string,
+      profile?: RegisterProfileInput,
+    ) => {
+      // Register trả user (không token) — tự login sau để có phiên.
+      await apiRegister(username, password, email, profile)
+      await login(username, password)
+    },
+    [login],
+  )
+
+  const refreshUser = useCallback(async () => {
+    const u = await getMe()
+    setUser(u)
+  }, [])
 
   const logout = useCallback(() => {
     apiLogout()
@@ -96,11 +119,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       token,
       initializing,
       isAdmin: user?.role === 'admin',
+      isProvider: user?.role === 'provider' || user?.role === 'admin',
       login,
       register,
+      refreshUser,
       logout,
     }),
-    [user, token, initializing, login, register, logout],
+    [user, token, initializing, login, register, refreshUser, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
@@ -143,5 +168,21 @@ export function AdminRoute({ children }: { children: ReactNode }) {
   }
   if (!user) return <Navigate to="/login" replace />
   if (!isAdmin) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
+/** Chỉ người duyệt hồ sơ xác thực — provider hoặc admin. */
+export function ProviderRoute({ children }: { children: ReactNode }) {
+  const { user, isProvider, initializing } = useAuth()
+
+  if (initializing) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <span className="h-6 w-6 animate-spin rounded-full border-2 border-gray-300 border-t-teal-600" />
+      </div>
+    )
+  }
+  if (!user) return <Navigate to="/login" replace />
+  if (!isProvider) return <Navigate to="/" replace />
   return <>{children}</>
 }

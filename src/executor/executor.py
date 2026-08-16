@@ -113,6 +113,8 @@ class Executor:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        seed_statuses: dict[str, TaskStatus] | None = None,
+        seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         """Thực thi TaskPlan.
 
@@ -121,6 +123,13 @@ class Executor:
             workflow_id: ID workflow (tạo mới nếu None)
             parent_workflow_id: ID workflow cha (dùng cho /continue)
             session_id: ID session/chat thread (tạo mới nếu None)
+            seed_statuses: task_id → status ĐÃ hoàn thành ở lượt trước (resume).
+                Task được seed KHÔNG chạy lại nhưng vẫn tính là SUCCESS cho
+                dependency và cho `all_success` cuối kỳ. Caller phải tự ghi
+                `save_task_result`/`update_task_status` trước khi truyền vào.
+            seed_results: task_id → StandardResult của task đã seed, để
+                `_resolve_input` lấy được output phục vụ task phụ thuộc
+                (InputRef trỏ tới task đã hoàn thành).
 
         Returns:
             Tuple (workflow_id, completed_results)
@@ -147,13 +156,19 @@ class Executor:
         if persisted_id:
             workflow_id = str(persisted_id)
 
-        # Khởi tạo task statuses
-        task_statuses: dict[str, TaskStatus] = {}
-        completed_results: dict[str, StandardResult] = {}
+        # Khởi tạo task statuses. `seed_statuses` mang task ĐÃ hoàn thành ở lượt
+        # trước (resume viewing): chúng giữ trạng thái SUCCESS trong bộ nhớ để
+        # dependency và `_check_dependencies` tính đúng, và KHÔNG bị ghi đè về
+        # PENDING bên dưới.
+        task_statuses: dict[str, TaskStatus] = dict(seed_statuses or {})
+        completed_results: dict[str, StandardResult] = dict(seed_results or {})
 
-        # Tạo task records
+        # Tạo task records. Task đã seed có row SUCCESS sẵn trong database
+        # (`save_task_result`/`update_task_status` đã chạy trước); `create_task`
+        # dùng ON CONFLICT DO NOTHING nên không đè lại.
         for task in plan.tasks:
-            task_statuses[task.task_id] = TaskStatus.PENDING
+            if task.task_id not in task_statuses:
+                task_statuses[task.task_id] = TaskStatus.PENDING
             await self.repository.create_task(
                 workflow_id,
                 {
@@ -171,7 +186,15 @@ class Executor:
         # Thực thi theo từng "wave" của DAG. Mọi task có dependency đã SUCCESS
         # trong cùng wave được gọi Connector song song; task phụ thuộc chỉ xuất
         # hiện ở wave sau.
-        remaining_tasks = list(plan.tasks)
+        #
+        # Task đã seed (SUCCESS từ lượt trước) bị LOẠI khỏi hàng đợi: chạy lại
+        # `schedule_property_viewing` sẽ tạo một lịch thứ hai qua Tour provider.
+        #
+        # Lọc theo `seed_statuses`, KHÔNG theo `task_statuses`: vòng lặp dựng
+        # task records ở trên đã gán PENDING cho MỌI task chưa seed, nên lọc theo
+        # `task_statuses` sẽ làm `remaining_tasks` rỗng và executor không chạy gì.
+        seeded_task_ids = set(seed_statuses or {})
+        remaining_tasks = [task for task in plan.tasks if task.task_id not in seeded_task_ids]
         max_iterations = len(plan.tasks) * 2  # Prevent infinite loop
 
         for _ in range(max_iterations):

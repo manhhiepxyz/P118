@@ -4,46 +4,49 @@ Port: 8004.
 
 Theo cấu trúc system design (`01-high-level-architecture.md`): mock provider
 độc lập theo domain. Provider này chứa dữ liệu chủ sở hữu căn hộ từ ban quản lý
-chung cư, dùng để xác minh quyền sở hữu.
+chung cư, dùng để xác minh quyền sở hữu, và — từ Phase D — sở hữu VÒNG ĐỜI xác
+thực có bằng chứng (bảng `verification_records`) cho cả căn hộ lẫn xe.
 
 **Đây KHÔNG phải một Agent tool.** Xác minh quyền sở hữu là mối quan tâm của
 tầng Auth/VerificationGuard, chạy TRƯỚC khi Agent Workflow bắt đầu — không phải
 một task trong TaskPlan.
 
-Kiến trúc đích (Week 2):
-    P-118 Auth/VerificationGuard
-    → Mock Ownership Provider   (app này)
-    → chỉ VERIFIED mới cho Agent Workflow chạy
+PostgreSQL là nguồn sự thật (bảng `apartment_owners` + `verification_records`),
+KHÔNG còn `Store()` RAM — giống Transport/Payment provider. Pool tạo trong
+`database_lifespan` (src/services/mock/db_pool.py).
 
-Trạng thái provider hỗ trợ HÔM NAY (Week 1):
-    VERIFIED / OWNERSHIP_NOT_FOUND (404) / OWNERSHIP_MISMATCH (403).
-    PENDING và REJECTED là trạng thái DỰ KIẾN cho Week 2 — chưa implement.
+Endpoints:
+  POST /api/apartment-owners/verify-ownership   — verify quyền sở hữu (cũ, giữ path)
+  POST /api/verification-records                — tạo hồ sơ xác thực PENDING
+  GET  /api/verification-records                — list hồ sơ (cho trang duyệt)
+  POST /api/verification-records/{id}/decide    — duyệt / từ chối (bắt buộc lý do)
 
-`owner_name` là PII: dùng để so khớp nội bộ, không trả ra response, không log.
-
-Nguyên tắc hub thuần:
-- Provider này KHÔNG biết gì về Resident/Transport/Payment provider
-- Provider chỉ trả trạng thái xác minh, không tạo resident hay vehicle
-- Planner và Executor không gọi provider này; xác minh quyền sở hữu không nằm
-  trong allowlist tool nghiệp vụ của TaskPlan.
-
-VerificationGuard CHƯA được implement (hạng mục Week 2) — hiện provider chạy độc
-lập và đã sẵn sàng để Guard gọi.
+`owner_name` là PII: dùng để so khớp nội bộ, KHÔNG trả ra response (chỉ trả
+`ownership_match: bool`) và KHÔNG bao giờ được log.
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import asyncpg
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.db.parking_payment_repository import BookingError
 from src.mock import schemas
 from src.mock.errors import forbidden, inject_failure, install_error_handler, not_found
-from src.mock.store import Store
+from src.services.mock import verification_service
+from src.services.mock.db_pool import as_api_error, database_lifespan, get_pool
+from src.services.mock.ownership_service import (
+    ApartmentOwnershipService,
+    OwnershipMismatchError,
+    OwnershipNotFoundError,
+)
 
 apartment_ownership_app = FastAPI(
     title="P-118 Apartment Ownership Mock Provider",
-    description="Dịch vụ giả lập Apartment Ownership — provider cho VerificationGuard, không phải Agent tool.",
-    version="0.1.0",
+    description="Dịch vụ giả lập Apartment Ownership — provider cho VerificationGuard và verification_records, không phải Agent tool.",
+    version="0.2.0",
+    lifespan=database_lifespan,
 )
 
 apartment_ownership_app.add_middleware(
@@ -56,15 +59,12 @@ apartment_ownership_app.add_middleware(
 
 install_error_handler(apartment_ownership_app)
 
-# Store riêng của provider này — KHÔNG dùng singleton src.mock.store.store
-# (mỗi provider độc lập; HUB orchestrate truyền dữ liệu).
-store = Store()
-
 
 @apartment_ownership_app.post("/api/apartment-owners/verify-ownership", summary="Xác minh quyền sở hữu căn hộ")
-def verify_ownership(
+async def verify_ownership(
     payload: schemas.VerifyOwnershipRequest,
     fail: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
 ) -> schemas.ApiEnvelope:
     """
     Verify quyền sở hữu căn hộ.
@@ -80,28 +80,100 @@ def verify_ownership(
     if fail:
         raise inject_failure(fail)
 
-    owner = store.apartment_owners.get((payload.apartment_code, payload.residential_area))
-    if owner is None:
-        raise not_found(
-            "OWNERSHIP_NOT_FOUND",
-            f"Apartment {payload.apartment_code} in {payload.residential_area} not found in ownership records",
+    service = ApartmentOwnershipService(pool)
+    try:
+        result = await service.verify(
+            full_name=payload.full_name,
+            apartment_code=payload.apartment_code,
+            residential_area=payload.residential_area,
         )
+    except OwnershipNotFoundError as exc:
+        raise not_found(exc.error_code, exc.message) from exc
+    except OwnershipMismatchError as exc:
+        raise forbidden(exc.error_code, exc.message) from exc
 
-    if owner["owner_name"] != payload.full_name:
-        raise forbidden(
-            "OWNERSHIP_MISMATCH",
-            f"Requester is not the owner of apartment {payload.apartment_code} in {payload.residential_area}",
+    return schemas.ApiEnvelope(success=True, data=result, message="Ownership verified")
+
+
+# ---------------------------------------------------------------------------
+# verification_records — vòng đời xác thực có bằng chứng (provider duyệt)
+# ---------------------------------------------------------------------------
+
+
+@apartment_ownership_app.post(
+    "/api/verification-records",
+    status_code=201,
+    summary="Tạo hồ sơ xác thực (căn hộ / xe)",
+)
+async def create_verification_record(
+    payload: schemas.VerificationRecordCreate,
+    fail: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> schemas.ApiEnvelope:
+    if fail:
+        raise inject_failure(fail)
+
+    try:
+        record = await verification_service.create_record(
+            pool,
+            record_type=payload.record_type,
+            applicant_user_id=payload.applicant_user_id,
+            claimed_data=payload.claimed_data,
+            proof_image_urls=payload.proof_image_urls,
+            record_id=payload.record_id,
         )
+        match = await verification_service.compute_ownership_match(
+            pool, payload.record_type, payload.claimed_data
+        )
+    except BookingError as exc:
+        raise as_api_error(exc) from exc
 
-    return schemas.ApiEnvelope(
-        success=True,
-        data={
-            "verified": True,
-            "apartment_code": owner["apartment_code"],
-            "residential_area": owner["residential_area"],
-        },
-        message="Ownership verified",
+    return schemas.ApiEnvelope(success=True, data=record.as_output(ownership_match=match), message="Pending")
+
+
+@apartment_ownership_app.get("/api/verification-records", summary="Danh sách hồ sơ xác thực")
+async def list_verification_records(
+    record_type: str | None = None,
+    status: str | None = None,
+    applicant_user_id: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> schemas.ApiEnvelope:
+    records = await verification_service.list_records(
+        pool,
+        record_type=record_type,
+        status=status,
+        applicant_user_id=applicant_user_id,
     )
+    data = []
+    for record in records:
+        match = await verification_service.compute_ownership_match(pool, record.record_type, record.claimed_data)
+        data.append(record.as_output(ownership_match=match))
+    return schemas.ApiEnvelope(success=True, data=data, message="Found")
+
+
+@apartment_ownership_app.post("/api/verification-records/{record_id}/decide", summary="Duyệt / từ chối hồ sơ")
+async def decide_verification_record(
+    record_id: str,
+    payload: schemas.VerificationRecordDecision,
+    fail: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> schemas.ApiEnvelope:
+    if fail:
+        raise inject_failure(fail)
+
+    try:
+        record = await verification_service.decide_record(
+            pool,
+            record_id=record_id,
+            decision=payload.decision,
+            reject_reason=payload.reject_reason,
+            decided_by=payload.decided_by,
+        )
+        match = await verification_service.compute_ownership_match(pool, record.record_type, record.claimed_data)
+    except BookingError as exc:
+        raise as_api_error(exc) from exc
+
+    return schemas.ApiEnvelope(success=True, data=record.as_output(ownership_match=match), message="Decided")
 
 
 @apartment_ownership_app.get("/health", tags=["meta"])

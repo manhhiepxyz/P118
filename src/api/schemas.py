@@ -79,12 +79,17 @@ class WorkflowStatusResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 # Role: dùng str thay enum để khỏi đụng src/common (sở hữu Mạnh Hiệp/Thành Bảo).
-UserRole = Literal["customer", "admin"]
+# 'provider' là người duyệt hồ sơ xác thực (căn hộ / xe) — role mới Phase D.
+UserRole = Literal["customer", "admin", "provider"]
 ResidentLinkStatus = Literal["NOT_LINKED", "PENDING", "VERIFIED", "REJECTED"]
 
 
 class RegisterRequest(BaseModel):
-    """Body cho POST /auth/register — user mới luôn là 'resident'."""
+    """Body cho POST /auth/register — user mới luôn là 'customer'.
+
+    Profile fields là THÔNG TIN TỰ KHAI, tất cả optional. `cccd_last4` chỉ nhận
+    đúng 4 chữ số cuối (mặt nạ) — không có toàn bộ giấy tờ đi qua wire này.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -92,6 +97,19 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     # Email là str thường (EmailStr cần email-validator chưa cài); chấp nhận None.
     email: str | None = Field(default=None, max_length=255)
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=200)
+    phone: str | None = Field(default=None, min_length=8, max_length=20)
+    address: str | None = Field(default=None, max_length=255)
+    date_of_birth: str | None = Field(default=None, description="YYYY-MM-DD")
+    gender: str | None = Field(default=None, max_length=10)
+    cccd_last4: str | None = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+        pattern=r"^[0-9]{4}$",
+        description="4 chữ số cuối của CCCD — MẶT NẠ, không bao giờ gửi nguyên giấy tờ",
+    )
 
 
 class LoginRequest(BaseModel):
@@ -119,6 +137,16 @@ class UserResponse(BaseModel):
     resident_verification_status: ResidentLinkStatus = "NOT_LINKED"
     apartment_code: str | None = None
     residential_area: str | None = None
+
+    # Profile tự khai (Phase D). `cccd_last4` là MẶT NẠ — chỉ 4 số cuối, đủ để
+    # user tự nhận diện hồ sơ, không phơi giấy tờ.
+    full_name: str | None = None
+    phone: str | None = None
+    address: str | None = None
+    date_of_birth: str | None = None
+    gender: str | None = None
+    cccd_last4: str | None = None
+    avatar_url: str | None = None
 
 
 class TokenResponse(BaseModel):
