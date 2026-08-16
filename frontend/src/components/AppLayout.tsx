@@ -32,13 +32,54 @@ import { NotificationBell } from './NotificationBell'
 const THEME_KEY = 'p118_theme'
 const COLLAPSED_KEY = 'p118_sidebar_collapsed'
 
-const USER_NAV_ITEMS = [
+/**
+ * Điều hướng theo NHÓM, không phải một danh sách phẳng.
+ *
+ * Sáu mục ngang hàng không nói được rằng "Xem dịch vụ qua hội thoại" và "Nộp
+ * hồ sơ chờ duyệt" là hai loại việc khác nhau — người dùng phải tự đoán mục
+ * nào dẫn tới đâu. Chia nhóm đặt câu trả lời ngay trên nhãn.
+ *
+ * "Workflows" đổi thành "Hành trình": người dùng nghĩ "chuyến xem nhà ngày
+ * 20/09", không nghĩ theo đơn vị thực thi của hệ thống. Route giữ nguyên
+ * `/workflows` — đổi URL chỉ để đẹp tên sẽ phá link cũ và browser E2E.
+ */
+const USER_NAV_GROUPS: { heading: string | null; items: NavSpec[] }[] = [
+  {
+    heading: null,
+    items: [
+      { to: '/', label: 'Trang chủ', icon: LayoutDashboard, end: true },
+      { to: '/workflows', label: 'Hành trình', icon: Workflow, end: true },
+      { to: '/approvals', label: 'Cần bạn', icon: TimerReset, end: false },
+    ],
+  },
+  {
+    heading: 'Hồ sơ & Tài sản',
+    items: [
+      { to: '/profile', label: 'Hồ sơ của tôi', icon: UserCheck, end: true },
+      { to: '/apartment-link', label: 'Xác minh căn hộ', icon: Home, end: true },
+      { to: '/vehicle-register', label: 'Đăng ký xe', icon: Car, end: true },
+    ],
+  },
+]
+
+interface NavSpec {
+  to: string
+  label: string
+  icon: typeof LayoutDashboard
+  end?: boolean
+}
+
+/**
+ * Thanh tab dưới cho mobile — tối đa 4 mục.
+ *
+ * Hội thoại KHÔNG phải một tab: nó là ô nhập dính đáy trong từng màn. Đặt chat
+ * thành tab sẽ tách nó khỏi hành trình mà nó đang nói về.
+ */
+const MOBILE_TABS: NavSpec[] = [
   { to: '/', label: 'Trang chủ', icon: LayoutDashboard, end: true },
-  { to: '/profile', label: 'Hồ sơ & Tài sản', icon: UserCheck, end: true },
-  { to: '/apartment-link', label: 'Xác minh căn hộ', icon: Home, end: true },
-  { to: '/vehicle-register', label: 'Đăng ký xe', icon: Car, end: true },
-  { to: '/approvals', label: 'Chờ duyệt', icon: TimerReset, end: false },
-  { to: '/workflows', label: 'Workflows', icon: Workflow, end: true },
+  { to: '/workflows', label: 'Hành trình', icon: Workflow, end: true },
+  { to: '/approvals', label: 'Cần bạn', icon: TimerReset },
+  { to: '/profile', label: 'Hồ sơ', icon: UserCheck, end: true },
 ]
 
 /** Theme sáng/tối — lưu localStorage, mặc định theo hệ thống. */
@@ -155,16 +196,27 @@ function SidebarContent({
     <div className="flex h-full flex-col">
       <nav className="flex-1 space-y-1 px-3 py-4" aria-label="Điều hướng chính">
         {isCustomer &&
-          USER_NAV_ITEMS.map(({ to, label, icon, end }) => (
-            <NavItem
-              key={to}
-              to={to}
-              label={label}
-              icon={icon}
-              end={end}
-              collapsed={collapsed}
-              onClick={onNavigate}
-            />
+          USER_NAV_GROUPS.map((group, index) => (
+            <div key={group.heading ?? `group-${index}`} className={index > 0 ? 'pt-4' : ''}>
+              {/* Tiêu đề nhóm ẩn khi sidebar thu gọn — lúc đó chỉ còn icon,
+                  một dòng chữ nhỏ xíu sẽ thành nhiễu chứ không thành cấu trúc. */}
+              {group.heading && !collapsed && (
+                <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {group.heading}
+                </p>
+              )}
+              {group.items.map(({ to, label, icon, end }) => (
+                <NavItem
+                  key={to}
+                  to={to}
+                  label={label}
+                  icon={icon}
+                  end={end}
+                  collapsed={collapsed}
+                  onClick={onNavigate}
+                />
+              ))}
+            </div>
           ))}
 
         {/* Điều hướng quản trị chỉ hiện với admin. Route cũng được chặn bằng
@@ -344,13 +396,50 @@ export function AppLayout() {
           />
         </aside>
 
-        {/* Main content — bên phải, chiếm hết chiều rộng còn lại */}
-        <main className="min-w-0 flex-1 px-4 py-6 lg:px-8">
+        {/* Main content — bên phải, chiếm hết chiều rộng còn lại.
+            `pb-24` trên mobile: chừa chỗ cho thanh tab cố định, nếu không nội
+            dung cuối trang nằm khuất dưới nó. */}
+        <main className="min-w-0 flex-1 px-4 pb-24 pt-6 lg:px-8 lg:pb-6">
           <div className="w-full">
             <Outlet />
           </div>
         </main>
       </div>
+
+      {/* Thanh tab dưới — chỉ mobile, chỉ khách hàng.
+          `env(safe-area-inset-bottom)` để không nằm dưới thanh gesture iPhone. */}
+      {role === 'customer' && (
+        <nav
+          className="fixed inset-x-0 bottom-0 z-40 flex border-t border-gray-200 bg-card pb-[env(safe-area-inset-bottom)] lg:hidden dark:border-gray-700"
+          aria-label="Điều hướng chính"
+        >
+          {MOBILE_TABS.map(({ to, label, icon: Icon, end }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={end}
+              /* min-h-14: mục tiêu chạm tối thiểu 44px, đây rộng hơn cho chắc. */
+              className={({ isActive }) =>
+                `flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition ${
+                  isActive
+                    ? 'text-brand-600 dark:text-teal-400'
+                    : 'text-gray-500 dark:text-gray-400'
+                }`
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon className="h-5 w-5" aria-hidden />
+                  {/* Icon + CHỮ, không icon trần: icon-only làm giảm khả năng
+                      khám phá và người dùng phải đoán nghĩa từng hình. */}
+                  <span>{label}</span>
+                  {isActive && <span className="sr-only">(đang xem)</span>}
+                </>
+              )}
+            </NavLink>
+          ))}
+        </nav>
+      )}
 
       {/* Drawer mobile */}
       {mobileOpen && (

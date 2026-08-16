@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./workspace.css";
 
 /* ---------------------------------------------------------------------------
    P-118 Design tokens — theo docs/ui-design-prompts.md (Design System)
@@ -11,10 +12,53 @@
   --color-brand-50: #f0fdfa;
   --color-brand-100: #ccfbf1;
 
-  /* Surfaces (gray scale chuẩn Tailwind) */
-  --color-surface: #f8fafc; /* gray-50 */
-  --color-card: #ffffff;
-  --color-border-card: #e2e8f0; /* slate-200 */
+  /* ── Bề mặt: BA tầng, không phải hai ───────────────────────────────
+     Trước đây chỉ có `surface` và `card`, nên panel và thẻ bên trong panel
+     trông y hệt nhau — người dùng không đọc được cái nào nằm trên cái nào.
+     Ba tầng cho phép dựng chiều sâu bằng chính màu nền, không phải bằng viền.
+
+     Nền workspace ấm nhẹ (hơi ngả be) thay vì trắng lạnh: trắng tinh trên cả
+     màn hình lớn làm mọi thứ trông như tài liệu, và làm bề mặt nổi phía trên
+     không còn chỗ để nổi. */
+  --color-surface: #f6f5f2; /* nền workspace — ấm, thấp nhất */
+  --color-panel: #fbfaf8; /* panel/dock — cao hơn nền một bậc */
+  --color-card: #ffffff; /* thẻ, node — cao nhất */
+  --color-border-card: #e7e3dc;
+  --color-border-strong: #d6d1c7;
+
+  /* ── Nhấn ngữ nghĩa ────────────────────────────────────────────────
+     Teal là thương hiệu, KHÔNG phải màu của mọi thứ tương tác. Mỗi trạng thái
+     có màu riêng để đọc được ý nghĩa mà không cần đọc chữ. */
+  --color-state-running: #0d7490; /* lam-lục: đang chạy */
+  --color-state-running-soft: #e0f2f7;
+  --color-state-waiting: #b45309; /* hổ phách đậm: chờ bạn */
+  --color-state-waiting-soft: #fef3c7;
+  --color-state-provider: #6b7280; /* xám: chờ bên khác, cố ý trầm */
+  --color-state-provider-soft: #f1f0ed;
+  --color-state-success: #15803d;
+  --color-state-success-soft: #dcfce7;
+  --color-state-failed: #b91c1c;
+  --color-state-failed-soft: #fee2e2;
+
+  /* ── Chuyển động ───────────────────────────────────────────────────
+     Thời lượng theo QUÃNG ĐƯỜNG và độ phức tạp, không phải một con số dùng
+     chung. Easing giảm tốc khi vào, tăng tốc khi ra.
+
+     KHÔNG dùng ease overshoot (`back.out`) ở đây: với giao diện mang thông
+     tin, cú nảy đọc như cẩu thả chứ không như sống động. */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-hover: 170ms;
+  --dur-press: 140ms;
+  --dur-panel: 260ms;
+  --dur-morph: 380ms;
+  --dur-node: 320ms;
+
+  /* ── Đổ bóng: một thang duy nhất ──────────────────────────────────
+     Bóng nhiều lớp, rất mềm — bóng một lớp cứng trông rẻ tiền. */
+  --shadow-card: 0 1px 2px rgb(30 27 22 / 0.04), 0 2px 8px rgb(30 27 22 / 0.04);
+  --shadow-lift: 0 2px 4px rgb(30 27 22 / 0.05), 0 12px 24px -6px rgb(30 27 22 / 0.1);
+  --shadow-panel: 0 1px 3px rgb(30 27 22 / 0.05), 0 20px 40px -12px rgb(30 27 22 / 0.12);
 
   /* Typography */
   --font-sans:
@@ -38,9 +82,28 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 .dark {
-  --color-surface: #0f172a; /* slate-900 */
-  --color-card: #1e293b; /* slate-800 */
-  --color-border-card: #334155; /* slate-700 */
+  /* Tối cũng BA tầng, và không dùng đen tuyệt đối: #0b0f14 giữ được chỗ cho
+     bề mặt phía trên nổi lên, còn #000 thì mọi thứ đều phải sáng hơn nền. */
+  --color-surface: #0f1319;
+  --color-panel: #161b23;
+  --color-card: #1c222b;
+  --color-border-card: #2a313c;
+  --color-border-strong: #3a424f;
+
+  --color-state-running: #38bdf8;
+  --color-state-running-soft: #082f49;
+  --color-state-waiting: #fbbf24;
+  --color-state-waiting-soft: #422006;
+  --color-state-provider: #9ca3af;
+  --color-state-provider-soft: #1f242c;
+  --color-state-success: #4ade80;
+  --color-state-success-soft: #052e16;
+  --color-state-failed: #f87171;
+  --color-state-failed-soft: #450a0a;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.4), 0 12px 24px -6px rgb(0 0 0 / 0.5);
+  --shadow-panel: 0 1px 3px rgb(0 0 0 / 0.5), 0 20px 40px -12px rgb(0 0 0 / 0.6);
   --color-node-ring: #334155;
   --color-ink: #e2e8f0;
 
@@ -232,4 +295,121 @@ body {
 
 .animate-toast-in {
   animation: toast-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ---------------------------------------------------------------------------
+   Lớp trình bày dùng chung cho workspace.
+
+   Đặt ở CSS thay vì rải utility trong JSX: bóng, thời lượng và easing là
+   NGÔN NGỮ của sản phẩm, không phải lựa chọn của từng component. Rải ra thì
+   mỗi chỗ một con số và giao diện mất nhịp.
+--------------------------------------------------------------------------- */
+
+.surface-card {
+  background-color: var(--color-card);
+  box-shadow: var(--shadow-card);
+}
+
+.surface-panel {
+  background-color: var(--color-panel);
+}
+
+/* Thẻ bấm được: nhấc nhẹ khi rê, lún khi nhấn. Chỉ animate `transform` và
+   `box-shadow` — animate width/height/top/left gây reflow và giật khung hình. */
+.lift {
+  transition:
+    transform var(--dur-hover) var(--ease-out-soft),
+    box-shadow var(--dur-hover) var(--ease-out-soft),
+    border-color var(--dur-hover) var(--ease-out-soft);
+  will-change: transform;
+}
+
+.lift:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lift);
+}
+
+.lift:active {
+  transform: translateY(-1px) scale(0.995);
+  transition-duration: var(--dur-press);
+}
+
+/* Nút: phản hồi xúc giác nhẹ. Scale nhỏ hơn thẻ vì quãng đường ngắn hơn. */
+.press {
+  transition:
+    transform var(--dur-press) var(--ease-out-soft),
+    background-color var(--dur-press) var(--ease-out-soft),
+    border-color var(--dur-press) var(--ease-out-soft),
+    box-shadow var(--dur-press) var(--ease-out-soft);
+}
+
+.press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Nội dung panel đổi khi chọn node khác — hoà tan thay vì nhảy phắt. */
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.enter-soft {
+  animation: fade-rise var(--dur-panel) var(--ease-out-soft) both;
+}
+
+/* Vào theo đợt cho danh sách. Chậm dần từng mục tạo cảm giác có nhịp, nhưng
+   trần 8 mục — quá số đó thì mục cuối chờ lâu tới mức thành lỗi. */
+.stagger > * {
+  animation: fade-rise 340ms var(--ease-out-soft) both;
+}
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 45ms; }
+.stagger > *:nth-child(3) { animation-delay: 90ms; }
+.stagger > *:nth-child(4) { animation-delay: 135ms; }
+.stagger > *:nth-child(5) { animation-delay: 180ms; }
+.stagger > *:nth-child(6) { animation-delay: 225ms; }
+.stagger > *:nth-child(n + 7) { animation-delay: 260ms; }
+
+/* Nhịp thở của chặng ĐANG CHẠY — vòng sáng nở ra rồi tắt.
+   Đây là hoạt ảnh lặp DUY NHẤT trong sản phẩm, và nó có nghĩa: một việc đang
+   thật sự diễn ra. Hết chạy là hết nhịp. */
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-state-running) 32%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 12px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.pulse-running {
+  animation: pulse-ring 2.4s var(--ease-in-out-soft) infinite;
+}
+
+/* Ưu tiên 1 của skill: tôn trọng prefers-reduced-motion.
+   Không phải làm nhanh hơn — mà là KHÔNG chạy, và hiện thẳng trạng thái cuối. */
+@media (prefers-reduced-motion: reduce) {
+  .lift,
+  .press,
+  .enter-soft,
+  .stagger > *,
+  .pulse-running {
+    animation: none !important;
+    transition-duration: 1ms !important;
+  }
+
+  .lift:hover,
+  .lift:active,
+  .press:active {
+    transform: none;
+  }
 }

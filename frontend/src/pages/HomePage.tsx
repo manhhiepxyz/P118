@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { BadgeCheck, Clock, Home, Lock, Loader2, SendHorizontal, ShieldX } from 'lucide-react'
+import { BadgeCheck, Clock, Home, Lock, Loader2, ShieldX } from 'lucide-react'
 
 import { ChatWorkflowCard } from '../components/ChatWorkflowCard'
+import { Composer } from '../components/Composer'
 import { QuickActionForm } from '../components/QuickActionForm'
 import { cancelWorkflow, continueWorkflow, getCapabilities, startWorkflow } from '../lib/agentApi'
 import { useAuth } from '../lib/auth'
@@ -304,13 +305,8 @@ export function HomePage() {
     }
   }
 
-  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
-    // `isComposing` là bắt buộc với tiếng Việt: bộ gõ dùng Enter để chốt dấu,
-    // và gửi lúc đó sẽ cắt mất chữ người dùng đang viết dở.
-    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
-    event.preventDefault()
-    void send()
-  }
+  // Xử lý phím Enter đã chuyển vào `Composer`, KỂ CẢ guard `isComposing` cho
+  // bộ gõ tiếng Việt — thiếu nó thì gõ "cà" sẽ gửi mất chữ "ca".
 
   const status: ResidentLinkStatus = user?.resident_verification_status ?? 'NOT_LINKED'
   const view = LINK_VIEW[status] ?? LINK_VIEW.NOT_LINKED
@@ -452,37 +448,19 @@ export function HomePage() {
             </button>
           )}
         </div>
-        <label htmlFor="goal" className="sr-only">
-          Việc bạn cần P-118 giúp
-        </label>
-        <div className="flex items-end gap-2">
-          <textarea
-            id="goal"
-            rows={2}
-            value={goal}
-            onChange={(e) => {
-              setGoal(e.target.value)
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder="Ví dụ: Tôi muốn đăng ký xe và đặt chỗ đỗ xe. (Enter để gửi, Shift+Enter xuống dòng)"
-            disabled={Boolean(workflowRunning) || assistantPreparing}
-            className="min-h-[3rem] w-full resize-none rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
-          />
-          <button
-            type="button"
-            onClick={() => void send()}
-            disabled={sending || Boolean(workflowRunning) || assistantPreparing || !goal.trim()}
-            aria-label="Gửi"
-            className="inline-flex h-11 shrink-0 items-center gap-2 rounded-xl bg-teal-700 px-4 text-sm font-medium text-white disabled:opacity-60"
-          >
-            {sending ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            ) : (
-              <SendHorizontal className="h-4 w-4" aria-hidden />
-            )}
-            {waitingForReply ? 'Gửi' : 'Bắt đầu'}
-          </button>
-        </div>
+        {/* Ô nhập dính đáy. Logic gửi/huỷ/poll GIỮ NGUYÊN — chỉ đổi vỏ.
+            `id="goal"` giữ nguyên: browser E2E điền vào `#goal` và còn chờ nó
+            `state: 'visible'`, nên nó phải là ô nhập THẬT, không phải input ẩn. */}
+        <Composer
+          id="goal"
+          value={goal}
+          onChange={setGoal}
+          onSubmit={() => void send()}
+          disabled={sending || Boolean(workflowRunning) || assistantPreparing}
+          placeholder="Ví dụ: Đặt lịch tham quan Ocean Park ngày 20/09 lúc 10:00"
+          hint={waitingForReply ? 'P-118 đang chờ câu trả lời cho yêu cầu hiện tại.' : null}
+          submitLabel={waitingForReply ? 'Gửi' : 'Bắt đầu'}
+        />
         {error && (
           <p className="mt-2 text-sm text-red-600" role="alert">
             {error}

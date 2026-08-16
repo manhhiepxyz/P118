@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { BadgeCheck, Car, Clock, ShieldX, UploadCloud } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
+import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { EmptyState, SkeletonRows } from '../components/Bits'
 import {
   createVerificationRecord,
@@ -96,6 +97,9 @@ export function VehicleRegistrationPage() {
   }
 
   return (
+    <WorkspaceShell>
+      <div className="h-full overflow-y-auto">
+        <div className="mx-auto w-full max-w-[1000px] px-12 pb-16 pt-12">
     <div className="space-y-5">
       <header>
         <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Đăng ký xe</h1>
@@ -255,5 +259,8 @@ export function VehicleRegistrationPage() {
         </ul>
       </section>
     </div>
+        </div>
+      </div>
+    </WorkspaceShell>
   )
 }

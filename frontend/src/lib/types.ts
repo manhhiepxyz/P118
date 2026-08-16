@@ -180,6 +180,15 @@ export interface AgentWorkflowResponse {
    */
   viewing_approval: AgentViewingApproval | null
   /**
+   * Ai đang cần hành động khi `status === 'WAITING_APPROVAL'`.
+   *
+   * Trước đây giao diện phải ĐOÁN bằng cách xem `payment_quote` hay
+   * `viewing_approval` khác null. Suy diễn ấy đúng với đúng hai loại chờ đang
+   * có và sẽ sai ngay khi xuất hiện loại thứ ba — mà cái giá của việc sai là
+   * dựng nút "Xác nhận" cho một quyết định người dùng không có quyền ra.
+   */
+  approval_actor: 'USER' | 'PROVIDER' | 'ADMIN' | null
+  /**
    * Câu trả lời tự nhiên do Response Agent viết từ kết quả đã được xác minh.
    *
    * KHÁC `message`: `message` gắn với stage nên giống nhau cho mọi workflow

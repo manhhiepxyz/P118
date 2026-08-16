@@ -1,19 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import {
-  BadgeCheck,
-  Camera,
-  Clock,
-  Home,
-  Loader2,
-  Pencil,
-  ShieldX,
-  UserRound,
-} from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { BadgeCheck, Building2, Check, Clock, Lock, Pencil, Plus, ShieldCheck } from 'lucide-react'
 
-import { EmptyState, SkeletonRows } from '../components/Bits'
+import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { myVerificationRecords, updateProfile } from '../lib/agentApi'
 import { useAuth } from '../lib/auth'
-import type { ResidentLinkStatus, VerificationRecord } from '../lib/types'
+import type { VerificationRecord } from '../lib/types'
 
 /**
  * Hồ sơ tài khoản — Phase D.
@@ -29,28 +21,18 @@ import type { ResidentLinkStatus, VerificationRecord } from '../lib/types'
  * Lưu số đầy đủ là thêm một nơi lưu PII mà không thêm giá trị.
  */
 
-const LINK_VIEW: Record<ResidentLinkStatus, { label: string; hint: string; tone: string }> = {
-  VERIFIED: {
-    label: 'Đã xác minh',
-    hint: 'Bạn dùng được đầy đủ dịch vụ dành cho cư dân.',
-    tone: 'border-teal-200 bg-teal-50 text-teal-800 dark:border-teal-900/50 dark:bg-teal-950/30',
-  },
-  PENDING: {
-    label: 'Đang chờ duyệt',
-    hint: 'Ban quản lý đang xem xét hồ sơ kèm ảnh của bạn. Dịch vụ cư dân sẽ mở sau khi được duyệt.',
-    tone: 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30',
-  },
-  REJECTED: {
-    label: 'Chưa được duyệt',
-    hint: 'Hồ sơ chưa được chấp nhận. Vui lòng liên hệ ban quản lý toà nhà.',
-    tone: 'border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/30',
-  },
-  NOT_LINKED: {
-    label: 'Chưa liên kết căn hộ',
-    hint: 'Xác minh căn hộ với ảnh giấy tờ để liên kết tài khoản với căn hộ của bạn.',
-    tone: 'border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300',
-  },
-}
+/*
+ * `LINK_VIEW` cũ đã bỏ.
+ *
+ * Nó vẽ MỘT thẻ xanh "Đã xác minh — bạn dùng được đầy đủ dịch vụ" cho trạng
+ * thái liên kết cư dân, trong khi ngay dưới đó danh sách hồ sơ xác thực lại
+ * rỗng. Hai câu cùng đúng nhưng đặt cạnh nhau thì mâu thuẫn: người dùng không
+ * biết mình đã xác minh hay chưa.
+ *
+ * Nguyên nhân là gộp BA thứ khác nhau vào một nhãn: quan hệ cư dân–căn hộ,
+ * hồ sơ nộp kèm ảnh, và xác thực từng kênh. Bản mới tách hẳn ba phần.
+ */
+
 
 const ROLE_LABEL: Record<string, string> = {
   admin: 'Quản trị viên',
@@ -100,11 +82,9 @@ export function ProfilePage() {
   if (!user) return null
 
   const status = user.resident_verification_status
-  const view = LINK_VIEW[status] ?? LINK_VIEW.NOT_LINKED
-  const Icon = status === 'VERIFIED' ? BadgeCheck : status === 'PENDING' ? Clock : ShieldX
+  const linked = status === 'VERIFIED'
 
-  // `user` đã được kiểm tra non-null ở trên; bản sao này cho phép closure dùng
-  // nó mà TS không lỗi (function declaration không kế thừa narrowing).
+  // `user` đã kiểm non-null ở trên; bản sao cho closure dùng mà TS không lỗi.
   const currentUser = user
 
   function startEdit() {
@@ -136,324 +116,301 @@ export function ProfilePage() {
           address: edit.address.trim() || null,
           date_of_birth: edit.date_of_birth || null,
           gender: edit.gender || null,
-          // Chỉ 4 số cuối — nếu người dùng gõ số dài hơn, cắt còn 4.
+          // Chỉ 4 số cuối — nếu người dùng gõ dài hơn, cắt còn 4.
           cccd_last4: edit.cccd_last4.replace(/\D/g, '').slice(-4) || null,
         },
         avatar ?? undefined,
       )
-      // Đọc lại user qua /auth/me để profile + avatar mới hiện ngay trên màn.
       await refreshUser()
       setEditing(false)
       setSaved(true)
       window.setTimeout(() => setSaved(false), 4000)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Chưa lưu được hồ sơ. Vui lòng thử lại.')
+      setError(err instanceof Error ? err.message : 'Không lưu được hồ sơ.')
     } finally {
       setSaving(false)
     }
   }
 
-  const cccdMask = user.cccd_last4 ? `••••${user.cccd_last4}` : null
+  const personal: { label: string; value: string | null }[] = [
+    { label: 'Họ và tên', value: user.full_name },
+    { label: 'Số điện thoại', value: user.phone },
+    { label: 'Email', value: user.email },
+    { label: 'Ngày sinh', value: user.date_of_birth },
+    { label: 'Giới tính', value: user.gender },
+    { label: 'Địa chỉ', value: user.address },
+    // Che sẵn: chỉ 4 số cuối, và hiện dưới dạng có mặt nạ.
+    { label: 'CCCD', value: user.cccd_last4 ? `•••• •••• ${user.cccd_last4}` : null },
+  ]
 
   return (
-    <div className="space-y-5">
-      <header className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Hồ sơ của bạn</h1>
-        {!editing && (
-          <button
-            type="button"
-            onClick={startEdit}
-            className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:border-teal-700 hover:text-teal-700 dark:border-gray-700 dark:text-gray-200"
-          >
-            <Pencil className="h-4 w-4" aria-hidden />
-            Chỉnh sửa
-          </button>
-        )}
-      </header>
-
-      {/* Tài khoản + avatar */}
-      <section className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
-        <div className="flex items-center gap-4">
-          {user.avatar_url ? (
-            <img
-              src={user.avatar_url}
-              alt="Ảnh đại diện"
-              className="h-14 w-14 shrink-0 rounded-full object-cover"
-            />
-          ) : (
-            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-teal-100 text-xl font-semibold text-teal-800 dark:bg-white/10 dark:text-teal-300">
-              <UserRound className="h-6 w-6" aria-hidden />
-            </span>
-          )}
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{user.username}</p>
-            <p className="text-xs text-gray-500">
-              {ROLE_LABEL[user.role] ?? 'Khách hàng'}
-              {user.email ? ` · ${user.email}` : ''}
-            </p>
-          </div>
-        </div>
-
-        {editing && (
-          <form onSubmit={handleSave} className="mt-5 space-y-4">
-            {/* Avatar upload */}
-            <div className="flex items-center gap-3">
-              <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-gray-300 px-3 py-2 text-sm text-gray-500 hover:border-teal-700 hover:text-teal-700 dark:border-gray-700">
-                <Camera className="h-4 w-4" aria-hidden />
-                {avatar ? avatar.name : 'Đổi ảnh đại diện'}
-                <input
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  className="hidden"
-                  onChange={(e) => setAvatar(e.target.files?.[0] ?? null)}
-                />
-              </label>
-              {avatar && <span className="text-xs text-gray-500">{(avatar.size / 1024).toFixed(0)}KB</span>}
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <ProfileField label="Họ và tên">
-                <input
-                  value={edit.full_name}
-                  onChange={(e) => setEdit({ ...edit, full_name: e.target.value })}
-                  className={inputClass}
-                />
-              </ProfileField>
-              <ProfileField label="Số điện thoại">
-                <input
-                  value={edit.phone}
-                  onChange={(e) => setEdit({ ...edit, phone: e.target.value })}
-                  placeholder="0981 234 567"
-                  className={inputClass}
-                />
-              </ProfileField>
-              <ProfileField label="Địa chỉ" full>
-                <input
-                  value={edit.address}
-                  onChange={(e) => setEdit({ ...edit, address: e.target.value })}
-                  className={inputClass}
-                />
-              </ProfileField>
-              <ProfileField label="Ngày sinh">
-                <input
-                  type="date"
-                  value={edit.date_of_birth}
-                  onChange={(e) => setEdit({ ...edit, date_of_birth: e.target.value })}
-                  className={inputClass}
-                />
-              </ProfileField>
-              <ProfileField label="Giới tính">
-                <select
-                  value={edit.gender}
-                  onChange={(e) => setEdit({ ...edit, gender: e.target.value })}
-                  className={inputClass}
-                >
-                  <option value="">—</option>
-                  <option value="nam">Nam</option>
-                  <option value="nu">Nữ</option>
-                  <option value="khac">Khác</option>
-                </select>
-              </ProfileField>
-              <ProfileField label="4 số cuối CCCD">
-                <input
-                  value={edit.cccd_last4}
-                  onChange={(e) =>
-                    setEdit({ ...edit, cccd_last4: e.target.value.replace(/\D/g, '').slice(0, 4) })
-                  }
-                  placeholder="Chỉ lưu 4 số cuối"
-                  maxLength={4}
-                  inputMode="numeric"
-                  className={inputClass}
-                />
-              </ProfileField>
-            </div>
-
-            {error && (
-              <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30" role="alert">
-                {error}
-              </p>
-            )}
-
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setEditing(false)}
-                className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 dark:border-gray-700 dark:text-gray-200"
-              >
-                Huỷ
-              </button>
-              <button
-                type="submit"
-                disabled={saving}
-                className="inline-flex items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
-              >
-                {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
-                Lưu hồ sơ
-              </button>
-            </div>
-          </form>
-        )}
-
-        {!editing && (
-          <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
-            <Field label="Họ và tên" value={user.full_name} />
-            <Field label="Số điện thoại" value={user.phone} />
-            <Field label="Địa chỉ" value={user.address} full />
-            <Field label="Ngày sinh" value={formatDate(user.date_of_birth)} />
-            <Field label="Giới tính" value={genderLabel(user.gender)} />
-            <Field label="CCCD" value={cccdMask} />
-          </dl>
-        )}
-
-        {saved && (
-          <p className="mt-4 rounded-xl bg-teal-50 p-3 text-sm text-teal-800 dark:bg-teal-950/30" role="status">
-            Đã lưu hồ sơ.
+    <WorkspaceShell>
+      <div className="h-full overflow-y-auto">
+        <div className="mx-auto w-full max-w-[1000px] px-12 pb-16 pt-12">
+          <p className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
+            Tài khoản
           </p>
-        )}
-      </section>
+          <h1 className="mt-4 text-[38px] font-semibold leading-[1.12] tracking-[-0.03em] text-[var(--text-primary)]">
+            Hồ sơ của bạn
+          </h1>
+          <p className="mt-3 text-[15px] text-[var(--text-secondary)]">
+            {user.username} · {ROLE_LABEL[user.role] ?? user.role}
+          </p>
 
-      {/* Trạng thái xác minh căn hộ */}
-      <section className={`rounded-2xl border p-5 ${view.tone}`}>
-        <div className="flex items-start gap-3">
-          <Icon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
-          <div className="min-w-0">
-            <p className="text-sm font-semibold">{view.label}</p>
-            <p className="mt-1 text-sm opacity-90">{view.hint}</p>
+          {saved && (
+            <p
+              className="mt-6 rounded-[var(--r-sm)] px-4 py-3 text-[14.5px]"
+              style={{
+                color: 'var(--success)',
+                backgroundColor: 'color-mix(in srgb, var(--success) 12%, transparent)',
+              }}
+              role="status"
+            >
+              Đã lưu hồ sơ.
+            </p>
+          )}
 
-            {/* Căn hộ chỉ hiện khi ĐÃ xác minh. Hiện sớm hơn là khẳng định một
-                quan hệ sở hữu mà hệ thống chưa xác nhận. */}
-            {status === 'VERIFIED' && user.apartment_code && (
-              <p className="mt-3 inline-flex items-center gap-2 text-sm font-medium">
-                <Home className="h-4 w-4" aria-hidden />
-                {user.apartment_code}
-                {user.residential_area ? ` · ${user.residential_area}` : ''}
+          {/* ── 1. Quan hệ cư dân – căn hộ ────────────────────────────
+              Đặt TRƯỚC thông tin cá nhân: đây là thứ P-118 dùng để quyết định
+              mở dịch vụ nào, nên nó quan trọng hơn ngày sinh hay địa chỉ. */}
+          <section className="mt-11">
+            <div className="flex items-baseline justify-between">
+              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                Bất động sản đã liên kết
+              </h2>
+              <span
+                className="inline-flex items-center gap-1.5 text-[13px] font-semibold"
+                style={{ color: linked ? 'var(--success)' : 'var(--waiting-user)' }}
+              >
+                {linked ? <BadgeCheck className="h-4 w-4" aria-hidden /> : <Clock className="h-4 w-4" aria-hidden />}
+                {linked ? 'Đã xác minh' : status === 'PENDING' ? 'Chờ duyệt' : 'Chưa liên kết'}
+              </span>
+            </div>
+
+            {linked && user.apartment_code ? (
+              <div className="mt-4 rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] p-5">
+                <div className="flex items-start gap-4">
+                  <span
+                    aria-hidden
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--r-sm)] border border-[var(--border-subtle)]"
+                    style={{ color: 'var(--agent)' }}
+                  >
+                    <Building2 className="h-5 w-5" strokeWidth={1.9} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[18px] font-semibold leading-[1.3] text-[var(--text-primary)]">
+                      {user.apartment_code}
+                    </p>
+                    {user.residential_area && (
+                      <p className="mt-1 text-[14.5px] text-[var(--text-secondary)]">
+                        {user.residential_area}
+                      </p>
+                    )}
+                    <p className="mt-3 inline-flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
+                      <Lock className="h-3.5 w-3.5" aria-hidden />
+                      Thông tin tin cậy — không sửa từ hồ sơ
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 rounded-[var(--r-sm)] border border-dashed border-[var(--border-strong)] p-6 text-center">
+                <p className="text-[14.5px] leading-[1.6] text-[var(--text-secondary)]">
+                  {status === 'PENDING'
+                    ? 'Yêu cầu liên kết đang chờ ban quản lý duyệt.'
+                    : 'Bạn chưa liên kết bất động sản nào. Liên kết để dùng các dịch vụ dành cho cư dân.'}
+                </p>
+              </div>
+            )}
+
+            <Link
+              to="/apartment-link"
+              className="press mt-4 inline-flex min-h-11 items-center gap-2 rounded-[var(--r-sm)] border border-[var(--border-strong)] px-4 text-[14px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+            >
+              <Plus className="h-4 w-4" strokeWidth={2.2} aria-hidden />
+              Liên kết thêm bất động sản
+            </Link>
+          </section>
+
+          {/* ── 2. Thông tin cá nhân ─────────────────────────────────── */}
+          <section className="mt-12">
+            <div className="flex items-baseline justify-between">
+              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                Thông tin cá nhân
+              </h2>
+              {!editing && (
+                <button
+                  type="button"
+                  onClick={startEdit}
+                  className="press inline-flex cursor-pointer items-center gap-1.5 text-[13.5px] font-semibold text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                >
+                  <Pencil className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden />
+                  Chỉnh sửa
+                </button>
+              )}
+            </div>
+
+            {editing ? (
+              <form onSubmit={handleSave} className="mt-5 grid gap-5 sm:grid-cols-2">
+                {(
+                  [
+                    ['full_name', 'Họ và tên', 'text'],
+                    ['phone', 'Số điện thoại', 'tel'],
+                    ['date_of_birth', 'Ngày sinh', 'date'],
+                    ['gender', 'Giới tính', 'text'],
+                    ['address', 'Địa chỉ', 'text'],
+                    ['cccd_last4', 'CCCD — 4 số cuối', 'text'],
+                  ] as const
+                ).map(([key, label, type]) => (
+                  <div key={key} className={key === 'address' ? 'sm:col-span-2' : ''}>
+                    <label
+                      htmlFor={`p-${key}`}
+                      className="block text-[13.5px] font-medium text-[var(--text-secondary)]"
+                    >
+                      {label}
+                    </label>
+                    <input
+                      id={`p-${key}`}
+                      type={type}
+                      value={edit[key]}
+                      onChange={(event) => setEdit({ ...edit, [key]: event.target.value })}
+                      className="mt-2 h-12 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)]"
+                    />
+                  </div>
+                ))}
+
+                <div className="sm:col-span-2">
+                  <label htmlFor="p-avatar" className="block text-[13.5px] font-medium text-[var(--text-secondary)]">
+                    Ảnh đại diện
+                  </label>
+                  <input
+                    id="p-avatar"
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => setAvatar(event.target.files?.[0] ?? null)}
+                    className="mt-2 text-[14px] text-[var(--text-secondary)]"
+                  />
+                </div>
+
+                {error && (
+                  <p className="sm:col-span-2 text-[14px]" style={{ color: 'var(--danger)' }} role="alert">
+                    {error}
+                  </p>
+                )}
+
+                <div className="flex gap-3 sm:col-span-2">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="press inline-flex min-h-11 cursor-pointer items-center rounded-[var(--r-sm)] px-5 text-[14.5px] font-semibold disabled:opacity-50"
+                    style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
+                  >
+                    {saving ? 'Đang lưu…' : 'Lưu'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditing(false)}
+                    className="press min-h-11 cursor-pointer rounded-[var(--r-sm)] border border-[var(--border-strong)] px-5 text-[14.5px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                  >
+                    Huỷ
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <dl className="mt-5 grid gap-x-10 gap-y-5 sm:grid-cols-2">
+                {personal.map((field) => (
+                  <div key={field.label}>
+                    <dt className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                      {field.label}
+                    </dt>
+                    <dd
+                      className={`mt-1.5 break-words text-[16px] leading-[1.4] ${
+                        field.value
+                          ? 'font-medium text-[var(--text-primary)]'
+                          : 'text-[var(--text-muted)]'
+                      }`}
+                    >
+                      {field.value || 'Chưa có'}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </section>
+
+          {/* ── 3. Xác thực & bảo mật ─────────────────────────────────
+              Từng kênh một, và CHỈ đánh dấu đã xác minh khi có bằng chứng.
+              Backend chưa có cờ riêng cho điện thoại/email/danh tính, nên ở đây
+              chỉ khẳng định điều duy nhất kiểm được: quan hệ cư dân–căn hộ. */}
+          <section className="mt-12">
+            <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
+              Xác thực & bảo mật
+            </h2>
+
+            <ul className="mt-5 divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
+              {[
+                {
+                  label: 'Quan hệ cư dân – căn hộ',
+                  done: linked,
+                  note: linked ? 'Ban quản lý đã duyệt' : 'Chưa liên kết bất động sản',
+                },
+                // TODO(backend): chưa có cờ xác minh riêng cho từng kênh.
+                // Không đánh dấu ✓ khi không có bằng chứng — đó chính là mâu
+                // thuẫn của bản cũ.
+                { label: 'Số điện thoại', done: false, note: user.phone ? 'Đã khai, chưa xác minh' : 'Chưa khai' },
+                { label: 'Email', done: false, note: user.email ? 'Đã khai, chưa xác minh' : 'Chưa khai' },
+                { label: 'Danh tính (eKYC)', done: false, note: 'Chưa xác minh' },
+              ].map((row) => (
+                <li key={row.label} className="flex items-center gap-4 py-4">
+                  <span
+                    aria-hidden
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border"
+                    style={{
+                      color: row.done ? 'var(--success)' : 'var(--text-muted)',
+                      borderColor: 'currentColor',
+                      backgroundColor: row.done
+                        ? 'color-mix(in srgb, currentColor 14%, transparent)'
+                        : 'transparent',
+                    }}
+                  >
+                    {row.done ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : null}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[15.5px] font-medium text-[var(--text-primary)]">
+                      {row.label}
+                    </span>
+                    <span className="mt-0.5 block text-[13.5px] text-[var(--text-muted)]">{row.note}</span>
+                  </span>
+                  {!row.done && row.label === 'Danh tính (eKYC)' && (
+                    <button
+                      type="button"
+                      disabled
+                      title="Chưa có luồng xác minh danh tính"
+                      className="min-h-10 cursor-not-allowed rounded-[var(--r-sm)] border border-[var(--border-subtle)] px-4 text-[13.5px] font-medium text-[var(--text-muted)] opacity-50"
+                    >
+                      Bắt đầu xác minh
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+
+            <p className="mt-4 inline-flex items-center gap-2 text-[13px] text-[var(--text-muted)]">
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
+              Nguồn xác minh: hệ thống cư dân của ban quản lý
+            </p>
+
+            {!recordsLoading && records.length > 0 && (
+              <p className="mt-3 text-[13.5px] text-[var(--text-secondary)]">
+                Bạn có {records.length} hồ sơ đã nộp.{' '}
+                <Link to="/apartment-link" className="font-medium text-[var(--agent)] hover:underline">
+                  Xem hồ sơ
+                </Link>
               </p>
             )}
-          </div>
+          </section>
         </div>
-      </section>
-
-      {/* Các hồ sơ xác thực của tôi */}
-      <section>
-        <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-          Hồ sơ xác thực của bạn
-        </h2>
-        {recordsLoading && <SkeletonRows count={2} />}
-        {!recordsLoading && records.length === 0 && (
-          <EmptyState message="Bạn chưa có hồ sơ xác thực nào." />
-        )}
-        <ul className="mt-3 space-y-3">
-          {records.map((r) => (
-            <li
-              key={r.record_id}
-              className="rounded-2xl border border-gray-200 bg-card p-4 dark:border-gray-800"
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {recordTitle(r)}
-                </p>
-                <span className={`rounded-full border px-2 py-0.5 text-xs ${statusTone(r.status)}`}>
-                  {statusLabel(r.status)}
-                </span>
-              </div>
-              {r.reject_reason && (
-                <p className="mt-1 text-xs text-gray-500">Lý do: {r.reject_reason}</p>
-              )}
-              {r.proof_image_urls.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {r.proof_image_urls.map((url) => (
-                    <a
-                      key={url}
-                      href={url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-xs text-teal-700 underline hover:text-teal-800 dark:text-teal-300"
-                    >
-                      Ảnh giấy tờ
-                    </a>
-                  ))}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      </section>
-    </div>
+      </div>
+    </WorkspaceShell>
   )
-}
-
-/* ------------------------------------------------------------------------ */
-/* Field helpers                                                            */
-/* ------------------------------------------------------------------------ */
-
-const inputClass =
-  'mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900'
-
-function ProfileField({
-  label,
-  full,
-  children,
-}: {
-  label: string
-  full?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <div className={full ? 'sm:col-span-2' : ''}>
-      <label className="block text-sm text-gray-700 dark:text-gray-300">{label}</label>
-      {children}
-    </div>
-  )
-}
-
-function Field({ label, value, full }: { label: string; value: string | null; full?: boolean }) {
-  return (
-    <div className={full ? 'sm:col-span-2' : ''}>
-      <dt className="text-xs text-gray-500">{label}</dt>
-      <dd className="mt-0.5 text-gray-900 dark:text-gray-100">{value || '—'}</dd>
-    </div>
-  )
-}
-
-function formatDate(value: string | null): string | null {
-  if (!value) return null
-  const d = new Date(value)
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString('vi-VN')
-}
-
-function genderLabel(value: string | null): string | null {
-  if (!value) return null
-  return { nam: 'Nam', nu: 'Nữ', khac: 'Khác' }[value] ?? value
-}
-
-function recordTitle(record: VerificationRecord): string {
-  const c = record.claimed_data
-  if (record.record_type === 'apartment' && 'apartment_code' in c) {
-    return `Xác minh căn hộ · ${c.apartment_code}`
-  }
-  if (record.record_type === 'vehicle' && 'plate_number' in c) {
-    return `Đăng ký xe · ${c.plate_number}`
-  }
-  return record.record_id
-}
-
-const STATUS_LABEL: Record<VerificationRecord['status'], string> = {
-  PENDING: 'Đang chờ duyệt',
-  APPROVED: 'Đã duyệt',
-  REJECTED: 'Chưa duyệt',
-}
-
-function statusLabel(status: VerificationRecord['status']): string {
-  return STATUS_LABEL[status]
-}
-
-function statusTone(status: VerificationRecord['status']): string {
-  switch (status) {
-    case 'PENDING':
-      return 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30'
-    case 'APPROVED':
-      return 'border-teal-200 bg-teal-50 text-teal-900 dark:border-teal-900/50 dark:bg-teal-950/30'
-    case 'REJECTED':
-      return 'border-red-200 bg-red-50 text-red-900 dark:border-red-900/50 dark:bg-red-950/30'
-  }
 }

@@ -58,8 +58,20 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   // refetch dùng chung bởi cả poll fallback lẫn bên ngoài; user cố định theo
   // phiên đang đăng nhập (effect chạy lại khi user.id đổi).
   const refetch = useCallback(async () => {
-    const next = await fetchNotificationSummary()
-    setSummary(next)
+    // Nuốt lỗi TẠI ĐÂY, không để người gọi tự lo.
+    //
+    // Cả hai chỗ gọi đều dùng `void refetch()`, nên một promise bị reject là
+    // một unhandled rejection — nó nổi lên thành lỗi trang, mỗi nhịp poll một
+    // lần, kể cả khi người dùng đang làm việc khác hoàn toàn.
+    //
+    // Huy hiệu thông báo là thứ phụ trợ: hỏng thì mất con số, không được phép
+    // làm bẩn báo cáo lỗi của cả ứng dụng. Endpoint này còn 404 trên những
+    // bản backend chưa có phần thông báo.
+    try {
+      setSummary(await fetchNotificationSummary())
+    } catch {
+      /* giữ nguyên snapshot cũ */
+    }
   }, [])
 
   useEffect(() => {

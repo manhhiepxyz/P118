@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2, CircleDot, Loader2, Lock, ShieldAlert, XCircle } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, ChevronDown, Clock3, Info, XCircle } from 'lucide-react'
 
 import { ClarificationReply } from '../components/ClarificationReply'
-import { StatusBadge } from '../components/StatusBadge'
+import { ResultSummary } from '../components/workspace/ResultSummary'
+import { StepList } from '../components/workspace/StepList'
+import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { continueWorkflow, decidePayment } from '../lib/agentApi'
-import type { AgentTaskStatus } from '../lib/types'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
 /**
@@ -19,18 +20,18 @@ import { useWorkflowPolling } from '../lib/useWorkflowPolling'
  * Planner/Validator/Executor, SQL/DSN, hay enum thô khi đã có nhãn tiếng Việt.
  */
 
-const STATUS_LABEL: Record<string, string> = {
-  PENDING: 'Đang chuẩn bị',
-  RUNNING: 'Đang thực hiện',
-  NEEDS_INFORMATION: 'Cần thêm thông tin',
-  WAITING_APPROVAL: 'Chờ bạn xác nhận',
-  SUCCESS: 'Hoàn thành',
-  FAILED: 'Không thành công',
-  PLANNING_ERROR: 'Chưa hiểu được yêu cầu',
-  VALIDATION_ERROR: 'Yêu cầu chưa hợp lệ',
-  EXECUTION_ERROR: 'Không thực hiện được',
-  CHAT: 'Đã trả lời',
+const TONE: Record<string, { label: string; token: string }> = {
+  PENDING: { label: 'Đang chờ', token: 'var(--text-muted)' },
+  RUNNING: { label: 'Đang thực hiện', token: 'var(--running)' },
+  NEEDS_INFORMATION: { label: 'Cần thêm thông tin', token: 'var(--waiting-user)' },
+  WAITING_APPROVAL: { label: 'Chờ xác nhận', token: 'var(--waiting-user)' },
+  SUCCESS: { label: 'Hoàn tất', token: 'var(--success)' },
+  FAILED: { label: 'Chưa xong', token: 'var(--danger)' },
+  CANCELLED: { label: 'Đã huỷ', token: 'var(--text-muted)' },
 }
+
+/* `STATUS_LABEL` cũ đã gộp vào `TONE` — nhãn và sắc đi cùng nhau thì không
+   thể có chỗ đặt nhãn mà quên đặt màu. */
 
 function formatVnd(amount: number | undefined, currency: string | undefined): string {
   if (typeof amount !== 'number') return '—'
@@ -39,55 +40,23 @@ function formatVnd(amount: number | undefined, currency: string | undefined): st
 }
 
 /** Nhãn trạng thái cho TỪNG bước — user thấy ngay bước nào chờ duyệt / đã xong. */
-const TASK_LABEL: Record<AgentTaskStatus, string> = {
-  PENDING: 'Chờ bước trước',
-  RUNNING: 'Đang thực hiện',
-  WAITING_APPROVAL: 'Chờ phê duyệt',
-  SUCCESS: 'Hoàn thành',
-  FAILED: 'Không thành công',
-  CANCELLED: 'Đã huỷ',
-  NOT_RUN: 'Chưa thực hiện',
-}
-
-function taskChipClass(status: AgentTaskStatus): string {
-  switch (status) {
-    case 'SUCCESS':
-      return 'bg-teal-100 text-teal-800 dark:bg-teal-950/40 dark:text-teal-300'
-    case 'WAITING_APPROVAL':
-      return 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
-    case 'FAILED':
-      return 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300'
-    case 'RUNNING':
-      return 'bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
-    default:
-      return 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
-  }
-}
-
-function formatTaskTime(iso: string | null | undefined): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
-}
-
-/** Nhãn + giờ cho một bước. `pay_fee` là bước DUY NHẤT có phê duyệt thật — sau
- * khi xong, nói "Đã phê duyệt" chứ không chỉ "Hoàn thành", kèm giờ duyệt. */
-function taskStatusMeta(task: { tool: string; status: AgentTaskStatus; updated_at?: string | null }) {
-  if (task.tool === 'pay_fee' && task.status === 'SUCCESS') {
-    return { label: 'Đã phê duyệt', timePrefix: 'lúc', chip: taskChipClass('SUCCESS') }
-  }
-  if (task.status === 'WAITING_APPROVAL') {
-    return { label: TASK_LABEL[task.status], timePrefix: 'từ', chip: taskChipClass(task.status) }
-  }
-  return { label: TASK_LABEL[task.status] ?? '—', timePrefix: 'lúc', chip: taskChipClass(task.status) }
-}
+/*
+ * `formatTaskTime` và `taskStatusMeta` đã chuyển vào `JourneyStepList` để
+ * trang hành trình, thẻ trong danh sách và trang xem trước dùng CHUNG một
+ * cách vẽ bước.
+ *
+ * Bỏ luôn luật riêng cũ `pay_fee + SUCCESS → "Đã phê duyệt"`: đó là suy diễn
+ * nghiệp vụ từ tên `tool` ở phía giao diện, đúng thứ ta đang loại bỏ. Ý nghĩa
+ * không mất — `message` do backend trả đã nói rõ "Đã thanh toán 150.000 VND".
+ */
 
 export function WorkflowPage() {
   const { workflowId = '' } = useParams()
   const navigate = useNavigate()
   const [deciding, setDeciding] = useState<'approve' | 'reject' | null>(null)
   const [decisionError, setDecisionError] = useState<string | null>(null)
+  /** Diễn biến kỹ thuật: gập mặc định sau khi việc đã xong. */
+  const [showTrace, setShowTrace] = useState(false)
 
   // Vòng poll dùng CHUNG với thẻ workflow trong hội thoại. Hai bản chép tay
   // thì một bản được sửa còn bản kia giữ nguyên lỗi — và vòng lặp này đã từng
@@ -129,231 +98,258 @@ export function WorkflowPage() {
 
   if (loading && !data) {
     return (
-      <div className="space-y-4">
-        <div className="h-6 w-48 animate-pulse rounded bg-gray-200 dark:bg-gray-800" />
-        <div className="h-32 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-900" />
-      </div>
+      <WorkspaceShell>
+        <div className="mx-auto w-full max-w-[900px] px-12 pt-14">
+          <div className="h-8 w-64 animate-pulse rounded bg-[var(--surface-raised)]" />
+          <div className="mt-8 h-40 animate-pulse rounded-[var(--r-sm)] bg-[var(--surface-raised)]" />
+        </div>
+      </WorkspaceShell>
     )
   }
 
-  if (error && !data) {
+  if ((error && !data) || !data) {
     return (
-      <div className="space-y-4">
-        <Link to="/" className="inline-flex items-center gap-1 text-sm text-teal-700">
-          <ArrowLeft className="h-4 w-4" /> Về trang chủ
-        </Link>
-        <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700">{error}</p>
-      </div>
-    )
-  }
-
-  if (!data) return null
-
-  const quote = data.payment_quote ?? {}
-  // Cùng status WAITING_APPROVAL với thanh toán nhưng là chờ ĐƠN VỊ xác nhận
-  // (người duyệt là provider/admin qua /review, khách chỉ xem). Phân biệt bằng
-  // `viewing_approval` — KHÔNG dùng status riêng.
-  const isWaitingViewing = data.status === 'WAITING_APPROVAL' && data.viewing_approval != null
-  const isWaitingPayment = data.status === 'WAITING_APPROVAL' && !isWaitingViewing
-  const needsInfo = data.status === 'NEEDS_INFORMATION'
-
-  return (
-    <div className="space-y-6">
-      <Link to="/" className="inline-flex items-center gap-1 text-sm text-teal-700">
-        <ArrowLeft className="h-4 w-4" /> Về trang chủ
-      </Link>
-
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-            {data.summary || data.message || 'Yêu cầu của bạn'}
-          </h1>
-          <p className="mt-1 text-sm text-gray-500">
-            {isWaitingViewing ? 'Chờ đơn vị xác nhận lịch tham quan' : STATUS_LABEL[data.status] ?? 'Đang xử lý'}
+      <WorkspaceShell>
+        <div className="mx-auto w-full max-w-[900px] px-12 pt-14">
+          <Link
+            to="/workflows"
+            className="inline-flex items-center gap-2 text-[14px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+          >
+            <ArrowLeft className="h-4 w-4" aria-hidden /> Lịch sử
+          </Link>
+          <p
+            className="mt-8 rounded-[var(--r-sm)] px-4 py-3.5 text-[15px]"
+            style={{
+              color: 'var(--danger)',
+              backgroundColor: 'color-mix(in srgb, var(--danger) 11%, transparent)',
+            }}
+            role="alert"
+          >
+            {error ?? 'Không tìm thấy yêu cầu này.'}
           </p>
         </div>
-        <StatusBadge status={data.status} />
-      </header>
+      </WorkspaceShell>
+    )
+  }
 
-      {needsInfo && data.question && (
-        <section className="space-y-3">
-          <p className="max-w-3xl whitespace-pre-wrap rounded-2xl rounded-bl-sm bg-gray-100 px-4 py-3 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-100">
-            {data.answer || data.question}
-          </p>
-          <ClarificationReply onSubmit={handleClarification} />
-        </section>
-      )}
+  const tone = TONE[data.status] ?? { label: data.status, token: 'var(--text-muted)' }
+  const finished = data.status === 'SUCCESS'
+  /**
+   * Diễn biến người dùng còn quan tâm SAU KHI việc đã xong.
+   *
+   * "Đang chuẩn bị kế hoạch", "Kế hoạch đã sẵn sàng", "Đang thực hiện yêu cầu"
+   * là nhịp nội bộ của agent — hữu ích lúc đang chạy, vô nghĩa lúc đã xong.
+   * Giữ lại thì phần quan trọng nhất của trang bị đẩy xuống dưới một danh sách
+   * mà không ai đọc.
+   */
+  const NOISE = ['đang chuẩn bị kế hoạch', 'đã xác định các bước', 'kế hoạch đã sẵn sàng', 'đang thực hiện yêu cầu']
+  const traceEvents = finished
+    ? data.events.filter((event) => !NOISE.some((noise) => (event.message ?? '').toLowerCase().includes(noise)))
+    : data.events
+  /** Bước xong CUỐI có chi tiết — thứ người dùng thật sự nhận được. */
+  const resultTask = [...data.tasks].reverse().find(
+    (task) => task.status === 'SUCCESS' && (task.details?.length ?? 0) > 0,
+  )
+  const subject = resultTask?.details?.find((detail) => detail.label === 'Dự án')?.value ?? null
+  // Tiêu đề gọn: nói KẾT QUẢ, không lặp lại cả câu tường thuật.
+  const headline = finished && resultTask ? `${resultTask.title} thành công` : (data.summary || data.message || 'Yêu cầu của bạn')
+  const needsInfo = data.status === 'NEEDS_INFORMATION'
+  const quote = data.payment_quote ?? {}
+  // Cùng status WAITING_APPROVAL nhưng KHÁC loại chờ: lịch tham quan chờ đơn vị
+  // duyệt, khách chỉ xem. Phân biệt bằng `viewing_approval`, không dùng status
+  // riêng — đây là tiền lệ đã có trong codebase.
+  const waitingViewing = data.status === 'WAITING_APPROVAL' && Boolean(data.viewing_approval)
+  const waitingPayment = data.status === 'WAITING_APPROVAL' && !waitingViewing
 
-      {isWaitingViewing && data.viewing_approval && (
-        <section className="rounded-2xl border border-blue-200 bg-blue-50 p-5 dark:border-blue-900/50 dark:bg-blue-950/30">
-          <div className="flex items-start gap-3">
-            <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-blue-600" aria-hidden />
+  return (
+    <WorkspaceShell>
+      <div className="h-full overflow-y-auto">
+        <div className="mx-auto w-full max-w-[900px] px-12 pb-20 pt-12">
+          <Link
+            to="/workflows"
+            className="press inline-flex cursor-pointer items-center gap-2 text-[14px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+          >
+            <ArrowLeft className="h-4 w-4" aria-hidden /> Lịch sử
+          </Link>
+
+          <div className="mt-5 flex items-start gap-4">
             <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                Đang chờ đơn vị xác nhận lịch tham quan
-              </h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Đơn vị tour đang xác nhận lịch. Bạn sẽ thấy kết quả ở đây.
+              <h1 className="text-[30px] font-semibold leading-[1.18] tracking-[-0.028em] text-[var(--text-primary)]">
+                {headline}
+              </h1>
+              {subject && (
+                <p className="mt-1.5 text-[19px] leading-[1.3] text-[var(--text-secondary)]">{subject}</p>
+              )}
+              <p className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[14px]">
+                <span className="font-semibold" style={{ color: tone.token }}>
+                  {tone.label}
+                </span>
+                {data.tasks.length > 0 && (
+                  <span className="font-mono tabular-nums text-[var(--text-muted)]">
+                    {data.tasks.filter((task) => task.status === 'SUCCESS').length}/{data.tasks.length} bước
+                  </span>
+                )}
               </p>
-              <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-                {data.viewing_approval.project_name && (
-                  <>
-                    <dt className="text-gray-500 dark:text-gray-400">Dự án</dt>
-                    <dd className="font-medium text-gray-900 dark:text-gray-100">
-                      {data.viewing_approval.project_name}
-                    </dd>
-                  </>
-                )}
-                <dt className="text-gray-500 dark:text-gray-400">Thời gian</dt>
-                <dd className="font-medium text-gray-900 dark:text-gray-100">
-                  {data.viewing_approval.viewing_date} · {data.viewing_approval.viewing_time}
-                </dd>
-                {data.viewing_approval.passenger_count != null && (
-                  <>
-                    <dt className="text-gray-500 dark:text-gray-400">Số khách</dt>
-                    <dd className="font-medium text-gray-900 dark:text-gray-100">
-                      {data.viewing_approval.passenger_count} người
-                    </dd>
-                  </>
-                )}
-                {data.viewing_approval.wants_shuttle && (
-                  <>
-                    <dt className="text-gray-500 dark:text-gray-400">Xe đưa đón</dt>
-                    <dd className="font-medium text-gray-900 dark:text-gray-100">
-                      Sẽ đặt sau khi duyệt
-                    </dd>
-                  </>
-                )}
-              </dl>
             </div>
           </div>
-        </section>
-      )}
 
-      {isWaitingPayment && (
-        <section className="rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900/50 dark:bg-amber-950/30">
-          <div className="flex items-start gap-3">
-            <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" aria-hidden />
-            <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                Cần bạn xác nhận khoản thanh toán
-              </h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Phí chỗ đỗ xe cho yêu cầu này. Chúng tôi chỉ thu sau khi bạn đồng ý.
+          {/* ── Cần bạn bổ sung ─────────────────────────────────────── */}
+          {needsInfo && data.question && (
+            <section className="rise mt-9">
+              <p className="mat-raised rounded-[var(--r-sm)] px-5 py-4 text-[15px] leading-[1.6] text-[var(--text-secondary)]">
+                {data.answer || data.question}
               </p>
-              <p className="mt-3 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              <div className="mt-4">
+                <ClarificationReply onSubmit={handleClarification} />
+              </div>
+            </section>
+          )}
+
+          {/* ── Chờ ĐƠN VỊ duyệt: không có nút, và nói thẳng như vậy ─── */}
+          {waitingViewing && data.viewing_approval && (
+            <section
+              className="rise mt-9 rounded-[var(--r-sm)] p-5"
+              style={{
+                color: 'var(--waiting-provider)',
+                backgroundColor: 'color-mix(in srgb, currentColor 9%, transparent)',
+                boxShadow: 'inset 0 0 0 1px color-mix(in srgb, currentColor 22%, transparent)',
+              }}
+            >
+              <p className="flex items-center gap-2.5 text-[13px] font-bold uppercase tracking-[0.1em]">
+                <Clock3 className="h-4 w-4" strokeWidth={2.2} aria-hidden />
+                Chờ đơn vị duyệt
+              </p>
+              <p className="mt-2.5 text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                Bạn không cần làm gì thêm. Mình sẽ báo ngay khi có kết quả.
+              </p>
+              <dl className="mt-4 grid gap-x-8 gap-y-2.5 text-[14px] sm:grid-cols-2">
+                {data.viewing_approval.project_name && (
+                  <div>
+                    <dt className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                      Dự án
+                    </dt>
+                    <dd className="mt-1 font-medium text-[var(--text-primary)]">
+                      {data.viewing_approval.project_name}
+                    </dd>
+                  </div>
+                )}
+                <div>
+                  <dt className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                    Thời gian
+                  </dt>
+                  <dd className="mt-1 font-medium tabular-nums text-[var(--text-primary)]">
+                    {data.viewing_approval.viewing_date} · {data.viewing_approval.viewing_time}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          )}
+
+          {/* ── Chờ BẠN: có nút, và nút chính là phần tử mạnh nhất ──── */}
+          {waitingPayment && (
+            <section
+              className="rise mt-9 rounded-[var(--r-sm)] p-5"
+              style={{
+                color: 'var(--waiting-user)',
+                backgroundColor: 'color-mix(in srgb, currentColor 11%, transparent)',
+                boxShadow: 'inset 0 0 0 1px color-mix(in srgb, currentColor 26%, transparent)',
+              }}
+            >
+              <p className="flex items-center gap-2.5 text-[13px] font-bold uppercase tracking-[0.1em]">
+                <Info className="h-4 w-4" strokeWidth={2.2} aria-hidden />
+                Cần bạn xác nhận
+              </p>
+              <p className="mt-3 font-mono text-[30px] font-semibold tabular-nums text-[var(--text-primary)]">
                 {formatVnd(quote.amount as number | undefined, quote.currency as string | undefined)}
               </p>
+              <p className="mt-2 text-[15px] leading-[1.6] text-[var(--text-secondary)]">
+                Chỗ đỗ xe đã được giữ. Khoản này chưa được thanh toán — chỉ thu sau khi bạn đồng ý.
+              </p>
 
-              {decisionError && <p className="mt-3 text-sm text-red-600">{decisionError}</p>}
+              {decisionError && (
+                <p className="mt-3 text-[14px]" style={{ color: 'var(--danger)' }} role="alert">
+                  {decisionError}
+                </p>
+              )}
 
-              <div className="mt-4 flex flex-wrap gap-3">
+              <div className="mt-5 flex flex-wrap gap-3">
                 <button
                   type="button"
                   onClick={() => handleDecision('approve')}
                   disabled={deciding !== null}
-                  className="inline-flex items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                  className="press inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] px-6 text-[15px] font-semibold disabled:opacity-50"
+                  style={{ backgroundColor: 'var(--waiting-user)', color: 'var(--surface-base)' }}
                 >
-                  <CheckCircle2 className="h-4 w-4" aria-hidden />
+                  <CheckCircle2 className="h-4 w-4" strokeWidth={2.2} aria-hidden />
                   {deciding === 'approve' ? 'Đang gửi…' : 'Xác nhận thanh toán'}
                 </button>
                 <button
                   type="button"
                   onClick={() => handleDecision('reject')}
                   disabled={deciding !== null}
-                  className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:text-gray-200"
+                  className="press inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border border-[var(--border-strong)] px-6 text-[15px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
                 >
-                  <XCircle className="h-4 w-4" aria-hidden />
+                  <XCircle className="h-4 w-4" strokeWidth={2.2} aria-hidden />
                   {deciding === 'reject' ? 'Đang gửi…' : 'Từ chối'}
                 </button>
               </div>
+            </section>
+          )}
+
+          {/* ── Kết quả cho NGƯỜI DÙNG ─────────────────────────────── */}
+          {finished && resultTask && (
+            <div className="mt-11">
+              <ResultSummary task={resultTask} journeyTitle={headline} />
             </div>
-          </div>
-        </section>
-      )}
+          )}
 
-      {data.tasks.length > 0 && (
-        <section className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
-          <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Các bước</h2>
-          <ol className="mt-3 space-y-3">
-            {data.tasks.map((task) => {
-              const meta = taskStatusMeta(task)
-              const time = formatTaskTime(task.updated_at)
-              return (
-                <li key={task.task_id} className="flex items-start gap-3">
-                  {task.status === 'SUCCESS' ? (
-                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-teal-600" aria-hidden />
-                  ) : task.status === 'FAILED' ? (
-                    <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-hidden />
-                  ) : task.status === 'WAITING_APPROVAL' ? (
-                    <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden />
-                  ) : task.status === 'RUNNING' ? (
-                    <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-blue-600" aria-hidden />
-                  ) : (
-                    <CircleDot className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{task.title}</p>
-                      <span
-                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${meta.chip}`}
-                      >
-                        {meta.label}
-                      </span>
-                      {time && (
-                        <span className="text-xs text-gray-400 dark:text-gray-500">
-                          {meta.timePrefix} {time}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-0.5 text-sm text-gray-600 dark:text-gray-400">{task.message}</p>
-                    {task.details && task.details.length > 0 && (
-                      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-                        {task.details.map((item, index) => (
-                          <div key={`${task.task_id}-${index}`} className="contents">
-                            <dt className="text-gray-500 dark:text-gray-400">{item.label}</dt>
-                            <dd className="font-medium text-gray-900 dark:text-gray-100">{item.value}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    )}
-                  </div>
-                </li>
-              )
-            })}
-          </ol>
-        </section>
-      )}
+          {/* ── Các bước ────────────────────────────────────────────── */}
+          {data.tasks.length > 0 && (
+            <section className="mt-12">
+              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                Các bước
+              </h2>
+              <div className="mt-4">
+                {/* Đã có khối kết quả ở trên thì không mở sẵn chi tiết lần nữa. */}
+                <StepList tasks={data.tasks} expandDetails={!finished && data.status === 'SUCCESS'} />
+              </div>
+            </section>
+          )}
 
-      {data.events.length > 0 && (
-        <section className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
-          <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Diễn biến</h2>
-          <ul className="mt-3 space-y-2">
-            {data.events.map((event) => (
-              <li key={event.sequence} className="text-sm text-gray-600 dark:text-gray-400">
-                {event.message}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+          {/* ── Chi tiết xử lý: gập, và lọc bỏ dòng vô nghĩa với người dùng ── */}
+          {traceEvents.length > 0 && (
+            <section className="mt-12">
+              <button
+                type="button"
+                onClick={() => setShowTrace((value) => !value)}
+                aria-expanded={showTrace}
+                className="press inline-flex cursor-pointer items-center gap-2 font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+              >
+                Chi tiết xử lý
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform duration-[var(--t-hover)] ${showTrace ? 'rotate-180' : ''}`}
+                  strokeWidth={2.4}
+                  aria-hidden
+                />
+              </button>
 
-      {data.plan.length > 0 && (
-        <details className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
-          <summary className="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300">
-            Xem chi tiết kế hoạch
-          </summary>
-          {/* Read-only. Kế hoạch do backend lập; browser không dựng và không sửa. */}
-          <ol className="mt-3 space-y-2">
-            {data.plan.map((step) => (
-              <li key={step.task_id} className="text-sm text-gray-600 dark:text-gray-400">
-                <span className="font-medium text-gray-800 dark:text-gray-200">{step.title}</span>
-                {step.description ? ` — ${step.description}` : ''}
-              </li>
-            ))}
-          </ol>
-        </details>
-      )}
-    </div>
+              {showTrace && (
+                <ul className="rise mt-4 space-y-2">
+                  {traceEvents.map((event) => (
+                    <li
+                      key={event.sequence}
+                      className="text-[14px] leading-[1.55] text-[var(--text-secondary)]"
+                    >
+                      {event.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
+        </div>
+      </div>
+    </WorkspaceShell>
   )
 }

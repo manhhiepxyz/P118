@@ -1,0 +1,601 @@
+/* ===========================================================================
+   P-118 · hệ thị giác của workspace
+
+   Phạm vi đóng trong `.ws`. SÁNG và TỐI đều là theme hạng nhất: `.ws` khai
+   bảng sáng, `.dark .ws` remap sang bảng tối. Component chỉ tiêu thụ VAI TRÒ
+   ngữ nghĩa (`--surface-raised`, `--text-secondary`…), không bao giờ biết mình
+   đang ở theme nào — nhờ vậy đổi theme là đổi VẬT LIỆU của cùng một sản phẩm,
+   không phải chuyển sang một sản phẩm khác.
+
+   Chiều sâu đến từ: tầng bề mặt · viền chính xác · vệt sáng trong · bóng đo
+   được. KHÔNG đến từ quầng sáng. Tắt hết hiệu ứng phát quang thì giao diện
+   vẫn phải đứng vững — đó là phép thử của hệ này.
+=========================================================================== */
+
+.ws {
+  /* ── Bề mặt: khoáng lạnh, không phải trắng ấm ─────────────────────────
+     Trắng ngà đọc như tài liệu; xám khoáng lạnh đọc như một mặt điều khiển.
+     Bốn tầng để phân biệt được nền / tấm / thẻ / thứ đang nổi lên. */
+  --surface-base: #e9ebef;
+  --surface-raised: #f4f5f7;
+  --surface-overlay: #fdfdfe;
+  --surface-interactive: #ffffff;
+  --surface-sunken: #dfe2e7;
+
+  --border-subtle: rgb(15 23 42 / 0.09);
+  --border-strong: rgb(15 23 42 / 0.17);
+  /* Vệt sáng mép trên — thứ cho bề mặt một độ dày vật lý. */
+  --edge-light: rgb(255 255 255 / 0.9);
+
+  --text-primary: #10151d;
+  --text-secondary: #4a5464;
+  --text-muted: #838d9c;
+
+  /* ── Nhấn ngữ nghĩa ───────────────────────────────────────────────────
+     Teal CHỈ dành cho P-118, hành động chính và lựa chọn. Trạng thái thực thi
+     dùng màu riêng — màu ở đây mang nghĩa, không phải để trông tương lai. */
+  --agent: #0d9488;
+  --selection: #0d9488;
+  --running: #0e7490;
+  --success: #15803d;
+  --waiting-user: #b45309;
+  --waiting-provider: #4b6584;
+  --danger: #be123c;
+
+  /* ── Hình học: chặt, có kiểm soát ─────────────────────────────────── */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  /* ── Bóng: đo được, không phải sương mù ──────────────────────────── */
+  --shadow-1: 0 1px 1px rgb(16 21 29 / 0.04), 0 1px 2px rgb(16 21 29 / 0.06);
+  --shadow-2: 0 1px 2px rgb(16 21 29 / 0.05), 0 4px 10px -3px rgb(16 21 29 / 0.1);
+  --shadow-3: 0 2px 4px rgb(16 21 29 / 0.06), 0 16px 32px -12px rgb(16 21 29 / 0.18);
+
+  /* Kết cấu canvas — lưới kỹ thuật, luôn phụ thuộc vào workflow. */
+  --grid-line: rgb(15 23 42 / 0.045);
+  --grid-dot: rgb(15 23 42 / 0.09);
+
+  /* ── Vật liệu nền của sân khấu ────────────────────────────────────────
+     Ba lớp, đọc từ dưới lên: khoáng lạnh → lưới cấu trúc → ánh sáng toả.
+
+     Lưới ở đây KHÔNG phải để đo đạc. Nó chỉ tồn tại để mặt phẳng có hạt: nhìn
+     thẳng thì thấy một bề mặt, nhìn sát mới thấy cấu trúc. Vượt quá ~4% là bắt
+     đầu đọc thành giấy kẻ ô, và nội dung mất quyền dẫn dắt. */
+  --stage-grid: rgb(15 23 42 / 0.062);
+  --stage-grid-size: 72px;
+  /* Tần số thứ hai, mảnh hơn ba lần và mờ hơn hai lần rưỡi. Một lưới đơn tần
+     đọc ra ngay là "hoa văn lặp"; hai tần số chồng nhau đọc ra là "vật liệu"
+     — mắt không đếm được nhịp nên nó thành hạt bề mặt. Đây là cách làm nền
+     dày dạn hơn mà KHÔNG cần tăng độ đậm. */
+  --stage-grid-fine: rgb(15 23 42 / 0.026);
+  --stage-grid-fine-size: 24px;
+
+  /* ── Con trỏ ───────────────────────────────────────────────────────────
+     Vị trí chuột, do `WorkspaceShell` ghi vào. Giá trị mặc định ở đây là thứ
+     duy nhất giữ cho nền đúng trên thiết bị KHÔNG có chuột: không có
+     `pointermove` nào thì đèn đứng yên ở giữa-trên, y như trước. */
+  --mx: 50%;
+  --my: 22%;
+  --stage-cursor-r: 340px;
+  /* Đèn theo tay: sáng lên vài phần trăm, không phải một vệt sáng đuổi theo
+     con trỏ. Nếu nhìn thấy được cái đèn thì nó đã quá mạnh. */
+  --stage-cursor: rgb(255 255 255 / 0.5);
+  /* Vùng sáng quanh chỗ làm việc — nâng nền lên vài phần trăm, không phải một
+     quầng. Tắt lớp này đi giao diện vẫn đứng vững. */
+  --stage-glow: rgb(255 255 255 / 0.62);
+  --stage-tint: rgb(148 170 200 / 0.1);
+  /* Tối dần ở bốn góc. Nó không tự nhìn thấy được; việc của nó là đẩy mắt vào
+     giữa, nơi nội dung nằm. */
+  --stage-vignette: rgb(15 23 42 / 0.055);
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --t-hover: 170ms;
+  --t-press: 130ms;
+  --t-select: 210ms;
+  --t-panel: 260ms;
+  --t-node: 300ms;
+  --t-morph: 420ms;
+
+  color: var(--text-primary);
+  background-color: var(--surface-base);
+  /* Chỉ chuyển nền/chữ ở gốc khi đổi theme — không animate từng component,
+     nếu không cả màn hình nhấp nháy theo nhiều nhịp lệch nhau. */
+  transition:
+    background-color var(--t-panel) var(--ease-soft),
+    color var(--t-panel) var(--ease-soft);
+}
+
+.dark .ws {
+  --surface-base: #0c0f13;
+  --surface-raised: #13171d;
+  --surface-overlay: #191e26;
+  --surface-interactive: #1f242d;
+  --surface-sunken: #080a0d;
+
+  --border-subtle: rgb(255 255 255 / 0.075);
+  --border-strong: rgb(255 255 255 / 0.15);
+  --edge-light: rgb(255 255 255 / 0.06);
+
+  --text-primary: #e9edf3;
+  --text-secondary: #9ba5b4;
+  --text-muted: #67707e;
+
+  /* Cùng sắc, nâng độ sáng cho nền tối — vẫn là một họ màu. */
+  --agent: #2dd4bf;
+  --selection: #2dd4bf;
+  --running: #22d3ee;
+  --success: #34d399;
+  --waiting-user: #fbbf24;
+  --waiting-provider: #7f9cc4;
+  --danger: #fb7185;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.5);
+  --shadow-2: 0 2px 4px rgb(0 0 0 / 0.5), 0 8px 20px -6px rgb(0 0 0 / 0.6);
+  --shadow-3: 0 4px 8px rgb(0 0 0 / 0.55), 0 24px 48px -16px rgb(0 0 0 / 0.8);
+
+  --grid-line: rgb(255 255 255 / 0.035);
+  --grid-dot: rgb(255 255 255 / 0.07);
+
+  /* Cùng một ngôn ngữ, đổi vật liệu: trên nền than chì thì lưới sáng lên thay
+     vì tối đi, và ánh sáng toả là hơi xanh lạnh chứ không phải trắng. */
+  --stage-grid: rgb(255 255 255 / 0.05);
+  --stage-grid-fine: rgb(255 255 255 / 0.02);
+  --stage-glow: rgb(150 180 220 / 0.055);
+  --stage-tint: rgb(80 110 150 / 0.1);
+  /* Trên nền than chì đèn phải hơi xanh lạnh: trắng tinh ở đây đọc thành một
+     vệt sương, không phải ánh sáng của cùng một vật liệu. */
+  --stage-cursor: rgb(150 190 235 / 0.07);
+}
+
+/* ── Vật liệu ─────────────────────────────────────────────────────────── */
+
+.mat-raised {
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  box-shadow: inset 0 1px 0 var(--edge-light), var(--shadow-1);
+}
+
+.mat-overlay {
+  background-color: var(--surface-overlay);
+  border: 1px solid var(--border-subtle);
+  box-shadow: inset 0 1px 0 var(--edge-light), var(--shadow-2);
+}
+
+/* ── Sân khấu: nền của mọi trang workspace ───────────────────────────────
+   Một mặt phẳng xám trơn đọc như bản nháp chưa xong. Nhưng lưới đậm thì đọc
+   như Figma/giấy kẻ ô, và lúc ấy nền tranh chỗ với nội dung.
+
+   Lối ra là ba lớp mà không lớp nào tự nó nhìn thấy được:
+
+     nền khoáng lạnh  →  lưới cấu trúc (~3–4%)  →  ánh sáng toả
+
+   Lưới đi qua một `mask` hình elip: rõ nhất ở giữa vùng làm việc, tan hẳn ở
+   mép. Nhờ vậy nó không bao giờ chạm vào viền sidebar hay mép dưới — hai chỗ
+   mà một đường kẻ tràn ra sẽ lộ ngay thành hoa văn.
+
+   Cả hai lớp đều là pseudo-element `pointer-events: none`: xoá hai dòng
+   `::before`/`::after` là nền trở lại phẳng, không ảnh hưởng gì đến bố cục. */
+.mat-stage {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--surface-base);
+}
+
+/* Lớp 2 — cấu trúc. */
+.mat-stage::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--stage-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--stage-grid) 1px, transparent 1px),
+    linear-gradient(var(--stage-grid-fine) 1px, transparent 1px),
+    linear-gradient(90deg, var(--stage-grid-fine) 1px, transparent 1px);
+  background-size:
+    var(--stage-grid-size) var(--stage-grid-size),
+    var(--stage-grid-size) var(--stage-grid-size),
+    var(--stage-grid-fine-size) var(--stage-grid-fine-size),
+    var(--stage-grid-fine-size) var(--stage-grid-fine-size);
+  /* HAI mặt nạ cộng lại:
+       1. hình elip cố định — lưới sống ở giữa, tan trước khi chạm viền
+       2. một vòng tròn bám con trỏ — lưới hiện rõ hẳn dưới tay người dùng
+     Cộng chứ không nhân: vòng con trỏ KÉO THÊM lưới ra ở chỗ elip đã tắt, nên
+     rê chuột ra mép là thấy vật liệu lộ ra chứ không phải thấy một cái đèn pin
+     quét trên hoa văn có sẵn. */
+  mask-image:
+    radial-gradient(ellipse 78% 68% at 50% 34%, #000 12%, transparent 82%),
+    radial-gradient(circle var(--stage-cursor-r) at var(--mx) var(--my), #000 0%, transparent 78%);
+  mask-composite: add;
+  -webkit-mask-composite: source-over;
+}
+
+/* Lớp 3 — ánh sáng. Một vùng sáng lệch lên trên, cộng một sắc lạnh dưới đáy
+   để mặt phẳng có hướng thay vì đều tăm tắp. */
+.mat-stage::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle var(--stage-cursor-r) at var(--mx) var(--my), var(--stage-cursor), transparent 70%),
+    radial-gradient(ellipse 62% 52% at 50% 6%, var(--stage-glow), transparent 72%),
+    radial-gradient(ellipse 90% 60% at 50% 118%, var(--stage-tint), transparent 70%);
+}
+
+/* Không có chuột thì không có đèn theo tay — và cũng không nên có: trên cảm
+   ứng nó sẽ kẹt ở chỗ chạm cuối cùng, đọc như một vết bẩn. */
+@media (hover: none) {
+  .mat-stage::before {
+    mask-image: radial-gradient(ellipse 78% 68% at 50% 34%, #000 12%, transparent 82%);
+  }
+  .mat-stage::after {
+    background-image:
+      radial-gradient(ellipse 62% 52% at 50% 6%, var(--stage-glow), transparent 72%),
+      radial-gradient(ellipse 90% 60% at 50% 118%, var(--stage-tint), transparent 70%);
+  }
+}
+
+/* Kết cấu canvas: lưới mảnh + chấm ở giao điểm. Hai lớp tần số khác nhau cho
+   cảm giác chiều sâu khi pan, mà vẫn nhạt hơn mọi thứ đặt lên trên. */
+/* Lưới nhạt cho vùng Dịch vụ — gần như không thấy. Ở đây danh sách là nội
+   dung chính; kết cấu nền chỉ để bề mặt không phẳng lì. */
+.mat-canvas-soft {
+  background-color: var(--surface-base);
+  background-image: radial-gradient(var(--grid-dot) 1px, transparent 1px);
+  background-size: 88px 88px;
+  opacity: 1;
+}
+
+.mat-canvas {
+  background-color: var(--surface-base);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    radial-gradient(var(--grid-dot) 1px, transparent 1px);
+  background-size:
+    88px 88px,
+    88px 88px,
+    88px 88px;
+  background-position:
+    0 0,
+    0 0,
+    -0.5px -0.5px;
+}
+
+.think-dot {
+  animation: think-dot 1.15s var(--ease-soft) infinite;
+}
+
+@keyframes think-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .think-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* ── Bảng lệnh ───────────────────────────────────────────────────────────
+   Độ sâu thứ hai của vật liệu: nổi hơn nền sân khấu vừa đủ để đọc ra "chỗ ra
+   lệnh", nhưng KHÔNG phải một thẻ nổi. Phân tách đến từ viền mảnh + vệt sáng
+   mép trên; ô nhập bên trong để trong suốt hoàn toàn, nên không có hộp trắng
+   nào cắt ngang bảng. */
+.console {
+  position: relative;
+  background-color: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  border: 1px solid var(--border-subtle);
+  box-shadow:
+    inset 0 1px 0 var(--edge-light),
+    var(--shadow-1);
+  transition:
+    border-color var(--t-hover) var(--ease),
+    box-shadow var(--t-hover) var(--ease),
+    background-color var(--t-hover) var(--ease);
+}
+
+.console:hover {
+  border-color: var(--border-strong);
+}
+
+/* Focus nâng CẢ bảng, không riêng ô nhập: người dùng đang gõ vào phần mềm.
+   Đây cũng là chỗ dấu focus bàn phím hiện ra — textarea bên trong bỏ outline
+   nên nếu bảng không sáng lên thì điều hướng bằng Tab sẽ mất dấu. */
+.console:focus-within {
+  background-color: var(--surface-raised);
+  border-color: color-mix(in srgb, var(--selection) 55%, var(--border-strong));
+  box-shadow:
+    inset 0 1px 0 var(--edge-light),
+    0 0 0 3px color-mix(in srgb, var(--selection) 14%, transparent),
+    var(--shadow-2);
+}
+
+/* Ô nhập không tự vẽ vòng focus: đã có `.console:focus-within` bao ngoài, để
+   nguyên thì thành HAI vòng lồng nhau và cái trong lại đóng khung ô nhập thành
+   một hộp — đúng thứ bản này đang gỡ bỏ. Dấu focus bàn phím KHÔNG mất: vòng
+   ngoài to hơn và tương phản hơn vòng mặc định. */
+.console textarea:focus-visible {
+  outline: none;
+}
+
+/* Đang chạy: một vệt mảnh chạy trên mép bảng. Đủ để biết hệ đang làm việc,
+   không chiếm màn hình như một lớp phủ toàn trang. */
+.console-progress {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--running), transparent);
+  animation: console-sweep 1.5s var(--ease-soft) infinite;
+}
+
+@keyframes console-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.console-run:disabled {
+  opacity: 0.75;
+}
+
+/* Chấm trạng thái lúc đang chạy — thở, không nhấp nháy. */
+.pulse-dot {
+  animation: pulse-dot 1.8s var(--ease-soft) infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-progress,
+  .pulse-dot {
+    animation: none;
+  }
+}
+
+/* ── Tương tác ───────────────────────────────────────────────────────── */
+
+.act {
+  transition:
+    background-color var(--t-hover) var(--ease),
+    border-color var(--t-hover) var(--ease),
+    box-shadow var(--t-hover) var(--ease),
+    transform var(--t-hover) var(--ease),
+    color var(--t-hover) var(--ease);
+}
+.act:hover {
+  background-color: var(--surface-interactive);
+  border-color: var(--border-strong);
+  box-shadow: inset 0 1px 0 var(--edge-light), var(--shadow-2);
+}
+.act:active {
+  transform: translateY(0.5px);
+  transition-duration: var(--t-press);
+}
+
+.press {
+  transition:
+    transform var(--t-press) var(--ease),
+    background-color var(--t-press) var(--ease),
+    border-color var(--t-press) var(--ease);
+}
+.press:active:not(:disabled) {
+  transform: scale(0.975);
+}
+
+/* Vòng focus bàn phím — dày, tương phản, không bao giờ bị gỡ. */
+.ws :focus-visible {
+  outline: 2px solid var(--selection);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+/* ── Chuyển động ─────────────────────────────────────────────────────── */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise var(--t-panel) var(--ease) both;
+}
+
+.seq > * {
+  animation: rise 320ms var(--ease) both;
+}
+.seq > *:nth-child(1) { animation-delay: 0ms; }
+.seq > *:nth-child(2) { animation-delay: 34ms; }
+.seq > *:nth-child(3) { animation-delay: 68ms; }
+.seq > *:nth-child(4) { animation-delay: 102ms; }
+.seq > *:nth-child(5) { animation-delay: 136ms; }
+.seq > *:nth-child(6) { animation-delay: 170ms; }
+.seq > *:nth-child(7) { animation-delay: 204ms; }
+.seq > *:nth-child(n + 8) { animation-delay: 230ms; }
+
+/* Thanh trạng thái của chặng đang chạy: một vệt sáng trôi dọc.
+   Chuyển động nằm trên MỘT dải 2px, không phải trên cả thẻ — đủ để mắt bắt
+   được là có việc đang diễn ra, không đủ để tranh chú ý với nội dung. */
+@keyframes rail-scan {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(200%);
+  }
+}
+.rail-scan::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent, var(--edge-scan), transparent);
+  animation: rail-scan 2.6s var(--ease-soft) infinite;
+}
+
+/* Chấm nhịp của agent — chỉ chạy khi thật sự đang điều phối. */
+@keyframes halo {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  70%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+.halo {
+  animation: halo 2.4s var(--ease-soft) infinite;
+}
+
+/* Launcher → Canvas: rời đi có hướng, không tan biến tại chỗ. */
+@keyframes shift-out {
+  to {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.985);
+  }
+}
+.shift-out {
+  animation: shift-out var(--t-morph) var(--ease) both;
+}
+
+/* ── React Flow ──────────────────────────────────────────────────────── */
+
+.ws .react-flow__edge-path {
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+  transition: stroke var(--t-node) var(--ease);
+}
+.ws .react-flow__edge.edge-live .react-flow__edge-path {
+  stroke: var(--running);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 6;
+  animation: dash 1.6s linear infinite;
+}
+@keyframes dash {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+.ws .react-flow__edge.edge-done .react-flow__edge-path {
+  stroke: var(--border-subtle);
+}
+.ws .react-flow__handle {
+  width: 5px;
+  height: 5px;
+  border: none;
+  background: var(--border-strong);
+}
+.ws .react-flow__controls {
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-2);
+}
+.ws .react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+  background: var(--surface-overlay);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  transition: background-color var(--t-hover) var(--ease);
+}
+.ws .react-flow__controls-button:hover {
+  background: var(--surface-interactive);
+  color: var(--text-primary);
+}
+.ws .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/* ── Thanh cuộn ──────────────────────────────────────────────────────── */
+.ws ::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.ws ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 9px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.ws ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws *,
+  .ws *::after,
+  .ws *::before {
+    animation: none !important;
+    transition-duration: 1ms !important;
+  }
+  .act:active,
+  .press:active {
+    transform: none;
+  }
+}
+
+
+/* Node vào theo đợt khi canvas hình thành — 250–400ms như đã định.
+   CHỈ animate `opacity`. React Flow đặt vị trí node bằng `transform:
+   translate(x, y)` nội tuyến; animate `transform` ở đây sẽ ghi đè toạ độ và
+   mọi node dồn về gốc 0,0. Đã xảy ra đúng như vậy. */
+@keyframes node-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.ws .react-flow__node {
+  animation: node-in 320ms var(--ease) both;
+}
+.ws .react-flow__node:nth-child(1) { animation-delay: 40ms; }
+.ws .react-flow__node:nth-child(2) { animation-delay: 80ms; }
+.ws .react-flow__node:nth-child(3) { animation-delay: 120ms; }
+.ws .react-flow__node:nth-child(4) { animation-delay: 160ms; }
+.ws .react-flow__node:nth-child(5) { animation-delay: 200ms; }
+.ws .react-flow__node:nth-child(n + 6) { animation-delay: 240ms; }
+
+/* Cạnh hiện SAU node — nối chỉ có nghĩa khi hai đầu đã ở đó. */
+@keyframes edge-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.ws .react-flow__edges {
+  animation: edge-in 300ms var(--ease) 320ms both;
+}
