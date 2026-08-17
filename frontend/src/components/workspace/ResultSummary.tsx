@@ -116,6 +116,42 @@ export function ResultSummary({ task, journeyTitle }: Props) {
   const whenRaw = byLabel.get('Thời gian') ?? ''
   const when = whenRaw ? readableWhen(whenRaw) : null
 
+  /*
+   * Không có MỐC THỜI GIAN thì đây không phải một buổi hẹn.
+   *
+   * Bố cục bên dưới nói bằng ngôn ngữ của một lịch tham quan: "Trước buổi tham
+   * quan", "Thêm vào lịch", "Đổi lịch", "Huỷ lịch". Áp nó cho mọi kết quả đã
+   * xong nghĩa là một lần ĐĂNG KÝ TƯ VẤN — thứ không có giờ, không có điểm gặp,
+   * không có gì để đổi — vẫn hiện đủ những nút ấy. Đo được: yêu cầu INT-003
+   * hiện "Lịch tham quan · Đổi lịch · Huỷ lịch · Trước buổi tham quan".
+   *
+   * Phân biệt bằng DỮ KIỆN có thật (`Thời gian`), không bằng tên tool.
+   */
+  if (!when) {
+    return (
+      <Block title="Kết quả">
+        {details.length === 0 ? (
+          <p className="text-[15px] text-[var(--text-secondary)]">
+            Yêu cầu đã hoàn tất. Đơn vị sẽ liên hệ với bạn nếu cần thêm thông tin.
+          </p>
+        ) : (
+          <dl className="grid gap-x-10 gap-y-4 sm:grid-cols-2">
+            {details.map((detail) => (
+              <div key={detail.label}>
+                <dt className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                  {detail.label}
+                </dt>
+                <dd className="mt-1 text-[16px] font-medium leading-[1.4] text-[var(--text-primary)]">
+                  {detail.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </Block>
+    )
+  }
+
   return (
     <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_300px]">
       {/* ── Cột chính: kết quả, rồi chuẩn bị ───────────────────────── */}
