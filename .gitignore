@@ -66,3 +66,8 @@ out/
 # tên file thay vì chỉ một cái, vì lần sau nó sẽ mang tên khác.
 *token*.txt
 *.jwt
+
+# Skill cục bộ của Claude Code — cấu hình theo từng máy, không phải mã nguồn
+# của dự án. `.claude/settings.json` thì VẪN theo dõi, vì đó là thoả thuận
+# chung của cả nhóm.
+.claude/skills/
