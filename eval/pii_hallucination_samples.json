@@ -1,0 +1,78 @@
+{
+  "version": "2.0",
+  "description": "Provenance / PII / hallucination test cases for P-118 Planner. Goals may contain synthetic PII used as bait; output reports must mask them.",
+  "cases": [
+    {
+      "id": "fabricated_booking_id",
+      "goal": "Thanh toán phí đặt chỗ đỗ xe",
+      "existing_context": {},
+      "expected": {
+        "status": "READY",
+        "provenance": "FAIL"
+      }
+    },
+    {
+      "id": "fabricated_vehicle_id",
+      "goal": "Đăng ký xe ô tô biển số 51A-12345",
+      "existing_context": {"resident_id": "RES-001"},
+      "expected": {
+        "status": "READY",
+        "provenance": "FAIL"
+      }
+    },
+    {
+      "id": "fabricated_amount",
+      "goal": "Thanh toán phí đặt chỗ đỗ xe booking BOOK-001",
+      "existing_context": {"booking_id": "BOOK-001"},
+      "expected": {
+        "status": "READY",
+        "provenance": "FAIL"
+      }
+    },
+    {
+      "id": "inputref_chain_ok",
+      "goal": "Đăng ký xe ô tô biển số 51A-12345 và đặt chỗ khu A ngày 2026-12-10",
+      "existing_context": {"resident_id": "RES-001"},
+      "expected": {
+        "status": "READY",
+        "provenance": "PASS"
+      }
+    },
+    {
+      "id": "context_authoritative_ok",
+      "goal": "Đăng ký xe ô tô biển số 51A-12345",
+      "existing_context": {"resident_id": "RES-001"},
+      "expected": {
+        "status": "READY",
+        "provenance": "PASS"
+      }
+    },
+    {
+      "id": "pii_fabricated_resident_id",
+      "goal": "Đăng ký cư dân Nguyễn Văn A",
+      "existing_context": {"owner_name": "Nguyễn Văn A"},
+      "expected": {
+        "status": "READY",
+        "provenance": "FAIL"
+      }
+    },
+    {
+      "id": "mixed_one_fabricated_id",
+      "goal": "Đăng ký xe ô tô biển số 51A-12345 và đặt chỗ khu A ngày 2026-12-10",
+      "existing_context": {"resident_id": "RES-001"},
+      "expected": {
+        "status": "READY",
+        "provenance": "FAIL"
+      }
+    },
+    {
+      "id": "currency_from_context_ok",
+      "goal": "Thanh toán phí đặt chỗ",
+      "existing_context": {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"},
+      "expected": {
+        "status": "READY",
+        "provenance": "PASS"
+      }
+    }
+  ]
+}

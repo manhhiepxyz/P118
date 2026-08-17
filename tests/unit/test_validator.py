@@ -10,7 +10,7 @@ from src.agents.examples.plans import (
     PLAN_PARTIAL_BOOK_AND_PAY,
     PLAN_PARTIAL_BOOK_ONLY,
 )
-from src.agents.validator import TaskPlanValidator
+from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
 from src.common.task_plan import AllowedTool, InputRef, Task, TaskPlan
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ def _book_only_task(task_id: str = "T1", depends_on: list[str] | None = None) ->
         depends_on=depends_on or [],
         input={
             "vehicle_id": "VEH-001",
-            "booking_date": "2026-08-10",
+            "booking_date": "2026-12-10",
             "parking_zone": "ZONE_A",
         },
     )
@@ -104,7 +104,7 @@ def test_reject_self_dependency() -> None:
             depends_on=["T1"],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -127,7 +127,7 @@ def test_reject_direct_cycle() -> None:
             depends_on=["T2"],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -175,7 +175,7 @@ def test_reject_multi_task_cycle() -> None:
             depends_on=["T2"],
             input={
                 "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -231,7 +231,7 @@ def test_reject_missing_required_input_book_parking() -> None:
             depends_on=[],
             input={
                 # vehicle_id is missing
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -255,6 +255,22 @@ def test_reject_missing_required_input_pay_fee() -> None:
     )
     with pytest.raises(ValueError, match="missing required input"):
         TaskPlanValidator.validate(plan)
+
+
+def test_missing_required_input_error_exposes_only_contract_field_names() -> None:
+    plan = _make_plan(
+        Task(
+            task_id="T1",
+            tool="book_parking",
+            depends_on=[],
+            input={},
+        )
+    )
+
+    with pytest.raises(MissingRequiredInputError) as exc_info:
+        TaskPlanValidator.validate(plan)
+
+    assert exc_info.value.missing_fields == ("booking_date", "parking_zone", "vehicle_id")
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +477,7 @@ def test_ordinary_business_goal_is_accepted() -> None:
     """A normal Vietnamese business goal must not trip the sensitive-data checks."""
     plan = _make_plan(
         _book_only_task(),
-        goal="Tôi mới chuyển vào căn hộ A1201. Hãy đặt chỗ đậu xe tại ZONE_A ngày 2026-08-10 giúp tôi.",
+        goal="Tôi mới chuyển vào căn hộ A1201. Hãy đặt chỗ đậu xe tại ZONE_A ngày 2026-12-10 giúp tôi.",
     )
     assert TaskPlanValidator.validate(plan) is plan
 
@@ -479,7 +495,7 @@ def test_reject_url_in_task_id() -> None:
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -497,7 +513,7 @@ def test_task_id_error_does_not_echo_task_id() -> None:
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         )
@@ -645,7 +661,7 @@ def test_example_plans_still_valid_after_sweep() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Regression: the Planner contract is exactly four tools
+# Regression: schema and validator agree on the approved tool contract
 #
 # Ownership verification is an external VerificationGuard concern that runs
 # BEFORE the workflow — it must never reappear as a TaskPlan tool.
@@ -653,16 +669,22 @@ def test_example_plans_still_valid_after_sweep() -> None:
 
 EXPECTED_TOOLS = frozenset(
     {
+        "search_properties",
+        "schedule_property_viewing",
+        "register_property_interest",
+        "create_maintenance_request",
+        "schedule_move",
         "register_resident",
         "register_vehicle",
         "book_parking",
         "pay_fee",
+        "book_shuttle",
     }
 )
 
 
-def test_planner_contract_is_exactly_four_tools() -> None:
-    """Schema, validator allowlist and required-input table must agree on 4 tools."""
+def test_planner_contract_tool_sets_are_exactly_aligned() -> None:
+    """Schema, validator allowlist and required-input table must agree."""
     assert frozenset(typing.get_args(AllowedTool)) == EXPECTED_TOOLS
     assert TaskPlanValidator.ALLOWED_TOOLS == EXPECTED_TOOLS
     assert frozenset(TaskPlanValidator.REQUIRED_INPUTS) == EXPECTED_TOOLS
@@ -724,3 +746,90 @@ def test_schema_rejects_ownership_task_from_raw_json() -> None:
     }
     with pytest.raises(ValidationError):
         TaskPlan.model_validate(raw_plan)
+
+
+@pytest.mark.parametrize(
+    ("tool", "input_data", "error"),
+    [
+        (
+            "book_parking",
+            {"vehicle_id": "VEH-001", "booking_date": "2026-02-31", "parking_zone": "ZONE_A"},
+            "invalid booking_date format",
+        ),
+        (
+            "book_parking",
+            {"vehicle_id": "VEH-001", "booking_date": "2020-01-01", "parking_zone": "ZONE_A"},
+            "booking_date in the past",
+        ),
+        (
+            "schedule_property_viewing",
+            {"project_id": "PRJ-001", "viewing_date": "2026-12-15", "viewing_time": "12:99"},
+            "invalid viewing_time format",
+        ),
+        (
+            "schedule_property_viewing",
+            {"project_id": "PRJ-001", "viewing_date": "2026-12-15", "viewing_time": "07:59"},
+            "viewing_time outside business hours",
+        ),
+        (
+            "create_maintenance_request",
+            {
+                "issue_type": "electrical",
+                "description": "Mất điện",
+                "location": "Phòng khách",
+                "preferred_date": "2026-12-15",
+                "preferred_time": "18:01",
+            },
+            "preferred_time outside business hours",
+        ),
+        (
+            "schedule_move",
+            {
+                "move_date": "2026-12-15",
+                "move_time": "20:01",
+                "needs_elevator": True,
+                "needs_loading_support": False,
+                "move_vehicle": "truck",
+            },
+            "move_time outside business hours",
+        ),
+    ],
+)
+def test_validator_rejects_invalid_schedule_values(tool: str, input_data: dict, error: str) -> None:
+    plan = TaskPlan(goal="Lịch không hợp lệ", tasks=[Task(task_id="T1", tool=tool, depends_on=[], input=input_data)])
+    with pytest.raises(ValueError, match=error):
+        TaskPlanValidator.validate(plan)
+
+
+@pytest.mark.parametrize(
+    ("tool", "field", "bad_value", "input_data"),
+    [
+        (
+            "book_parking",
+            "parking_zone",
+            "ZONE_C",
+            {"vehicle_id": "VEH-001", "booking_date": "2026-12-15", "parking_zone": "ZONE_C"},
+        ),
+        (
+            "register_vehicle",
+            "vehicle_type",
+            "modified_car",
+            {"resident_id": "RES-001", "plate_number": "59A-12345", "vehicle_type": "modified_car"},
+        ),
+    ],
+)
+def test_validator_rejects_enum_outside_contract_without_echoing_value(
+    tool: str,
+    field: str,
+    bad_value: str,
+    input_data: dict,
+) -> None:
+    plan = TaskPlan(
+        goal="Giá trị ngoài contract", tasks=[Task(task_id="T1", tool=tool, depends_on=[], input=input_data)]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        TaskPlanValidator.validate(plan)
+
+    assert field in str(exc_info.value)
+    assert bad_value not in str(exc_info.value)

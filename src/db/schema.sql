@@ -1,9 +1,19 @@
 -- =============================================================
 -- P-118 — Database Schema
--- Version: v0.3.0
--- Updated: 2026-08-05
+-- Version: v0.5.0
+-- Updated: 2026-08-14
 -- Owner: Hoàng Anh (src/db/)
 -- =============================================================
+-- Changelog v0.5.0:
+--   [add] tour_slot_config / tour_bookings / tour_capacity: đặt lịch tham quan
+--         dự án căn hộ (demo) — service book_tour
+--   [add] shuttle_bookings: đặt xe tham quan (demo) — service book_shuttle
+--   [add] consultations: đăng ký tư vấn mua (ở/kinh doanh/đầu tư) + thuê
+--         (demo) — service register_consultation
+-- Changelog v0.4.0:
+--   [add] users: auth (login/register + RBAC) — scrypt password_hash
+--         không seed bằng SQL (scrypt hash không tính được trong SQL);
+--         admin đầu tiên tạo bằng scripts/create_admin.py
 -- Changelog v0.3.0:
 --   [fix] parking_capacity: bỏ booked_count denormalized,
 --         tính COUNT(*) + SELECT FOR UPDATE trong transaction
@@ -79,7 +89,7 @@ CREATE TABLE IF NOT EXISTS parking_bookings (
     parking_zone VARCHAR(20)  NOT NULL
                      CHECK (parking_zone IN ('ZONE_A', 'ZONE_B')),
     booking_date DATE         NOT NULL,
-    amount       INTEGER      NOT NULL CHECK (amount >= 0),
+    amount       INTEGER      NOT NULL CHECK (amount > 0),
     currency     VARCHAR(10)  NOT NULL DEFAULT 'VND',
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -114,7 +124,7 @@ CREATE TABLE IF NOT EXISTS payments (
     payment_id     VARCHAR(20)  PRIMARY KEY,          -- PAY-001…
     booking_id     VARCHAR(20)  NOT NULL
                        REFERENCES parking_bookings(booking_id),
-    amount         INTEGER      NOT NULL CHECK (amount >= 0),
+    amount         INTEGER      NOT NULL CHECK (amount > 0),
     currency       VARCHAR(10)  NOT NULL DEFAULT 'VND',
     payment_status VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
                        CHECK (payment_status IN ('PENDING', 'PAID', 'FAILED', 'REFUNDED')),
@@ -128,6 +138,87 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_paid_booking
     ON payments(booking_id)
     WHERE payment_status = 'PAID';
+
+
+-- =============================================================
+-- NHÓM 1b: DEMO SERVICES (đặt lịch tham quan / đặt xe / tư vấn)
+-- =============================================================
+-- [add] v0.5.0 — Dịch vụ demo sau Gate 2, mock API tự quản lý (giống NHÓM 1).
+-- KHÔNG phải workflow state; Executor/Repository không ghi vào đây.
+-- =============================================================
+
+-- Cấu hình sức chứa slot tham quan theo (residential_area, tour_slot).
+-- Seed rõ ràng trong seed.sql (giống zone_capacity_config cho parking).
+CREATE TABLE IF NOT EXISTS tour_slot_config (
+    residential_area VARCHAR(100) NOT NULL,
+    tour_slot        VARCHAR(20)  NOT NULL
+                         CHECK (tour_slot IN ('MORNING', 'AFTERNOON')),
+    capacity         INTEGER      NOT NULL CHECK (capacity > 0),
+    PRIMARY KEY (residential_area, tour_slot)
+);
+
+-- Đặt lịch tham quan dự án căn hộ.
+-- resident_id NULL = khách tham quan (không phải cư dân).
+CREATE TABLE IF NOT EXISTS tour_bookings (
+    tour_id          VARCHAR(20)  PRIMARY KEY,          -- TOUR-001…
+    resident_id      VARCHAR(20)
+                         REFERENCES residents(resident_id),
+    residential_area VARCHAR(100) NOT NULL,
+    tour_date        DATE         NOT NULL,
+    tour_slot        VARCHAR(20)  NOT NULL
+                         CHECK (tour_slot IN ('MORNING', 'AFTERNOON')),
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    -- Một resident không đặt trùng (resident_id, tour_date, tour_slot).
+    -- NULL resident_id (khách) không bị ràng buộc này — Postgres UNIQUE coi
+    -- NULL khác nhau; sức chứa slot là guard chính cho khách.
+    CONSTRAINT uq_tour_bookings_res_date_slot UNIQUE (resident_id, tour_date, tour_slot)
+);
+
+-- [add] Sức chứa slot tham quan theo ngày — đọc COUNT(*) + SELECT FOR UPDATE
+-- trong transaction (giống parking_capacity). Không dùng booked_count denormalized.
+CREATE TABLE IF NOT EXISTS tour_capacity (
+    residential_area VARCHAR(100) NOT NULL,
+    tour_date        DATE         NOT NULL,
+    tour_slot        VARCHAR(20)  NOT NULL
+                         CHECK (tour_slot IN ('MORNING', 'AFTERNOON')),
+    capacity         INTEGER      NOT NULL CHECK (capacity > 0),
+    PRIMARY KEY (residential_area, tour_date, tour_slot)
+);
+
+-- Đặt xe tham quan dự án.
+-- Một lịch tham quan (tour_id) chỉ đặt 1 xe.
+CREATE TABLE IF NOT EXISTS shuttle_bookings (
+    shuttle_id      VARCHAR(20)  PRIMARY KEY,           -- SHUTTLE-001…
+    tour_id         VARCHAR(20)  NOT NULL
+                        REFERENCES tour_bookings(tour_id),
+    tour_date       DATE         NOT NULL,
+    passenger_count INTEGER      NOT NULL
+                        CHECK (passenger_count BETWEEN 1 AND 30),
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_shuttle_bookings_tour UNIQUE (tour_id)
+);
+
+-- Đăng ký tư vấn bất động sản.
+-- consultation_type: BUY (mua) / RENT (thuê).
+-- buy_sub_type (chỉ khi BUY): RESIDE (ở) / BUSINESS (kinh doanh) / INVEST (đầu tư).
+CREATE TABLE IF NOT EXISTS consultations (
+    consultation_id   VARCHAR(20)  PRIMARY KEY,         -- CONS-001…
+    resident_id       VARCHAR(20)
+                          REFERENCES residents(resident_id),
+    consultation_type VARCHAR(20)  NOT NULL
+                          CHECK (consultation_type IN ('BUY', 'RENT')),
+    buy_sub_type      VARCHAR(20)
+                          CHECK (buy_sub_type IN ('RESIDE', 'BUSINESS', 'INVEST')),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    -- Một resident chỉ đăng ký 1 tư vấn cho mỗi loại.
+    CONSTRAINT uq_consultations_resident_type UNIQUE (resident_id, consultation_type)
+);
 
 
 -- =============================================================
@@ -152,13 +243,83 @@ CREATE TABLE IF NOT EXISTS workflows (
     -- [fix] Soft delete thay vì DELETE cứng.
     -- Lý do: execution_logs cần giữ audit trail ngay cả khi workflow "bị xóa".
     -- NULL = active; NOT NULL = archived (không hiển thị ở UI nhưng không mất dữ liệu).
-    archived_at TIMESTAMPTZ  DEFAULT NULL
+    archived_at TIMESTAMPTZ  DEFAULT NULL,
+
+    -- Phiên hội thoại đã ghim (server-side) và workflow cha khi một lượt
+    -- clarification sinh ra workflow con.
+    parent_workflow_id UUID         REFERENCES workflows(workflow_id),
+    session_id         VARCHAR(100),
+
+    -- Lý do workflow hỏng, ở dạng MÃ ỔN ĐỊNH (LLM_CONFIGURATION_ERROR,
+    -- PROVIDER_UNAVAILABLE, …). KHÔNG lưu message của exception: message đến
+    -- từ thư viện bên thứ ba, đổi bất cứ lúc nào, và hay kèm chi tiết không
+    -- nên nằm trong database.
+    --
+    -- Vì sao phải lưu: trước đây lỗi chỉ nằm trong `_DEMO_JOBS` — RAM của một
+    -- tiến trình. Sau restart, workflow đọc lên là `PENDING`, giao diện map
+    -- thành "đang chạy" và poll mãi một việc đã chết từ lâu.
+    error_code         VARCHAR(60),
+
+    -- Câu trả lời tự nhiên của P-118 cho CHÍNH workflow này.
+    --
+    -- Đây là thuộc tính TRÌNH BÀY của workflow, không phải một tin nhắn rời.
+    -- P-118 là Agent thực hiện tác vụ, không phải chatbot có trí nhớ hội thoại:
+    -- không có bảng conversation_messages, và box chat chỉ là cách hiển thị lại
+    -- các workflow. Vì vậy câu trả lời sống ở đây, cùng chỗ với thứ nó mô tả.
+    --
+    -- Không có mấy cột này, câu trả lời chỉ nằm trong `_DEMO_JOBS` — RAM của
+    -- một tiến trình — nên F5 hoặc restart là mất, còn workflow thì vẫn còn.
+    assistant_answer      TEXT,
+    assistant_suggestions JSONB       NOT NULL DEFAULT '[]'::jsonb,
+
+    -- PENDING: đã chốt quyền sinh, đang gọi mô hình
+    -- READY:   mô hình trả lời và câu đó đã qua kiểm
+    -- FALLBACK: dùng câu deterministic (mô hình lỗi hoặc câu bị loại)
+    assistant_response_state VARCHAR(20)
+        CHECK (assistant_response_state IN ('PENDING', 'READY', 'FALLBACK')),
+
+    -- Trạng thái workflow mà câu trả lời đang mô tả.
+    --
+    -- Cần thiết vì câu trả lời gắn với MỘT trạng thái: câu viết cho
+    -- WAITING_APPROVAL trở thành sai ngay khi người dùng bấm duyệt. Cột này
+    -- vừa là khoá idempotency (một lần gọi mô hình cho mỗi trạng thái) vừa là
+    -- cách phát hiện câu đã lỗi thời.
+    assistant_for_status  VARCHAR(30),
+    assistant_updated_at  TIMESTAMPTZ
 );
 
 -- Index tìm workflow active (chưa archived)
 CREATE INDEX IF NOT EXISTS idx_workflows_active
     ON workflows(status)
     WHERE archived_at IS NULL;
+
+-- Ngữ cảnh cần để tiếp tục một workflow đang chờ người dùng bổ sung thông tin.
+--
+-- Không có bảng này, `/continue` chỉ chạy được khi job còn trong RAM: một lần
+-- restart giữa lúc NEEDS_INFORMATION là mất hẳn hội thoại.
+--
+-- `workflow_id` có khoá ngoại tới `workflows`, nên workflow shell phải được
+-- tạo TRƯỚC khi ghi clarification (xem `_ensure_workflow_shell`).
+--
+-- KHÔNG lưu: token, credential, raw LLM output. `existing_context` là context
+-- TRUSTED do server dựng, không phải dữ liệu browser gửi lên.
+CREATE TABLE IF NOT EXISTS workflow_clarifications (
+    workflow_id        UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
+    session_id         VARCHAR(100),
+    parent_workflow_id UUID,
+    goal               TEXT         NOT NULL,
+    missing_fields     JSONB        NOT NULL DEFAULT '[]',
+    question           TEXT,
+    existing_context   JSONB        NOT NULL DEFAULT '{}',
+    resolved_at        TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Chỉ index phần chưa được trả lời — đó là tập được truy vấn.
+CREATE INDEX IF NOT EXISTS idx_workflow_clarifications_open
+    ON workflow_clarifications(workflow_id) WHERE resolved_at IS NULL;
+
 
 CREATE TABLE IF NOT EXISTS workflow_tasks (
     id            BIGSERIAL    PRIMARY KEY,
@@ -250,3 +411,103 @@ CREATE TABLE IF NOT EXISTS approval_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_approval_decisions_workflow
     ON approval_decisions(workflow_id);
+
+
+-- =============================================================
+-- NHÓM 5: REPAIR HINTS
+-- ======================================================
+
+-- Lỗi nghiệp vụ repairable (FAILED nhưng user có thể đổi input để chạy tiếp).
+-- workflows.status vẫn FAILED; bảng con này nhận diện trạng thái con
+-- "FAILED nhưng repairable". Chỉ lưu error_code + message generic (KHÔNG có
+-- field) — missing_fields sinh tại render từ error_code + task.tool.
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS workflow_repair_hints (
+    id          BIGSERIAL    PRIMARY KEY,
+    workflow_id UUID         NOT NULL
+                    REFERENCES workflows(workflow_id),
+    task_id     VARCHAR(20)  NOT NULL,
+    error_code  VARCHAR(60)  NOT NULL,
+    message     VARCHAR(500) NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_repair_hints_wf
+    ON workflow_repair_hints(workflow_id);
+-- =============================================================
+-- NHÓM 6: AUTH
+-- =============================================================
+-- [add] v0.4.0 — Tài khoản đăng nhập (login/register) + phân quyền.
+--   - role: 'customer' (mặc định khi register) | 'admin' (tạo bằng
+--     scripts/create_admin.py). role là VAI TRÒ TÀI KHOẢN, KHÔNG phải quyền
+--     cư dân — quyền đó nằm ở bảng user_resident_links.
+--   - password_hash: chuỗi 'scrypt:N:r:p:salt_b64:hash_b64' (stdlib
+--     hashlib.scrypt, salt random 16 bytes). KHÔNG seed bằng SQL vì
+--     scrypt không tính được trong SQL.
+--   - archived_at: soft delete — user bị xoá vẫn giữ audit trail
+--     (decided_by / execution_logs).
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS users (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    username      VARCHAR(50)  NOT NULL,                  -- lowercase ở tầng app
+    email         VARCHAR(255),
+    password_hash TEXT         NOT NULL,                  -- scrypt:N:r:p:salt_b64:hash_b64
+    role          VARCHAR(20)  NOT NULL DEFAULT 'customer'
+                      CONSTRAINT ck_users_role CHECK (role IN ('customer', 'admin')),
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    archived_at   TIMESTAMPTZ  DEFAULT NULL,
+
+    CONSTRAINT uq_users_username UNIQUE (username)
+);
+
+-- Email unique chỉ khi có giá trị (nhiều user có thể bỏ trống email)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email
+    ON users(email) WHERE email IS NOT NULL;
+
+
+-- =============================================================
+-- Yêu cầu liên kết căn hộ do CHÍNH CHỦ TÀI KHOẢN gửi
+-- =============================================================
+-- Trước đây customer không có đường nào để bắt đầu việc liên kết: admin phải
+-- tự gõ UUID tài khoản và mã cư dân. Nghĩa là admin phải biết trước ai muốn
+-- liên kết căn hộ nào — một thông tin chỉ tồn tại ngoài hệ thống.
+--
+-- Bảng này giữ phần khách hàng KHAI. Nó KHÔNG phải nguồn sự thật về quyền:
+-- quyền vẫn nằm ở `user_resident_links.verification_status`, và chỉ admin ghi
+-- được. Khách hàng gửi yêu cầu; ban quản lý quyết định.
+--
+-- GIỚI HẠN GATE 2: xác minh là thao tác THỦ CÔNG của admin, không phải eKYC.
+-- Trust boundary thì đúng — người dùng không tự nâng quyền được — nhưng bằng
+-- chứng danh tính thì chưa có.
+CREATE TABLE IF NOT EXISTS resident_link_requests (
+    request_id       UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          UUID         NOT NULL REFERENCES users(id),
+
+    -- Thông tin người dùng ĐỌC ĐƯỢC và biết được. Cố ý KHÔNG có `resident_id`:
+    -- đó là mã nội bộ, và cho khách hàng gửi mã cư dân nghĩa là cho họ trỏ vào
+    -- hồ sơ của bất kỳ ai.
+    apartment_code   VARCHAR(50)  NOT NULL,
+    residential_area VARCHAR(100) NOT NULL,
+    full_name        VARCHAR(200) NOT NULL,
+
+    status           VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+                         CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decided_at       TIMESTAMPTZ,
+    -- Ai đã quyết định. Audit trail: một liên kết được mở phải truy được về
+    -- một con người.
+    decided_by       UUID         REFERENCES users(id)
+);
+
+-- Mỗi tài khoản chỉ được có ĐÚNG MỘT yêu cầu đang chờ.
+-- Không có ràng buộc này, bấm gửi mười lần tạo mười dòng chờ duyệt giống hệt
+-- nhau, và admin phải đoán cái nào là thật.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_link_request_one_pending_per_user
+    ON resident_link_requests(user_id)
+    WHERE status = 'PENDING';
+
+CREATE INDEX IF NOT EXISTS idx_link_requests_status
+    ON resident_link_requests(status, created_at);

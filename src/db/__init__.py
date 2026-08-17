@@ -13,6 +13,7 @@ from src.db.migrations import create_test_db, run_migrations
 from src.db.postgres_repository import (
     PostgreSQLWorkflowStateRepository,
 )
+from src.db.user_repository import UserAlreadyExistsError, UserRepository
 
 __all__ = [
     # Connection / lifecycle
@@ -25,7 +26,9 @@ __all__ = [
     "create_test_db",
     # Repository
     "PostgreSQLWorkflowStateRepository",
+    "UserRepository",
     # Domain errors
     "NoAvailabilityError",
     "BookingAlreadyExistsError",
+    "UserAlreadyExistsError",
 ]

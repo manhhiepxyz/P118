@@ -1,0 +1,415 @@
+@import "tailwindcss";
+@import "./workspace.css";
+
+/* ---------------------------------------------------------------------------
+   P-118 Design tokens — theo docs/ui-design-prompts.md (Design System)
+   Tailwind v4: khai báo theme inline qua @theme, không cần tailwind.config.js
+--------------------------------------------------------------------------- */
+@theme {
+  /* Brand teal */
+  --color-brand-600: #0f766e;
+  --color-brand-700: #115e59;
+  --color-brand-50: #f0fdfa;
+  --color-brand-100: #ccfbf1;
+
+  /* ── Bề mặt: BA tầng, không phải hai ───────────────────────────────
+     Trước đây chỉ có `surface` và `card`, nên panel và thẻ bên trong panel
+     trông y hệt nhau — người dùng không đọc được cái nào nằm trên cái nào.
+     Ba tầng cho phép dựng chiều sâu bằng chính màu nền, không phải bằng viền.
+
+     Nền workspace ấm nhẹ (hơi ngả be) thay vì trắng lạnh: trắng tinh trên cả
+     màn hình lớn làm mọi thứ trông như tài liệu, và làm bề mặt nổi phía trên
+     không còn chỗ để nổi. */
+  --color-surface: #f6f5f2; /* nền workspace — ấm, thấp nhất */
+  --color-panel: #fbfaf8; /* panel/dock — cao hơn nền một bậc */
+  --color-card: #ffffff; /* thẻ, node — cao nhất */
+  --color-border-card: #e7e3dc;
+  --color-border-strong: #d6d1c7;
+
+  /* ── Nhấn ngữ nghĩa ────────────────────────────────────────────────
+     Teal là thương hiệu, KHÔNG phải màu của mọi thứ tương tác. Mỗi trạng thái
+     có màu riêng để đọc được ý nghĩa mà không cần đọc chữ. */
+  --color-state-running: #0d7490; /* lam-lục: đang chạy */
+  --color-state-running-soft: #e0f2f7;
+  --color-state-waiting: #b45309; /* hổ phách đậm: chờ bạn */
+  --color-state-waiting-soft: #fef3c7;
+  --color-state-provider: #6b7280; /* xám: chờ bên khác, cố ý trầm */
+  --color-state-provider-soft: #f1f0ed;
+  --color-state-success: #15803d;
+  --color-state-success-soft: #dcfce7;
+  --color-state-failed: #b91c1c;
+  --color-state-failed-soft: #fee2e2;
+
+  /* ── Chuyển động ───────────────────────────────────────────────────
+     Thời lượng theo QUÃNG ĐƯỜNG và độ phức tạp, không phải một con số dùng
+     chung. Easing giảm tốc khi vào, tăng tốc khi ra.
+
+     KHÔNG dùng ease overshoot (`back.out`) ở đây: với giao diện mang thông
+     tin, cú nảy đọc như cẩu thả chứ không như sống động. */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-hover: 170ms;
+  --dur-press: 140ms;
+  --dur-panel: 260ms;
+  --dur-morph: 380ms;
+  --dur-node: 320ms;
+
+  /* ── Đổ bóng: một thang duy nhất ──────────────────────────────────
+     Bóng nhiều lớp, rất mềm — bóng một lớp cứng trông rẻ tiền. */
+  --shadow-card: 0 1px 2px rgb(30 27 22 / 0.04), 0 2px 8px rgb(30 27 22 / 0.04);
+  --shadow-lift: 0 2px 4px rgb(30 27 22 / 0.05), 0 12px 24px -6px rgb(30 27 22 / 0.1);
+  --shadow-panel: 0 1px 3px rgb(30 27 22 / 0.05), 0 20px 40px -12px rgb(30 27 22 / 0.12);
+
+  /* Typography */
+  --font-sans:
+    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Timeline node ring */
+  --color-node-ring: #e2e8f0;
+
+  /* Màu chữ chính (body) — sáng/sậm theo theme */
+  --color-ink: #0f172a;
+}
+
+/* ---------------------------------------------------------------------------
+   Dark mode — remap toàn bộ token (surface + neutral + brand + status tint)
+   qua biến CSS. Utility như bg-gray-50 / text-gray-900 / border-gray-200 đều
+   resolve tới --color-* nên chỉ cần override ở đây — KHÔNG sửa từng class.
+   Các nền trắng (card) đã chuyển sang token `bg-card` trong JSX.
+   --color-white GIỮ NGUYÊN #fff vì `text-white`/`border-white` (nhãn nút,
+   viền handle) phải sáng trên mọi theme.
+--------------------------------------------------------------------------- */
+@custom-variant dark (&:where(.dark, .dark *));
+
+.dark {
+  /* Tối cũng BA tầng, và không dùng đen tuyệt đối: #0b0f14 giữ được chỗ cho
+     bề mặt phía trên nổi lên, còn #000 thì mọi thứ đều phải sáng hơn nền. */
+  --color-surface: #0f1319;
+  --color-panel: #161b23;
+  --color-card: #1c222b;
+  --color-border-card: #2a313c;
+  --color-border-strong: #3a424f;
+
+  --color-state-running: #38bdf8;
+  --color-state-running-soft: #082f49;
+  --color-state-waiting: #fbbf24;
+  --color-state-waiting-soft: #422006;
+  --color-state-provider: #9ca3af;
+  --color-state-provider-soft: #1f242c;
+  --color-state-success: #4ade80;
+  --color-state-success-soft: #052e16;
+  --color-state-failed: #f87171;
+  --color-state-failed-soft: #450a0a;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.4), 0 12px 24px -6px rgb(0 0 0 / 0.5);
+  --shadow-panel: 0 1px 3px rgb(0 0 0 / 0.5), 0 20px 40px -12px rgb(0 0 0 / 0.6);
+  --color-node-ring: #334155;
+  --color-ink: #e2e8f0;
+
+  /* Neutral gray — đảo chiều (50 = tối nhất, 900 = sáng nhất) */
+  --color-gray-50: #1e293b;
+  --color-gray-100: #273449;
+  --color-gray-200: #334155;
+  --color-gray-300: #475569;
+  --color-gray-400: #64748b;
+  --color-gray-500: #94a3b8;
+  --color-gray-600: #cbd5e1;
+  --color-gray-700: #e2e8f0;
+  --color-gray-800: #f1f5f9;
+  --color-gray-900: #f8fafc;
+
+  /* Neutral slate */
+  --color-slate-50: #1e293b;
+  --color-slate-100: #273449;
+  --color-slate-200: #334155;
+  --color-slate-300: #475569;
+  --color-slate-400: #64748b;
+  --color-slate-500: #94a3b8;
+  --color-slate-600: #cbd5e1;
+  --color-slate-700: #e2e8f0;
+
+  /* Brand teal — nền tint 50/100 tối hơn; 700/800 (nút primary) GIỮ NGUYÊN
+     màu đậm để chữ trắng trên nút luôn đủ tương phản. Link/text teal-700/800
+     được làm sáng riêng bằng selector ở dưới. */
+  --color-teal-50: #042f2e;
+  --color-teal-100: #134e4a;
+
+  /* Status tints — 50/100 nền pastel → nền tối, 600/700 chữ → sáng */
+  --color-amber-50: #451a03;
+  --color-amber-100: #78350f;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #fbbf24;
+  --color-amber-700: #fcd34d;
+  --color-amber-800: #fde68a;
+
+  --color-emerald-50: #022c22;
+  --color-emerald-100: #064e3b;
+  --color-emerald-600: #34d399;
+  --color-emerald-700: #6ee7b7;
+  --color-emerald-800: #a7f3d0;
+
+  --color-blue-50: #172554;
+  --color-blue-100: #1e3a8a;
+  --color-blue-600: #60a5fa;
+  --color-blue-700: #93c5fd;
+
+  /* Tool tints mới (book_tour/book_shuttle/register_consultation) */
+  --color-violet-50: #2e1065;
+  --color-violet-100: #4c1d95;
+  --color-violet-700: #a78bfa;
+
+  --color-indigo-50: #1e1b4b;
+  --color-indigo-100: #312e81;
+  --color-indigo-700: #a5b4fc;
+
+  --color-cyan-50: #083344;
+  --color-cyan-100: #164e63;
+  --color-cyan-700: #67e8f9;
+
+  --color-red-50: #450a0a;
+  --color-red-100: #7f1d1d;
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-600: #f87171;
+  --color-red-700: #fca5a5;
+  --color-red-800: #fecaca;
+}
+
+/* Base */
+html,
+body {
+  background-color: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Monospace cho id */
+.font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Dark mode: link/text teal sáng hơn cho đủ tương phản trên nền tối.
+   Nút primary (bg-teal-700/bg-teal-800 + text-white) KHÔNG đổi vì teal đậm
+   mới đảm bảo chữ trắng rõ. Border/hover của link cũng làm sáng nhẹ.
+--------------------------------------------------------------------------- */
+.dark .text-teal-700,
+.dark .text-teal-800 {
+  color: #2dd4bf; /* teal-400 */
+}
+
+.dark .border-teal-600,
+.dark .border-teal-700,
+.dark .border-teal-700\/50 {
+  border-color: #2dd4bf;
+}
+
+.dark .hover\:text-teal-700:hover {
+  color: #5eead4; /* teal-300 */
+}
+
+.dark .hover\:border-teal-700:hover,
+.dark .hover\:border-teal-700\/50:hover {
+  border-color: #2dd4bf;
+}
+
+.dark .hover\:bg-teal-50:hover {
+  background-color: #134e4a;
+}
+
+/* ---------------------------------------------------------------------------
+   React Flow (@xyflow/react) — theme theo design system P-118 (teal)
+   CSS của RF được import TRƯỚC index.css trong main.tsx để override này thắng.
+   Ưu tiên biến CSS v12 (--xy-*) trước, fallback selector thường.
+--------------------------------------------------------------------------- */
+.react-flow {
+  --xy-edge-stroke: #94a3b8; /* slate-400 */
+  --xy-edge-stroke-width: 2;
+  --xy-edge-stroke-selected: #0f766e;
+  --xy-handle-background-color: #0f766e;
+  --xy-handle-border-color: #ffffff;
+  --xy-background-color: #f8fafc;
+  --xy-controls-button-background-color: #ffffff;
+  --xy-controls-button-background-color-hover: #f8fafc;
+  --xy-controls-button-color: #475569;
+}
+
+.dark .react-flow {
+  --xy-edge-stroke: #64748b;
+  --xy-edge-stroke-selected: #14b8a6;
+  --xy-handle-background-color: #14b8a6;
+  --xy-handle-border-color: #0f172a;
+  --xy-background-color: #1e293b;
+  --xy-controls-button-background-color: #1e293b;
+  --xy-controls-button-background-color-hover: #273449;
+  --xy-controls-button-color: #cbd5e1;
+}
+
+/* Handle nhỏ, viền trắng, đúng brand teal */
+.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.2);
+}
+
+.dark .react-flow__handle {
+  border-color: #0f172a;
+}
+
+/* Edge được chọn → teal */
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #0f766e;
+}
+
+.dark .react-flow__edge.selected .react-flow__edge-path,
+.dark .react-flow__edge:hover .react-flow__edge-path {
+  stroke: #14b8a6;
+}
+
+/* Attribution ẩn (đã set proOptions, giữ lại phòng hờ) */
+.react-flow__attribution {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Toast — animation slide-in / fade-out
+--------------------------------------------------------------------------- */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ---------------------------------------------------------------------------
+   Lớp trình bày dùng chung cho workspace.
+
+   Đặt ở CSS thay vì rải utility trong JSX: bóng, thời lượng và easing là
+   NGÔN NGỮ của sản phẩm, không phải lựa chọn của từng component. Rải ra thì
+   mỗi chỗ một con số và giao diện mất nhịp.
+--------------------------------------------------------------------------- */
+
+.surface-card {
+  background-color: var(--color-card);
+  box-shadow: var(--shadow-card);
+}
+
+.surface-panel {
+  background-color: var(--color-panel);
+}
+
+/* Thẻ bấm được: nhấc nhẹ khi rê, lún khi nhấn. Chỉ animate `transform` và
+   `box-shadow` — animate width/height/top/left gây reflow và giật khung hình. */
+.lift {
+  transition:
+    transform var(--dur-hover) var(--ease-out-soft),
+    box-shadow var(--dur-hover) var(--ease-out-soft),
+    border-color var(--dur-hover) var(--ease-out-soft);
+  will-change: transform;
+}
+
+.lift:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lift);
+}
+
+.lift:active {
+  transform: translateY(-1px) scale(0.995);
+  transition-duration: var(--dur-press);
+}
+
+/* Nút: phản hồi xúc giác nhẹ. Scale nhỏ hơn thẻ vì quãng đường ngắn hơn. */
+.press {
+  transition:
+    transform var(--dur-press) var(--ease-out-soft),
+    background-color var(--dur-press) var(--ease-out-soft),
+    border-color var(--dur-press) var(--ease-out-soft),
+    box-shadow var(--dur-press) var(--ease-out-soft);
+}
+
+.press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Nội dung panel đổi khi chọn node khác — hoà tan thay vì nhảy phắt. */
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.enter-soft {
+  animation: fade-rise var(--dur-panel) var(--ease-out-soft) both;
+}
+
+/* Vào theo đợt cho danh sách. Chậm dần từng mục tạo cảm giác có nhịp, nhưng
+   trần 8 mục — quá số đó thì mục cuối chờ lâu tới mức thành lỗi. */
+.stagger > * {
+  animation: fade-rise 340ms var(--ease-out-soft) both;
+}
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 45ms; }
+.stagger > *:nth-child(3) { animation-delay: 90ms; }
+.stagger > *:nth-child(4) { animation-delay: 135ms; }
+.stagger > *:nth-child(5) { animation-delay: 180ms; }
+.stagger > *:nth-child(6) { animation-delay: 225ms; }
+.stagger > *:nth-child(n + 7) { animation-delay: 260ms; }
+
+/* Nhịp thở của chặng ĐANG CHẠY — vòng sáng nở ra rồi tắt.
+   Đây là hoạt ảnh lặp DUY NHẤT trong sản phẩm, và nó có nghĩa: một việc đang
+   thật sự diễn ra. Hết chạy là hết nhịp. */
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-state-running) 32%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 12px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.pulse-running {
+  animation: pulse-ring 2.4s var(--ease-in-out-soft) infinite;
+}
+
+/* Ưu tiên 1 của skill: tôn trọng prefers-reduced-motion.
+   Không phải làm nhanh hơn — mà là KHÔNG chạy, và hiện thẳng trạng thái cuối. */
+@media (prefers-reduced-motion: reduce) {
+  .lift,
+  .press,
+  .enter-soft,
+  .stagger > *,
+  .pulse-running {
+    animation: none !important;
+    transition-duration: 1ms !important;
+  }
+
+  .lift:hover,
+  .lift:active,
+  .press:active {
+    transform: none;
+  }
+}

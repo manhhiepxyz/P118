@@ -8,6 +8,8 @@ Singleton ``store`` dùng chung cho cả 4 service để mô phỏng dữ liệu
 from dataclasses import dataclass, field
 from threading import RLock
 
+from src.common.projects import PROJECTS as _CANONICAL_PROJECTS
+
 # Dữ liệu chủ sở hữu căn hộ — seed từ ban quản lý chung cư.
 # Dùng verify quyền sở hữu khi register_resident.
 # Phải khớp với dữ liệu test (Lâm Thành Bảo / A1201 / Vinhomes Ocean Park).
@@ -70,6 +72,15 @@ DEFAULT_APARTMENT_OWNERS = [
     },
 ]
 
+# Sức chứa slot tham quan theo (residential_area, tour_slot) — seed như
+# apartment_owners. Dùng cho NO_AVAILABILITY khi slot đã kín.
+# Sức chứa được sinh từ danh mục dự án canonical, không liệt kê tay: mọi dự án
+# `search_properties` trả về đều phải đặt lịch xem được. Danh sách viết tay
+# trước đây chỉ phủ 2 khu, nên 5 dự án còn lại search ra rồi đặt là 404.
+DEFAULT_TOUR_SLOTS = [
+    (_project["project_name"], slot, 3) for _project in _CANONICAL_PROJECTS for slot in ("MORNING", "AFTERNOON")
+]
+
 
 @dataclass
 class Store:
@@ -83,11 +94,24 @@ class Store:
     parking_load: dict = field(default_factory=dict)
     # Chủ sở hữu căn hộ — key: (apartment_code, residential_area) → value: record
     apartment_owners: dict = field(default_factory=dict)
+    # Đặt lịch tham quan dự án (book_tour).
+    tour_bookings: dict = field(default_factory=dict)
+    # Số lượt đã đặt cho (residential_area, tour_date, tour_slot) — NO_AVAILABILITY.
+    tour_load: dict = field(default_factory=dict)
+    # Sức chứa slot tham quan — key: (residential_area, tour_slot) → capacity
+    tour_slots: dict = field(default_factory=dict)
+    # Đặt xe tham quan (book_shuttle).
+    shuttle_bookings: dict = field(default_factory=dict)
+    # Tổng số khách đã đặt xe cho một ngày — key: tour_date (ISO string)
+    shuttle_load: dict = field(default_factory=dict)
+    # Đăng ký tư vấn (register_consultation).
+    consultations: dict = field(default_factory=dict)
     _lock: RLock = field(default_factory=RLock, repr=False)
 
     def __post_init__(self) -> None:
-        """Seed apartment_owners từ DEFAULT_APARTMENT_OWNERS."""
+        """Seed apartment_owners + tour_slots từ dữ liệu mặc định."""
         self._seed_apartment_owners()
+        self._seed_tour_slots()
 
     def _seed_apartment_owners(self) -> None:
         """Nạp dữ liệu chủ sở hữu mặc định."""
@@ -100,6 +124,11 @@ class Store:
                 "id_number": owner.get("id_number"),
             }
 
+    def _seed_tour_slots(self) -> None:
+        """Nạp sức chứa slot tham quan mặc định."""
+        for area, slot, capacity in DEFAULT_TOUR_SLOTS:
+            self.tour_slots[(area, slot)] = capacity
+
     def reset(self) -> None:
         """Xóa toàn bộ dữ liệu (dùng cho test isolation), rồi re-seed."""
         with self._lock:
@@ -109,7 +138,14 @@ class Store:
             self.payments.clear()
             self.parking_load.clear()
             self.apartment_owners.clear()
+            self.tour_bookings.clear()
+            self.tour_load.clear()
+            self.tour_slots.clear()
+            self.shuttle_bookings.clear()
+            self.shuttle_load.clear()
+            self.consultations.clear()
             self._seed_apartment_owners()
+            self._seed_tour_slots()
 
 
 store = Store()

@@ -2,29 +2,40 @@
 
 Port: 8003 — khớp `PaymentConnector` (src/connectors/payment.py).
 
-Theo cấu trúc system design (`01-high-level-architecture.md`): mock provider
-độc lập theo domain, implement đúng contract riêng.
+PostgreSQL là nguồn sự thật, KHÔNG phải `Store()` RAM.
 
-KHÁC với src/mock/ (single app, có cross-check booking/amount): provider này
-KHÔNG check `booking_id` tồn tại hay amount khớp — đó là dữ liệu của
-Transport provider, HUB orchestrate truyền `booking_id` + `amount` đã verify
-vào input. Payment nhận và xử lý, trả về `payment_id` + `payment_status`.
+Trước đây provider này KHÔNG kiểm gì cả: không kiểm booking tồn tại, không đối
+chiếu số tiền, không chống thanh toán trùng. Lý do được ghi trong code cũ là
+"booking thuộc Transport provider, HUB đã verify" — nhưng HUB chỉ chuyển tiếp
+những gì Planner sinh ra, nên thực tế không ai verify. Giờ cả hai provider cùng
+đọc một database, nên booking kiểm được và phải kiểm.
+
+Idempotency key đi qua HEADER `Idempotency-Key`, không nằm trong body:
+
+  - Nó là siêu dữ liệu của lần gọi, không phải dữ liệu nghiệp vụ của `pay_fee`.
+  - Đưa vào body sẽ kéo theo việc thêm nó vào Tool Contract, tức là LLM sinh ra
+    được — mà một khoá idempotency do LLM đặt thì vô nghĩa: mỗi lần sinh lại
+    một khoá khác, retry nào cũng thành giao dịch mới.
+
+Khoá do orchestration đặt, deterministic theo workflow_id + task_id.
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import asyncpg
+from fastapi import Depends, FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.db.parking_payment_repository import BookingError, create_payment, get_payment
 from src.mock import schemas
 from src.mock.errors import inject_failure, install_error_handler, not_found
-from src.mock.ids import make_generator
-from src.mock.store import Store
+from src.services.mock.db_pool import as_api_error, database_lifespan, get_pool
 
 payment_app = FastAPI(
     title="P-118 Payment Mock Provider",
     description="Dịch vụ giả lập Payment — tool pay_fee.",
     version="0.1.0",
+    lifespan=database_lifespan,
 )
 
 payment_app.add_middleware(
@@ -37,54 +48,40 @@ payment_app.add_middleware(
 
 install_error_handler(payment_app)
 
-# Store riêng của provider này — KHÔNG dùng singleton src.mock.store.store.
-store = Store()
-
-new_payment_id = make_generator("PAY")
-
 
 @payment_app.post("/api/payments", status_code=201, summary="Thanh toán phí")
-def pay_fee(
+async def pay_fee(
     payload: schemas.PayFeeRequest,
     fail: str | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    pool: asyncpg.Pool = Depends(get_pool),
 ) -> schemas.ApiEnvelope:
     if fail:
         raise inject_failure(fail)
 
-    # KHÔNG check booking_id/amount — Booking là dữ liệu của Transport provider
-    # (cross-provider). HUB orchestrate truyền booking_id + amount đã verify.
-    payment_id = new_payment_id()
-    with store._lock:
-        store.payments[payment_id] = {
-            "payment_id": payment_id,
-            "booking_id": payload.booking_id,
-            "amount": payload.amount,
-            "currency": payload.currency.value,
-            "payment_status": schemas.PaymentStatus.PAID.value,
-        }
-    return schemas.ApiEnvelope(
-        success=True,
-        data={
-            "payment_id": payment_id,
-            "payment_status": schemas.PaymentStatus.PAID.value,
-        },
-        message="Created",
-    )
+    try:
+        payment = await create_payment(
+            pool,
+            booking_id=payload.booking_id,
+            amount=payload.amount,
+            currency=payload.currency.value,
+            idempotency_key=idempotency_key,
+        )
+    except BookingError as exc:
+        raise as_api_error(exc) from exc
+
+    return schemas.ApiEnvelope(success=True, data=payment.as_output(), message="Created")
 
 
 @payment_app.get("/api/payments/{payment_id}", summary="Tra cứu giao dịch")
-def get_payment(payment_id: str) -> schemas.ApiEnvelope:
-    payment = store.payments.get(payment_id)
+async def get_payment_endpoint(
+    payment_id: str,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> schemas.ApiEnvelope:
+    payment = await get_payment(pool, payment_id)
     if payment is None:
-        raise not_found("PAYMENT_NOT_FOUND", f"Payment {payment_id} not found")
-    return schemas.ApiEnvelope(
-        success=True,
-        data={
-            "payment_id": payment["payment_id"],
-            "payment_status": payment["payment_status"],
-        },
-        message="Found",
-    )
+        raise not_found("PAYMENT_NOT_FOUND", "Payment not found")
+    return schemas.ApiEnvelope(success=True, data=payment.as_output(), message="Found")
 
 
 @payment_app.get("/health", tags=["meta"])

@@ -37,7 +37,7 @@ def _assert_invalid_input_envelope(response) -> dict:
         pytest.param(
             transport_app,
             "/api/parking/bookings",
-            {"vehicle_id": "VEH-1", "booking_date": "2026-08-10", "parking_zone": "NOT_A_ZONE"},
+            {"vehicle_id": "VEH-1", "booking_date": "2026-12-10", "parking_zone": "NOT_A_ZONE"},
             id="transport",
         ),
         pytest.param(
@@ -74,7 +74,7 @@ async def test_monolith_app_validation_error_returns_envelope():
     async with AsyncClient(transport=ASGITransport(app=monolith_app), base_url="http://test") as ac:
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": "VEH-1", "booking_date": "2026-08-10", "parking_zone": "NOT_A_ZONE"},
+            json={"vehicle_id": "VEH-1", "booking_date": "2026-12-10", "parking_zone": "NOT_A_ZONE"},
         )
 
     body = _assert_invalid_input_envelope(response)
@@ -113,7 +113,7 @@ async def test_domain_error_handler_behaviour_unchanged():
     async with AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://test") as ac:
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": "VEH-KHONG-TON-TAI", "booking_date": "2026-08-10", "parking_zone": "ZONE_A"},
+            json={"vehicle_id": "VEH-KHONG-TON-TAI", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
         )
 
     assert response.status_code == 404

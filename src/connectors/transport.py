@@ -152,7 +152,7 @@ class TransportConnector(Connector):
         """Đặt chỗ đỗ xe → POST /api/parking/bookings.
 
         Input (từ TaskPlan sau khi resolve InputRef):
-          {"vehicle_id": "VEH-xxx", "booking_date": "2026-08-10", "parking_zone": "ZONE_A"}
+          {"vehicle_id": "VEH-xxx", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"}
 
         Output canonical (tất cả 5 field này được truyền sang pay_fee):
           {
@@ -265,6 +265,7 @@ class TransportConnector(Connector):
             "VALIDATION_ERROR": ErrorCode.INVALID_INPUT,
             "VEHICLE_EXISTS": ErrorCode.VEHICLE_ALREADY_EXISTS,
             "NO_AVAILABILITY": ErrorCode.NO_AVAILABILITY,
+            "BOOKING_ALREADY_EXISTS": ErrorCode.BOOKING_ALREADY_EXISTS,
             "VEHICLE_NOT_FOUND": ErrorCode.VEHICLE_NOT_FOUND,
             "INVALID_DATA": ErrorCode.INVALID_INPUT,
             "SERVICE_UNAVAILABLE": ErrorCode.SERVICE_UNAVAILABLE,

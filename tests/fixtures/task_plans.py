@@ -8,7 +8,7 @@ from src.common.task_plan import InputRef, Task, TaskPlan
 
 # Full flow: T1→T2→T3→T4
 FULL_FLOW_PLAN = TaskPlan(
-    goal="Tôi mới chuyển vào căn hộ A1201. Hãy đăng ký cư dân, đăng ký xe biển số 51A-12345, đặt chỗ tại ZONE_A ngày 2026-08-10 và thanh toán phí.",
+    goal="Tôi mới chuyển vào căn hộ A1201. Hãy đăng ký cư dân, đăng ký xe biển số 51A-12345, đặt chỗ tại ZONE_A ngày 2026-12-10 và thanh toán phí.",
     tasks=[
         Task(
             task_id="T1",
@@ -36,7 +36,7 @@ FULL_FLOW_PLAN = TaskPlan(
             depends_on=["T2"],
             input={
                 "vehicle_id": InputRef(from_task="T2", field="vehicle_id"),
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -63,7 +63,7 @@ PARTIAL_BOOK_PARKING_PLAN = TaskPlan(
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),
@@ -80,7 +80,7 @@ PARTIAL_BOOK_AND_PAY_PLAN = TaskPlan(
             depends_on=[],
             input={
                 "vehicle_id": "VEH-001",
-                "booking_date": "2026-08-10",
+                "booking_date": "2026-12-10",
                 "parking_zone": "ZONE_A",
             },
         ),

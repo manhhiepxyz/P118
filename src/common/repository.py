@@ -150,3 +150,58 @@ class WorkflowStateRepository(Protocol):
         task đã SUCCESS không bao giờ chạy lại.
         """
         ...
+
+    async def list_workflows_by_session(self, session_id: str) -> list[dict]:
+        """Lấy tất cả workflow cùng session_id, sắp xếp từ cũ đến mới.
+
+        Dùng cho endpoint GET /workflows/demo/session/{session_id} để UI
+        hiển thị lịch sử một cuộc hội thoại (chat thread).
+        """
+        ...
+
+    async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
+        """Persist repair hints sau khi workflow FAILED với lỗi repairable.
+
+        hints: {task_id: {"error_code": str, "message": str}}. Chỉ lưu mã lỗi
+        chuẩn hoá + message nghiệp vụ generic — KHÔNG có field, không có input
+        echo. Gọi ở `_run_demo_job` (có async context), không gọi trong
+        Executor.on_failure (sync).
+        """
+        ...
+
+    async def get_repair_hints(self, workflow_id: str) -> list[dict]:
+        """Đọc repair hints của workflow, mới nhất trước.
+
+        Trả list dict mỗi phần tử có: task_id, error_code, message, created_at.
+        Dùng trong `get_demo_workflow_status` để phân biệt "FAILED cứng" và
+        "FAILED nhưng repairable → NEEDS_INFORMATION" sau restart (DB là nguồn
+        sự thật, không dựa vào `_DEMO_JOBS`).
+        """
+        ...
+
+    async def log_execution(
+        self,
+        workflow_id: str,
+        task_id: str,
+        attempt_number: int,
+        connector_name: str | None,
+        http_status: int | None,
+        raw_error_code: str | None,
+        standard_result: StandardResult,
+        duration_ms: int | None,
+    ) -> None:
+        """Ghi audit mỗi lần Connector gọi API (kể cả retry).
+
+        Logging là best-effort: lỗi ghi log không được làm hỏng workflow.
+        Executor gọi method này sau mỗi attempt, trước khi quyết định retry.
+        """
+        ...
+
+    async def list_execution_logs(self, limit: int = 10_000) -> list[dict]:
+        """Đọc execution logs để aggregate metrics.
+
+        Trả list dict với keys: connector_name, attempt_number, duration_ms,
+        standard_result (dict), created_at. Metrics module dùng để tính retry
+        rate, success rate, error breakdown.
+        """
+        ...

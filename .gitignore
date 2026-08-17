@@ -60,3 +60,9 @@ out/
 .ai-log/archive/
 
 # file .md not public
+
+# Token sinh ra khi chạy E2E bằng tay. Một file như thế này ĐÃ từng bị commit
+# (`e2e_token.txt` ở 7a6a884) và làm `test_no_committed_secrets` đỏ. Chặn cả họ
+# tên file thay vì chỉ một cái, vì lần sau nó sẽ mang tên khác.
+*token*.txt
+*.jwt

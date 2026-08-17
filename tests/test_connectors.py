@@ -17,9 +17,12 @@ from src.connectors.base import Connector
 from src.connectors.payment import PaymentConnector
 from src.connectors.resident import ResidentConnector
 from src.connectors.transport import TransportConnector
+from src.db.migrations import create_test_db
+from src.services.mock.db_pool import override_pool
 from src.services.mock.payment import payment_app
 from src.services.mock.resident import resident_app
 from src.services.mock.transport import transport_app
+from tests._dbcheck import require_test_database_url
 
 
 @pytest.fixture
@@ -157,7 +160,7 @@ async def test_transport_connector_book_parking_success(mock_httpx_client):
         "data": {
             "booking_id": "BOOK-1",
             "parking_zone": "ZONE_A",
-            "booking_date": "2026-08-10",
+            "booking_date": "2026-12-10",
             "amount": 100,
             "currency": "VND",
             "ignore_me": "yes",
@@ -175,7 +178,7 @@ async def test_transport_connector_book_parking_success(mock_httpx_client):
     assert result.data == {
         "booking_id": "BOOK-1",
         "parking_zone": "ZONE_A",
-        "booking_date": "2026-08-10",
+        "booking_date": "2026-12-10",
         "amount": 100,
         "currency": "VND",
     }
@@ -191,7 +194,7 @@ async def test_transport_connector_book_parking_url_and_payload(mock_httpx_clien
         "data": {
             "booking_id": "BOOK-777",
             "parking_zone": "ZONE_B",
-            "booking_date": "2026-08-10",
+            "booking_date": "2026-12-10",
             "amount": 200000,
             "currency": "VND",
         },
@@ -199,7 +202,7 @@ async def test_transport_connector_book_parking_url_and_payload(mock_httpx_clien
     }
     mock_httpx_client.post_mock.return_value = mock_response
 
-    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-08-10", "parking_zone": "ZONE_B"}
+    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_B"}
     connector = TransportConnector(base_url="http://localhost:8002", client=mock_httpx_client)
     await connector.execute("book_parking", payload)
 
@@ -278,6 +281,9 @@ async def test_payment_connector_url_and_payload(mock_httpx_client):
     mock_httpx_client.post_mock.assert_called_once_with(
         "http://localhost:8003/api/payments",
         json=payload,
+        # Không có khoá idempotency thì không gửi header; body vẫn đúng 3 field
+        # của contract, khoá không bao giờ lọt vào payload.
+        headers=None,
         timeout=30.0,
     )
 
@@ -516,6 +522,32 @@ async def payment_client():
         yield ac
 
 
+@pytest_asyncio.fixture(scope="session")
+async def provider_pool():
+    """Pool tới p118_test_db cho ba provider đã chuyển sang PostgreSQL."""
+    pool = await create_test_db(require_test_database_url())
+    yield pool
+    await pool.close()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def wire_provider_pool(provider_pool):
+    """Trỏ provider vào test DB rồi dọn sạch sau mỗi test.
+
+    Không tiêm pool thì `database_lifespan` tự mở kết nối theo DATABASE_URL —
+    tức là test sẽ ghi thẳng vào database phát triển.
+    """
+    override_pool(provider_pool)
+    try:
+        yield provider_pool
+    finally:
+        async with provider_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE verification_records, payments, parking_bookings, parking_capacity, vehicles, residents RESTART IDENTITY CASCADE"
+            )
+        override_pool(None)
+
+
 def _unique(prefix: str) -> str:
     """Sinh giá trị duy nhất — store của mock provider dùng chung giữa các test."""
     return f"{prefix}{uuid.uuid4().hex[:8].upper()}"
@@ -587,7 +619,7 @@ async def test_integration_book_parking(resident_client, transport_client):
         "book_parking",
         {
             "vehicle_id": vehicle.data["vehicle_id"],
-            "booking_date": "2026-08-10",
+            "booking_date": "2026-12-10",
             "parking_zone": "ZONE_B",
         },
     )
@@ -596,7 +628,7 @@ async def test_integration_book_parking(resident_client, transport_client):
     assert set(result.data) == {"booking_id", "parking_zone", "booking_date", "amount", "currency"}
     assert result.data["booking_id"].startswith("BOOK")
     assert result.data["parking_zone"] == "ZONE_B"
-    assert result.data["booking_date"] == "2026-08-10"
+    assert result.data["booking_date"] == "2026-12-10"
     assert result.data["currency"] == "VND"
     assert isinstance(result.data["amount"], int)
 
@@ -624,7 +656,7 @@ async def test_integration_pay_fee_full_chain(resident_client, transport_client,
         "book_parking",
         {
             "vehicle_id": vehicle.data["vehicle_id"],
-            "booking_date": "2026-08-11",
+            "booking_date": "2026-12-11",
             "parking_zone": "ZONE_B",
         },
     )
@@ -652,7 +684,7 @@ async def test_integration_error_envelope_from_real_provider(transport_client):
 
     result = await connector.execute(
         "book_parking",
-        {"vehicle_id": "VEH-KHONG-TON-TAI", "booking_date": "2026-08-12", "parking_zone": "ZONE_A"},
+        {"vehicle_id": "VEH-KHONG-TON-TAI", "booking_date": "2026-12-12", "parking_zone": "ZONE_A"},
     )
 
     assert result.success is False
@@ -698,3 +730,28 @@ async def test_integration_validation_error_maps_to_invalid_input(resident_clien
     assert result.error_code == ErrorCode.INVALID_INPUT
     assert result.data is None
     assert result.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_payment_connector_sends_idempotency_key_as_a_header_not_in_body(mock_httpx_client):
+    """Khoá idempotency là siêu dữ liệu của lần gọi, không phải dữ liệu nghiệp vụ.
+
+    Nếu nó nằm trong body thì phải thêm vào Tool Contract, tức là LLM sinh ra
+    được — mà khoá do LLM đặt thì mỗi lần retry lại khác nhau, vô hiệu hoá đúng
+    thứ nó sinh ra để bảo vệ.
+    """
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {
+        "success": True,
+        "data": {"payment_id": "PAY-001", "payment_status": "PAID"},
+    }
+    mock_httpx_client.post_mock.return_value = mock_response
+
+    connector = PaymentConnector(client=mock_httpx_client, idempotency_key="wf:abc:task:T3")
+    await connector.execute("pay_fee", {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"})
+
+    _, kwargs = mock_httpx_client.post_mock.call_args
+    assert kwargs["headers"] == {"Idempotency-Key": "wf:abc:task:T3"}
+    assert "idempotency_key" not in kwargs["json"]
+    assert set(kwargs["json"]) == {"booking_id", "amount", "currency"}

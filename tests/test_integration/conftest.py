@@ -15,6 +15,7 @@ import asyncpg
 import pytest_asyncio
 
 from src.db.migrations import create_test_db
+from src.services.mock.db_pool import override_pool
 from tests._dbcheck import require_test_database_url
 
 
@@ -25,6 +26,19 @@ async def e2e_pool() -> asyncpg.Pool:
     pool = await create_test_db(test_url)
     yield pool
     await pool.close()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def wire_provider_pool(e2e_pool: asyncpg.Pool):
+    """Trỏ Transport/Payment provider vào test DB.
+
+    Hai provider này giờ đọc/ghi PostgreSQL thay vì Store RAM. Không tiêm pool
+    thì `database_lifespan` sẽ tự mở kết nối theo DATABASE_URL — tức là chạm
+    vào database phát triển ngay trong test.
+    """
+    override_pool(e2e_pool)
+    yield
+    override_pool(None)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -39,11 +53,16 @@ async def clean_e2e_tables(e2e_pool: asyncpg.Pool) -> None:
                 execution_logs,
                 workflow_tasks,
                 workflows,
+                consultations,
+                shuttle_bookings,
+                tour_capacity,
+                tour_bookings,
                 payments,
                 parking_capacity,
                 parking_bookings,
                 vehicles,
-                residents
+                residents,
+                verification_records
             RESTART IDENTITY CASCADE
             """
         )

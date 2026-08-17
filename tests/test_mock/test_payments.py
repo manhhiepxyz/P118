@@ -7,7 +7,7 @@ from src.mock.main import app
 
 RESIDENT = {"full_name": "Lâm Thành Bảo", "apartment_code": "A1201", "residential_area": "Vinhomes Ocean Park"}
 VEHICLE = {"resident_id": None, "plate_number": "51A-12345", "vehicle_type": "car"}
-BOOKING = {"vehicle_id": None, "booking_date": "2026-08-10", "parking_zone": "ZONE_B"}
+BOOKING = {"vehicle_id": None, "booking_date": "2026-12-10", "parking_zone": "ZONE_B"}
 
 
 async def _setup_booking(ac) -> tuple[str, int]:

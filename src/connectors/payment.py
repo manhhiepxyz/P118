@@ -51,7 +51,14 @@ class PaymentConnector(Connector):
         base_url: str = "http://localhost:8003",
         timeout: float = 30.0,
         client: httpx.AsyncClient | None = None,
+        idempotency_key: str | None = None,
     ):
+        # Khoá idempotency do ORCHESTRATION đặt, deterministic theo
+        # workflow_id + task_id. Không đưa vào TaskPlan: field trong TaskPlan là
+        # thứ LLM sinh ra, mà khoá do LLM đặt thì mỗi lần retry lại một giá trị
+        # khác — retry nào cũng thành giao dịch mới, đúng thứ khoá này sinh ra
+        # để chặn. Vì vậy nó đi qua header, không qua body.
+        self._idempotency_key = idempotency_key
         # Chuẩn hóa base_url bỏ dấu / ở cuối
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -62,6 +69,15 @@ class PaymentConnector(Connector):
     def tool_names(self) -> list[str]:
         # Danh sách các tool mà connector này đảm nhận
         return ["pay_fee"]
+
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """`pay_fee` chỉ an toàn khi lần gọi này MANG idempotency key.
+
+        Không có key thì provider coi mỗi request là một giao dịch mới, và
+        retry sau timeout sẽ thu tiền lần hai. Có key thì provider trả lại đúng
+        payment cũ, nên gọi lại vô hại.
+        """
+        return tool_name == "pay_fee" and bool(self._idempotency_key)
 
     async def execute(
         self,
@@ -78,9 +94,11 @@ class PaymentConnector(Connector):
         try:
             # --- Bước 2: Khởi tạo HTTP client và gọi API ---
             async with self._get_client() as client:
+                headers = {"Idempotency-Key": self._idempotency_key} if self._idempotency_key is not None else None
                 response = await client.post(
                     f"{self.base_url}/api/payments",
                     json=input_data,
+                    headers=headers,
                     timeout=self.timeout,
                 )
 

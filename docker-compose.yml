@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ----------------------------------------------------------------
   # PostgreSQL — database chính của P-118
@@ -25,36 +23,115 @@ services:
   # ----------------------------------------------------------------
   # Backend — FastAPI app
   # ----------------------------------------------------------------
+  # One-shot job: nâng cấp schema TRƯỚC khi bất kỳ service nào chạm database.
+  #
+  # Không để từng provider tự migrate trong lifespan: sáu service khởi động song
+  # song sẽ chạy cùng một ALTER TABLE từ sáu kết nối, và quyền đổi schema bị
+  # phát tán ra mọi container. Migration hỏng cũng phải chặn được cả cụm, chứ
+  # không phải để một container restart lặp trong khi số còn lại chạy trên
+  # schema sai.
+  #
+  # `docker-entrypoint-initdb.d` không thay thế được job này: PostgreSQL chỉ
+  # chạy thư mục đó khi volume còn trống, nên nó không nâng cấp được volume đã
+  # có dữ liệu.
+  db-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_db_migrate
+    command: ["python", "-m", "src.db.migrate_cli"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Job chạy một lần rồi thoát. `on-failure` để lỗi tạm thời được thử lại,
+    # nhưng lỗi SQL thật vẫn kết thúc bằng exit code khác 0.
+    restart: "no"
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: p118_backend
     ports:
-      - "${APP_PORT:-8000}:8000"
+      # 8080 tránh đụng các FastAPI dev server thường dùng cổng 8000 trên host.
+      # Cổng bên trong container vẫn là 8000 nên healthcheck không đổi.
+      - "${APP_PORT:-8080}:8000"
     env_file:
       - .env
     environment:
+      # Key KHÔNG bao giờ nằm trong file này — chỉ tham chiếu môi trường.
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL_NAME: ${DEEPSEEK_MODEL_NAME:-deepseek-v4-flash}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       # Override DATABASE_URL để trỏ vào postgres service trong compose network
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+      RESIDENT_SERVICE_URL: http://mock-resident:8001
+      TRANSPORT_SERVICE_URL: http://mock-transport:8002
+      PAYMENT_SERVICE_URL: http://mock-payment:8003
+      PROPERTY_SERVICE_URL: http://mock-property:8008
+      RESIDENT_SERVICES_SERVICE_URL: http://mock-resident-services:8006
+      TOUR_SERVICE_URL: http://mock-tour:8005
+      CONSULTATION_SERVICE_URL: http://mock-consultation:8007
+      SHUTTLE_SERVICE_URL: http://mock-shuttle:8009
+      # Bật để xem prompt / chuỗi suy luận / câu trả lời của model ngay trong
+      # `docker compose logs -f backend`. Mặc định TẮT: trace in cả nội dung
+      # người dùng gõ, không phải thứ nên chạy thường trực.
+      # LangSmith TẮT mặc định.
+      #
+      # `.env` đang bật `LANGCHAIN_TRACING_V2=true` với một key không còn hiệu
+      # lực, nên mỗi lượt gọi mô hình sinh ra một dòng
+      # "403 Forbidden … /runs/multipart" — telemetry hỏng không làm sai kết
+      # quả, nhưng nó lấp mất chính dòng log mình cần đọc khi demo.
+      #
+      # Dùng tên biến RIÊNG (`P118_LANGSMITH`) chứ không phải
+      # `${LANGCHAIN_TRACING_V2:-false}`: compose nội suy `${...}` từ `.env`,
+      # nên biến kia sẽ đọc lại đúng `true` trong đó và mặc định "tắt" không
+      # bao giờ có tác dụng. Bật lại bằng `P118_LANGSMITH=true`.
+      LANGCHAIN_TRACING_V2: ${P118_LANGSMITH:-false}
+      P118_LLM_TRACE: ${P118_LLM_TRACE:-0}
+      # 0 = tắt (mặc định). Đặt >0 để demo một mình: lịch tham quan tự được
+      # duyệt sau chừng ấy giây, không cần ai ngồi ở cổng /review.
+      P118_AUTO_APPROVE_VIEWING_SECONDS: ${P118_AUTO_APPROVE_VIEWING_SECONDS:-0}
     volumes:
       - ./data:/app/data
     depends_on:
       postgres:
-        condition: service_healthy   # chờ postgres sẵn sàng mới start backend
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully   # chờ postgres sẵn sàng mới start backend
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
+      # /ready, KHÔNG phải /health.
+      #
+      # /health chỉ nói tiến trình còn sống. Compose từng dùng nó và báo mọi
+      # service healthy trong khi backend chạy với một LLM_PROVIDER không có
+      # key tương ứng — mọi workflow chết ngay ở bước lập kế hoạch, còn bảng
+      # trạng thái thì xanh hết.
+      #
+      # start_period cho app thời gian dựng pool và chạy migration trước khi
+      # lần kiểm đầu tiên được tính là thất bại.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/ready').status == 200 else 1)"]
+      interval: 15s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Mock Providers — 3 provider độc lập theo domain.
+  # Mock Providers — provider độc lập theo domain.
   # Cổng phải khớp base_url mặc định của Connector:
-  #   ResidentConnector  → 8001
-  #   TransportConnector → 8002  (register_vehicle + book_parking)
-  #   PaymentConnector   → 8003
+  #   ResidentConnector         → 8001  register_resident
+  #   TransportConnector        → 8002  register_vehicle, book_parking
+  #   PaymentConnector          → 8003  pay_fee
+  #   PropertyConnector         → 8008  search_properties
+  #   TourConnector             → 8005  schedule_property_viewing
+  #   ResidentServicesConnector → 8006  create_maintenance_request, schedule_move
+  #   ConsultationConnector     → 8007  register_property_interest
+  #   ShuttleConnector          → 8009  book_shuttle
   # ----------------------------------------------------------------
   mock-resident:
     build:
@@ -71,6 +148,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 30s
@@ -93,6 +172,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
       interval: 30s
@@ -115,8 +196,136 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  mock-property:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_property
+    command: ["uvicorn", "src.services.mock.property:property_app", "--host", "0.0.0.0", "--port", "8008"]
+    ports:
+      - "8008:8008"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  mock-resident-services:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_resident_services
+    command: ["uvicorn", "src.services.mock.resident_services:resident_services_app", "--host", "0.0.0.0", "--port", "8006"]
+    ports:
+      - "8006:8006"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # Mock Tour Provider — 8005. Nền của `schedule_property_viewing`.
+  # ----------------------------------------------------------------
+  mock-tour:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_tour
+    command: ["uvicorn", "src.services.mock.tour:tour_app", "--host", "0.0.0.0", "--port", "8005"]
+    ports:
+      - "8005:8005"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # Mock Shuttle Provider — 8009. `book_shuttle` là tool thứ 10 của contract
+  # public (chuỗi schedule_property_viewing → book_shuttle), chạy mặc định.
+  # ----------------------------------------------------------------
+  mock-shuttle:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_shuttle
+    command: ["uvicorn", "src.services.mock.shuttle:shuttle_app", "--host", "0.0.0.0", "--port", "8009"]
+    ports:
+      - "8009:8009"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Không còn experimental: shuttle đã đăng ký với Executor và là chuỗi bắt
+    # buộc của lịch tham quan, nên `docker compose up` chạy nó mặc định.
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # Mock Consultation Provider — 8007. Nền của `register_property_interest`.
+  # ----------------------------------------------------------------
+  mock-consultation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p118_mock_consultation
+    command: ["uvicorn", "src.services.mock.consultation:consultation_app", "--host", "0.0.0.0", "--port", "8007"]
+    ports:
+      - "8007:8007"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -143,6 +352,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     profiles:
       - ownership   # docker compose --profile ownership up
@@ -166,6 +377,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     profiles:
       - monolith   # docker compose --profile monolith up

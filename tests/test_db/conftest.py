@@ -51,13 +51,95 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
             TRUNCATE TABLE
                 approval_decisions,
                 execution_logs,
+                llm_usage,
+                payment_approvals,
+                sessions,
+                workflow_repair_hints,
                 workflow_tasks,
                 workflows,
+                consultations,
+                shuttle_bookings,
+                tour_capacity,
+                tour_bookings,
                 payments,
                 parking_capacity,
                 parking_bookings,
                 vehicles,
-                residents
+                residents,
+                verification_records,
+                users
             RESTART IDENTITY CASCADE
             """
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase B — client mang danh tính thật, dùng chung cho các test auth/IDOR.
+#
+# Đặt ở conftest thay vì import chéo giữa hai file test: import một fixture
+# từ module test khác khiến `client` bị định nghĩa lại và ruff báo F811, còn
+# thứ tự nạp module thì quyết định fixture nào thắng.
+# ---------------------------------------------------------------------------
+
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+from src.main import app  # noqa: E402
+from src.orchestration.runtime_provider import (  # noqa: E402
+    clear_repository_provider,
+    set_repository_provider,
+)
+
+
+@pytest_asyncio.fixture
+async def client(db_pool, monkeypatch):
+    """Client in-process nói chuyện với PostgreSQL test thật.
+
+    `app.state.runtime` chỉ được dựng trong lifespan, mà ASGITransport không
+    chạy lifespan — nên mọi endpoint auth trả 503. Ở đây gắn thẳng repository
+    thật (không phải fake) để test đi qua đúng đường SQL mà production đi.
+    """
+    from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+
+    repository = PostgreSQLWorkflowStateRepository(db_pool)
+
+    class _SharedPool:
+        def __init__(self, pool):
+            self._inner = pool
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def close(self):
+            return None
+
+    repository._pool = _SharedPool(db_pool)  # noqa: SLF001 - test sở hữu pool
+
+    async def _provide():
+        return repository
+
+    # ĐÚNG MỘT chỗ override. Trước đây mỗi module import `build_repository` vào
+    # namespace riêng nên test phải vá từng module — và bốn lần đã quên một
+    # module, khiến route đó lặng lẽ đọc `p118_db` thật trong khi phần còn lại
+    # chạy trên `p118_test_db`.
+    set_repository_provider(_provide)
+
+    app.state.runtime = (None, repository)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            yield c
+    finally:
+        clear_repository_provider()
+        app.state.runtime = None
+
+
+async def _register_and_login(client: AsyncClient, username: str) -> str:
+    await client.post(
+        "/api/v1/auth/register",
+        json={"username": username, "password": "MatKhauRatDai123!"},
+    )
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": "MatKhauRatDai123!"},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["access_token"]

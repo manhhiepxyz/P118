@@ -22,14 +22,14 @@ async def test_book_parking_success():
         vehicle_id = await _setup_vehicle(ac)
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": vehicle_id, "booking_date": "2026-08-10", "parking_zone": "ZONE_A"},
+            json={"vehicle_id": vehicle_id, "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
         )
     assert response.status_code == 201
     body = response.json()
     assert body["success"] is True
     assert body["data"]["booking_id"].startswith("BOOK-")
     assert body["data"]["parking_zone"] == "ZONE_A"
-    assert body["data"]["booking_date"] == "2026-08-10"
+    assert body["data"]["booking_date"] == "2026-12-10"
     assert body["data"]["amount"] == 150_000
     assert body["data"]["currency"] == "VND"
     assert body["error_code"] is None
@@ -41,7 +41,7 @@ async def test_book_parking_vehicle_not_found():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": "VEH-999", "booking_date": "2026-08-10", "parking_zone": "ZONE_B"},
+            json={"vehicle_id": "VEH-999", "booking_date": "2026-12-10", "parking_zone": "ZONE_B"},
         )
     assert response.status_code == 404
     body = response.json()
@@ -69,13 +69,13 @@ async def test_book_parking_no_availability_zone_a():
         for vid in vehicle_ids[:3]:
             r = await ac.post(
                 "/api/parking/bookings",
-                json={"vehicle_id": vid, "booking_date": "2026-08-10", "parking_zone": "ZONE_A"},
+                json={"vehicle_id": vid, "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
             )
             assert r.status_code == 201
 
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": vehicle_ids[3], "booking_date": "2026-08-10", "parking_zone": "ZONE_A"},
+            json={"vehicle_id": vehicle_ids[3], "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
         )
     assert response.status_code == 409
     body = response.json()
@@ -88,7 +88,7 @@ async def test_book_parking_no_availability_zone_a():
 async def test_book_parking_duplicate_vehicle_date():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         vehicle_id = await _setup_vehicle(ac)
-        booking = {"vehicle_id": vehicle_id, "booking_date": "2026-08-10", "parking_zone": "ZONE_B"}
+        booking = {"vehicle_id": vehicle_id, "booking_date": "2026-12-10", "parking_zone": "ZONE_B"}
         await ac.post("/api/parking/bookings", json=booking)
         response = await ac.post("/api/parking/bookings", json=booking)
     assert response.status_code == 409
@@ -116,7 +116,7 @@ async def test_fail_no_availability_via_query_param():
         vehicle_id = await _setup_vehicle(ac)
         response = await ac.post(
             "/api/parking/bookings?fail=NO_AVAILABILITY",
-            json={"vehicle_id": vehicle_id, "booking_date": "2026-08-10", "parking_zone": "ZONE_A"},
+            json={"vehicle_id": vehicle_id, "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
         )
     assert response.status_code == 409
     body = response.json()
@@ -132,7 +132,7 @@ async def test_fail_parking_service_unavailable():
         vehicle_id = await _setup_vehicle(ac)
         response = await ac.post(
             "/api/parking/bookings?fail=SERVICE_UNAVAILABLE",
-            json={"vehicle_id": vehicle_id, "booking_date": "2026-08-10", "parking_zone": "ZONE_B"},
+            json={"vehicle_id": vehicle_id, "booking_date": "2026-12-10", "parking_zone": "ZONE_B"},
         )
     assert response.status_code == 503
     body = response.json()

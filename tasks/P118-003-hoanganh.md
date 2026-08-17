@@ -1,6 +1,6 @@
 # P118-003 — Hoàng Anh · Tầng Dịch vụ + Dữ liệu + Giao diện
 
-> Đọc `docs/shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
+> Đọc `shared_contracts.md` và `AGENTS.md` trước khi bắt đầu.
 
 ---
 
@@ -188,6 +188,112 @@ class WorkflowStateRepository(Protocol):
 - eKYC/Didit thật hoặc lưu dữ liệu sinh trắc học.
 - Compensation endpoint, deploy production hoặc Live URL nếu happy path bằng
   LLM thật chưa ổn định.
+
+### Review AI Plan (Direction 2) — đã triển khai 13/08/2026
+
+Chủ sở hữu dự án chốt Direction 2: LLM Planner sinh TaskPlan → hiện lên canvas
+chỉnh sửa được (tái dùng builder) → người dùng duyệt → Executor chạy. Home
+giữ nguyên nhập mục tiêu (không phải blank-canvas entry).
+
+**Backend (sở hữu Hoàng Anh):**
+- `POST /workflow/start` — có `tasks` → validate + persist draft PENDING; chỉ
+  `goal` → gọi Planner (NEEDS_INFORMATION / READY→draft). LLMConfigurationError→503,
+  PlannerError→502.
+- `GET /workflow/{id}/status` — trả workflow + tasks + `task_plan` đã parse.
+- `POST /workflow/{id}/execute` — duyệt & chạy (thay vì dùng `/approve` là HITL
+  task-level). Gate status==PENDING (409), snapshot task_plan TRƯỚC execute,
+  gọi boundary.
+- Trust boundary pay_fee: guard API `_reject_untrusted_pay_fee` mirror Planner —
+  booking_id/amount/currency phải là InputRef trỏ CÙNG 1 task book_parking
+  (plan chỉnh sửa bypass Planner nên phải cưỡng chế ở tầng API).
+- `src/db/workflow_repository.py::update_workflow_task_plan`, passthrough +
+  `close()` ở `postgres_repository.py`.
+- `src/main.py` lifespan: dựng runtime, DB chưa lên → `/health` vẫn 200.
+
+**Frontend:**
+- `planToDraftSteps` (task_id→stepId, refMode cho InputRef, cascade vị trí).
+- `useBuilderDraft` hook trích từ BuilderPage — dùng chung cho Builder + Review.
+- `ReviewPlanPage` (/review/:id) — canvas chỉnh sửa + "Duyệt & chạy".
+- Dashboard "Lập kế hoạch" → NEEDS_INFORMATION hiện question inline.
+- Builder submit → tạo draft → /review/:id (luồng hợp nhất).
+
+**Tests:** `tests/test_api/fakes.py` + 16 route test (dependency_overrides);
+`tests/test_db` roundtrip `task_plan`. Verify: `pytest`, `ruff`, `npm run build`,
+`npm run lint` đều pass.
+
+### Auth (login / register / phân quyền) — đã triển khai 14/08/2026
+
+Đăng nhập, đăng ký và RBAC cho backend — quyết định với chủ sở hữu: 2 vai trò
+`resident` + `admin`, **stdlib only** (scrypt + HMAC token, KHÔNG thêm bcrypt/pyjwt).
+
+**DB:**
+- `src/db/schema.sql` v0.4.0: bảng `users` (`id` UUID PK, `username` UNIQUE,
+  `email` partial-unique, `password_hash` TEXT `scrypt:N:r:p:salt:hash`,
+  `role` CHECK `('resident','admin')` default resident, `created_at`/`updated_at`/`archived_at`).
+- `src/db/user_repository.py`: `create_user` (trả KHÔNG kèm hash) /
+  `get_user_by_username` / `get_user_by_id` (kèm hash cho login verify);
+  `UserAlreadyExistsError` map từ `UniqueViolationError`. Compose vào facade
+  thành `repository.users` + passthrough `create_user`/`get_user_*`.
+
+**Auth primitives (`src/api/auth.py`):** `hash_password`/`verify_password`
+(hashlib.scrypt, salt 16B, `hmac.compare_digest` constant-time);
+`create_access_token`/`decode_access_token` (JWT-shaped HS256 stdlib, payload
+`sub/username/role/iat/exp`, TTL 24h). `JWT_SECRET` trong `.env` — rỗng → 500.
+
+**API:**
+- `POST /auth/register` (201, mặc định resident, 409 username trùng, lowercase).
+- `POST /auth/login` (200 `TokenResponse`, 401 cùng message chống enumeration).
+- `GET /auth/me` (Bearer).
+- Bảo vệ: 5 route nghiệp vụ `/api/v1` thêm `Depends(get_current_user)` —
+  `/health` + auth endpoints public.
+- `deps.py`: `get_user_repository` (đọc `repository.users` qua tuple `(boundary,
+  repository)` KHÔNG đổi shape), `get_current_user`, `require_roles(*roles)` factory.
+
+**Khác:** `scripts/create_admin.py` (tạo/reset admin, upsert idempotent —
+getpass interactive, không chạy trong CI). `shared_contracts.md` §16 Auth.
+`.env` đã thêm `JWT_SECRET` (gitignored).
+
+**Tests:** `tests/test_api/test_auth_routes.py` (14 test: register/login/me +
+bảo vệ route + require_roles qua route thật); `workflow_env` fixture thêm
+override `get_current_user=FAKE_USER`; `tests/test_routes.py` 2 test thêm auth
+override; `tests/test_db/test_user_repository.py` (7 test DB thật);
+`tests/test_db/conftest.py` TRUNCATE thêm `users`.
+
+**Verify:** API 33 test pass; DB 35 test pass (real Postgres); full suite
+411 pass — 2 failure pre-existing `test_runtime_packaging.py` (cp1252). `ruff
+check` + `ruff format` pass.
+
+### Tích hợp API + Frontend (happy path) — đã triển khai 14/08/2026
+
+Chủ sở hữu chốt: **tích hợp happy path trước** — nối đúng luồng chính
+auth → plan → review → execute → status → list về backend thật; giữ HITL
+(approve/reject/cancel) ở mock, không đụng scope Tuần 3.
+
+**Backend fix (nguyên nhân 502):**
+- `src/agents/planner.py`: `llm.with_structured_output(_PlannerResponse)` mặc
+  định chuyển sang strict structured-output (`json_schema`) ở langchain-openai
+  1.4.2, mode này TỪ CHỐI schema vì `Task.input` là dict tự do. Fix bằng
+  `method="function_calling"` → `POST /workflow/start` (chỉ `goal`) chạy được,
+  trả plan 4 task với chuỗi `depends_on` đúng.
+- File thuộc Thành Bảo theo task file, nhưng fix cần thiết để happy path LLM
+  planning hoạt động từ UI.
+
+**Frontend wiring:**
+- `frontend/.env`: `VITE_USE_MOCK=false` → `client.ts` chuyển mock → API thật
+  qua proxy `/api/v1` (vite.config.ts → `http://localhost:8000`).
+- `frontend/src/lib/client.ts`: `approveTask`/`rejectTask`/`cancelWorkflow`
+  mock-only; chế độ real throw lỗi rõ ràng (`HITL_NOT_READY`) thay vì 404 mù mờ.
+- `frontend/src/components/AppLayout.tsx`: badge **MOCK DATA** chỉ hiện khi
+  `USE_MOCK` (real mode không nhầm với data thật).
+- `frontend/README.md`: cập nhật bảng trạng thái tích hợp (auth, start, status,
+  workflows, execute ✅; HITL ⏳ Tuần 3).
+
+**Verify end-to-end:** register → login → LLM plan (4 task, chuỗi depends_on)
+→ status PENDING → execute SUCCESS → status phản ánh 4 task SUCCESS kèm
+`resident_id`/`vehicle_id`/`booking_id`/`payment_id` thật. UI: dashboard (real,
+không badge MOCK) → nhập goal → review (đủ 4 task) → "Duyệt & Thực thi ngay" →
+timeline workflow. `npm run build` pass; `ruff check` + `ruff format --check`
+pass trên planner fix.
 
 ---
 

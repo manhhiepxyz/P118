@@ -1,4 +1,15 @@
 {
+  "permissions": {
+    "allow": [
+      "PowerShell(python -m pytest tests/test_small_talk.py::test_chat_route_capability -v 2>&1)",
+      "Bash(python -m pytest tests/test_api/test_rate_limit.py -v)",
+      "Bash(python -m pytest tests/test_small_talk.py tests/test_api/test_routes.py -q)",
+      "Bash(python -m pytest tests/test_small_talk.py tests/test_api/test_routes.py tests/test_api/test_rate_limit.py -q)",
+      "Bash(python -m pytest tests/test_api/test_rate_limit.py tests/test_api/test_routes.py tests/test_small_talk.py -q)",
+      "Bash(python -m pytest tests/test_execution_metrics.py -v)",
+      "Bash(python -m pytest tests/test_eval_harness.py -v)"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {
