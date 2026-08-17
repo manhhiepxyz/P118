@@ -150,6 +150,42 @@ def resolve_test_database_url() -> str | None:
     return None
 
 
+async def require_running_app_database() -> None:
+    """Skip (local) hoặc FAIL (CI) nếu database của ỨNG DỤNG chưa chạy.
+
+    Khác `require_test_database_url`: hàm kia canh `TEST_DATABASE_URL` —
+    `p118_test_db`, nơi test được phép TRUNCATE. Hàm này canh `DATABASE_URL` —
+    `p118_db` của stack thật, thứ mà một vài test buộc phải chạm vì chúng gọi
+    `lifespan()` thật thay vì tiêm provider giả.
+
+    Vì sao cần: khi stack tắt, những test ấy đổ với
+    `InvalidAuthorizationSpecificationError: role "user" does not exist` —
+    thông báo của asyncpg về DSN mặc định, không nói gì về việc phải bật
+    Docker. Repo vừa clone về là đỏ, và người đọc không có manh mối nào.
+
+    KHÔNG bao giờ ghi gì vào database này, kể cả khi kết nối thành công. Chỉ mở
+    rồi đóng.
+    """
+    import asyncpg
+
+    from src.config import get_settings
+
+    dsn = get_settings().database_url
+    try:
+        connection = await asyncpg.connect(dsn, timeout=3)
+    except Exception:  # noqa: BLE001 - mọi lỗi kết nối đều là "stack chưa sẵn sàng"
+        # Message KHÔNG chứa DSN: xem ghi chú ở `_WRONG_DATABASE_MESSAGE`.
+        message = (
+            "Database của ứng dụng chưa chạy — test này gọi lifespan() thật. "
+            "Bật stack bằng `sh scripts/stack_up.sh` rồi chạy lại."
+        )
+        if is_ci():
+            pytest.fail(f"{message} Trong CI, test này không được phép skip.", pytrace=False)
+        pytest.skip(message)
+    else:
+        await connection.close()
+
+
 def require_test_database_url() -> str:
     """Trả về `TEST_DATABASE_URL` đã kiểm an toàn.
 
