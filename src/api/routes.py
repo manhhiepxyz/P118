@@ -1219,6 +1219,33 @@ async def _run_demo_job(
         # thứ repair định tiếp tục nên KHÔNG chạy. Guard `not repair_hints`.
         if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"} and not repair_hints:
             await release_on_failure(workflow_id)
+
+        # Ghim trạng thái kết thúc, y như nhánh `except` bên dưới đã làm.
+        #
+        # Nhánh `except` bắt trường hợp job NÉM lỗi. Nhưng `run_demo_workflow`
+        # cũng có thể TRẢ VỀ một response lỗi mà không ném gì — và đường đó
+        # trước đây không ghi gì xuống database. Cùng một mối nguy mà comment
+        # ở nhánh `except` mô tả, chỉ khác là không có lá chắn nào.
+        #
+        # Đo được, lặp lại 100%: goal liên hoàn thất bại ở khâu lập kế hoạch.
+        #
+        #   t+40s   API: EXECUTION_ERROR / EXECUTION_FAILED
+        #           DB : PENDING, 0 task
+        #   t+60s   y nguyên như vậy, và mãi mãi
+        #
+        # Hậu quả không dừng ở một cột sai: trang Lịch sử đọc database nên hiển
+        # thị "Đang diễn ra" vĩnh viễn, và zombie sweeper đếm nó như việc đang
+        # chạy. Khi execution đã chạy thì graph tự ghi status; chỗ này chỉ đỡ
+        # đúng những workflow chết TRƯỚC lúc đó, nên `workflow_tasks` rỗng và
+        # không có gì để mâu thuẫn.
+        #
+        # `mark_workflow_failed` chỉ đụng `status IN ('PENDING','RUNNING')` nên
+        # nó không thể ghi đè SUCCESS hay WAITING_APPROVAL.
+        if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR", "VALIDATION_ERROR"}:
+            await _mark_workflow_failed_safely(
+                workflow_id,
+                response.error_code or ErrorCode.UNKNOWN_EXTERNAL_ERROR.value,
+            )
     except Exception as exc:  # noqa: BLE001 - không để raw exception vào job public
         # Phân loại TRƯỚC khi làm gì khác: mã lỗi quyết định cả câu nói với
         # người dùng lẫn việc có mời họ thử lại hay không.
@@ -1268,6 +1295,25 @@ def _keep_demo_task(task: asyncio.Task[None], *, workflow_id: str | None = None)
         _DEMO_TASKS.discard(done)
         if workflow_id is not None and _DEMO_WORKFLOW_TASKS.get(workflow_id) is done:
             _DEMO_WORKFLOW_TASKS.pop(workflow_id, None)
+
+        # Đọc exception của task đã xong. Không đọc thì asyncio chỉ cảnh báo
+        # "exception was never retrieved" lúc GC — nếu có — còn workflow thì
+        # nằm lại `PENDING` mãi mãi: không log, không `error_code`, không gì
+        # để lần theo.
+        #
+        # Đo được: prompt tự do dựng workflow, trả 202, rồi đứng im. Giao diện
+        # poll hàng trăm lượt GET và cuối cùng nói "đang bị dừng lại vì lỗi" —
+        # câu duy nhất người dùng nhận được, và nó không nói lỗi gì.
+        if done.cancelled():
+            return
+        error = done.exception()
+        if error is not None:
+            logger.exception(
+                "job nền của workflow %s chết: %s",
+                (workflow_id or "?")[:8],
+                type(error).__name__,
+                exc_info=error,
+            )
 
     task.add_done_callback(_forget)
 
@@ -1397,6 +1443,35 @@ _DEFAULT_BASELINE: dict[str, str] = {
 }
 
 
+def _viewing_facts(approval: DemoViewingApproval | None) -> dict[str, Any] | None:
+    """Dữ kiện lịch tham quan cho Response Agent — CHỈ trường thật sự áp dụng.
+
+    Bỏ mọi trường `None`. Một `null` trong payload không đọc là "không áp dụng";
+    model đọc nó là "còn thiếu, phải hỏi".
+
+    Đo được: `passenger_count` là `None` khi khách chọn tự đi (nó thuộc về đặt
+    xe đưa đón, không phải input của `schedule_property_viewing` — xem
+    `tool_contract.py`). Gửi `so_khach: null` kèm theo, và model kết thúc câu
+    trả lời bằng "bạn vui lòng cho biết số lượng khách tham gia nhé" — xin một
+    thông tin không ai cần, cho một lịch đã gửi đi rồi.
+
+    `co_xe_dua_don` LUÔN được gửi kể cả khi `False`: đó là một sự thật đã quyết,
+    không phải một ô còn trống.
+    """
+    if approval is None:
+        return None
+    facts: dict[str, Any] = {
+        "du_an": approval.project_name,
+        "ngay": approval.viewing_date,
+        "gio": approval.viewing_time,
+        "co_xe_dua_don": approval.wants_shuttle,
+    }
+    # Số khách chỉ có nghĩa khi thật sự đặt xe đón.
+    if approval.wants_shuttle and approval.passenger_count is not None:
+        facts["so_khach"] = approval.passenger_count
+    return {k: v for k, v in facts.items() if v is not None}
+
+
 def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list[str]) -> ReplyView:
     """View model cho Response Agent, dựng TỪ response công khai.
 
@@ -1437,6 +1512,14 @@ def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list
         error_code=response.error_code,
         retryable=response.retryable,
         capabilities=capabilities,
+        approval_actor=response.approval_actor,
+        # Chỉ đặt khi thật sự có việc người dùng làm được. Đặt bừa sẽ bật guard
+        # `next_step` cho những tình huống không có hướng dẫn nào để nêu, và
+        # mọi câu trả lời ở đó đều rơi về bản dự phòng.
+        next_step=(LINK_REQUIRED_ACTION if response.error_code == ErrorCode.ACTION_DENIED.value else None),
+        # Chỉ những trường KHÁCH ĐÃ THẤY trên thẻ chờ. Không có task_id, không
+        # có project_id — model không cần chúng và chúng là định danh nội bộ.
+        viewing=_viewing_facts(response.viewing_approval),
     )
 
 
@@ -1912,10 +1995,9 @@ async def chat(http_request: Request, request: ChatRequest) -> ChatResponse:
     small_talk = classify(message)
     if isinstance(small_talk, SmallTalk):
         if small_talk.speech_type == SpeechType.CAPABILITY:
-            base_url = str(http_request.base_url).rstrip("/")
             capability = await answer_capability_question(
                 message,
-                base_url=base_url,
+                capabilities=_capability_dicts(),
                 account_state="prospect",
             )
             reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
@@ -1961,9 +2043,18 @@ _RESIDENT_SERVICE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Đặt lịch chuyển nhà", ("chuyển nhà", "chuyển đồ", "thang máy", "vận chuyển đồ")),
 )
 
+# Tên mục phải KHỚP menu thật. Sidebar ghi "Xác minh căn hộ"
+# (`AppLayout.tsx`), còn câu này bảo người dùng tìm "Liên kết căn hộ" — một mục
+# không tồn tại. Chỉ sai một cái tên là toàn bộ phần hướng dẫn trở nên vô dụng:
+# người dùng đi tìm đúng thứ mình bảo họ tìm, không thấy, rồi dừng lại.
+LINK_REQUIRED_ACTION = (
+    "Mở mục “Xác minh căn hộ” ở thanh bên, nhập mã căn hộ và khu đô thị, "
+    "đính kèm ảnh giấy tờ nhà, rồi bấm gửi. Ban quản lý duyệt xong là dùng được ngay."
+)
+
 _LINK_REQUIRED_TEMPLATE = (
-    "{service} chỉ dành cho cư dân đã liên kết căn hộ, nên mình chưa thực hiện được. "
-    "Bạn vào mục Liên kết căn hộ để gửi yêu cầu; ban quản lý duyệt xong là mình hỗ trợ ngay."
+    "{service} chỉ dành cho cư dân đã xác minh căn hộ, nên mình chưa thực hiện được. "
+    + LINK_REQUIRED_ACTION
 )
 
 
@@ -2075,7 +2166,24 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
     # xuất hiện ở nhánh nào phía dưới — nguyên nhân vẫn là một.
     link_required = _resident_link_required_message(state)
     if link_required is not None and not state.get("plan_validated"):
-        return DemoWorkflowResponse(status="EXECUTION_ERROR", summary=link_required, plan=plan_view)
+        # `ACTION_DENIED`, KHÔNG phải một mã lỗi hệ thống.
+        #
+        # Đây là từ chối vì thiếu quyền, không phải hỏng hóc. Không có mã riêng
+        # thì hai thứ khác hẳn nhau bị gộp làm một:
+        #
+        #   - database ghi `UNKNOWN_EXTERNAL_ERROR` cho một quyết định hoàn
+        #     toàn bình thường của hệ thống;
+        #   - prompt dịch `EXECUTION_ERROR` thành "đã dừng lại vì lỗi", nên
+        #     model viết "Quy trình đang tạm dừng vì lỗi ở một số bước" cho một
+        #     tài khoản chỉ đơn giản là chưa xác minh căn hộ. Người dùng đi tìm
+        #     một sự cố không tồn tại thay vì đi xác minh căn hộ.
+        return DemoWorkflowResponse(
+            status="EXECUTION_ERROR",
+            summary=link_required,
+            error_code=ErrorCode.ACTION_DENIED.value,
+            retryable=False,
+            plan=plan_view,
+        )
 
     if state.get("planning_error"):
         return DemoWorkflowResponse(
@@ -2310,10 +2418,9 @@ async def start_demo_workflow(
         workflow_id = str(uuid4())
         session_id = str(uuid4())
         if small_talk.speech_type == SpeechType.CAPABILITY:
-            base_url = str(http_request.base_url).rstrip("/")
             capability = await answer_capability_question(
                 request.goal,
-                base_url=base_url,
+                capabilities=_capability_dicts(),
                 account_state=small_talk_state,
             )
             reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
@@ -2328,6 +2435,10 @@ async def start_demo_workflow(
                 status="CHAT",
                 stage="CHAT",
                 message=reply,
+                # `answer` mới là trường client đọc để nói ra. Xem ghi chú ở
+                # `_chat_response_carries_the_reply_as_answer` trong
+                # tests/test_api/test_small_talk_routes.py.
+                answer=reply,
                 session_id=session_id,
             ),
             "events": [],
@@ -2345,6 +2456,7 @@ async def start_demo_workflow(
             status="CHAT",
             stage="CHAT",
             message=reply,
+            answer=reply,
             session_id=session_id,
         )
 
@@ -2519,10 +2631,9 @@ async def continue_demo_workflow(
         if isinstance(small_talk, SmallTalk):
             new_workflow_id = str(uuid4())
             if small_talk.speech_type == SpeechType.CAPABILITY:
-                base_url = str(http_request.base_url).rstrip("/")
                 capability = await answer_capability_question(
                     goal,
-                    base_url=base_url,
+                    capabilities=_capability_dicts(),
                     account_state=account_state,
                 )
                 reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
@@ -2538,6 +2649,7 @@ async def continue_demo_workflow(
                     status="CHAT",
                     stage="CHAT",
                     message=reply,
+                    answer=reply,
                     session_id=session_id,
                 ),
                 "events": [],
@@ -2555,6 +2667,10 @@ async def continue_demo_workflow(
                 status="CHAT",
                 stage="CHAT",
                 message=reply,
+                # `answer` mới là trường client đọc để nói ra. Xem ghi chú ở
+                # `_chat_response_carries_the_reply_as_answer` trong
+                # tests/test_api/test_small_talk_routes.py.
+                answer=reply,
                 session_id=session_id,
                 parent_workflow_id=parent_workflow_id,
             )
@@ -3205,6 +3321,20 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
 #
 # Tool `pay_fee` KHÔNG bị gỡ: nó vẫn nằm trong `ALLOWED_TOOLS` và vẫn chạy —
 # chỉ là không còn được rao như một dịch vụ độc lập.
+
+
+def _capability_dicts() -> list[dict[str, Any]]:
+    """Danh mục dịch vụ dưới dạng dict, cho làn small-talk đọc trong tiến trình.
+
+    Đây là CÙNG một `_CAPABILITY_CATALOGUE` mà `GET /capabilities` trả về, nên
+    câu trả lời "bạn làm được gì" không bao giờ lệch với danh sách người dùng
+    nhìn thấy trên màn hình.
+
+    Không lọc theo quyền ở đây: `_capability_reply` đã tách "dùng được ngay" và
+    "mở sau khi liên kết căn hộ" dựa trên `account_state`, và nó cố ý LIỆT KÊ
+    cả phần bị khoá — giấu đi thì người dùng không biết dịch vụ tồn tại.
+    """
+    return [item.model_dump() for item in _CAPABILITY_CATALOGUE]
 
 
 @router.get("/capabilities", response_model=DemoCapabilityListResponse)

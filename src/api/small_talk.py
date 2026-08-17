@@ -110,6 +110,31 @@ _CAPABILITY_MARKERS = (
     "danh sach dich vu",
     "dich vu gi",
     "dich vu nao co",
+    # Ba cách hỏi dưới đây đều rơi vào planner trước khi được thêm vào đây, và
+    # planner trả `VALIDATION_ERROR` — người dùng hỏi một câu hoàn toàn hợp lý
+    # rồi bị báo "thông tin bạn vừa gửi chưa hợp lệ".
+    #
+    # Đo được: "Bạn giúp được gì?" → VALIDATION_ERROR. "P-118 có thể làm gì" →
+    # không khớp mẫu nào. "Hướng dẫn mình dùng với" → không khớp mẫu nào.
+    "giup duoc gi",
+    "giup gi duoc",
+    "giup toi duoc gi",
+    "co the lam gi",
+    "co the giup gi",
+    "lam nhung gi",
+    "nhung gi",
+    # Người dùng mới hay hỏi cách dùng chứ không hỏi danh mục. Câu trả lời họ
+    # cần vẫn là danh sách năng lực theo đúng quyền của họ.
+    # "the nao" một mình là rất rộng, nhưng `_asks_for_capabilities` đã trả
+    # False cho mọi câu có ý định dịch vụ TRƯỚC khi tới đây — nên "đặt lịch thế
+    # nào" vẫn về planner, chỉ "mình dùng cái này thế nào" mới thành capability.
+    "the nao",
+    "dung the nao",
+    "dung nhu the nao",
+    "su dung the nao",
+    "huong dan",
+    "bat dau tu dau",
+    "lam sao de",
 )
 
 # --- Service intent (Phase C) -------------------------------------------------
@@ -325,28 +350,34 @@ def classify(message: str) -> SmallTalk | None:
 async def answer_capability_question(
     message: str,
     *,
-    base_url: str,
     account_state: str,
+    capabilities: list[dict[str, Any]] | None = None,
 ) -> SmallTalk | None:
-    """Trả lời capability bằng data thật từ `/api/v1/capabilities`.
+    """Trả lời capability bằng danh mục dịch vụ, đọc TRONG TIẾN TRÌNH.
 
     Trả SmallTalk nếu message là capability query, ngược lại None để caller
     xử lý như service goal.
+
+    Trước đây hàm này tự gọi `GET /api/v1/capabilities` qua HTTP vào chính app
+    đang chạy. Endpoint đó BẮT BUỘC token — và lời gọi nội bộ không mang token
+    nào — nên nó luôn nhận 401, `raise_for_status()` ném lỗi, và người dùng
+    luôn nhận đúng một câu: "Hiện chưa lấy được danh sách dịch vụ."
+
+    Đo được trên stack sạch: gõ "Bạn giúp được gì?" trả về câu dự phòng ấy;
+    `httpx` gọi thẳng `localhost:8000/api/v1/capabilities` trong container cũng
+    trả 401. Đường này chưa từng chạy được.
+
+    Một app gọi HTTP vào chính nó để đọc một hằng số của chính nó thì phải trả
+    giá bằng: một vòng mạng, một `base_url` phải đoán, và một bộ credential nó
+    không có. Nhận danh mục qua tham số thì mất cả ba.
     """
     if not _asks_for_capabilities(message):
         return None
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{base_url}/api/v1/capabilities")
-            response.raise_for_status()
-            payload = response.json()
-    except Exception:  # noqa: BLE001 - capability query không được crash chat
+    if not capabilities:
         return SmallTalk(
             speech_type=SpeechType.CAPABILITY,
             reply="Hiện chưa lấy được danh sách dịch vụ. Bạn thử lại sau nhé.",
         )
-
-    capabilities = payload.get("capabilities") or []
     return SmallTalk(
         speech_type=SpeechType.CAPABILITY,
         reply=_capability_reply(capabilities, account_state),

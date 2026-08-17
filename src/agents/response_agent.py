@@ -87,6 +87,25 @@ class ReplyView(BaseModel):
     error_code: str | None = None
     retryable: bool | None = None
     capabilities: list[str] = Field(default_factory=list)
+    # AI đang chờ — `USER`, `PROVIDER` hay `ADMIN`.
+    #
+    # `WAITING_APPROVAL` mang HAI nghĩa: chờ khách xác nhận khoản tiền, hoặc chờ
+    # đơn vị duyệt lịch tham quan. Không có trường này, prompt phải chọn cứng
+    # một nghĩa — và nó chọn "chờ khách xác nhận thanh toán", nên model được
+    # bảo sai rồi viết đúng theo cái sai đó: "Bạn vui lòng xác nhận thanh toán
+    # giúp mình nhé" cho một lịch tham quan không hề có khoản phí nào.
+    approval_actor: str | None = None
+    # Việc CỤ THỂ người dùng phải làm để dùng được dịch vụ.
+    #
+    # Có mặt thì câu trả lời BẮT BUỘC phải nhắc tới — xem `_reject_reason`.
+    # Không có ràng buộc đó, model rút gọn câu nền thành "hiện chưa đủ điều
+    # kiện sử dụng" và bỏ mất phần duy nhất giúp người dùng thoát khỏi tình
+    # huống. Biết mình bị chặn mà không biết làm gì tiếp thì cũng như không.
+    next_step: str | None = None
+    # Dữ kiện lịch tham quan do BACKEND dựng từ canonical plan (không phải chữ
+    # khách gõ), nên số trong đây được coi là có thẩm quyền — xem
+    # `_numbers_in_view`.
+    viewing: dict[str, Any] | None = None
 
 
 class _StructuredLLM(Protocol):
@@ -160,6 +179,10 @@ _UNPAID_MARKERS: tuple[str, ...] = (
 # và `:` không nằm trong lớp ký tự, còn "12" thì quá ngắn. Một ngày bịa nghe
 # thuyết phục y hệt một số tiền bịa.
 _NUMBER = re.compile(r"\d+(?:[.,/:\-]\d+)+|\d{3,}")
+
+# Cụm neo phải có mặt khi `ReplyView.next_step` được đặt. Đúng tên mục trên
+# thanh bên, để người dùng tìm thấy thứ mình được bảo đi tìm.
+_ACTION_ANCHOR = "Xác minh căn hộ"
 
 # Dấu hiệu model đang THUẬT LẠI cách nó nghĩ.
 #
@@ -295,6 +318,19 @@ def _reject_reason(reply: AgentReply, view: ReplyView) -> str | None:
         if marker in lowered:
             return f"thuật lại quá trình suy luận ({marker!r})"
 
+    # Bị chặn mà không nói cách gỡ thì câu trả lời chưa làm xong việc của nó.
+    #
+    # Đo được: câu nền nêu rõ "mở mục Xác minh căn hộ, nhập mã căn hộ, đính kèm
+    # ảnh giấy tờ"; model viết lại thành "hiện chưa đủ điều kiện sử dụng, và
+    # không phải do lỗi hệ thống nên việc thử lại sẽ không giúp ích" — đúng,
+    # lịch sự, và bỏ mất đúng phần người dùng cần.
+    #
+    # Chỉ đòi cái NEO ("Xác minh căn hộ"), không đòi chép nguyên văn: model vẫn
+    # được tự do diễn đạt phần còn lại. Rớt guard này thì rơi về câu nền — mà
+    # câu nền có đủ hướng dẫn, nên người dùng không bao giờ mất thông tin.
+    if view.next_step and _ACTION_ANCHOR.casefold() not in lowered:
+        return "bỏ mất hướng dẫn người dùng cần làm gì tiếp"
+
     if len(reply.answer.strip()) > _MAX_ANSWER_CHARS:
         return f"câu trả lời dài {len(reply.answer.strip())} ký tự, quá mức cần thiết"
 
@@ -347,9 +383,47 @@ def _numbers_in_view(view: ReplyView) -> set[str]:
             " ".join(f"{s.get('title', '')} {s.get('status', '')} {s.get('message', '')}" for s in view.steps),
             " ".join(str(v) for v in (view.payment_quote or {}).values()),
             " ".join(view.missing_fields),
+            # Ngày/giờ/số khách của lịch tham quan. Backend dựng chúng từ
+            # canonical plan, nên chúng là nguồn có thẩm quyền y như báo giá.
+            #
+            # Thiếu dòng này thì MỌI câu nhắc tới lịch đều bị loại vì "nêu một
+            # con số không có trong dữ liệu" — model viết "08:00 ngày
+            # 15/01/2029" và guard không có gì để đối chiếu. Kết quả: nhánh chờ
+            # duyệt luôn rơi về câu mặc định, lần nào cũng y hệt.
+            " ".join(str(v) for v in (view.viewing or {}).values()),
         ]
     )
     numbers = {_normalise_number(n) for n in _NUMBER.findall(source)}
     # Số bước là dữ liệu thật và hay được nhắc ("cả 3 bước đã xong").
     numbers.add(str(len(view.steps)))
+    numbers |= _vietnamese_date_forms(source)
     return numbers
+
+
+# `2029-01-15` — dạng ngày backend luôn dùng trong dữ liệu.
+_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+
+
+def _vietnamese_date_forms(source: str) -> set[str]:
+    """Cùng một ngày, viết theo thói quen tiếng Việt.
+
+    Dữ liệu mang `2029-01-15`; người Việt viết `15/01/2029`. Sau
+    `_normalise_number` hai chuỗi thành `20290115` và `15012029` — khác nhau,
+    nên guard kết luận model bịa số.
+
+    Đây KHÔNG phải nới lỏng: cùng bấy nhiêu chữ số, cùng một ngày, chỉ khác thứ
+    tự quy ước. Không có nó, mọi câu nhắc tới ngày tham quan đều bị loại và
+    nhánh chờ duyệt vĩnh viễn rơi về câu mặc định — đo được: hai lần gọi model
+    liên tiếp đều bị loại với đúng lý do này.
+
+    Chỉ sinh từ ngày ĐÃ CÓ trong nguồn có thẩm quyền. Một ngày model tự nghĩ ra
+    vẫn bị loại như trước.
+    """
+    forms: set[str] = set()
+    for year, month, day in _ISO_DATE.findall(source):
+        forms.add(f"{day}{month}{year}")
+        # Người ta cũng viết "15/1/2029" — bỏ số 0 đứng đầu.
+        forms.add(f"{int(day)}{int(month)}{year}")
+        forms.add(f"{day}{month}")
+        forms.add(f"{int(day)}{int(month)}")
+    return forms

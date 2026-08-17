@@ -31,6 +31,17 @@ const TERMINAL = new Set([
 ])
 
 /**
+ * Câu duy nhất được nói trong lúc P-118 còn đang soạn câu trả lời.
+ *
+ * Nó cố ý KHÔNG mang nội dung: không nêu thiếu field nào, không đoán kết quả,
+ * không hứa thời gian. Chỉ nói "đang chạy, chờ một chút". Mọi thông tin thật
+ * đến ở đúng một lượt sau đó.
+ *
+ * Là hằng số nên `sayOnce` nhận ra và không lặp lại qua các nhịp poll.
+ */
+const WAITING = 'Mình đang xử lý yêu cầu của bạn, chờ mình một chút nhé.'
+
+/**
  * Form đã điền → một câu mục tiêu cho Planner.
  *
  * Backend nhận `goal` là văn bản tự nhiên, không nhận form. Nên chỗ này ghép
@@ -228,7 +239,27 @@ export function JourneyWorkspacePage() {
     // tức làm người dùng tưởng P-118 đã trả lời xong, rồi câu thật của model
     // đến sau lại mâu thuẫn với nó. Trong lúc chờ, nhịp ba chấm nói đúng thứ
     // đang xảy ra: model đang nghĩ.
-    sayOnce(res.answer || res.question || (next ? next.message : null))
+    //
+    // Trong lúc backend còn đang soạn (`response_state === 'PENDING'`), chỉ nói
+    // ĐÚNG một câu báo tiến trình — không nói nội dung.
+    //
+    // Trước đây chỗ này rơi xuống `res.question` (hoặc `next.message`), nên khi
+    // thiếu thông tin người dùng nhận HAI câu xin cùng một thứ, cách nhau 5
+    // giây và chỉ khác cách diễn đạt:
+    //
+    //   t+5s   "Mình cần thêm thông tin để lập kế hoạch: tên dự án…, ngày…"
+    //   t+10s  "Để đặt lịch tham quan, mình cần bạn bổ sung thêm: tên dự án…"
+    //
+    // Câu sau mới là câu model viết cho chính yêu cầu này. Câu trước là bản
+    // dựng sẵn từ danh sách `missing_fields`. Nói cả hai buộc người đọc phải tự
+    // nhận ra chúng là một, và đọc lại lần thứ hai không thu được gì mới.
+    //
+    // `WAITING` là hằng số nên `sayOnce` tự dedupe qua mọi nhịp poll.
+    if (res.response_state === 'PENDING') {
+      sayOnce(WAITING)
+    } else {
+      sayOnce(res.answer || res.question || (next ? next.message : null))
+    }
     // Lời kết nói SAU cùng, và chỉ khi thật sự xong. `sayOnce` lo phần không
     // lặp lại ở những nhịp poll tiếp theo.
     sayOnce(closingLine(res))
@@ -509,7 +540,12 @@ export function JourneyWorkspacePage() {
   const thinking =
     mode === 'journey' &&
     !!live &&
-    !pending &&
+    // Thẻ chờ hiện lên KHÔNG có nghĩa là hết chuyện để nói. Nó mang dữ kiện có
+    // cấu trúc ("chờ ai, việc gì"); câu của model mới là lời giải thích. Trước
+    // đây `!pending` tắt nhịp ba chấm ngay khi thẻ hiện, nên khoảng 18 giây
+    // chờ model soạn xong trở thành im lặng không dấu hiệu — và chính khoảng
+    // im lặng đó là lý do phải chèn một câu mẫu vào lấp chỗ.
+    (!pending || live.response_state === 'PENDING') &&
     // Đã có câu của model thì thôi nghĩ. Không có điều kiện này, một workflow
     // dừng ở trạng thái không nằm trong `TERMINAL` sẽ để ba chấm chạy mãi —
     // và một chỉ báo "đang xử lý" không bao giờ tắt là lời nói dối tệ hơn cả

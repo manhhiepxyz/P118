@@ -15,6 +15,7 @@ import pytest
 
 from src.agents.graph import (
     CLARIFICATION_UNAVAILABLE_MESSAGE,
+    RESIDENT_LINK_REQUIRED_MESSAGE,
     build_planner_graph,
     needs_information_update,
 )
@@ -340,8 +341,19 @@ async def test_missing_resident_id_without_context_still_rejected() -> None:
 
     # Không thực thi, không bịa mã cư dân.
     assert boundary.calls == []
-    assert state.get("clarification_error") == CLARIFICATION_UNAVAILABLE_MESSAGE
     assert state.get("plan_validated") is False
+    # Câu từ chối phải NÊU ĐÍCH DANH việc cần làm.
+    #
+    # Bản trước dùng chung `CLARIFICATION_UNAVAILABLE_MESSAGE` ("Bạn mô tả lại
+    # cụ thể hơn giúp mình nhé") cho cả hai lý do rất khác nhau: "thiếu một
+    # thứ không được phép hỏi" và "tài khoản chưa đủ điều kiện". Với trường hợp
+    # thứ hai — phổ biến hơn hẳn — nó đổ lỗi cho cách người dùng diễn đạt,
+    # trong khi mô tả của họ hoàn toàn rõ ràng. Họ viết lại rõ hơn và nhận đúng
+    # câu đó lần nữa.
+    assert state.get("clarification_error") == RESIDENT_LINK_REQUIRED_MESSAGE
+    # Bất biến KHÔNG đổi: không hỏi người dùng một ID nội bộ.
+    assert "resident_id" not in str(state.get("clarification_error"))
+    assert not state.get("missing_fields")
 
 
 @pytest.mark.asyncio
@@ -886,9 +898,14 @@ async def test_planner_branch_never_asks_user_for_system_owned_field(field: str)
 
     # Không rơi vào NEEDS_INFORMATION → UI không có form rỗng để render.
     assert state.get("planner_status") != "NEEDS_INFORMATION"
-    assert state["clarification_error"] == CLARIFICATION_UNAVAILABLE_MESSAGE
+    # `resident_id` có câu riêng: thiếu nó KHÔNG phải "không hỏi được" mà là
+    # "tài khoản chưa liên kết căn hộ" — một việc người dùng làm được, nên phải
+    # nói ra. Các field còn lại thật sự không có gì để hướng dẫn.
+    expected = RESIDENT_LINK_REQUIRED_MESSAGE if field == "resident_id" else CLARIFICATION_UNAVAILABLE_MESSAGE
+    assert state["clarification_error"] == expected
     assert "question" not in state
     assert tuple(state.get("missing_fields") or ()) == ()
+    # Bất biến chung cho MỌI field: tên field nội bộ không bao giờ lọt ra câu chữ.
     assert field not in state["clarification_error"]
     assert boundary.calls == []
 

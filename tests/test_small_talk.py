@@ -63,6 +63,40 @@ def test_classify_capability(message: str) -> None:
     assert result.speech_type == SpeechType.CAPABILITY
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Cả bốn câu này TRƯỚC ĐÂY rơi xuống planner. Người dùng hỏi một câu
+        # hoàn toàn hợp lý và nhận về "thông tin bạn vừa gửi chưa hợp lệ"
+        # (VALIDATION_ERROR) — đo được trên stack thật với câu đầu tiên.
+        "Bạn giúp được gì?",
+        "P-118 có thể làm gì",
+        "Mình dùng cái này thế nào",
+        "Hướng dẫn mình dùng với",
+    ],
+)
+def test_a_plain_question_about_the_agent_is_not_sent_to_the_planner(message: str) -> None:
+    result = classify(message)
+    assert result is not None, f"{message!r} rơi xuống planner"
+    assert result.speech_type == SpeechType.CAPABILITY
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # "thế nào" nằm trong `_CAPABILITY_MARKERS`, nên hai câu này là phép thử
+        # thật cho thứ tự kiểm: service-intent phải thắng capability, nếu không
+        # một yêu cầu thật sẽ bị trả lời bằng danh mục dịch vụ.
+        "Đặt lịch tham quan thế nào",
+        "Đăng ký xe như thế nào",
+        "Tôi muốn chuyển nhà tháng sau",
+        "Thanh toán phí giúp mình",
+    ],
+)
+def test_a_real_request_still_reaches_the_planner(message: str) -> None:
+    assert classify(message) is None, f"{message!r} bị nuốt thành small talk"
+
+
 def test_classify_service_goal_returns_none() -> None:
     assert classify("đặt chỗ đỗ xe khu A") is None
 

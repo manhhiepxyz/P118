@@ -35,6 +35,10 @@ Cách viết:
 - Riêng khi đang thiếu thông tin: hỏi trực tiếp trong 1–2 câu, nhóm các trường
   liên quan cho dễ đọc. Không thêm câu xác nhận tiếp nhận hoặc lời hứa chung chung.
 - Nếu có lỗi, giải thích bằng ngôn ngữ đời thường và nói họ nên làm gì.
+- Khi dữ liệu có `viec_ban_can_lam_de_dung_duoc`: BẮT BUỘC nói lại việc đó
+  trong câu trả lời, giữ nguyên tên mục trong dấu ngoặc kép để khách tìm đúng
+  chỗ. Nói khách "chưa đủ điều kiện" mà không nói cách để đủ điều kiện là bỏ
+  họ lại giữa chừng — họ biết mình bị chặn nhưng không biết làm gì tiếp.
 
 Tuyệt đối:
 - CHỈ nói những gì có trong dữ liệu được đưa. Không suy đoán, không thêm chi tiết cho sinh động.
@@ -59,7 +63,10 @@ def build_response_user_message(view: ReplyView) -> str:
     """
     payload = {
         "muc_tieu_cua_khach": view.goal,
-        "tinh_trang": _human_status(view.status),
+        "tinh_trang": _human_status(view.status, view.approval_actor, view.error_code),
+        "lich_tham_quan_da_gui": view.viewing,
+        # Có mặt thì câu trả lời BẮT BUỘC nhắc tới — guard sẽ loại nếu thiếu.
+        "viec_ban_can_lam_de_dung_duoc": view.next_step,
         "cac_buoc": view.steps,
         "thong_tin_con_thieu": view.missing_fields,
         "khoan_can_xac_nhan": view.payment_quote,
@@ -78,12 +85,32 @@ def build_response_user_message(view: ReplyView) -> str:
     )
 
 
-def _human_status(status: str) -> str:
+def _human_status(status: str, approval_actor: str | None = None, error_code: str | None = None) -> str:
     """Đổi mã trạng thái sang tiếng Việt TRƯỚC khi model nhìn thấy.
 
     Đưa nguyên `WAITING_APPROVAL` vào prompt là mời model chép lại nó ra câu
     trả lời — và mã trạng thái thô trước mặt khách hàng là thứ không ai đọc được.
+
+    `WAITING_APPROVAL` phải đọc `approval_actor` mới ra nghĩa đúng: cùng một mã
+    dùng cho "chờ khách xác nhận khoản tiền" VÀ "chờ đơn vị duyệt lịch tham
+    quan". Bản trước dịch cứng thành nghĩa thứ nhất, nên với một lịch tham quan
+    model được cho biết là đang chờ thanh toán — và nó viết đúng theo đó:
+    "Bạn vui lòng xác nhận thanh toán giúp mình nhé", cho một việc không hề có
+    khoản phí nào. Đó không phải model bịa; đó là prompt nói sai.
     """
+    # Từ chối vì thiếu quyền KHÔNG phải hỏng hóc. Dịch nó thành "lỗi" khiến
+    # model viết "Quy trình đang tạm dừng vì lỗi ở một số bước" cho một tài
+    # khoản chỉ đơn giản là chưa xác minh căn hộ — và người dùng đi tìm một sự
+    # cố không tồn tại thay vì đi xác minh căn hộ.
+    if error_code == "ACTION_DENIED":
+        return "chưa đủ điều kiện dùng dịch vụ này (không phải lỗi hệ thống)"
+
+    if status == "WAITING_APPROVAL" and approval_actor in {"PROVIDER", "ADMIN"}:
+        return (
+            "đang chờ đơn vị cung cấp dịch vụ xác nhận"
+            if approval_actor == "PROVIDER"
+            else "đang chờ ban quản lý duyệt"
+        )
     return {
         "SUCCESS": "đã hoàn thành",
         "FAILED": "đã dừng lại vì lỗi",

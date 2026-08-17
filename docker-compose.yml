@@ -78,6 +78,12 @@ services:
       TOUR_SERVICE_URL: http://mock-tour:8005
       CONSULTATION_SERVICE_URL: http://mock-consultation:8007
       SHUTTLE_SERVICE_URL: http://mock-shuttle:8009
+      # Thiếu dòng này thì backend giữ mặc định `http://localhost:8004` —
+      # trong container, `localhost` là chính backend, không phải mock. Hậu quả
+      # KHÔNG phải một lỗi nhỏ: toàn bộ luồng xác minh căn hộ trả 503, tức là
+      # việc ĐẦU TIÊN người dùng mới phải làm đã hỏng, và `/ready` vẫn xanh vì
+      # nó chỉ kiểm URL có đúng dạng chứ không kiểm gọi được.
+      OWNERSHIP_SERVICE_URL: http://mock-ownership:8004
       # Bật để xem prompt / chuỗi suy luận / câu trả lời của model ngay trong
       # `docker compose logs -f backend`. Mặc định TẮT: trace in cả nội dung
       # người dùng gõ, không phải thứ nên chạy thường trực.
@@ -355,8 +361,15 @@ services:
       db-migrate:
         condition: service_completed_successfully
     restart: unless-stopped
-    profiles:
-      - ownership   # docker compose --profile ownership up
+    # KHÔNG đặt sau `profiles:` nữa. Profile khiến `docker compose up -d` bỏ
+    # qua service này, trong khi luồng xác minh căn hộ — bước bắt buộc trước
+    # mọi dịch vụ cư dân — phụ thuộc hoàn toàn vào nó. Người dựng stack theo
+    # đúng hướng dẫn vẫn nhận 503 ở màn hình đầu tiên, không có gì chỉ ra
+    # thiếu một service.
+    #
+    # Comment ở đầu khối nói "Không Connector nào gọi service này" — đúng với
+    # tầng Agent, và có lẽ vì thế nó bị xếp là tuỳ chọn. Nhưng Auth có gọi, và
+    # Auth chạy trước Agent.
 
   # ----------------------------------------------------------------
   # Mock monolith — gộp mọi router vào một app, chỉ dùng cho test.
