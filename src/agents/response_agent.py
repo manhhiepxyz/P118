@@ -102,6 +102,20 @@ class ReplyView(BaseModel):
     # kiện sử dụng" và bỏ mất phần duy nhất giúp người dùng thoát khỏi tình
     # huống. Biết mình bị chặn mà không biết làm gì tiếp thì cũng như không.
     next_step: str | None = None
+    # Ngày hôm nay theo hệ thống, dạng "YYYY-MM-DD".
+    #
+    # Không có nó, model không trả lời được "hôm nay là ngày mấy" (nó nói thẳng
+    # là không xem được), và mọi câu nhắc tới ngày hôm nay đều bị guard loại vì
+    # con số không nằm trong dữ liệu. Cùng nguồn `date.today()` với Planner và
+    # `TaskPlanValidator`, nên ba tầng không bao giờ nói hai ngày khác nhau.
+    today: str | None = None
+    # Khách đang HỎI và câu trả lời chưa được viết — bạn viết nó bây giờ.
+    #
+    # Tách khỏi `status`: nhánh này đi trên `status="CHAT"` để frontend dừng
+    # poll, nhưng "CHAT" trong `_human_status` nghĩa là "đã trả lời". Không có
+    # cờ này, model tưởng việc đã xong và trả lời kiểu "mình gửi rồi, bạn kéo
+    # lên xem lại" — cho một câu hỏi chưa ai trả lời.
+    answering_question: bool = False
     # Dữ kiện lịch tham quan do BACKEND dựng từ canonical plan (không phải chữ
     # khách gõ), nên số trong đây được coi là có thẩm quyền — xem
     # `_numbers_in_view`.
@@ -391,6 +405,7 @@ def _numbers_in_view(view: ReplyView) -> set[str]:
             # 15/01/2029" và guard không có gì để đối chiếu. Kết quả: nhánh chờ
             # duyệt luôn rơi về câu mặc định, lần nào cũng y hệt.
             " ".join(str(v) for v in (view.viewing or {}).values()),
+            view.today or "",
         ]
     )
     numbers = {_normalise_number(n) for n in _NUMBER.findall(source)}

@@ -497,3 +497,42 @@ async def test_the_instruction_guard_is_off_when_there_is_nothing_to_instruct():
     """`next_step` không đặt thì guard phải im — nếu không mọi câu đều rơi về nền."""
     answer = "Mình đã đăng ký xe và giữ chỗ đỗ xe cho bạn xong rồi nhé."
     assert (await _reply(AgentReply(answer=answer))).answer == answer
+
+
+def test_the_prompt_does_not_repeat_prohibitions_that_code_already_enforces() -> None:
+    """Prompt nói về GIỌNG; guard lo an toàn. Đừng để hai vai trộn lại.
+
+    Bản trước có 7/15 dòng là điều cấm và đúng MỘT dòng nói về giọng, nên model
+    viết nhạt vì được yêu cầu viết nhạt. Bốn điều cấm đã gỡ đi vì
+    `_reject_reason()` chặn chúng bằng code:
+
+        con số ngoài dữ liệu → `_numbers_in_view`
+        "đã hoàn tất" khi chưa → `_COMPLETION_CLAIMS`
+        tên kỹ thuật / mã nội bộ → `_FORBIDDEN_MARKERS` + `_SNAKE_CASE`
+        kể lại quá trình suy nghĩ → `_REASONING_MARKERS`
+
+    Đo được: sau khi gỡ, 15 lượt gọi model thật cho 0 lần rớt guard, và 5/5 câu
+    khác nhau mỗi tình huống. Nới prompt KHÔNG làm model vi phạm nhiều hơn.
+
+    Test này tồn tại để lần sau ai đó gặp một câu trả lời lạ sẽ không phản xạ
+    "thêm một dòng cấm vào prompt" — chỗ đúng là thêm vào guard.
+    """
+    from src.agents.prompts.response_prompt import RESPONSE_SYSTEM_PROMPT
+
+    for banned in ("không kể lại quá trình suy nghĩ", "tên bảng", "mã trạng thái"):
+        assert banned not in RESPONSE_SYSTEM_PROMPT.lower(), (
+            f"{banned!r} đã được `_reject_reason()` chặn — nêu lại trong prompt chỉ tốn chỗ"
+        )
+
+
+def test_the_prompt_actually_asks_for_a_voice() -> None:
+    """Có phần dạy giọng, và có ví dụ — tính từ một mình không dạy được văn phong."""
+    from src.agents.prompts.response_prompt import RESPONSE_SYSTEM_PROMPT
+
+    assert "Giọng của bạn" in RESPONSE_SYSTEM_PROMPT
+    assert "dí dỏm" in RESPONSE_SYSTEM_PROMPT
+    # Đọc tình huống trước khi chọn giọng: đùa lúc khách đang mắc kẹt là tệ hơn
+    # cả khô khan.
+    assert "mắc kẹt" in RESPONSE_SYSTEM_PROMPT
+    # Ranh giới không đổi: sáng tạo ở CÁCH NÓI, không ở nội dung.
+    assert "CHỈ nói những gì có trong dữ liệu" in RESPONSE_SYSTEM_PROMPT

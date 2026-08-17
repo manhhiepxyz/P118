@@ -6,6 +6,7 @@ import { AdminRoute, AuthProvider, ProtectedRoute, ProviderRoute, useAuth } from
 import { NotificationProvider } from './lib/notifications'
 import { AdminDashboardPage } from './pages/AdminDashboardPage'
 import { ApartmentLinkPage } from './pages/ApartmentLinkPage'
+import { VerifyApartmentPage } from './pages/VerifyApartmentPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { LoginPage } from './pages/LoginPage'
 import { ProfilePage } from './pages/ProfilePage'
@@ -90,6 +91,23 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+
+          {/* Cổng của ĐƠN VỊ XÁC THỰC, phía người nộp hồ sơ.
+              Dùng chung vỏ với `/review` — cùng một cổng, hai vai — nên người
+              dùng thấy rõ mình đã rời P-118. `/apartment-link` bên Agent chỉ
+              còn là cửa vào: nó cho biết đang ở bước nào rồi dẫn sang đây.
+              Ranh giới này phản ánh đúng thực tế: xác minh căn hộ KHÔNG nằm
+              trong 10 tool của Agent, một đơn vị độc lập mới quyết định. */}
+          <Route
+            path="/verify"
+            element={
+              <ProtectedRoute>
+                <ReviewPortalLayout audience="applicant" />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<VerifyApartmentPage />} />
+          </Route>
 
           <Route
             path="/vehicle-register"

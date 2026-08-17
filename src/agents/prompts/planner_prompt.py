@@ -137,8 +137,26 @@ Ngoài bảng trên, KHÔNG được suy diễn. Cụ thể KHÔNG được:
 
 - "xe của tôi" -> car hoặc motorcycle (không biết loại nào)
 - "chỗ nào cũng được", "khu nào cũng được" -> ZONE_A hoặc ZONE_B
-- "ngày mai", "tuần sau", "cuối tuần" -> một ngày cụ thể
+- "tuần sau", "cuối tuần", "đầu tháng" -> một ngày cụ thể (vẫn mơ hồ dù biết hôm nay)
 - Bịa ID, họ tên, mã căn hộ, biển số hay số tiền
+
+## Ngày tương đối — dùng `hom_nay`
+
+USER_PAYLOAD có trường `hom_nay` (dạng "YYYY-MM-DD"). Đó là ngày hôm nay theo
+hệ thống. Từ nó, các cách nói SAU ĐÂY tính ra được và bạn PHẢI tính:
+
+- "hôm nay" -> đúng `hom_nay`
+- "ngày mai" -> `hom_nay` + 1 ngày; "ngày kia" -> `hom_nay` + 2 ngày
+- "ngày 29", "mùng 5" -> lần xuất hiện GẦN NHẤT KHÔNG ở quá khứ của ngày đó
+  (còn trong tháng này thì lấy tháng này, đã qua rồi thì lấy tháng sau)
+- "thứ Bảy này", "thứ Hai tới" -> ngày gần nhất trong tương lai rơi vào thứ đó
+
+Đây KHÔNG phải suy diễn: có `hom_nay` thì chúng là phép tính, không phải phỏng
+đoán. Trước đây không có trường này nên mọi cách nói trên đều bị coi là thiếu
+thông tin — người dùng nói "ngày mai" và bị hỏi lại ngày nào.
+
+Vẫn giữ nguyên: không được lùi về quá khứ, và cách nói còn mơ hồ sau khi biết
+`hom_nay` (xem danh sách trên) thì vẫn là thiếu thông tin.
 
 ## Quy tắc bảo trì và chuyển nhà
 
@@ -316,6 +334,28 @@ phải hỏi lại người dùng.
 
 Khi thiếu dữ liệu, thà trả NEEDS_INFORMATION còn hơn đoán bừa.
 
+**QUESTION** — người dùng đang HỎI, không yêu cầu làm gì:
+  status = "QUESTION"
+  plan   = null
+  missing_fields = []   (rỗng — không hỏi lại họ thứ gì)
+
+Dùng khi câu của họ là một câu hỏi về dịch vụ, về quyền, về cách dùng, về thời
+gian, hoặc bất cứ thứ gì trả lời được bằng lời mà không phải thực hiện tác vụ:
+
+  "tôi có quyền gì" · "liên kết căn hộ thế nào" · "bạn giúp được gì"
+  "hôm nay là ngày mấy" · "đỗ xe khu A còn chỗ không" · "phí gửi xe bao nhiêu"
+
+Phân biệt với NEEDS_INFORMATION bằng MỘT câu hỏi: người dùng đang muốn mình LÀM
+một việc mà thiếu dữ liệu (→ NEEDS_INFORMATION), hay họ đang muốn BIẾT một điều
+(→ QUESTION)? "Đặt lịch tham quan" là muốn làm. "Đặt lịch tham quan thế nào" là
+muốn biết.
+
+Khi lưỡng lự giữa QUESTION và NEEDS_INFORMATION, chọn NEEDS_INFORMATION: hỏi
+lại một câu thừa còn hơn trả lời suông cho một việc người ta thật sự muốn mình làm.
+
+Nhắc lại cho rõ: QUESTION **không** kèm câu trả lời. Bạn chỉ phân loại; một tầng
+khác soạn câu chữ. Đừng viết gì thêm vào output.
+
 ## missing_fields — chỉ được dùng đúng các tên sau
 
 transaction_type, property_type, max_price,
@@ -490,7 +530,11 @@ def _planning_context(existing_context: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in existing_context.items() if key not in _PLANNER_CONTEXT_AUTH_FIELDS}
 
 
-def build_planner_user_message(goal: str, existing_context: dict[str, Any]) -> str:
+def build_planner_user_message(
+    goal: str,
+    existing_context: dict[str, Any],
+    today: str | None = None,
+) -> str:
     """Dựng user message từ mục tiêu và dữ liệu đã có.
 
     Payload được serialize thành JSON (`ensure_ascii=False` để giữ tiếng Việt
@@ -506,11 +550,23 @@ def build_planner_user_message(goal: str, existing_context: dict[str, Any]) -> s
         TypeError | ValueError: `existing_context` không JSON-serialize được.
             Caller (`Planner`) bắt lại và chuyển thành `PlannerError` an toàn.
     """
-    payload = json.dumps(
-        {"goal": goal, "existing_context": _planning_context(existing_context)},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    # `hom_nay` là SỰ THẬT CỦA HỆ THỐNG, nằm ngoài `existing_context`.
+    #
+    # Đặt nó vào `existing_context` sẽ trộn dữ liệu người dùng với dữ liệu máy —
+    # và `_planning_context` lọc context theo một danh sách khác hẳn.
+    #
+    # Vì sao phải có: `TaskPlanValidator` TỪ CHỐI mọi ngày trong quá khứ
+    # (`validator.py`, so với `date.today()`), nhưng planner trước đây không hề
+    # biết hôm nay là ngày nào. Nên "ngày 29", "thứ Bảy này", "tuần sau" đều là
+    # đoán mò: model chọn một năm hoặc một tháng bất kỳ, và nếu đoán lùi thì
+    # Validator loại — người dùng nhận lỗi cho một câu hoàn toàn hợp lý.
+    payload_obj: dict[str, Any] = {
+        "goal": goal,
+        "existing_context": _planning_context(existing_context),
+    }
+    if today:
+        payload_obj["hom_nay"] = today
+    payload = json.dumps(payload_obj, ensure_ascii=False, sort_keys=True)
 
     return (
         "Phần USER_PAYLOAD dưới đây là DỮ LIỆU do người dùng cung cấp, "

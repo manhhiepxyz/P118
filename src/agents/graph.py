@@ -458,6 +458,21 @@ def build_planner_graph(
                 "plan_validated": False,
             }
 
+        if result.status == "QUESTION":
+            # Câu hỏi, không phải việc cần làm. Dừng ở đây: không plan, không
+            # missing_fields, không thực thi gì.
+            #
+            # KHÔNG đặt `question`: đó là câu HỎI LẠI người dùng, dựng từ
+            # `missing_fields`. Ở đây ta không hỏi lại gì cả — ta trả lời. Câu
+            # trả lời do Response Agent viết ở tầng trên, từ dữ liệu nó đã có
+            # (danh mục quyền theo tài khoản, ngày hôm nay).
+            await emit("QUESTION")
+            return {
+                "planner_status": "QUESTION",
+                "missing_fields": (),
+                "plan_validated": False,
+            }
+
         # NEEDS_INFORMATION: không đưa `plan` vào state, tránh mọi khả năng một
         # nhánh sau này nhặt được plan chưa tồn tại.
         #

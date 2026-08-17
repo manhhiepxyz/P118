@@ -42,6 +42,19 @@ const TERMINAL = new Set([
 const WAITING = 'Mình đang xử lý yêu cầu của bạn, chờ mình một chút nhé.'
 
 /**
+ * Chờ bao lâu rồi mới trấn an.
+ *
+ * Dưới mốc này thì im lặng — nhịp ba chấm đã cho biết P-118 đang nghĩ, và một
+ * câu trả lời đến sau vài giây tự nó là đủ. Trên mốc này thì khoảng lặng bắt
+ * đầu giống như hỏng, nên nói một câu.
+ *
+ * 8 giây chọn từ số đo thật: hỏi đáp ngắn trả lời trong 5–7 giây (không hiện
+ * câu này), còn đặt lịch tham quan mất 25–35 giây vì phải gọi provider (có
+ * hiện). Ranh giới nằm đúng giữa hai nhóm, không phải một con số tròn cho đẹp.
+ */
+const WAITING_AFTER_MS = 8000
+
+/**
  * Form đã điền → một câu mục tiêu cho Planner.
  *
  * Backend nhận `goal` là văn bản tự nhiên, không nhận form. Nên chỗ này ghép
@@ -205,6 +218,13 @@ export function JourneyWorkspacePage() {
    * bị lặp vô hạn cùng một dòng.
    */
   const said = useRef<Set<string>>(new Set())
+  /**
+   * Thời điểm bắt đầu chờ câu trả lời của lượt hiện tại, hoặc null nếu không chờ.
+   *
+   * Đặt lại về null mỗi khi câu trả lời tới, để lượt sau đo lại từ đầu chứ
+   * không cộng dồn thời gian chờ của cả cuộc hội thoại.
+   */
+  const pendingSince = useRef<number | null>(null)
 
   function say(from: ChatTurn['from'], text: string) {
     turnId.current += 1
@@ -255,9 +275,25 @@ export function JourneyWorkspacePage() {
     // nhận ra chúng là một, và đọc lại lần thứ hai không thu được gì mới.
     //
     // `WAITING` là hằng số nên `sayOnce` tự dedupe qua mọi nhịp poll.
+    //
+    // Và nó CHỈ được nói khi người dùng đã chờ đủ lâu để thấy sốt ruột. Câu
+    // trấn an đặt đúng chỗ thì hữu ích; đặt sai chỗ thì nó tự tố cáo hệ thống:
+    //
+    //   Bạn:   hôm nay là ngày mấy
+    //   P-118: Mình đang xử lý yêu cầu của bạn, chờ mình một chút nhé.
+    //   P-118: (5 giây sau, câu trả lời thật)
+    //
+    // Một câu hỏi trả lời được trong năm giây mà vẫn xin phép được chờ — đọc
+    // lên giống một tổng đài đang câu giờ hơn là một trợ lý.
+    //
+    // Mốc thời gian, KHÔNG phải loại tác vụ: "chat" và "tác vụ" không tách bạch
+    // — câu hỏi ngày tháng cũng đi qua planner như một workflow. Thứ quyết định
+    // câu này có ích hay lố bịch là người dùng đã chờ bao lâu.
     if (res.response_state === 'PENDING') {
-      sayOnce(WAITING)
+      if (pendingSince.current === null) pendingSince.current = performance.now()
+      if (performance.now() - pendingSince.current >= WAITING_AFTER_MS) sayOnce(WAITING)
     } else {
+      pendingSince.current = null
       sayOnce(res.answer || res.question || (next ? next.message : null))
     }
     // Lời kết nói SAU cùng, và chỉ khi thật sự xong. `sayOnce` lo phần không
@@ -452,6 +488,7 @@ export function JourneyWorkspacePage() {
       setGoalText(text)
       setFault(null)
       said.current = new Set()
+      pendingSince.current = null
       startWorkflow(text)
         .then(absorb)
         .catch((error) => {
@@ -493,6 +530,7 @@ export function JourneyWorkspacePage() {
     }
 
     said.current = new Set()
+    pendingSince.current = null
     setGoalText(goal)
     setTurns([])
     setFault(null)

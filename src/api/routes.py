@@ -1513,6 +1513,9 @@ def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list
         retryable=response.retryable,
         capabilities=capabilities,
         approval_actor=response.approval_actor,
+        # Cùng nguồn `date.today()` với Planner và `TaskPlanValidator`.
+        today=date.today().isoformat(),
+        answering_question=response.stage == "QUESTION",
         # Chỉ đặt khi thật sự có việc người dùng làm được. Đặt bừa sẽ bật guard
         # `next_step` cho những tình huống không có hướng dẫn nào để nêu, và
         # mọi câu trả lời ở đó đều rơi về bản dự phòng.
@@ -2048,8 +2051,9 @@ _RESIDENT_SERVICE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 # không tồn tại. Chỉ sai một cái tên là toàn bộ phần hướng dẫn trở nên vô dụng:
 # người dùng đi tìm đúng thứ mình bảo họ tìm, không thấy, rồi dừng lại.
 LINK_REQUIRED_ACTION = (
-    "Mở mục “Xác minh căn hộ” ở thanh bên, nhập mã căn hộ và khu đô thị, "
-    "đính kèm ảnh giấy tờ nhà, rồi bấm gửi. Ban quản lý duyệt xong là dùng được ngay."
+    "Mở mục “Xác minh căn hộ” ở thanh bên rồi bấm “Xác thực với đơn vị”; ở cổng của họ, "
+    "nhập mã căn hộ và khu đô thị, đính kèm ảnh giấy tờ nhà rồi gửi. "
+    "Duyệt xong là dùng được ngay."
 )
 
 _LINK_REQUIRED_TEMPLATE = (
@@ -2161,6 +2165,24 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                     missing_fields=missing_fields,
                     plan=plan_view,
                 )
+
+    # Câu HỎI được xét TRƯỚC mọi nhánh chính sách.
+    #
+    # Đo được: "phí gửi xe ô tô một tháng khoảng bao nhiêu" có chữ "gửi xe" nên
+    # `_resident_link_required_message` nhận là dịch vụ cư dân và trả về
+    # "Bạn cần xác minh căn hộ trước mới xem được phí gửi xe."
+    #
+    # Nhưng họ có yêu cầu gửi xe đâu — họ hỏi giá. Chặn quyền là đúng khi ai đó
+    # muốn LÀM một việc; chặn một câu hỏi thì chỉ là từ chối nói chuyện. Planner
+    # đã phân loại xong, và phân loại đó phải thắng.
+    if state.get("planner_status") == "QUESTION":
+        # `status="CHAT"` để frontend coi là điểm dừng và ngừng poll; `stage`
+        # mới là thứ phân biệt với small-talk. Hai thứ này KHÔNG thay nhau
+        # được: small-talk đã có sẵn câu trả lời, còn ở đây câu trả lời chưa
+        # được viết — và `_human_status("CHAT")` dịch thành "đã trả lời", nên
+        # model được bảo là xong việc rồi và nó nói đúng như thế:
+        # "mình đã gửi thông tin cho bạn rồi nhé", "bạn kéo lên xem lại".
+        return DemoWorkflowResponse(status="CHAT", stage="QUESTION", plan=plan_view)
 
     # Chưa liên kết căn hộ mà hỏi dịch vụ cư dân: nói đúng lý do, bất kể lỗi
     # xuất hiện ở nhánh nào phía dưới — nguyên nhân vẫn là một.

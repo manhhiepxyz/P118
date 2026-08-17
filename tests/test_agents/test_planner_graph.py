@@ -982,3 +982,43 @@ def test_both_needs_information_branches_share_one_policy() -> None:
         if field == "vehicle_id":
             continue
         assert "clarification_error" in needs_information_update((field,), {})
+
+
+@pytest.mark.asyncio
+async def test_a_question_stops_before_validation_and_never_executes() -> None:
+    """QUESTION là điểm dừng: không kế hoạch, không kiểm, không thực thi.
+
+    Trạng thái này tồn tại vì suốt trước đó mọi câu HỎI đều bị ép vào khuôn
+    "lập kế hoạch hoặc là thiếu dữ liệu", và cái thứ hai hiện ra với người dùng
+    thành "thông tin bạn cung cấp chưa hợp lệ" — đổ lỗi cho họ vì đã hỏi. Đã vá
+    bằng từ khoá năm lần (hỏi năng lực, hỏi cách làm, xác minh căn hộ, hỏi ngày,
+    hỏi quyền), lần nào cũng chỉ bịt được đúng cách hỏi mình nghĩ ra được.
+    """
+    planner = FakePlanner(PlannerResult(status="QUESTION"))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": "tôi có quyền gì", "existing_context": {}})
+
+    assert state["planner_status"] == "QUESTION"
+    assert boundary.calls == [], "câu hỏi mà vẫn chạy tác vụ"
+    assert state.get("plan") is None
+    assert not state.get("plan_validated")
+    # Không hỏi lại người dùng thứ gì — họ đang hỏi mình, không phải ngược lại.
+    assert tuple(state.get("missing_fields") or ()) == ()
+    assert "question" not in state
+    # Và KHÔNG có câu trả lời nào ở đây: planner phân loại, Response Agent viết.
+    assert "clarification_error" not in state
+
+
+def test_the_planner_cannot_smuggle_prose_through_the_question_status() -> None:
+    """Ranh giới cũ được giữ nguyên: planner không soạn chữ cho người dùng.
+
+    `_PlannerResponse` cố ý không có field văn bản. Nếu một ngày ai đó thêm vào
+    để "tiện", LLM sẽ nói thẳng ra ngoài mà không đi qua guard của Response
+    Agent — test này đỏ trước khi điều đó kịp xảy ra.
+    """
+    from src.agents.planner import _PlannerResponse
+
+    fields = set(_PlannerResponse.model_fields)
+    assert fields == {"status", "plan", "missing_fields"}, fields

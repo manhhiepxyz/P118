@@ -30,6 +30,8 @@ Ranh giới HITL:
 
 from __future__ import annotations
 
+from datetime import date
+
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, get_args
 
@@ -41,7 +43,18 @@ from src.agents.prompts.planner_prompt import (
 )
 from src.common.task_plan import AllowedTool, InputRef, TaskPlan
 
-PlannerStatus = Literal["READY", "NEEDS_INFORMATION"]
+# QUESTION: câu người dùng gõ là một CÂU HỎI về dịch vụ, không phải việc cần làm.
+#
+# Thiếu trạng thái này, mọi câu hỏi đều bị ép vào khuôn "lập kế hoạch hoặc là
+# thiếu dữ liệu", và cái thứ hai hiện ra với người dùng thành "thông tin bạn
+# cung cấp chưa hợp lệ" — đổ lỗi cho họ vì đã hỏi. Đã vá bằng từ khoá năm lần
+# (hỏi năng lực, hỏi cách làm, xác minh căn hộ, hỏi ngày, hỏi quyền) và lần nào
+# cũng chỉ bịt được đúng những cách hỏi mình nghĩ ra được.
+#
+# QUAN TRỌNG: `QUESTION` KHÔNG mang theo câu trả lời. Planner phân loại, không
+# viết — Response Agent vẫn là nơi duy nhất soạn chữ cho người dùng, và nó đã có
+# guard. Trộn hai vai lại là mở một đường cho LLM nói thẳng ra ngoài mà không ai kiểm.
+PlannerStatus = Literal["READY", "NEEDS_INFORMATION", "QUESTION"]
 
 # Dùng khi mục tiêu chứa việc nằm ngoài 6 tool được hỗ trợ. Đây là control
 # value, không phải một field nghiệp vụ.
@@ -102,7 +115,7 @@ MISSING_FIELD_LABELS: dict[str, str] = {
 
 # `Literal` không được kiểm tra lúc chạy — giữ bản runtime để `PlannerResult`
 # và `Planner` cùng dựa vào một nguồn.
-_VALID_STATUSES: frozenset[str] = frozenset({"READY", "NEEDS_INFORMATION"})
+_VALID_STATUSES: frozenset[str] = frozenset({"READY", "NEEDS_INFORMATION", "QUESTION"})
 
 _ALLOWED_MISSING_FIELDS: frozenset[str] = frozenset(MISSING_FIELD_LABELS) | {
     UNSUPPORTED_GOAL_FIELD,
@@ -368,7 +381,10 @@ class _PlannerResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: PlannerStatus = Field(
-        description="READY khi lập được kế hoạch; NEEDS_INFORMATION khi thiếu dữ liệu bắt buộc.",
+        description=(
+            "READY khi lập được kế hoạch; NEEDS_INFORMATION khi thiếu dữ liệu bắt buộc; "
+            "QUESTION khi người dùng đang HỎI chứ không yêu cầu làm."
+        ),
     )
     plan: TaskPlan | None = Field(
         default=None,
@@ -393,6 +409,11 @@ class _PlannerResponse(BaseModel):
         Wire shape phẳng tương thích rộng hơn; ràng buộc loại trừ được cưỡng chế
         ở đây, cho cùng một hiệu lực: sai là `ValidationError` ngay lúc parse.
         """
+        if self.status == "QUESTION":
+            if self.plan is not None or self.missing_fields:
+                raise ValueError("status=QUESTION phải không có plan và không có missing_fields.")
+            return self
+
         if self.status == "READY":
             if self.plan is None:
                 raise ValueError("status=READY phải kèm plan.")
@@ -470,6 +491,8 @@ class PlannerResult:
 
       - READY             -> `plan` là TaskPlan; `missing_fields` rỗng.
       - NEEDS_INFORMATION -> `plan` None; `missing_fields` khác rỗng, hợp lệ.
+      - QUESTION          -> `plan` None; `missing_fields` rỗng. Câu hỏi, không
+                             phải yêu cầu. Không mang theo câu trả lời.
 
     `question` KHÔNG phải field khởi tạo — nó là property dựng từ
     `missing_fields`. Caller không có chỗ nào để chèn văn bản tự do vào câu hỏi
@@ -489,6 +512,12 @@ class PlannerResult:
         # lúc chạy, nên phải tự chặn ở đây.
         if self.status not in _VALID_STATUSES:
             raise ValueError("PlannerResult.status không hợp lệ.")
+
+        # QUESTION là trạng thái RỖNG: không kế hoạch, không field thiếu. Cho
+        # phép kèm `missing_fields` sẽ dựng ra một trạng thái lai — vừa hỏi lại
+        # vừa trả lời — và giao diện không biết hiện cái nào.
+        if self.status == "QUESTION" and (self.plan is not None or self.missing_fields):
+            raise ValueError("PlannerResult.QUESTION phải không có plan và không có missing_fields.")
 
         # List/set/str đều lọt qua các vòng lặp bên dưới nhưng phá bất biến
         # frozen + hashable của dataclass. Yêu cầu đúng tuple.
@@ -510,6 +539,10 @@ class PlannerResult:
                 raise ValueError("PlannerResult READY phải có plan.")
             if self.missing_fields:
                 raise ValueError("PlannerResult READY không được có missing_fields.")
+            return
+
+        # Nhánh QUESTION đã kiểm xong ở trên — nó rỗng cả hai phía.
+        if self.status == "QUESTION":
             return
 
         if self.plan is not None:
@@ -636,7 +669,11 @@ class Planner:
     @staticmethod
     def _build_user_message(goal: str, existing_context: dict[str, Any]) -> str:
         try:
-            return build_planner_user_message(goal, existing_context)
+            # Ngày hôm nay lấy tại ĐÂY, không truyền từ ngoài vào: mọi lời gọi
+            # planner đều phải thấy cùng một "hôm nay" với `TaskPlanValidator`,
+            # vốn cũng dùng `date.today()`. Hai nguồn ngày khác nhau thì kế
+            # hoạch hợp lệ lúc dựng có thể thành quá khứ lúc kiểm.
+            return build_planner_user_message(goal, existing_context, today=date.today().isoformat())
         except (TypeError, ValueError) as exc:
             # Không echo context: nó có thể chứa dữ liệu cư dân.
             raise PlannerError(f"existing_context không serialize được sang JSON ({type(exc).__name__}).") from None
@@ -778,6 +815,21 @@ class Planner:
             self._reject_untrusted_payment_values(plan, existing_context)
 
             return PlannerResult(status="READY", plan=plan)
+
+        if response.status == "QUESTION":
+            # Câu hỏi: không kế hoạch, không field thiếu, không câu chữ.
+            #
+            # Phải chặn ở ĐÂY chứ không để rơi xuống nhánh NEEDS_INFORMATION bên
+            # dưới. Nhánh đó gọi `_clean_missing_fields`, và danh sách rỗng thì
+            # nó ném `NEEDS_INFORMATION_WITHOUT_FIELDS` — đo được: cả 5 câu hỏi
+            # thử nghiệm đều chết ở đúng chỗ này, dù model đã trả `QUESTION`
+            # hoàn toàn đúng.
+            if response.plan is not None or response.missing_fields:
+                raise _InconsistentResponseError(
+                    "QUESTION_WITH_PAYLOAD",
+                    "Planner trả QUESTION nhưng vẫn kèm kế hoạch hoặc field thiếu.",
+                )
+            return PlannerResult(status="QUESTION")
 
         # NEEDS_INFORMATION — cũng đã được validator chặn, giữ làm lớp phòng thủ.
         if response.plan is not None:
