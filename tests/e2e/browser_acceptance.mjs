@@ -114,8 +114,15 @@ async function waitForApprovalCard(page, workflowId, timeoutMs = 240000) {
 }
 
 /** Số dịch vụ bị khoá — chỉ đếm trong khu "Dịch vụ". */
+/**
+ * Số năng lực đang bị khoá vì chưa liên kết hồ sơ cư dân.
+ *
+ * Workspace không có `<section>` tiêu đề "Dịch vụ" như màn Home cũ; danh sách
+ * năng lực là `ul.seq`, và mục bị khoá là hàng `button[disabled]`.
+ */
 async function lockedCapabilities(page) {
-  return page.locator('section:has(h2:text-is("Dịch vụ")) button[disabled]').count()
+  await page.locator('ul.seq').first().waitFor({ timeout: 20000 }).catch(() => {})
+  return page.locator('ul.seq > li button[aria-pressed][disabled]').count()
 }
 
 
@@ -124,11 +131,27 @@ async function lockedCapabilities(page) {
 /* ------------------------------------------------------------------ */
 
 /** Mọi workflow đang có thẻ trong hội thoại. */
+/**
+ * Id của các workflow ĐANG CÓ, đọc từ trang Lịch sử.
+ *
+ * Hội thoại trong workspace không còn thẻ workflow: canvas hiển thị các chặng
+ * của MỘT hành trình, còn danh sách yêu cầu nằm ở `/workflows`. Đọc từ đó là
+ * đọc đúng nguồn, thay vì tìm một thẻ không còn tồn tại.
+ *
+ * Mở trong tab riêng để không cướp mất trang mà phép kiểm đang dùng.
+ */
 async function cardWorkflowIds(page) {
-  const hrefs = await page.locator('a:has-text("Xem chi tiết")').evaluateAll(
-    (els) => els.map((e) => e.getAttribute('href') ?? ''),
-  )
-  return hrefs.map((href) => href.split('/workflow/')[1] ?? '').filter(Boolean)
+  const tab = await page.context().newPage()
+  try {
+    await tab.goto(`${APP}/workflows`)
+    await tab.waitForTimeout(2500)
+    const hrefs = await tab.locator('a[href^="/workflow/"]').evaluateAll(
+      (els) => els.map((e) => e.getAttribute('href') ?? ''),
+    )
+    return hrefs.map((href) => href.split('/workflow/')[1] ?? '').filter(Boolean)
+  } finally {
+    await tab.close()
+  }
 }
 
 /**
@@ -151,14 +174,15 @@ async function waitForNewCard(page, before, timeoutMs = 120000) {
 
 /** Gõ mục tiêu vào composer rồi gửi. Trả id workflow của thẻ vừa xuất hiện. */
 async function sendGoal(page, goal) {
-  await page.goto(`${APP}/`)
-  await page.locator('#goal').waitFor({ timeout: 20000 })
+  // `/` redirect sang `/workspace`; đi thẳng để không phụ thuộc vào redirect.
+  await page.goto(`${APP}/workspace`)
+  await page.locator('#ws-composer').waitFor({ timeout: 20000 })
   // Chờ màn hình dựng lại xong TRƯỚC khi chụp ảnh: chụp giữa chừng thì một
   // thẻ cũ vừa hiện ra sẽ bị tính là thẻ mới.
   await page.waitForTimeout(3000)
   const before = await cardWorkflowIds(page)
-  await page.locator('#goal').fill(goal)
-  await page.locator('button', { hasText: 'Bắt đầu' }).first().click()
+  await page.locator('#ws-composer').fill(goal)
+  await page.locator('.console-run').click()
   return waitForNewCard(page, before)
 }
 
@@ -231,11 +255,11 @@ function clarificationSentence(answers) {
 
 /** Trả lời tự nhiên NGAY TRONG hội thoại rồi chờ thẻ chuyển sang workflow con. */
 async function answerInChat(page, parentId, answers) {
-  const reply = page.locator('#goal')
+  const reply = page.locator('#ws-composer')
   await reply.waitFor({ state: 'visible', timeout: 60000 })
   await reply.fill(clarificationSentence(answers))
   const before = await cardWorkflowIds(page)
-  await page.getByRole('button', { name: 'Gửi', exact: true }).click()
+  await page.locator('.console-run').click()
   // Thẻ cha được thay bằng thẻ con TẠI CHỖ, nên "thẻ mới" ở đây là workflow con.
   const child = await waitForNewCard(page, before)
   return child || parentId
@@ -258,16 +282,46 @@ async function answerOnDetail(page, parentId, answers) {
 /** Chờ composer duy nhất chuyển sang chế độ trả lời workflow hiện tại. */
 async function waitForChatClarification(page, timeoutMs = 240000) {
   try {
-    await page.getByRole('button', { name: 'Gửi', exact: true }).waitFor({ timeout: timeoutMs })
-    await page.locator('#goal').waitFor({ state: 'visible', timeout: timeoutMs })
+    // Dấu hiệu "P-118 đang chờ mình" giờ là thẻ việc ở cột phải, không phải
+    // nút Gửi đổi nhãn.
+    await page.locator('#pending-title').waitFor({ timeout: timeoutMs })
+    await page.locator('#ws-composer').waitFor({ state: 'visible', timeout: timeoutMs })
     return true
   } catch {
     return false
   }
 }
 
+/**
+ * Project name của stack ĐANG CHẠY, đọc từ nhãn của container.
+ *
+ * Không có nó, `docker compose` lấy project name từ tên thư mục. Chạy harness
+ * từ một worktree khác nghĩa là một project KHÁC: compose dựng stack thứ hai
+ * với volume trống, database rỗng, và mọi con số đo được sau đó là số của một
+ * hệ thống không ai đang dùng. Thực tế đã xảy ra — nó tạo
+ * `p118-ui-redesign_postgres_data` rồi mới dừng vì trùng tên container.
+ *
+ * Đặt `P118_COMPOSE_PROJECT` để ép, ngược lại hỏi Docker.
+ */
+const COMPOSE_PROJECT = (() => {
+  if (process.env.P118_COMPOSE_PROJECT) return process.env.P118_COMPOSE_PROJECT
+  try {
+    return execFileSync('docker',
+      ['inspect', 'p118_backend', '--format', '{{index .Config.Labels "com.docker.compose.project"}}'],
+      { encoding: 'utf8', timeout: 30000 }).trim()
+  } catch {
+    return null
+  }
+})()
+
 function compose(args, { override = null } = {}) {
-  const files = ['-f', 'docker-compose.yml']
+  if (!COMPOSE_PROJECT) {
+    throw new SetupError(
+      'Không tìm thấy stack đang chạy (container p118_backend). Chạy `sh scripts/stack_up.sh` trước, '
+      + 'hoặc đặt P118_COMPOSE_PROJECT nếu stack mang tên project khác.',
+    )
+  }
+  const files = ['-p', COMPOSE_PROJECT, '-f', 'docker-compose.yml']
   if (override) files.push('-f', override)
   return execFileSync('docker', ['compose', ...files, ...args],
     { cwd: REPO, encoding: 'utf8', timeout: 300000 })
@@ -356,6 +410,18 @@ async function main() {
   await pageA.fill('#link-apartment', apartment)
   await pageA.fill('#link-area', area)
   await pageA.fill('#link-name', 'Nguyen Van Browser')
+  // Liên kết căn hộ giờ BẮT BUỘC ảnh giấy tờ (thêm ở 7a6a884, phần hồ sơ xác
+  // thực). Không đính kèm thì nút gửi disabled và phép bấm treo 30 giây — một
+  // thất bại của harness, không phải của sản phẩm.
+  await pageA.locator('#link-files').setInputFiles({
+    name: 'so-hong-canary.png',
+    mimeType: 'image/png',
+    // PNG 1×1 hợp lệ — đủ để qua kiểm kiểu tệp, không mang nội dung thật.
+    buffer: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  })
   await pageA.locator('form button[type="submit"]').click()
   await pageA.waitForTimeout(3000)
 
@@ -476,7 +542,7 @@ async function main() {
   check('2b. Quick action mở form chuẩn bị ngay trên trang',
     await quickForm.count() === 1 && await quickForm.locator('input, select').count() >= 3)
   check('2c. Ô prompt vẫn độc lập và không bị quick action điền hộ',
-    (await pageA.locator('#goal').inputValue()) === '')
+    (await pageA.locator('#ws-composer').inputValue()) === '')
 
   // Chọn thêm một dịch vụ phải GIỮ dịch vụ đầu và xổ thêm nhóm field, không
   // thay form cũ như single-select. Sau đó bỏ mục thứ hai để phần happy path
@@ -544,12 +610,12 @@ async function main() {
     && (await pageA.locator('[id^="clarify-"]').count()) === 0)
   check('6b0. Home chỉ có đúng một ô chat',
     (await pageA.locator('textarea').count()) === 1
-    && (await pageA.locator('#goal').count()) === 1)
+    && (await pageA.locator('#ws-composer').count()) === 1)
 
   // Câu hỏi phụ không phải một giá trị field: phải được trả lời trên cùng
   // workflow, không 422 và không consume lượt clarification.
   const cardsBeforeQuestion = await cardWorkflowIds(pageA)
-  const lookupReply = pageA.locator('#goal')
+  const lookupReply = pageA.locator('#ws-composer')
   await lookupReply.fill('Có những dự án nào?')
   const lookupResponsePromise = pageA.waitForResponse(
     (response) => response.url().includes(`/workflows/demo/${wfCompound}/continue`)
@@ -567,7 +633,7 @@ async function main() {
     .last().waitFor({ timeout: 30000 })
   check('6b2. Hỏi danh sách dự án được trả lời mà không tạo workflow mới',
     JSON.stringify(await cardWorkflowIds(pageA)) === JSON.stringify(cardsBeforeQuestion)
-    && (await pageA.locator('#goal').count()) === 1)
+    && (await pageA.locator('#ws-composer').count()) === 1)
   const userHistory = await pageA.locator('div.flex.justify-end > p').allInnerTexts()
   const assistantHistory = await pageA.locator('div.flex.flex-col.items-start > p').allInnerTexts()
   check('6b3. Hỏi tiếp không làm mất lịch sử cùng workflow',
@@ -680,7 +746,7 @@ async function main() {
   check('8a. F5 mở cuộc trò chuyện mới, không tự nhét workflow cũ vào chat',
     (await cardWorkflowIds(pageA)).length === 0
     && (await pageA.locator('#clarification-reply').count()) === 0
-    && (await pageA.locator('#goal').count()) === 1
+    && (await pageA.locator('#ws-composer').count()) === 1
     && new URL(pageA.url()).pathname === '/')
 
   // Workflow không mất: người dùng chủ động mở lại từ mục Workflows (ở đây
