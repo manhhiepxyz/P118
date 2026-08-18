@@ -431,6 +431,7 @@ def build_planner_graph(
             result = await planner.plan(
                 state.get("goal", ""),
                 state.get("existing_context", {}),
+                recalled=state.get("recalled") or None,
             )
         except PlannerError as exc:
             # `PlannerError` được thiết kế để message luôn an toàn: chỉ mô tả

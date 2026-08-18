@@ -836,6 +836,67 @@ class WorkflowRepository:
             )
         return [dict(row) for row in rows]
 
+    async def recent_turns_for_owner(
+        self,
+        *,
+        owner_user_id: str,
+        exclude_workflow_id: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """N lượt hỏi–đáp gần nhất của một người, kèm dịch vụ mà mỗi lượt đã dùng.
+
+        KHÔNG lọc theo dịch vụ ở đây, và đó là một lựa chọn.
+
+        Lọc được thì tốt — ký ức về chỗ đỗ xe chỉ làm nhiễu khi đang lập lịch
+        tham quan. Nhưng muốn lọc thì phải biết yêu cầu MỚI thuộc dịch vụ nào,
+        mà lúc này Planner còn chưa chạy. Cách duy nhất là tự dựng một bộ phân
+        loại goal→dịch vụ bằng khớp chuỗi — đúng thứ đã sai hai lần trong chính
+        codebase này ("o dau" khớp vào giữa "chỗ đậu" và biến một câu đặt chỗ
+        thành câu hỏi cách làm).
+
+        Thay vào đó, mỗi lượt mang theo NHÃN dịch vụ dựng từ tool ĐÃ CHẠY THẬT
+        (`workflow_tasks.tool`) — dữ kiện chắc chắn, không phải suy đoán. Model
+        đọc nhãn rồi tự bỏ qua thứ không liên quan; nó vốn giỏi việc đó hơn một
+        bảng từ khoá. Và nếu nó lọc sai thì guard `_fields_taken_from_recall`
+        vẫn chặn: ký ức sai chỉ tốn token, không thành hành động sai.
+
+        `assistant_answer` có thể NULL (workflow chưa kịp trả lời) — vẫn lấy,
+        vì câu người dùng đã nói tự nó là ngữ cảnh.
+        """
+        if limit <= 0:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    w.goal,
+                    w.assistant_answer,
+                    w.created_at,
+                    array_remove(array_agg(DISTINCT t.tool), NULL) AS tools,
+                    -- Input ĐÃ CHẠY THẬT của các bước, gộp lại. Đây là nguồn
+                    -- duy nhất cho "lần trước bạn chọn gì": nó là giá trị đã
+                    -- được validate và đã đi vào provider, không phải một chuỗi
+                    -- moi lại từ câu người dùng gõ.
+                    COALESCE(
+                        jsonb_object_agg(t.task_id, t.input_data)
+                            FILTER (WHERE t.input_data IS NOT NULL),
+                        '{}'::jsonb
+                    ) AS inputs
+                FROM workflows w
+                LEFT JOIN workflow_tasks t ON t.workflow_id = w.workflow_id
+                WHERE w.owner_user_id = $1
+                  AND w.goal IS NOT NULL
+                  AND ($2::uuid IS NULL OR w.workflow_id <> $2::uuid)
+                GROUP BY w.workflow_id, w.goal, w.assistant_answer, w.created_at
+                ORDER BY w.created_at DESC
+                LIMIT $3
+                """,
+                _uuid(owner_user_id),
+                _uuid(exclude_workflow_id) if exclude_workflow_id else None,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
     async def current_step_titles(self, workflow_ids: list[str]) -> dict[str, str]:
         """Tool của bước đang chạy (hoặc đang chờ) cho từng workflow."""
         if not workflow_ids:

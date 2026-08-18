@@ -109,7 +109,14 @@ class _FakePlanner:
     def __init__(self, results: dict[str, PlannerResult]) -> None:
         self.results = results
 
-    async def plan(self, goal: str, existing_context: dict[str, Any]) -> PlannerResult:
+    async def plan(self, goal: str, existing_context: dict[str, Any],
+        # Ký ức hội thoại. Fake PHẢI nhận tham số này, kể cả khi không dùng:
+        # graph gọi `plan(..., recalled=...)`, và một fake thiếu tham số sẽ ném
+        # TypeError — vốn bị `except Exception` trong `plan_node` nuốt và biến
+        # thành `planning_error`. Test khi đó đỏ ở một chỗ hoàn toàn khác, với
+        # `KeyError: 'planner_status'`, không nhắc gì tới chữ ký hàm.
+        recalled: list[dict[str, Any]] | None = None,
+    ) -> PlannerResult:
         return self.results[goal]
 
 

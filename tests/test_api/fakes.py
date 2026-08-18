@@ -140,7 +140,14 @@ class FakePlanner:
         self.error = error
         self.calls: list[tuple[str, dict]] = []
 
-    async def plan(self, goal: str, existing_context: dict | None = None) -> PlannerResult:
+    async def plan(self, goal: str, existing_context: dict | None = None,
+        # Ký ức hội thoại. Fake PHẢI nhận tham số này, kể cả khi không dùng:
+        # graph gọi `plan(..., recalled=...)`, và một fake thiếu tham số sẽ ném
+        # TypeError — vốn bị `except Exception` trong `plan_node` nuốt và biến
+        # thành `planning_error`. Test khi đó đỏ ở một chỗ hoàn toàn khác, với
+        # `KeyError: 'planner_status'`, không nhắc gì tới chữ ký hàm.
+        recalled: list[dict[str, Any]] | None = None,
+    ) -> PlannerResult:
         self.calls.append((goal, existing_context or {}))
         if self.error is not None:
             raise self.error

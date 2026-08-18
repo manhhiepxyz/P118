@@ -1155,6 +1155,7 @@ async def _run_demo_job(
             workflow_id=workflow_id,
             on_stage=on_stage,
             existing_context=job["existing_context"],
+            recalled=job.get("recalled") or None,
             user_answers=job.get("user_answers") or {},
             approve_mock_payment=approve_mock_payment,
             resident_url=service_urls["resident"],
@@ -1513,7 +1514,13 @@ def _viewing_facts(approval: DemoViewingApproval | None) -> dict[str, Any] | Non
     return {k: v for k, v in facts.items() if v is not None}
 
 
-def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list[str]) -> ReplyView:
+def _reply_view(
+    response: DemoWorkflowResponse,
+    *,
+    goal: str,
+    capabilities: list[str],
+    recalled: list[dict[str, Any]] | None = None,
+) -> ReplyView:
     """View model cho Response Agent, dựng TỪ response công khai.
 
     Đây là toàn bộ trust boundary của lớp đó, và nó gọn được vì response công
@@ -1540,6 +1547,10 @@ def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list
         ),
         steps=[{"title": task.title, "status": task.status, "message": task.message} for task in response.tasks],
         missing_fields=[MISSING_FIELD_LABELS.get(f, f) for f in response.missing_fields],
+        # Gợi ý lấy từ giá trị ĐÃ CHẠY THẬT ở lượt trước — chỉ cho những field
+        # đang hỏi, và chỉ để hỏi cho gọn. Field vẫn thiếu; người dùng vẫn xác
+        # nhận. Tra bằng tên field NỘI BỘ, không phải nhãn hiển thị.
+        recalled_hints=_recalled_hints(recalled or [], list(response.missing_fields)),
         payment_quote=(
             {"amount": response.payment_quote.get("amount"), "currency": response.payment_quote.get("currency")}
             if response.payment_quote
@@ -1599,7 +1610,7 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             return
 
         capabilities = await _capability_names_safely(job.get("owner_user_id"))
-        spoken = await _speak(current, goal=goal, capabilities=capabilities)
+        spoken = await _speak(current, goal=goal, capabilities=capabilities, recalled=job.get("recalled"))
         if spoken.answer is None:
             # `_speak` không dựng được client (thiếu key chẳng hạn). Dùng CHÍNH
             # câu deterministic mà Response Agent vốn lấy làm bản dự phòng, để
@@ -1782,7 +1793,13 @@ async def _capability_names_safely(owner_user_id: Any) -> list[str]:
     return [item.name for item in _CAPABILITY_CATALOGUE if is_resident or not item.requires_resident]
 
 
-async def _speak(response: DemoWorkflowResponse, *, goal: str, capabilities: list[str]) -> DemoWorkflowResponse:
+async def _speak(
+    response: DemoWorkflowResponse,
+    *,
+    goal: str,
+    capabilities: list[str],
+    recalled: list[dict[str, Any]] | None = None,
+) -> DemoWorkflowResponse:
     """Gắn câu trả lời tự nhiên vào response. Không bao giờ raise.
 
     Chỉ gọi ở ĐIỂM DỪNG — lúc workflow đã kết thúc hoặc đang chờ người dùng.
@@ -1809,7 +1826,7 @@ async def _speak(response: DemoWorkflowResponse, *, goal: str, capabilities: lis
             get_llm(callbacks=[usage_logger], fast=True),
             structured_output_method=structured_output_method(),
         )
-        view = _reply_view(response, goal=goal, capabilities=capabilities)
+        view = _reply_view(response, goal=goal, capabilities=capabilities, recalled=recalled)
         reply = await agent.reply(view)
         # `ResponseAgent.reply()` fail-closed về baseline khi provider lỗi hoặc
         # output bị guard loại. Thử đúng MỘT lần nữa: model không tất định và
@@ -2600,6 +2617,10 @@ async def start_demo_workflow(
         # mà bước duyệt tồn tại chính vì nó không được phép là tuỳ chọn.
         "approve_mock_payment": False,
         "existing_context": context,
+        # Ký ức hội thoại: các lượt TRƯỚC của chính người này, mỗi lượt kèm nhãn
+        # dịch vụ. Loại trừ workflow đang tạo — nó chưa có gì để nhớ, và đưa
+        # chính nó vào là để model đọc lại đề bài như thể đó là tiền lệ.
+        "recalled": await _recall_recent_turns(user["id"], exclude_workflow_id=workflow_id),
         # Thông tin liên hệ lấy từ tài khoản/provider, không từ browser.
         "contact_profile": {},
         "session_id": session_id,
@@ -2951,6 +2972,10 @@ async def continue_demo_workflow(
         "owner_user_id": user["id"],
         "approve_mock_payment": pending_approve_payment,
         "existing_context": context,
+        # Workflow con thừa hưởng ký ức như workflow gốc: người dùng đang trong
+        # cùng một cuộc trò chuyện, và câu "như lần trước" của họ không đổi
+        # nghĩa chỉ vì backend tách ra một workflow mới.
+        "recalled": await _recall_recent_turns(user["id"], exclude_workflow_id=new_workflow_id),
         # Tách riêng khỏi `existing_context`: đây là điều người dùng vừa nói
         # SAU KHI biết lựa chọn đầu không dùng được, nên nó phải thắng câu chữ
         # trong goal cũ — goal của workflow con vẫn mang nguyên "lúc 12:30".
@@ -3156,6 +3181,109 @@ async def get_demo_workflow_status(
         return response
     goal = await _read_workflow_goal(workflow_id)
     return response.model_copy(update={"goal": goal}) if goal else response
+
+
+_RECALL_LIMIT = 10
+
+# Field được phép nhớ lại. Danh sách ĐÓNG, và đó là chủ ý.
+#
+# Nhớ mọi thứ nghĩa là ký ức mang theo cả biển số, số tiền, mã đặt chỗ — dữ liệu
+# nhạy cảm hoặc đã hết hạn, đi vào prompt ở mọi lượt sau. Ở đây chỉ giữ những
+# LỰA CHỌN mà người dùng thật sự hay lặp lại, và lặp lại thì tiện.
+#
+# Ngày giờ CỐ Ý không nằm trong danh sách: "ngày 01/07" của lần trước gần như
+# chắc chắn không phải ngày lần này, nên gợi ý nó chỉ dẫn người dùng đi sai.
+_RECALLABLE_FIELDS = frozenset(
+    {"parking_zone", "vehicle_type", "project_id", "property_type", "issue_type", "transaction_type"}
+)
+
+
+def _flatten_task_inputs(inputs: Any) -> dict[str, Any]:
+    """Gộp input của mọi task thành một dict phẳng, chỉ giữ field được phép nhớ.
+
+    Bỏ InputRef (dict): chúng trỏ tới output của task khác trong CÙNG plan cũ,
+    hoàn toàn vô nghĩa ở một yêu cầu mới.
+    """
+    if not isinstance(inputs, dict):
+        return {}
+    flat: dict[str, Any] = {}
+    for task_input in inputs.values():
+        if not isinstance(task_input, dict):
+            continue
+        for field, value in task_input.items():
+            if field in _RECALLABLE_FIELDS and isinstance(value, (str, int, float)):
+                flat[field] = value
+    return flat
+
+
+def _recalled_hints(recalled: list[dict[str, Any]], missing_fields: list[str]) -> dict[str, str]:
+    """Lần trước người dùng chọn gì cho ĐÚNG những field đang hỏi.
+
+    Lấy từ lượt GẦN NHẤT có field đó. Gợi ý một giá trị từ ba tháng trước trong
+    khi tháng trước họ đã đổi sang khu B là gợi ý sai — và người dùng gật đầu
+    theo thói quen thì hệ thống vừa đặt lại đúng cái họ đã bỏ.
+    """
+    wanted = set(missing_fields)
+    hints: dict[str, str] = {}
+    for turn in recalled:  # đã sắp mới-nhất-trước
+        for field, value in (turn.get("ban_da_chon") or {}).items():
+            if field in wanted and field not in hints:
+                hints[field] = str(value)
+    return hints
+
+
+
+
+
+async def _recall_recent_turns(user_id: str, exclude_workflow_id: str | None = None) -> list[dict[str, Any]]:
+    """Ký ức hội thoại cho Planner — mỗi lượt kèm NHÃN dịch vụ nó đã dùng.
+
+    Nhãn dựng từ tool ĐÃ CHẠY THẬT, không phải suy đoán từ câu chữ. Model đọc
+    nhãn rồi tự bỏ qua thứ không liên quan — ký ức về chỗ đỗ xe không nên chen
+    vào lúc đang lập lịch tham quan.
+
+    Giới hạn 10 lượt. Đo được: mỗi lượt ~62 token, nên 10 lượt thêm ~1.300
+    token vào một prompt vốn đã 10.700 — khoảng +10% chi phí. Vượt qua đó, giá
+    trị giảm nhanh còn rủi ro tăng: model bắt đầu bám vào thông tin cũ đã hết
+    hạn.
+
+    Best-effort: đọc hỏng thì Planner chạy KHÔNG có ký ức, đúng như trước khi
+    có tính năng này. Trí nhớ là thứ làm câu hỏi hay hơn, không phải thứ để
+    workflow sống chết theo nó.
+    """
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            rows = await repository.recent_turns_for_owner(
+                owner_user_id=str(user_id),
+                exclude_workflow_id=exclude_workflow_id,
+                limit=_RECALL_LIMIT,
+            )
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - ký ức hỏng không được làm hỏng yêu cầu
+        logger.warning("không đọc được ký ức hội thoại; planner chạy không có ngữ cảnh cũ")
+        return []
+
+    turns: list[dict[str, Any]] = []
+    for row in rows:
+        services = [
+            _TOOL_PRESENTATION[tool][0] for tool in (row.get("tools") or []) if tool in _TOOL_PRESENTATION
+        ]
+        turn: dict[str, Any] = {"ban_da_noi": row["goal"]}
+        chosen = _flatten_task_inputs(row.get("inputs"))
+        if chosen:
+            turn["ban_da_chon"] = chosen
+        if row.get("assistant_answer"):
+            turn["p118_da_tra_loi"] = row["assistant_answer"]
+        if services:
+            turn["dich_vu"] = sorted(set(services))
+        created = row.get("created_at")
+        if created is not None:
+            turn["khi"] = created.date().isoformat()
+        turns.append(turn)
+    return turns
 
 
 async def _read_workflow_goal(workflow_id: str) -> str | None:

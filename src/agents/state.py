@@ -29,6 +29,17 @@ class AgentState(TypedDict, total=False):
     # --- Input của planner graph --------------------------------------------
     goal: str
     existing_context: dict[str, Any]
+    # Ký ức hội thoại — các lượt hỏi–đáp TRƯỚC của cùng người dùng.
+    #
+    # PHẢI khai báo ở đây. `AgentState` là TypedDict và LangGraph bỏ IM LẶNG mọi
+    # khoá không có trong schema: thiếu dòng này thì `recalled` vẫn truyền được
+    # vào graph, vẫn không có lỗi nào, và Planner chỉ đơn giản không bao giờ
+    # nhận được ký ức.
+    #
+    # KHÁC `existing_context`: đó là dữ kiện của lần này, còn đây là chuyện cũ.
+    # Xem `Planner._fields_taken_from_recall` — chuyện cũ không được phép trở
+    # thành hành động mà chưa ai xác nhận.
+    recalled: list[dict[str, Any]]
 
     # Câu người dùng vừa trả lời cho câu hỏi bổ sung — PHẢI khai ở đây.
     #

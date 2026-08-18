@@ -434,6 +434,10 @@ async def run_demo_workflow(
     workflow_id: str | None = None,
     on_stage: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     existing_context: dict[str, Any] | None = None,
+    # Ký ức hội thoại — các lượt TRƯỚC của cùng người dùng. KHÁC
+    # `existing_context`: đó là dữ kiện lần này, đây là chuyện cũ, và
+    # `Planner._fields_taken_from_recall` không cho chuyện cũ thành hành động.
+    recalled: list[dict[str, Any]] | None = None,
     # Field người dùng VỪA trả lời trong lượt hỏi lại. Tách khỏi
     # `existing_context` vì nó có thẩm quyền cao hơn: goal vẫn mang câu cũ
     # ("lúc 12:30"), còn đây là điều người dùng vừa nói ("13h").
@@ -523,6 +527,8 @@ async def run_demo_workflow(
             "existing_context": trusted_context,
             "user_answers": dict(user_answers or {}),
         }
+        if recalled:
+            initial_state["recalled"] = list(recalled)
         if workflow_id is not None:
             initial_state["workflow_id"] = workflow_id
         return await graph.ainvoke(initial_state)

@@ -37,7 +37,24 @@ if TYPE_CHECKING:  # pragma: no cover - chỉ dùng cho type checker
     from src.agents.response_agent import ReplyView
 
 
-RESPONSE_SYSTEM_PROMPT = """Bạn là P-118, trợ lý dịch vụ cư dân, đang nói chuyện với khách hàng bằng tiếng Việt.
+RESPONSE_SYSTEM_PROMPT = """
+## `lan_truoc_chon` — hỏi cho gọn, đừng tự trả lời
+
+Khi payload có `lan_truoc_chon`, đó là lựa chọn của người dùng ở LẦN TRƯỚC cho
+đúng những field đang còn thiếu.
+
+Dùng nó để biến câu hỏi trống thành câu hỏi có gợi ý:
+  - Trống:   "Bạn cho mình biết khu vực đỗ xe."
+  - Có gợi ý: "Vẫn Khu A như lần trước phải không?"
+
+Câu thứ hai hỏi đúng một lần và người dùng đáp một chữ. Câu thứ nhất bắt họ nhớ
+lại hộ hệ thống.
+
+TUYỆT ĐỐI KHÔNG nói như thể đã có câu trả lời ("Mình đặt Khu A như lần trước
+nhé", "Đã ghi nhận Khu A"). Field đó VẪN đang thiếu, và câu nói ấy khiến người
+dùng tưởng xong rồi.
+
+Bạn là P-118, trợ lý dịch vụ cư dân, đang nói chuyện với khách hàng bằng tiếng Việt.
 
 Bạn nhận một bản tóm tắt trạng thái đã được hệ thống xác minh. Nhiệm vụ của bạn
 là diễn đạt đúng trạng thái đó cho khách hàng và, khi cần, nói bước tiếp theo.
@@ -109,6 +126,9 @@ def build_response_user_message(view: ReplyView) -> str:
         "viec_ban_can_lam_de_dung_duoc": view.next_step,
         "cac_buoc": view.steps,
         "thong_tin_con_thieu": view.missing_fields,
+        # Lần trước người dùng chọn gì cho đúng những field này. Dùng để HỎI
+        # cho gọn, KHÔNG phải để coi như đã có câu trả lời.
+        **({"lan_truoc_chon": view.recalled_hints} if view.recalled_hints else {}),
         "khoan_can_xac_nhan": view.payment_quote,
         # Luôn gửi, kể cả khi False: đây là một sự thật cần khẳng định, không
         # phải một field tuỳ chọn. `compact` phía dưới lọc bỏ None/[]/{} chứ
