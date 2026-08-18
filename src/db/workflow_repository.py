@@ -96,6 +96,41 @@ def _require_one_row(command_tag: str, workflow_id: str, task_id: str) -> None:
         raise TaskNotFoundError(workflow_id, task_id)
 
 
+# Workflow này còn việc gì SẼ diễn ra không?
+#
+# Không có bảng `events` chung, nên lịch nằm rải ở các bảng nghiệp vụ. Hai
+# nguồn có thật trong dữ liệu hiện tại:
+#
+#   - `workflow_tasks.result_data->>'booking_date'` — chỗ đỗ xe đã đặt.
+#   - `viewing_approvals.viewing_date` — lịch tham quan, nối bằng `workflow_id`.
+#
+# Khảo sát toàn bộ `result_data` cho thấy CHỈ `book_parking` sinh ra ngày; các
+# tool khác trả id hoặc trạng thái. Nên đây không phải là "quét mọi khoá trông
+# giống ngày" — nó là hai nguồn đã kiểm chứng, và mọi thứ khác rơi về "không có
+# sự kiện tương lai".
+#
+# Ngày lưu dạng chuỗi `YYYY-MM-DD`; so bằng `>= CURRENT_DATE` nên một lịch trong
+# hôm nay vẫn tính là sắp tới cho tới hết ngày. Đó là chủ ý: người dùng còn phải
+# đi, và đẩy nó sang "Đã xong" lúc 00:01 là nói sai.
+#
+# `~ '^\d{4}-\d{2}-\d{2}$'` chặn dữ liệu rác: một chuỗi không phải ngày mà đem
+# cast sẽ ném lỗi và làm hỏng cả truy vấn danh sách.
+_FUTURE_EVENT_SQL = r"""(
+    EXISTS (
+        SELECT 1 FROM workflow_tasks te
+        WHERE te.workflow_id = w.workflow_id
+          AND te.result_data ->> 'booking_date' ~ '^\d{4}-\d{2}-\d{2}$'
+          AND (te.result_data ->> 'booking_date')::date >= CURRENT_DATE
+    )
+    OR EXISTS (
+        SELECT 1 FROM viewing_approvals va
+        WHERE va.workflow_id = w.workflow_id
+          AND va.viewing_date::text ~ '^\d{4}-\d{2}-\d{2}$'
+          AND va.viewing_date::date >= CURRENT_DATE
+    )
+)"""
+
+
 class TaskNotFoundError(RuntimeError):
     """UPDATE nhắm vào một workflow_task không tồn tại.
 
@@ -739,6 +774,7 @@ class WorkflowRepository:
         statuses: tuple[str, ...] | None,
         limit: int,
         owner_user_id: str | None = None,
+        upcoming: bool | None = None,
     ) -> list[dict]:
         """Liệt kê workflow kèm số task đã xong — đọc thẳng PostgreSQL.
 
@@ -755,6 +791,10 @@ class WorkflowRepository:
 
         Row legacy (`owner_user_id IS NULL`) KHÔNG khớp: dữ liệu cũ giữ lại để
         truy vết nhưng không hiện cho tài khoản nào.
+
+        `upcoming=True` chỉ lấy workflow còn một sự kiện CHƯA DIỄN RA;
+        `upcoming=False` lấy phần còn lại. None = không quan tâm. Xem
+        `_FUTURE_EVENT_SQL`.
         """
         where = ["w.archived_at IS NULL"]
         params: list[object] = []
@@ -764,6 +804,8 @@ class WorkflowRepository:
         if statuses:
             params.append(list(statuses))
             where.append(f"w.status = ANY(${len(params)}::varchar[])")
+        if upcoming is not None:
+            where.append(_FUTURE_EVENT_SQL if upcoming else f"NOT ({_FUTURE_EVENT_SQL})")
         params.append(limit)
 
         async with self._pool.acquire() as conn:

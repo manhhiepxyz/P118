@@ -163,7 +163,11 @@ export interface AgentViewingApproval {
 }
 
 export interface AgentWorkflowResponse {
-  status: AgentWorkflowStatus
+  /* Union HIỂN THỊ: backend trả cả `CANCELLED` và các mã lỗi terminal.
+     Dùng union hẹp hơn ở đây thì mọi phép so với 'CANCELLED' bị TypeScript báo
+     "không bao giờ khớp" — và cách chữa dễ nhất lại là bỏ nhánh đó đi, tức là
+     giao diện im lặng với đúng những workflow đã bị huỷ. */
+  status: AgentDisplayWorkflowStatus
   stage?: AgentWorkflowStage | null
   workflow_id: string | null
   session_id: string | null
@@ -198,6 +202,10 @@ export interface AgentWorkflowResponse {
   answer: string | null
   /** Câu người dùng đã nói, nguyên văn — để dựng lại cuộc trao đổi. */
   goal: string | null
+  /** Mã lỗi đã ghim (`EXECUTION_ERROR`, …) — null khi không hỏng. */
+  error_code: string | null
+  /** Gửi lại có ích không. `null` = không có lỗi, KHÁC `false` = thử lại vô ích. */
+  retryable: boolean | null
   /** Tối đa 3 việc gợi ý tiếp theo, chỉ gồm dịch vụ tài khoản đang dùng được. */
   suggestions: string[]
   /**

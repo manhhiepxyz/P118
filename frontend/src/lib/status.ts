@@ -349,6 +349,30 @@ const FAILURE_TEXT: Record<string, string> = {
   LLM_CONFIGURATION_ERROR: 'Hệ thống chưa sẵn sàng xử lý yêu cầu. Bạn báo giúp ban quản lý nhé.',
 }
 
+/**
+ * Vì sao yêu cầu này chưa xong — câu cho NGƯỜI dùng, kèm việc họ làm được tiếp.
+ *
+ * Danh sách Lịch sử gộp "đang chạy / đang chờ quyết / dừng giữa chừng" vào một
+ * nhóm "Chưa xong", vì từ chỗ người dùng đứng cả ba là cùng một câu. Phép gộp
+ * đó chỉ đúng nếu trang chi tiết THẬT SỰ nói ra vấn đề cụ thể — nếu không, ta
+ * vừa bỏ ba lối vào vừa không đưa gì vào chỗ chúng dẫn tới.
+ *
+ * `retryable` quyết định vế thứ hai. Mời người dùng "thử lại" một lỗi không thể
+ * thử lại là bắt họ lặp cùng một thất bại; im lặng với một lỗi thử lại được là
+ * bỏ rơi họ ở đúng chỗ họ tự thoát ra được.
+ */
+export function describeWorkflowFailure(
+  errorCode: string | null | undefined,
+  retryable: boolean | null | undefined,
+): string {
+  const why = errorCode ? (FAILURE_TEXT[errorCode] ?? 'Yêu cầu này dừng giữa chừng.') : 'Yêu cầu này dừng giữa chừng.'
+  const next = retryable
+    ? 'Bạn gửi lại yêu cầu này là mình chạy tiếp được.'
+    : 'Việc này cần được xử lý lại từ phía hệ thống, bạn gửi lại cũng sẽ hỏng như cũ.'
+  return `${why} ${next}`
+}
+
+
 export function describeFailure(task: { error_code?: string | null; error_message?: string | null }): string {
   if (task.error_message) return task.error_message
   const code = task.error_code

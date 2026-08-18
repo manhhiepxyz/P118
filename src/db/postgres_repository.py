@@ -287,8 +287,11 @@ class PostgreSQLWorkflowStateRepository:
         statuses: tuple[str, ...] | None = None,
         limit: int = 20,
         owner_user_id: str | None = None,
+        upcoming: bool | None = None,
     ) -> list[dict]:
-        return await self.workflows.list_workflows(statuses=statuses, limit=limit, owner_user_id=owner_user_id)
+        return await self.workflows.list_workflows(
+            statuses=statuses, limit=limit, owner_user_id=owner_user_id, upcoming=upcoming
+        )
 
     async def current_step_titles(self, workflow_ids: list[str]) -> dict[str, str]:
         return await self.workflows.current_step_titles(workflow_ids)

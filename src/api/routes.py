@@ -1674,6 +1674,20 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     )
     plan = _plan_from_job_or_record(None, record)
     tasks = _polling_task_views(plan, record)
+    # `error_code` phải đi cùng status.
+    #
+    # Nhánh này dựng response TỪ DATABASE — đúng đường mà mọi workflow đi sau
+    # khi backend restart, hoặc khi người dùng mở lại một yêu cầu cũ. Bỏ
+    # `error_code` ở đây nghĩa là trang chi tiết biết việc đã hỏng mà không biết
+    # vì sao, và câu duy nhất nó nói được là "Chưa xong".
+    # Phân loại qua `failure_for_code`, KHÔNG dựng bảng thứ hai. "Lỗi này có
+    # thử lại được không" đã có đúng một câu trả lời trong `common/failures.py`;
+    # thêm một bảng nữa ở tầng API là thêm một chỗ để hai bên nói khác nhau, và
+    # cái sai sẽ im lặng — nó chỉ đổi một câu chữ trên màn hình.
+    #
+    # Mã lạ (ghi bởi phiên bản cũ hơn) trả None thay vì đoán: đoán sai
+    # `retryable` sẽ mời người dùng thử lại một việc không bao giờ chạy được.
+    failure = failure_for_code(record["workflow"].get("error_code"))
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status=status,
@@ -1681,6 +1695,8 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
         summary=_DEFAULT_BASELINE.get(status) if status in {"SUCCESS", "FAILED", "CANCELLED"} else None,
         tasks=tasks,
         persisted=True,
+        error_code=failure.code if failure else None,
+        retryable=failure.retryable if failure else None,
     )
 
 
@@ -3743,16 +3759,53 @@ _COMPLETED_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
 # nội bộ, nhưng đặt tên "Đã xong" cho một việc đã hỏng là nói sai với người
 # đang tìm nó.
 _SUCCEEDED_STATUSES = ("SUCCESS",)
-_UNFINISHED_STATUSES = ("FAILED", "CANCELLED")
+# "Đang xử lý" là MỘT nhóm: đang chạy, chờ duyệt, chờ chính người dùng.
+#
+# Tách chúng ra bắt người dùng ĐOÁN TRƯỚC việc của mình đang kẹt kiểu gì thì mới
+# biết bấm tab nào — mà nếu đoán được thì họ đã không cần đi tìm. Từ chỗ họ
+# đứng, cả ba là cùng một câu: việc này chưa xong. Vấn đề CỤ THỂ thuộc về trang
+# chi tiết, nơi có đủ chỗ để nói nó là gì.
+_IN_PROGRESS_STATUSES = _ACTIVE_STATUSES + _ATTENTION_STATUSES
 
+# Bộ lọc dạng "chỉ theo trạng thái". `upcoming`/`done` cần thêm một câu hỏi nữa
+# — workflow này còn sự kiện nào chưa diễn ra không — nên chúng nằm ở
+# `_EVENT_FILTERS` bên dưới, không nhét vừa vào bảng này.
 _LIST_FILTERS: dict[str, tuple[str, ...]] = {
-    "active": _ACTIVE_STATUSES + _ATTENTION_STATUSES,
+    "active": _IN_PROGRESS_STATUSES,
+    "in-progress": _IN_PROGRESS_STATUSES,
     "running": _ACTIVE_STATUSES,
     "attention": _ATTENTION_STATUSES,
     "completed": _COMPLETED_STATUSES,
     "succeeded": _SUCCEEDED_STATUSES,
-    "unfinished": _UNFINISHED_STATUSES,
     "all": (),
+}
+
+# Hai bộ lọc chia đôi phần ĐÃ KẾT THÚC theo việc còn lịch phía trước hay không.
+#
+#   "upcoming" — đã kết thúc nhưng còn một sự kiện chưa diễn ra (chỗ đỗ đã đặt
+#                cho tuần sau, lịch tham quan ngày mai). Người dùng chưa xong
+#                việc: họ còn phải đi.
+#   "done"     — đã kết thúc và không còn gì phía trước.
+#
+# CẢ HAI dùng cùng một tập trạng thái, và chúng khác nhau đúng ở phép phủ định.
+# Nhờ vậy hợp của ba tab bằng "Tất cả" — không yêu cầu nào rơi ra ngoài mọi bộ
+# lọc rồi chỉ tìm thấy khi xem tất cả.
+#
+# Bản đầu giới hạn "upcoming" ở SUCCESS. Đo trên dữ liệu thật thì HAI workflow
+# biến mất khỏi cả ba tab: một FAILED và một CANCELLED, mỗi cái vẫn giữ một chỗ
+# đỗ xe cho tháng sau. Chúng không lọt vào "upcoming" (không phải SUCCESS) và
+# cũng không lọt vào "done" (còn sự kiện tương lai).
+#
+# Và đó không chỉ là lỗi đếm: người dùng có một chỗ đã giữ, có ngày cụ thể, mà
+# không màn hình nào cho họ nhìn thấy. Workflow hỏng giữa chừng không có nghĩa
+# là mọi thứ nó đã đặt đều tự biến mất.
+#
+# FAILED/CANCELLED nằm ở đây chứ không phải "đang xử lý": không ai đang xử lý
+# chúng cả. Nhãn trạng thái trên từng dòng vẫn nói rõ "Chưa xong" / "Đã huỷ",
+# nên chỗ đứng của chúng không bị hiểu nhầm thành thành công.
+_EVENT_FILTERS: dict[str, tuple[tuple[str, ...], bool]] = {
+    "upcoming": (_COMPLETED_STATUSES, True),
+    "done": (_COMPLETED_STATUSES, False),
 }
 
 _LIST_LIMIT_MAX = 50
@@ -3801,7 +3854,7 @@ async def list_demo_workflows(
     Bù lại, nó không trả bất kỳ dữ liệu cá nhân nào: chỉ id, tiêu đề cắt từ
     goal, trạng thái, số bước và mốc thời gian.
     """
-    if status not in _LIST_FILTERS:
+    if status not in _LIST_FILTERS and status not in _EVENT_FILTERS:
         raise HTTPException(status_code=422, detail="Bộ lọc trạng thái không hợp lệ.")
     if limit < 1 or limit > _LIST_LIMIT_MAX:
         raise HTTPException(status_code=422, detail="Giới hạn số dòng không hợp lệ.")
@@ -3830,8 +3883,13 @@ async def list_demo_workflows(
             # trong SQL, không đọc hết rồi lọc ở Python.
             rows = await repository.list_workflows_by_session(session_id, owner_user_id=user["id"])
         else:
-            statuses = _LIST_FILTERS[status] or None
-            rows = await repository.list_workflows(statuses=statuses, limit=limit, owner_user_id=user["id"])
+            if status in _EVENT_FILTERS:
+                statuses, upcoming = _EVENT_FILTERS[status]
+            else:
+                statuses, upcoming = _LIST_FILTERS[status] or None, None
+            rows = await repository.list_workflows(
+                statuses=statuses, limit=limit, owner_user_id=user["id"], upcoming=upcoming
+            )
         step_tools = await repository.current_step_titles([str(row["workflow_id"]) for row in rows])
     finally:
         await pool.close()

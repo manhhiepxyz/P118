@@ -5,6 +5,7 @@ import { ArrowLeft, CheckCircle2, ChevronDown, Clock3, Info, XCircle } from 'luc
 import { ClarificationReply } from '../components/ClarificationReply'
 import { ResultSummary } from '../components/workspace/ResultSummary'
 import { StepList } from '../components/workspace/StepList'
+import { describeFailure, describeWorkflowFailure } from '../lib/status'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { continueWorkflow, decidePayment } from '../lib/agentApi'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
@@ -167,6 +168,8 @@ export function WorkflowPage() {
   // Tiêu đề gọn: nói KẾT QUẢ, không lặp lại cả câu tường thuật.
   const headline = finished && resultTask ? `${resultTask.title} thành công` : (data.summary || data.message || 'Yêu cầu của bạn')
   const needsInfo = data.status === 'NEEDS_INFORMATION'
+  /** Bước hỏng ĐẦU TIÊN — cái sau thường chỉ là hệ quả của cái này. */
+  const failedStep = data.tasks.find((task) => task.status === 'FAILED')
   const quote = data.payment_quote ?? {}
   // Cùng status WAITING_APPROVAL nhưng KHÁC loại chờ: lịch tham quan chờ đơn vị
   // duyệt, khách chỉ xem. Phân biệt bằng `viewing_approval`, không dùng status
@@ -223,6 +226,34 @@ export function WorkflowPage() {
 
               Đó là mất mát thật — các bước nói HỆ THỐNG đã làm gì, còn câu này
               nói KẾT QUẢ nghĩa là gì với họ. */}
+          {/* ── Vì sao chưa xong ─────────────────────────────────────
+              Lịch sử gộp "đang chạy / đang chờ quyết / dừng giữa chừng" vào một
+              nhóm "Chưa xong". Phép gộp đó chỉ đúng nếu trang này THẬT SỰ nói
+              ra vấn đề cụ thể — nếu không, ta vừa bỏ ba lối vào vừa không đưa
+              gì vào chỗ chúng dẫn tới.
+
+              Trước đây trang chi tiết chỉ hiện nhãn "Chưa xong" và im lặng về
+              lý do, dù `error_code` và `retryable` đã nằm sẵn trong response. */}
+          {(data.status === 'FAILED' || data.status === 'CANCELLED') && (
+            <section
+              className="rise mt-9 rounded-[var(--r-sm)] px-5 py-4"
+              style={{ backgroundColor: 'color-mix(in srgb, var(--danger) 7%, transparent)' }}
+              aria-label="Vì sao chưa xong"
+            >
+              <p className="text-[13px] font-semibold" style={{ color: 'var(--danger)' }}>
+                Vì sao chưa xong
+              </p>
+              <p className="mt-2 text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                {describeWorkflowFailure(data.error_code, data.retryable)}
+              </p>
+              {failedStep && (
+                <p className="mt-2.5 text-[13.5px] text-[var(--text-secondary)]">
+                  Dừng ở bước “{failedStep.title}”: {describeFailure(failedStep)}
+                </p>
+              )}
+            </section>
+          )}
+
           {/* ── Trao đổi ─────────────────────────────────────────────
               Câu người dùng đã nói + câu P-118 trả lời, đặt cạnh nhau.
 

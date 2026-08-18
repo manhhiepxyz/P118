@@ -20,21 +20,26 @@ import { usePolling } from '../lib/usePolling'
  */
 
 /*
- * Năm câu trả lời cho đúng một câu hỏi: việc của tôi đang ra sao?
+ * Ba câu trả lời cho "việc của tôi đang ra sao", cộng "Tất cả".
  *
- * Không nhóm nào chồng lên nhóm nào, và hợp của bốn nhóm đầu bằng "Tất cả" —
- * nên không có yêu cầu nào rơi ra ngoài mọi bộ lọc rồi chỉ tìm thấy khi xem
- * tất cả.
+ *   Đang xử lý — chưa chạy xong: đang chạy, chờ duyệt, hoặc chờ chính bạn.
+ *   Sắp tới    — chạy xong rồi nhưng còn một sự kiện CHƯA diễn ra (chỗ đỗ đã
+ *                đặt cho tuần sau, lịch tham quan ngày mai). Việc của bạn chưa
+ *                khép lại: bạn còn phải đi.
+ *   Đã xong    — đã kết thúc và không còn gì phía trước.
  *
- * "Cần bạn" cũ được lọc lại ở CLIENT sau khi xin `active` từ server, tức là
- * một khái niệm thứ hai về cùng một thứ, đặt ở tầng khác. Giờ server có
- * `attention` đúng nghĩa và client chỉ việc hỏi.
+ * "Sắp tới" là chiều thông tin mà trạng thái workflow KHÔNG mang: một chỗ đỗ
+ * đặt cho tháng sau và một chỗ đỗ đã dùng xong đều là SUCCESS, nhưng chỉ một
+ * trong hai còn cần người dùng nhớ.
+ *
+ * FAILED/CANCELLED nằm ở "Đã xong" — không ai đang xử lý chúng cả. Nhãn trạng
+ * thái trên từng dòng vẫn nói "Chưa xong" / "Đã huỷ", nên chúng không bị hiểu
+ * nhầm thành thành công.
  */
 const FILTERS = [
-  { value: 'active', label: 'Đang diễn ra' },
-  { value: 'attention', label: 'Đang chờ quyết' },
-  { value: 'succeeded', label: 'Đã xong' },
-  { value: 'unfinished', label: 'Chưa xong' },
+  { value: 'in-progress', label: 'Đang xử lý' },
+  { value: 'upcoming', label: 'Sắp tới' },
+  { value: 'done', label: 'Đã xong' },
   { value: 'all', label: 'Tất cả' },
 ] as const
 
@@ -43,10 +48,9 @@ type FilterValue = (typeof FILTERS)[number]['value']
 /* Câu rỗng nói đúng NHÓM đang xem. "Chưa có hành trình nào" khi người dùng
    đang lọc "Đã xong" đọc như tài khoản trống trơn, dù họ có hai chục yêu cầu. */
 const EMPTY_TEXT: Record<string, string> = {
-  active: 'Không có hành trình nào đang diễn ra.',
-  attention: 'Không có việc nào đang chờ bạn quyết.',
-  succeeded: 'Chưa có hành trình nào hoàn thành.',
-  unfinished: 'Không có hành trình nào dừng giữa chừng.',
+  'in-progress': 'Không có việc nào đang xử lý.',
+  upcoming: 'Không có lịch nào sắp tới.',
+  done: 'Chưa có hành trình nào kết thúc.',
   all: 'Chưa có hành trình nào.',
 }
 const RESUMABLE = new Set(['PENDING', 'RUNNING', 'NEEDS_INFORMATION', 'WAITING_APPROVAL'])
@@ -63,7 +67,9 @@ const TONE: Record<string, { label: string; token: string }> = {
 }
 
 export function WorkflowsPage() {
-  const [filter, setFilter] = useState<FilterValue>('all')
+  // Mặc định "Đang xử lý": thứ người dùng mở Lịch sử để tìm gần như luôn là
+  // việc còn dở, không phải kho lưu trữ.
+  const [filter, setFilter] = useState<FilterValue>('in-progress')
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
