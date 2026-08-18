@@ -214,6 +214,23 @@ export function WorkflowPage() {
             </div>
           </div>
 
+          {/* ── Câu P-118 nói về chính yêu cầu này ───────────────────
+              `data.answer` do Response Agent viết và ĐƯỢC LƯU vào
+              `workflows.assistant_answer`. Trước đây nó chỉ render trong nhánh
+              "cần bổ sung thông tin", nên với workflow đã xong, câu ấy nằm
+              trong database mà không ai đọc được: người dùng mở lại một yêu cầu
+              cũ và chỉ thấy danh sách bước.
+
+              Đó là mất mát thật — các bước nói HỆ THỐNG đã làm gì, còn câu này
+              nói KẾT QUẢ nghĩa là gì với họ. */}
+          {!needsInfo && data.answer && (
+            <section className="rise mt-9">
+              <p className="mat-raised whitespace-pre-line rounded-[var(--r-sm)] px-5 py-4 text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                {data.answer}
+              </p>
+            </section>
+          )}
+
           {/* ── Cần bạn bổ sung ─────────────────────────────────────── */}
           {needsInfo && data.question && (
             <section className="rise mt-9">

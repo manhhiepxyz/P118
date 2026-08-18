@@ -966,8 +966,12 @@ async function main() {
 
   await pageA.reload()
   await pageA.waitForTimeout(5000)
+  // Đo HỘI THOẠI, không đo danh sách workflow. `cardWorkflowIds` mở một tab
+  // sang `/workflows` và liệt kê MỌI workflow của người dùng — tới bước này họ
+  // đã có cả chục, nên phép kiểm cũ không thể đạt và nó không hề nói về thứ nó
+  // định nói: sau F5, khung chat phải TRỐNG.
   check('8a. F5 mở cuộc trò chuyện mới, không tự nhét workflow cũ vào chat',
-    (await cardWorkflowIds(pageA)).length === 0
+    (await pageA.locator('[data-turn]').count()) === 0
     && (await pageA.locator('#clarification-reply').count()) === 0
     && (await pageA.locator('#ws-composer').count()) === 1
     // Hội thoại giờ ở `/workspace`; `/` chỉ còn là chặng chuyển hướng.
@@ -1045,11 +1049,14 @@ async function main() {
   check('8f. Đăng nhập lại vẫn thấy yêu cầu trong danh sách workflow',
     afterRelogin.includes('Đăng ký ô tô, đặt chỗ đỗ xe'))
 
-  const cardLinks = await pageA.locator('a[href^="/workflow/"]').evaluateAll(
-    (els) => els.map((e) => e.getAttribute('href')))
+  // Đếm HÀNG, không đếm thẻ `<a>`: mỗi hàng có ba `<Link>` cùng trỏ về một
+  // workflow (tiêu đề, trạng thái, mũi tên), nên phép đếm cũ luôn báo "nhân
+  // đôi" — nó đo số lối vào chứ không đo số workflow.
+  const cardLinks = await pageA.locator('[data-workflow-row]').evaluateAll(
+    (els) => els.map((e) => e.getAttribute('data-workflow-row')))
   check('8g. Danh sách không nhân đôi workflow',
-    new Set(cardLinks).size === cardLinks.length,
-    `thẻ=${cardLinks.length} khác nhau=${new Set(cardLinks).size}`)
+    cardLinks.length > 0 && new Set(cardLinks).size === cardLinks.length,
+    `hàng=${cardLinks.length} khác nhau=${new Set(cardLinks).size}`)
 
   // Workflow cha đã archived không được hiện thành một yêu cầu riêng.
   check('8h. Workflow cha đã bàn giao không hiện lại',
