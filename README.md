@@ -218,7 +218,7 @@ bash scripts/setup_hooks.sh
 
 | Biến | Mặc định | Ghi chú |
 |---|---|---|
-| `LLM_PROVIDER` | `deepseek` | `deepseek` \| `openai` \| `openrouter` |
+| `LLM_PROVIDER` | `deepseek` | `deepseek` \| `openai` \| `openrouter` \| `groq` |
 | `DEEPSEEK_API_KEY` | *(trống)* | Bắt buộc khi provider là `deepseek` |
 | `DEEPSEEK_MODEL_NAME` | `deepseek-v4-flash` | Ghim đúng model này |
 | `DATABASE_URL` | `postgresql://p118:p118pass@localhost:5432/p118_db` | Docker Compose tự override sang host `postgres` |

@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # LLM
     # `Literal` là allowlist provider. Giá trị ngoài danh sách bị Pydantic từ
     # chối ngay lúc nạp cấu hình, không âm thầm rơi về một provider mặc định.
-    llm_provider: Literal["openai", "openrouter", "deepseek"] = "openai"
+    llm_provider: Literal["openai", "openrouter", "deepseek", "groq"] = "openai"
     openai_api_key: str = ""
     model_name: str = "gpt-4o-mini"
     openrouter_api_key: str = ""
@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # không lặng lẽ đổi model đang chạy production demo.
     deepseek_api_key: str = ""
     deepseek_model_name: str = "deepseek-v4-flash"
+
+    # Groq — API tương thích OpenAI, chạy trên phần cứng riêng nên nhanh hơn
+    # hẳn ở cùng một model. KHÔNG khoá cứng tên model như DeepSeek: danh mục
+    # Groq đổi thường xuyên và họ gỡ model cũ, nên khoá lại sẽ biến một lần dọn
+    # danh mục bên họ thành sự cố bên mình.
+    groq_api_key: str = ""
+    groq_model_name: str = "llama-3.3-70b-versatile"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     deepseek_base_url: str = "https://api.deepseek.com"
 
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
