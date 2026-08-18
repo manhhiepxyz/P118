@@ -101,6 +101,28 @@ tiên có dữ liệu:
 
 Chỉ khi CẢ 4 nguồn đều không có thì mới đưa tên field vào missing_fields.
 
+## `nho_lai` KHÔNG phải một nguồn
+
+`nho_lai` là những gì người dùng đã nói ở các lần TRƯỚC. Nó KHÔNG nằm trong bốn
+nguồn trên và KHÔNG BAO GIỜ đáp ứng được một input bắt buộc.
+
+Vì sao: "khu A" của tuần trước không phải là khu người dùng muốn hôm nay. Một
+giá trị đúng ở lần trước chỉ nói lên thói quen, không nói lên ý định lần này —
+mà hành động thì xảy ra thật: đặt nhầm chỗ, đặt nhầm ngày, và người dùng chỉ
+biết sau khi việc đã xong.
+
+Được phép dùng `nho_lai` để:
+  - HIỂU câu nói tắt: "đặt như lần trước" → biết lần trước là gì để hỏi lại cho
+    đúng trọng tâm.
+  - Đề xuất trong câu hỏi: "Vẫn khu A như lần trước phải không?"
+
+KHÔNG được dùng `nho_lai` để:
+  - Điền vào `inputs` của bất kỳ task nào.
+  - Bỏ một field ra khỏi `missing_fields`.
+
+Nói cách khác: `nho_lai` làm câu hỏi của bạn thông minh hơn, không làm bạn bớt
+hỏi đi.
+
 TUYỆT ĐỐI KHÔNG hỏi người dùng về field mà nguồn 3 cung cấp được. Ví dụ sai
 điển hình: đưa "amount" và "currency" vào missing_fields trong khi plan đã có
 book_parking ở phía trước — book_parking trả về đúng hai field đó.
@@ -534,6 +556,7 @@ def build_planner_user_message(
     goal: str,
     existing_context: dict[str, Any],
     today: str | None = None,
+    recalled: list[dict[str, Any]] | None = None,
 ) -> str:
     """Dựng user message từ mục tiêu và dữ liệu đã có.
 
@@ -566,6 +589,15 @@ def build_planner_user_message(
     }
     if today:
         payload_obj["hom_nay"] = today
+    # `nho_lai` là KHOÁ RIÊNG, không trộn vào `existing_context`.
+    #
+    # Trộn vào là xoá mất đúng thứ phân biệt chúng: `existing_context` là dữ
+    # kiện của LẦN NÀY (người dùng vừa nói, hoặc hệ thống vừa xác minh), còn
+    # `nho_lai` là chuyện cũ. Model không có cách nào biết giá trị nào thuộc
+    # loại nào nếu chúng nằm chung một túi — và cái giá của việc đoán sai là một
+    # chỗ đỗ xe đặt nhầm khu, người dùng chỉ phát hiện khi tới nơi.
+    if recalled:
+        payload_obj["nho_lai"] = recalled
     payload = json.dumps(payload_obj, ensure_ascii=False, sort_keys=True)
 
     return (

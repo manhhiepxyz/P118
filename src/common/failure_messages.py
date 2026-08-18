@@ -110,6 +110,37 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
 
 # Nhãn công khai của khu đỗ xe. Người dùng không bao giờ nhìn thấy "ZONE_A".
 _ZONE_LABELS = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}
+
+# Giá trị chuẩn của contract ↔ cách người Việt thật sự nói ra nó.
+#
+# Cần cho phép so "giá trị này có phải lấy từ chuyện cũ không": model viết lại
+# câu nói thành dạng chuẩn (`ZONE_A`), còn ký ức lưu nguyên văn ("khu A"). So
+# thô sẽ bỏ lọt đúng những ca cần bắt — và ca bị bỏ lọt là ca hệ thống lặng lẽ
+# đặt lại chỗ cũ mà không hỏi ai.
+#
+# Danh sách enum lấy từ `TOOL_CONTRACTS`; thêm enum mới mà quên ở đây thì guard
+# yếu đi chứ không sai — nó chỉ hết bắt được dạng tiếng Việt của enum đó.
+SPOKEN_FORMS: dict[str, tuple[str, ...]] = {
+    "ZONE_A": ("khu a", "zone a"),
+    "ZONE_B": ("khu b", "zone b"),
+    "car": ("ô tô", "oto", "xe hơi", "xe con"),
+    "motorcycle": ("xe máy", "xe may", "mô tô"),
+    "buy": ("mua",),
+    "rent": ("thuê", "thue"),
+    "consultation": ("tư vấn", "tu van"),
+    "apartment": ("căn hộ", "can ho"),
+    "room": ("phòng", "phong"),
+    "plumbing": ("nước", "ống nước", "vòi nước"),
+    "electrical": ("điện",),
+    "air_conditioning": ("điều hoà", "máy lạnh"),
+    "truck": ("xe tải",),
+    "van": ("xe van",),
+}
+
+
+def spoken_forms(value: str) -> tuple[str, ...]:
+    """Mọi cách một giá trị chuẩn có thể đã được NÓI RA, kèm chính nó."""
+    return (value,) + SPOKEN_FORMS.get(value, ())
 _OTHER_ZONE = {"ZONE_A": "Khu B", "ZONE_B": "Khu A"}
 
 

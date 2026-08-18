@@ -30,6 +30,8 @@ Ranh giới HITL:
 
 from __future__ import annotations
 
+import logging
+
 from datetime import date
 
 from dataclasses import dataclass, field
@@ -41,7 +43,10 @@ from src.agents.prompts.planner_prompt import (
     PLANNER_SYSTEM_PROMPT,
     build_planner_user_message,
 )
+from src.common.failure_messages import spoken_forms
 from src.common.task_plan import AllowedTool, InputRef, TaskPlan
+
+logger = logging.getLogger(__name__)
 
 # QUESTION: câu người dùng gõ là một CÂU HỎI về dịch vụ, không phải việc cần làm.
 #
@@ -608,6 +613,7 @@ class Planner:
         self,
         goal: str,
         existing_context: dict[str, Any] | None = None,
+        recalled: list[dict[str, Any]] | None = None,
     ) -> PlannerResult:
         """Lập kế hoạch cho `goal`, có tính đến dữ liệu đã có trong `existing_context`.
 
@@ -626,7 +632,7 @@ class Planner:
             system_prompt = f"{PLANNER_SYSTEM_PROMPT}\n\n{_JSON_MODE_INSTRUCTION}"
         messages = [
             ("system", system_prompt),
-            ("human", self._build_user_message(goal, context)),
+            ("human", self._build_user_message(goal, context, recalled)),
         ]
 
         for attempt in range(_MAX_CORRECTIVE_RETRIES + 1):
@@ -645,7 +651,7 @@ class Planner:
                 raise PlannerError(f"Planner không gọi được LLM ({type(exc).__name__}).") from None
 
             try:
-                return self._to_result(response, goal, context)
+                return self._to_result(response, goal, context, recalled)
             except _InconsistentResponseError as exc:
                 if is_last_attempt:
                     # Sai cả hai lần: dừng, không retry thêm.
@@ -667,16 +673,78 @@ class Planner:
         return [*messages, ("human", _CORRECTIVE_PREAMBLE + instruction)]
 
     @staticmethod
-    def _build_user_message(goal: str, existing_context: dict[str, Any]) -> str:
+    def _build_user_message(
+        goal: str,
+        existing_context: dict[str, Any],
+        recalled: list[dict[str, Any]] | None = None,
+    ) -> str:
         try:
             # Ngày hôm nay lấy tại ĐÂY, không truyền từ ngoài vào: mọi lời gọi
             # planner đều phải thấy cùng một "hôm nay" với `TaskPlanValidator`,
             # vốn cũng dùng `date.today()`. Hai nguồn ngày khác nhau thì kế
             # hoạch hợp lệ lúc dựng có thể thành quá khứ lúc kiểm.
-            return build_planner_user_message(goal, existing_context, today=date.today().isoformat())
+            return build_planner_user_message(
+                goal, existing_context, today=date.today().isoformat(), recalled=recalled
+            )
         except (TypeError, ValueError) as exc:
             # Không echo context: nó có thể chứa dữ liệu cư dân.
             raise PlannerError(f"existing_context không serialize được sang JSON ({type(exc).__name__}).") from None
+
+    @staticmethod
+    def _fields_taken_from_recall(
+        plan: TaskPlan,
+        recalled: list[dict[str, Any]],
+        existing_context: dict[str, Any],
+        goal: str,
+    ) -> list[str]:
+        """Field nào trong plan lấy giá trị TỪ CHUYỆN CŨ mà lần này chưa ai xác nhận.
+
+        Cưỡng chế bằng CODE, không chỉ bằng prompt — cùng lý do với
+        `_reject_untrusted_payment_values`. Prompt là lời khuyên: model đọc
+        "`nho_lai` không phải một nguồn" rồi vẫn có thể điền, và khi nó điền thì
+        hành động xảy ra thật. Không có gì ở giữa bắt lại.
+
+        Cái giá của một lần đoán sai không đối xứng. Hỏi thừa một câu: người
+        dùng gõ thêm ba chữ. Đặt nhầm khu vì "lần trước khu A": họ tới nơi mới
+        biết, chỗ đã bị giữ, và phải huỷ rồi đặt lại.
+
+        Một giá trị bị coi là "lấy từ chuyện cũ" khi nó xuất hiện trong
+        `nho_lai` mà KHÔNG xuất hiện trong `existing_context` (dữ kiện lần này)
+        và KHÔNG xuất hiện trong chính câu người dùng vừa nói.
+
+        So sánh trên chuỗi đã chuẩn hoá: model thường viết lại giá trị theo dạng
+        chuẩn ("ZONE_A") trong khi chuyện cũ lưu dạng người nói ("khu A"). So
+        thô sẽ bỏ lọt đúng những ca cần bắt.
+        """
+        if not recalled:
+            return []
+
+        def norm(value: Any) -> str:
+            return str(value).strip().casefold().replace("_", " ")
+
+        goal_text = norm(goal)
+        confirmed = {norm(v) for v in existing_context.values() if v is not None}
+        remembered: set[str] = set()
+        for turn in recalled:
+            for value in turn.values():
+                if value is not None:
+                    remembered.add(norm(value))
+
+        offending: list[str] = []
+        for task in plan.tasks:
+            for field, value in (task.input or {}).items():
+                # InputRef (dict) là output của task trước — nguồn hợp lệ.
+                if not isinstance(value, (str, int, float)):
+                    continue
+                # So bằng MỌI cách giá trị đó có thể đã được nói ra: model viết
+                # `ZONE_A`, người dùng nói "khu A". Xem `spoken_forms`.
+                forms = [norm(f) for f in spoken_forms(str(value))]
+                if any(f in confirmed or f in goal_text for f in forms if f):
+                    continue
+                if any(f and (f in memory or memory in f) for f in forms for memory in remembered if memory):
+                    if field not in offending:
+                        offending.append(field)
+        return offending
 
     @staticmethod
     def _reject_untrusted_payment_values(plan: TaskPlan, existing_context: dict[str, Any]) -> None:
@@ -775,7 +843,13 @@ class Planner:
                     f"pay_fee dùng '{field_name}' không đến từ book_parking hay existing_context.",
                 )
 
-    def _to_result(self, response: Any, goal: str, existing_context: dict[str, Any]) -> PlannerResult:
+    def _to_result(
+        self,
+        response: Any,
+        goal: str,
+        existing_context: dict[str, Any],
+        recalled: list[dict[str, Any]] | None = None,
+    ) -> PlannerResult:
         """Kiểm tra tính nhất quán rồi chuyển sang kết quả public."""
         if not isinstance(response, _PlannerResponse):
             raise _InconsistentResponseError("SCHEMA_MISMATCH", "Planner nhận được kết quả sai schema từ LLM.")
@@ -813,6 +887,17 @@ class Planner:
 
             # Trust boundary: chặn trước khi plan rời khỏi Planner.
             self._reject_untrusted_payment_values(plan, existing_context)
+
+            # Giá trị lấy từ chuyện cũ → HỎI LẠI, không phải báo lỗi.
+            #
+            # Báo lỗi là trừng phạt người dùng vì model đoán ẩu; hỏi lại đúng
+            # là thứ lẽ ra phải xảy ra. Và nó giữ được giá trị của `nho_lai`:
+            # model đã hiểu "như lần trước" nghĩa là gì, chỉ là nó phải xác
+            # nhận trước khi biến điều đó thành hành động.
+            recalled_fields = self._fields_taken_from_recall(plan, recalled or [], existing_context, goal)
+            if recalled_fields:
+                logger.info("planner: %d field lấy từ nho_lai → hỏi lại", len(recalled_fields))
+                return PlannerResult(status="NEEDS_INFORMATION", missing_fields=tuple(recalled_fields))
 
             return PlannerResult(status="READY", plan=plan)
 
