@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from src.api.deps import require_roles
 from src.api.schemas import AdminResidentLinkRequest, AdminResidentLinkResponse, LinkRequestDecision
+from src.config import get_settings
 from src.db.link_request_repository import decide_request, list_requests
 from src.db.resident_link_repository import VerificationStatus, upsert_link
 from src.orchestration.runtime_provider import acquire_repository
@@ -145,3 +146,100 @@ async def decide_resident_link_request(
 
     # KHÔNG trả `resident_id`: nó là mã nội bộ, và response này đi qua browser.
     return {"request_id": request_id, "decision": request.decision}
+
+
+@router.get(
+    "/metrics",
+    summary="Số liệu vận hành toàn hệ thống (chỉ admin)",
+)
+async def system_metrics(
+    _admin: dict = Depends(require_roles("admin")),
+) -> dict:
+    """Đếm workflow trên TOÀN hệ thống, không lọc theo chủ sở hữu.
+
+    Vì sao cần endpoint riêng thay vì nới `GET /workflows/demo`: endpoint đó
+    lọc theo `owner_user_id` và đó là hành vi ĐÚNG cho khách hàng. Nới phạm vi
+    của nó theo role là cách rò rỉ dữ liệu giữa người dùng — chỉ cần một nhánh
+    `if role == "admin"` đặt sai chỗ là mọi khách hàng đọc được workflow của
+    nhau.
+
+    Sự cố đã xảy ra vì thiếu endpoint này: `AdminDashboardPage` gọi
+    `listWorkflows()` — vốn lọc theo chủ sở hữu — rồi hiển thị kết quả dưới
+    tiêu đề "Giám sát toàn bộ workflow". Tài khoản admin không sở hữu workflow
+    nào nên màn hình luôn hiện 0, trong khi database có 92 workflow. Admin nhìn
+    thấy đúng view của một khách hàng trên dữ liệu rỗng của chính mình.
+
+    CHỈ trả về SỐ ĐẾM. Không trả `goal`, không trả tên chủ sở hữu: giám sát vận
+    hành cần biết có bao nhiêu việc đang hỏng, không cần biết ai yêu cầu gì.
+    Một dashboard tiện tay hiển thị nội dung yêu cầu của cư dân là một cách rò
+    rỉ dữ liệu được cấp phép sẵn.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        row = await pool.fetchrow(
+            """
+            SELECT
+                count(*)                                                        AS total,
+                count(*) FILTER (WHERE status IN ('PENDING', 'RUNNING'))        AS running,
+                count(*) FILTER (WHERE status = 'WAITING_APPROVAL')             AS waiting,
+                -- Đúng 6 giá trị của `WorkflowStatus`, không hơn.
+                -- Bản đầu còn lọc 'EXECUTION_ERROR'/'PLANNING_ERROR' —
+                -- những cái đó là `ErrorCode`, không phải trạng thái workflow,
+                -- nên chúng không bao giờ khớp và ô "Thất bại" thiếu số một
+                -- cách âm thầm. Một bộ lọc sai tên trạng thái không báo lỗi;
+                -- nó chỉ đếm ra 0.
+                count(*) FILTER (WHERE status = 'FAILED')                       AS failed,
+                count(*) FILTER (WHERE status = 'SUCCESS')                      AS success,
+                count(*) FILTER (WHERE status = 'CANCELLED')                    AS cancelled,
+                -- CHỜ NGƯỜI DÙNG và MỒ CÔI là hai chuyện khác hẳn nhau.
+                --
+                -- Bản đầu gộp chúng vào một ô "Kẹt quá 5 phút" đếm mọi
+                -- PENDING/RUNNING không nhúc nhích. Đo ra: cả 17 workflow nó
+                -- đếm đều đang chờ người dùng bổ sung thông tin — tức hệ thống
+                -- đang hoạt động ĐÚNG. Ô đó báo động giả 100%, và một chỉ số
+                -- vận hành báo động giả thì tệ hơn không có: người trực học
+                -- cách phớt lờ nó, rồi phớt lờ luôn lần nó nói thật.
+                --
+                -- `awaiting_user` dùng chính điều kiện mà sweeper dùng để THA:
+                -- có clarification chưa giải quyết. Hai chỗ phải cùng một định
+                -- nghĩa, nếu không màn hình sẽ mâu thuẫn với hành vi hệ thống.
+                count(*) FILTER (
+                    WHERE status IN ('PENDING', 'RUNNING')
+                      AND EXISTS (
+                          SELECT 1 FROM workflow_clarifications c
+                          WHERE c.workflow_id = workflows.workflow_id
+                            AND c.resolved_at IS NULL
+                      )
+                )                                                               AS awaiting_user,
+                -- MỒ CÔI: quá hạn TTL của sweeper mà sweeper vẫn chưa dọn.
+                -- Khác 0 nghĩa là vòng quét đang không chạy — đó mới là thứ
+                -- người vận hành cần biết, và nó nói về HỆ THỐNG chứ không
+                -- phải về người dùng.
+                count(*) FILTER (
+                    WHERE status IN ('PENDING', 'RUNNING')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM workflow_clarifications c
+                          WHERE c.workflow_id = workflows.workflow_id
+                            AND c.resolved_at IS NULL
+                      )
+                      AND updated_at < NOW() - make_interval(secs => $1)
+                )                                                               AS orphaned
+            FROM workflows
+            WHERE archived_at IS NULL
+            """,
+            float(get_settings().zombie_running_ttl_hours) * 3600.0,
+        )
+    finally:
+        await pool.close()
+
+    return {
+        "total": row["total"],
+        "running": row["running"],
+        "waiting_approval": row["waiting"],
+        "failed": row["failed"],
+        "success": row["success"],
+        "cancelled": row["cancelled"],
+        "awaiting_user": row["awaiting_user"],
+        "orphaned": row["orphaned"],
+    }

@@ -9,7 +9,13 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from src.api.small_talk import SpeechType, _is_acknowledgement, classify
+from src.api.small_talk import (
+    SpeechType,
+    _has_howto_marker,
+    _is_acknowledgement,
+    _normalize,
+    classify,
+)
 from src.main import app
 
 
@@ -468,3 +474,92 @@ def test_asking_about_my_own_permissions_is_answered_from_the_catalogue(message:
 )
 def test_widening_permission_markers_did_not_swallow_real_requests(message: str) -> None:
     assert classify(message) is None, f"{message!r} bị nuốt thành small talk"
+
+
+def test_the_self_introduction_does_not_advertise_services_that_do_not_exist() -> None:
+    """Câu giới thiệu phải dựng từ danh mục THẬT, không phải chuỗi cứng.
+
+    Bản trước hardcode "Mình giúp tìm nhà, đặt lịch xem, đăng ký cư dân/xe…" —
+    và chuỗi đó đã lệch khỏi `_CAPABILITY_CATALOGUE`. Người dùng đọc xong gõ
+    "tìm nhà thử xem" và bị Planner hỏi ngân sách cho một dịch vụ không tồn tại
+    trong danh mục.
+
+    Trả `CAPABILITY` để route dựng danh sách theo đúng quyền tài khoản; chuỗi
+    dự phòng ở đây không được nêu tên dịch vụ nào.
+    """
+    result = classify("giới thiệu về bạn")
+    assert result is not None
+    assert result.speech_type == SpeechType.CAPABILITY
+    for ghost in ("tìm nhà", "đăng ký cư dân", "tìm bất động sản"):
+        assert ghost not in result.reply.lower(), f"vẫn hứa dịch vụ không có: {ghost!r}"
+
+
+def test_the_guidance_names_a_path_that_actually_exists_in_the_workspace() -> None:
+    """Hướng dẫn phải trỏ tới mục CÓ THẬT trên thanh bên workspace.
+
+    Thanh bên workspace (`WorkspaceShell.tsx`) chỉ có ba mục: Hành trình, Lịch
+    sử, Hồ sơ. Không có "Xác minh căn hộ" — nó nằm BÊN TRONG Hồ sơ.
+
+    Trước khi sửa, Agent bảo "mở mục Xác minh căn hộ ở thanh bên". Người dùng
+    tìm không ra, nói "tôi không thấy", và đó là nguyên văn chuyện đã xảy ra:
+
+        Bạn:   không thấy phần liên kết
+        P-118: (trả lời lạc đề)
+        Bạn:   phần liên kết căn hộ
+        P-118: (lặp lại đúng hướng dẫn sai)
+
+    Ba tên cho một việc: Agent nói "Xác minh căn hộ ở thanh bên", thanh bên
+    không có, nút trong Hồ sơ thì tên "Liên kết thêm bất động sản".
+    """
+    from src.api.routes import LINK_REQUIRED_ACTION
+
+    guidance = [LINK_REQUIRED_ACTION, classify("liên kết căn hộ cho tôi").reply]
+    for text in guidance:
+        assert "Hồ sơ" in text, f"không nêu mục có thật trên thanh bên: {text!r}"
+        assert "Xác minh căn hộ" in text, f"không nêu tên trang đích: {text!r}"
+        assert "ở thanh bên rồi bấm “Xác thực" not in text, (
+            "vẫn bảo mở thẳng “Xác minh căn hộ” ở thanh bên — mục đó không tồn tại"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Marker hỏi-cách-làm phải khớp nguyên từ
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Đăng ký xe và đặt chỗ đậu xe",
+        "đặt chỗ đậu xe khu A",
+        "đổi chỗ đậu xe máy",
+        "tôi muốn đặt chỗ đậu xe tầng hầm",
+    ],
+)
+def test_asking_for_parking_is_not_mistaken_for_a_how_to_question(goal):
+    """`"o dau"` (ở đâu) nằm gọn bên trong `"chỗ đậu"`.
+
+    Chuẩn hoá xong là `"ch|o dau|"`, nên "đặt chỗ đậu xe" — một cách nói hoàn
+    toàn bình thường — bị xếp thành câu HỎI CÁCH LÀM và nhận về bài hướng dẫn
+    thay vì Agent đi đặt chỗ.
+
+    "đặt chỗ ĐỖ xe" thì không dính, nên lỗi chỉ hiện với một nửa số người dùng
+    — đúng kiểu lọt qua mọi lần thử tay. Nó lộ ra ở một test khác hẳn
+    (`test_a_child_workflow_inherits_...`), cách nguyên nhân bốn bước, dưới
+    dạng `TypeError: NoneType`.
+    """
+    assert not _has_howto_marker(_normalize(goal)), f"{goal!r} bị hiểu thành câu hỏi cách làm"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "bãi đỗ xe ở đâu",
+        "đăng ký xe như thế nào",
+        "tôi phải làm gì để đăng ký xe",
+        "hướng dẫn tôi đặt chỗ đậu xe",
+    ],
+)
+def test_real_how_to_questions_still_match(question):
+    """Chốt ngược: siết quá tay thành "không bao giờ khớp" cũng là hỏng."""
+    assert _has_howto_marker(_normalize(question)), f"{question!r} lẽ ra là câu hỏi cách làm"

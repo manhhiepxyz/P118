@@ -22,6 +22,7 @@ bị speech lane chặn. Đây là đường an toàn cho mọi prompt tấn cô
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
@@ -304,6 +305,22 @@ def _has_service_intent(message: str) -> bool:
 #
 # Họ hỏi rất rõ ràng và bị nói là gõ sai. Trong thực tế người dùng còn hỏi mơ hồ
 # hơn thế.
+def _has_howto_marker(normalized: str) -> bool:
+    """Marker phải khớp NGUYÊN TỪ, không phải khớp chuỗi con.
+
+    Lỗi đã đo được: `"o dau"` (ở đâu) nằm gọn bên trong `"chỗ đậu"` — chuẩn hoá
+    xong là `"ch|o dau|"`. Nên "đặt chỗ đậu xe", một cách nói hoàn toàn bình
+    thường, bị xếp thành câu HỎI CÁCH LÀM và nhận về một bài hướng dẫn thay vì
+    Agent đi đặt chỗ. "đặt chỗ ĐỖ xe" thì không sao, nên lỗi chỉ hiện ra với
+    một nửa số người dùng — đúng kiểu lọt qua mọi lần thử tay.
+
+    Dùng `(?<![a-z])`/`(?![a-z])` chứ không dùng `\b`: chuỗi đã chuẩn hoá là
+    ASCII thường, và `\b` coi ranh giới ở cả chữ số lẫn gạch dưới. Ở đây chỉ
+    cần chặn một chữ cái dính liền.
+    """
+    return any(_HOWTO_MARKER_RE[marker].search(normalized) for marker in _HOWTO_MARKERS)
+
+
 _HOWTO_MARKERS = (
     "the nao",
     "nhu the nao",
@@ -318,6 +335,11 @@ _HOWTO_MARKERS = (
     "lam gi de",
 )
 
+_HOWTO_MARKER_RE = {
+    marker: re.compile(r"(?<![a-z])" + re.escape(marker.strip()) + r"(?![a-z])")
+    for marker in _HOWTO_MARKERS
+}
+
 # Các bước cho từng việc. Khoá là cụm đã chuẩn hoá xuất hiện trong câu hỏi.
 #
 # Thứ tự QUAN TRỌNG: cụm cụ thể đứng trước cụm chung. "đăng ký xe" chứa "xe",
@@ -325,13 +347,13 @@ _HOWTO_MARKERS = (
 _HOWTO_STEPS: tuple[tuple[tuple[str, ...], str], ...] = (
     (
         ("can ho", "lien ket", "xac minh", "cu dan"),
-        "Để xác minh căn hộ: mở mục “Xác minh căn hộ” ở thanh bên, nhập mã căn hộ và "
-        "khu đô thị, đính kèm ảnh giấy tờ nhà rồi bấm gửi. Ban quản lý duyệt xong là "
+        "Để xác minh căn hộ: mở mục “Hồ sơ” ở thanh bên rồi bấm “Xác minh căn hộ”, nhập mã "
+        "căn hộ và khu đô thị, đính kèm ảnh giấy tờ nhà rồi gửi. Ban quản lý duyệt xong là "
         "các dịch vụ cư dân mở ra ngay.",
     ),
     (
         ("do xe", "dau xe", "phuong tien", "xe"),
-        "Đăng ký xe và chỗ đỗ cần căn hộ đã xác minh trước. Bạn mở mục “Xác minh căn hộ”, "
+        "Đăng ký xe và chỗ đỗ cần căn hộ đã xác minh trước. Bạn mở mục “Hồ sơ” rồi bấm “Xác minh căn hộ”, "
         "gửi mã căn hộ kèm ảnh giấy tờ; duyệt xong thì chọn “Đăng ký phương tiện và chỗ đỗ xe” "
         "ở danh sách năng lực, điền biển số và khu đỗ là xong.",
     ),
@@ -390,8 +412,8 @@ _OUTSIDE_TOOLSPACE: tuple[tuple[tuple[str, ...], str], ...] = (
             "lien ket cu dan",
         ),
         "Việc xác minh căn hộ do một đơn vị độc lập đối chiếu giấy tờ rồi duyệt, nên mình "
-        "không tự làm thay được. Bạn mở mục “Xác minh căn hộ” ở thanh bên rồi bấm "
-        "“Xác thực với đơn vị” — sang cổng của họ, nhập mã căn hộ và khu đô thị, đính kèm "
+        "không tự làm thay được. Bạn mở mục “Hồ sơ” ở thanh bên, bấm “Xác minh căn hộ” rồi "
+        "bấm “Xác thực với đơn vị” — sang cổng của họ, nhập mã căn hộ và khu đô thị, đính kèm "
         "ảnh giấy tờ nhà là xong. Duyệt xong thì các dịch vụ cư dân mở ra ngay.",
     ),
 )
@@ -455,7 +477,7 @@ def _asks_how_to(message: str) -> str | None:
     danh sách năm dịch vụ là bắt họ tự tìm câu trả lời trong đó một lần nữa.
     """
     normalized = _normalize(message)
-    if not any(marker in normalized for marker in _HOWTO_MARKERS):
+    if not _has_howto_marker(normalized):
         return None
     for keywords, steps in _HOWTO_STEPS:
         if any(keyword in normalized for keyword in keywords):
@@ -562,13 +584,19 @@ def classify(message: str) -> SmallTalk | None:
         )
 
     if _is_about_agent(text):
+        # Trả về CAPABILITY, không phải GREETING.
+        #
+        # Bản trước liệt kê dịch vụ bằng một chuỗi cứng — và chuỗi đó đã lệch
+        # khỏi sự thật: nó quảng cáo "tìm nhà" và "đăng ký cư dân", hai thứ
+        # KHÔNG có trong `_CAPABILITY_CATALOGUE`. Người dùng đọc xong gõ "tìm
+        # nhà thử xem" và bị Planner hỏi ngân sách cho một dịch vụ không tồn tại.
+        #
+        # Route sẽ dựng danh sách từ chính danh mục, theo đúng quyền của tài
+        # khoản — nên câu giới thiệu không bao giờ hứa thừa được nữa. `reply`
+        # ở đây chỉ là bản dự phòng nếu không dựng được danh mục.
         return SmallTalk(
-            speech_type=SpeechType.GREETING,
-            reply=(
-                "Mình là P-118, trợ lý bất động sản và dịch vụ cư dân. "
-                "Mình giúp tìm nhà, đặt lịch xem, đăng ký cư dân/xe, đặt chỗ đỗ "
-                "và thanh toán phí. Bạn cần mình hỗ trợ gì nhé?"
-            ),
+            speech_type=SpeechType.CAPABILITY,
+            reply="Mình là P-118, trợ lý dịch vụ cư dân. Bạn cần mình hỗ trợ gì nhé?",
         )
 
     if _asks_for_capabilities(text):
@@ -610,7 +638,9 @@ async def answer_capability_question(
     giá bằng: một vòng mạng, một `base_url` phải đoán, và một bộ credential nó
     không có. Nhận danh mục qua tham số thì mất cả ba.
     """
-    if not _asks_for_capabilities(message):
+    # Nhận cả câu "giới thiệu về bạn": nó cũng cần danh sách dịch vụ THẬT, và
+    # trước đây nó được trả lời bằng một chuỗi cứng đã lệch khỏi danh mục.
+    if not (_asks_for_capabilities(message) or _is_about_agent(message)):
         return None
     if not capabilities:
         return SmallTalk(

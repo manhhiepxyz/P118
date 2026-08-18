@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import os
 import sys
 from pathlib import Path
 
@@ -38,16 +39,33 @@ async def main() -> None:
     try:
         await run_migrations(pool)
 
-        username = input("Username (mặc định: provider): ").strip().lower() or "provider"
+        # Đường KHÔNG tương tác, cho setup tự động và môi trường không có tty
+        # (ví dụ `docker exec`). Giống hệt `create_admin.py`.
+        #
+        # Dùng biến môi trường chứ KHÔNG dùng tham số dòng lệnh: argv hiện
+        # trong `ps` với mọi user trên máy, và nằm lại trong lịch sử shell.
+        # Biến môi trường chỉ thuộc về tiến trình.
+        #
+        # Interactive vẫn là mặc định — không đặt biến thì hành vi y như cũ.
+        env_username = os.environ.get("P118_PROVIDER_USERNAME", "").strip().lower()
+        env_password = os.environ.get("P118_PROVIDER_PASSWORD", "")
+
+        username = env_username or (input("Username (mặc định: provider): ").strip().lower() or "provider")
         if len(username) < 3:
             print("Username phải ít nhất 3 ký tự.")
             return
 
-        while True:
-            password = getpass.getpass("Password (ít nhất 8 ký tự): ")
-            if len(password) >= 8:
-                break
-            print("Mật khẩu phải ít nhất 8 ký tự, thử lại.")
+        if env_password:
+            if len(env_password) < 8:
+                print("P118_PROVIDER_PASSWORD phải ít nhất 8 ký tự.")
+                return
+            password = env_password
+        else:
+            while True:
+                password = getpass.getpass("Password (ít nhất 8 ký tự): ")
+                if len(password) >= 8:
+                    break
+                print("Mật khẩu phải ít nhất 8 ký tự, thử lại.")
 
         password_hash = hash_password(password)
 

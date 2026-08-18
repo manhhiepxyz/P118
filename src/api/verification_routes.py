@@ -216,7 +216,11 @@ async def decide_verification_record(
       - apartment → mở quyền cư dân qua `materialize_resident_link`.
 
     `decided_by` lấy từ JWT của người duyệt (main app đặt, không nhận từ body).
+
+    KHÔNG ai được duyệt hồ sơ của chính mình — xem `_reject_self_review`.
     """
+    await _reject_self_review(record_id, reviewer, ownership)
+
     try:
         record = await ownership.decide_record(
             record_id,
@@ -349,10 +353,75 @@ def _remove_upload_dir(record_id: str) -> None:
         logger.warning("Không dọn được upload dir %s", record_id)
 
 
+async def _reject_self_review(
+    record_id: str,
+    reviewer: dict,
+    ownership: OwnershipConnector,
+) -> None:
+    """Chặn người duyệt tự duyệt hồ sơ do chính mình nộp.
+
+    Lỗ đã tái hiện được, đầy đủ từ đầu đến cuối:
+
+        provider nộp hồ sơ căn hộ "SELF-9001"  → tạo được
+        provider tự duyệt hồ sơ đó              → APPROVED, decided_by=provider
+        /auth/me                                → VERIFIED, căn hộ SELF-9001
+
+    Người duyệt tự cấp cho mình tư cách cư dân của một căn hộ KHÔNG có trong
+    registry. `ownership_match` trả False nhưng nó chỉ là thông tin hiển thị,
+    không chặn gì. Toàn bộ giá trị của bước xác thực nằm ở chỗ có người thứ hai
+    nhìn vào hồ sơ — người duyệt trùng người nộp thì bước đó bằng không.
+
+    Đặt ở đây, TRƯỚC `decide_record`, để không có trạng thái nào bị đổi rồi mới
+    phát hiện. `decide_record` claim bằng UPDATE nên nếu để lọt thì hồ sơ đã
+    APPROVED, và rollback nghĩa là phải gỡ cả liên kết cư dân đã materialize.
+
+    Chốt này nằm ở TẦNG BACKEND một cách có chủ ý. Ngay cả khi cổng duyệt có
+    hệ đăng nhập riêng và tài khoản provider không còn nộp hồ sơ được qua UI,
+    ràng buộc "người nộp không phải người duyệt" vẫn phải đúng — nó là quy tắc
+    nghiệp vụ, không phải chi tiết điều hướng.
+
+    Hỏi provider "hồ sơ này có phải của bạn không" thay vì tải hồ sơ rồi so
+    tay: `list_records(applicant_user_id=...)` đã lọc sẵn theo chủ đơn, nên câu
+    trả lời không phụ thuộc vào việc response có trả về `applicant_user_id` hay
+    không — và trường đó có thể bị lược đi vì lý do riêng tư bất cứ lúc nào.
+    """
+    try:
+        own_records = await ownership.list_records(applicant_user_id=str(reviewer["id"]))
+    except OwnershipProviderError as exc:
+        # Không đọc được thì KHÔNG duyệt. Fail-closed: một provider tạm thời
+        # không truy vấn được còn hơn một hồ sơ tự duyệt lọt qua.
+        raise _to_http(exc) from exc
+
+    if any(record.get("record_id") == record_id for record in own_records):
+        logger.warning(
+            "chặn tự duyệt: reviewer=%s record=%s",
+            reviewer.get("username"),
+            record_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Bạn không duyệt được hồ sơ do chính mình nộp. Hồ sơ này cần người khác xem xét.",
+        )
+
+
 def _to_http(exc: OwnershipProviderError) -> HTTPException:
     """Chuyển lỗi provider thành HTTPException (đúng status, không echo PII)."""
     message = {
-        "VERIFICATION_ALREADY_PENDING": "Bạn đã có một đơn đang chờ duyệt cho thông tin này.",
+        # KHÔNG nói "Bạn đã có một đơn" — ràng buộc phía sau lỗi này là
+        # `uq_verif_pending_apartment`, unique trên
+        # `(record_type, apartment_code, residential_area) WHERE status='PENDING'`
+        # — tức trên CĂN HỘ, không phải trên người nộp. Một tài khoản hoàn toàn
+        # mới, chưa có đơn nào, vẫn ăn lỗi này nếu người khác đang xin xác minh
+        # cùng căn hộ đó (đã tái hiện được). Câu cũ khiến họ đi tìm cái đơn
+        # không tồn tại rồi mắc kẹt, vì màn hình của họ trống trơn.
+        #
+        # Ràng buộc thì đúng: hai người cùng chờ duyệt một căn hộ mà cả hai
+        # được duyệt thì liên kết cư dân sẽ mâu thuẫn. Chỉ có lời giải thích là
+        # sai. Câu mới không nói ai đang giữ đơn — vế đó là dữ liệu người khác.
+        "VERIFICATION_ALREADY_PENDING": (
+            "Căn hộ này đang có một hồ sơ chờ duyệt, nên chưa nhận thêm hồ sơ mới. "
+            "Nếu hồ sơ đó không phải của bạn, vui lòng liên hệ ban quản lý toà nhà."
+        ),
         "REJECT_REASON_REQUIRED": "Từ chối cần lý do.",
         "VERIFICATION_NOT_FOUND": _MISSING,
         "VERIFICATION_ALREADY_DECIDED": "Hồ sơ này đã được xử lý.",
