@@ -3765,7 +3765,12 @@ _SUCCEEDED_STATUSES = ("SUCCESS",)
 # biết bấm tab nào — mà nếu đoán được thì họ đã không cần đi tìm. Từ chỗ họ
 # đứng, cả ba là cùng một câu: việc này chưa xong. Vấn đề CỤ THỂ thuộc về trang
 # chi tiết, nơi có đủ chỗ để nói nó là gì.
-_IN_PROGRESS_STATUSES = _ACTIVE_STATUSES + _ATTENTION_STATUSES
+#
+# FAILED/CANCELLED cũng ở đây. Chúng KHÔNG phải "đã xong": việc người dùng nhờ
+# vẫn chưa được làm, và họ còn nhắn tiếp với dịch vụ đó được. Xếp chúng cạnh
+# những việc đã hoàn tất là bảo người dùng rằng chuyện này khép lại rồi, trong
+# khi thứ họ cần vẫn chưa có.
+_IN_PROGRESS_STATUSES = _ACTIVE_STATUSES + _ATTENTION_STATUSES + ("FAILED", "CANCELLED")
 
 # Bộ lọc dạng "chỉ theo trạng thái". `upcoming`/`done` cần thêm một câu hỏi nữa
 # — workflow này còn sự kiện nào chưa diễn ra không — nên chúng nằm ở
@@ -3782,30 +3787,18 @@ _LIST_FILTERS: dict[str, tuple[str, ...]] = {
 
 # Hai bộ lọc chia đôi phần ĐÃ KẾT THÚC theo việc còn lịch phía trước hay không.
 #
-#   "upcoming" — đã kết thúc nhưng còn một sự kiện chưa diễn ra (chỗ đỗ đã đặt
+#   "upcoming" — đã CHẠY XONG và còn một sự kiện chưa diễn ra (chỗ đỗ đã đặt
 #                cho tuần sau, lịch tham quan ngày mai). Người dùng chưa xong
 #                việc: họ còn phải đi.
-#   "done"     — đã kết thúc và không còn gì phía trước.
+#   "done"     — đã chạy xong và không còn gì phía trước.
 #
 # CẢ HAI dùng cùng một tập trạng thái, và chúng khác nhau đúng ở phép phủ định.
-# Nhờ vậy hợp của ba tab bằng "Tất cả" — không yêu cầu nào rơi ra ngoài mọi bộ
-# lọc rồi chỉ tìm thấy khi xem tất cả.
-#
-# Bản đầu giới hạn "upcoming" ở SUCCESS. Đo trên dữ liệu thật thì HAI workflow
-# biến mất khỏi cả ba tab: một FAILED và một CANCELLED, mỗi cái vẫn giữ một chỗ
-# đỗ xe cho tháng sau. Chúng không lọt vào "upcoming" (không phải SUCCESS) và
-# cũng không lọt vào "done" (còn sự kiện tương lai).
-#
-# Và đó không chỉ là lỗi đếm: người dùng có một chỗ đã giữ, có ngày cụ thể, mà
-# không màn hình nào cho họ nhìn thấy. Workflow hỏng giữa chừng không có nghĩa
-# là mọi thứ nó đã đặt đều tự biến mất.
-#
-# FAILED/CANCELLED nằm ở đây chứ không phải "đang xử lý": không ai đang xử lý
-# chúng cả. Nhãn trạng thái trên từng dòng vẫn nói rõ "Chưa xong" / "Đã huỷ",
-# nên chỗ đứng của chúng không bị hiểu nhầm thành thành công.
+# Cộng với `_IN_PROGRESS_STATUSES` phủ nốt phần còn lại, hợp của ba tab bằng
+# "Tất cả" THEO CẤU TRÚC — không yêu cầu nào rơi ra ngoài mọi bộ lọc rồi chỉ
+# tìm thấy khi xem tất cả. Có test khoá tính chất đó.
 _EVENT_FILTERS: dict[str, tuple[tuple[str, ...], bool]] = {
-    "upcoming": (_COMPLETED_STATUSES, True),
-    "done": (_COMPLETED_STATUSES, False),
+    "upcoming": (_SUCCEEDED_STATUSES, True),
+    "done": (_SUCCEEDED_STATUSES, False),
 }
 
 _LIST_LIMIT_MAX = 50

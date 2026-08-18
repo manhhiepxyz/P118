@@ -154,4 +154,7 @@ async def test_every_workflow_lands_in_exactly_one_tab(client, db_pool):
     )
     # Và không chồng nhau — một yêu cầu ở đúng một chỗ.
     assert not (in_progress & upcoming) and not (in_progress & done) and not (upcoming & done)
-    assert len(upcoming) == 3, f"chỗ đỗ tương lai của workflow hỏng/huỷ bị bỏ sót: {upcoming}"
+    # Chỉ workflow ĐÃ CHẠY XONG mới vào "Sắp tới". Hỏng và huỷ ở "Đang xử lý":
+    # việc người dùng nhờ vẫn chưa được làm, và họ còn nhắn tiếp được.
+    assert len(upcoming) == 1, f"chỉ SUCCESS mới là 'Sắp tới': {upcoming}"
+    assert len(in_progress) == 3, f"hỏng/huỷ phải nằm ở 'Đang xử lý': {in_progress}"

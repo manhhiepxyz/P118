@@ -22,19 +22,21 @@ import { usePolling } from '../lib/usePolling'
 /*
  * Ba câu trả lời cho "việc của tôi đang ra sao", cộng "Tất cả".
  *
- *   Đang xử lý — chưa chạy xong: đang chạy, chờ duyệt, hoặc chờ chính bạn.
+ *   Đang xử lý — việc bạn nhờ chưa được làm xong: đang chạy, chờ duyệt, chờ
+ *                chính bạn, hoặc đã hỏng/bị huỷ. Cả nhóm này còn nhắn tiếp
+ *                được, nên chúng thuộc về chỗ bạn quay lại.
  *   Sắp tới    — chạy xong rồi nhưng còn một sự kiện CHƯA diễn ra (chỗ đỗ đã
  *                đặt cho tuần sau, lịch tham quan ngày mai). Việc của bạn chưa
  *                khép lại: bạn còn phải đi.
- *   Đã xong    — đã kết thúc và không còn gì phía trước.
+ *   Đã xong    — chạy xong và không còn gì phía trước.
  *
  * "Sắp tới" là chiều thông tin mà trạng thái workflow KHÔNG mang: một chỗ đỗ
  * đặt cho tháng sau và một chỗ đỗ đã dùng xong đều là SUCCESS, nhưng chỉ một
  * trong hai còn cần người dùng nhớ.
  *
- * FAILED/CANCELLED nằm ở "Đã xong" — không ai đang xử lý chúng cả. Nhãn trạng
- * thái trên từng dòng vẫn nói "Chưa xong" / "Đã huỷ", nên chúng không bị hiểu
- * nhầm thành thành công.
+ * FAILED/CANCELLED KHÔNG nằm ở "Đã xong". Việc người dùng nhờ vẫn chưa được
+ * làm; xếp chúng cạnh những việc đã hoàn tất là bảo họ rằng chuyện này khép lại
+ * rồi, trong khi thứ họ cần vẫn chưa có.
  */
 const FILTERS = [
   { value: 'in-progress', label: 'Đang xử lý' },
@@ -48,7 +50,7 @@ type FilterValue = (typeof FILTERS)[number]['value']
 /* Câu rỗng nói đúng NHÓM đang xem. "Chưa có hành trình nào" khi người dùng
    đang lọc "Đã xong" đọc như tài khoản trống trơn, dù họ có hai chục yêu cầu. */
 const EMPTY_TEXT: Record<string, string> = {
-  'in-progress': 'Không có việc nào đang xử lý.',
+  'in-progress': 'Không có việc nào đang dở.',
   upcoming: 'Không có lịch nào sắp tới.',
   done: 'Chưa có hành trình nào kết thúc.',
   all: 'Chưa có hành trình nào.',
