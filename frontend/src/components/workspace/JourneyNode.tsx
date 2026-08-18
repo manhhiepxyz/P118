@@ -25,6 +25,12 @@ export function JourneyNode({ data }: NodeProps) {
 
   return (
     <div
+      /* `data-journey-step` mang chính TÊN bước. Workspace vẽ các bước bằng
+         canvas này, không phải `StepList` — `StepList` chỉ còn trang chi tiết
+         `/workflow/:id` dùng. Harness từng đọc bước qua markup của bề mặt chat
+         CŨ rồi qua `StepList`, cả hai đều trả rỗng, và phép kiểm "hiện đủ bước
+         nghiệp vụ" báo đỏ trong khi các bước vẫn hiện đầy đủ trên màn hình. */
+      data-journey-step={step.title}
       style={{ color: view.token, ['--edge-scan' as string]: 'currentColor' }}
       className={[
         'group relative w-[268px] overflow-hidden rounded-[var(--r-md)] border pl-[13px] pr-3.5 py-3',

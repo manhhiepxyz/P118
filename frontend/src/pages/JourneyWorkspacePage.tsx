@@ -640,7 +640,16 @@ export function JourneyWorkspacePage() {
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-1">
+        {/* `data-journey-state` mang thẳng trạng thái workflow đang sống.
+            Neo cho kiểm thử, và nó thay thế cả một nhóm helper của harness từng
+            phải ĐOÁN trạng thái bằng cách đọc nhãn chữ trên thẻ — nhãn ấy thuộc
+            về `ChatWorkflowCard`, bề mặt chat CŨ, nên chúng chờ 240 giây rồi
+            trả "(hết giờ chờ)" trong khi workflow đã xong từ lâu.
+
+            Trạng thái là DỮ LIỆU, không phải cách trình bày. Bắt kiểm thử suy
+            ngược nó từ tiếng Việt hiển thị là buộc chúng vào lớp dễ đổi nhất
+            của sản phẩm. */}
+        <div className="flex min-h-0 flex-1" data-journey-state={live?.status ?? 'IDLE'}>
           <div className="relative flex min-w-0 flex-1 flex-col">
             {mode === 'journey' && (
               <div className="rise shrink-0 pb-5 pt-6">

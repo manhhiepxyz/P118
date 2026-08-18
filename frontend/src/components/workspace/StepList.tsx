@@ -45,11 +45,9 @@ export function StepList({
   if (tasks.length === 0) return null
 
   return (
-    /* `data-step-list` / `data-step`: neo cho kiểm thử. Harness từng bám vào
-       `section[aria-label="Tiến trình yêu cầu"] ol li p` — markup của
-       `ChatWorkflowCard`, tức bề mặt chat CŨ. Workspace dựng danh sách bước
-       bằng component này, nên selector kia không khớp gì và check treo 30 giây
-       rồi giết cả lượt chạy, dù sản phẩm đúng. */
+    /* `data-step-list` / `data-step`: neo cho kiểm thử của TRANG CHI TIẾT
+       `/workflow/:id` — component này chỉ ở đó. Workspace vẽ các bước bằng
+       `JourneyNode` trên canvas, xem `data-journey-step`. */
     <ol className="border-t border-[var(--border-subtle)]" data-step-list>
       {tasks.map((task) => {
         const view = STEP_STATE[MAP[task.status] ?? 'proposed']

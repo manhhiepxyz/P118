@@ -326,7 +326,32 @@ export function formatDate(value: string | null | undefined): string {
   })
 }
 
-/** Phân loại lỗi hiển thị cho task FAILED. */
+/**
+ * Câu giải thích lỗi cho task FAILED — luôn là TIẾNG VIỆT, không bao giờ là mã.
+ *
+ * Bản trước rơi thẳng về `error_code` khi backend không kèm `error_message`, nên
+ * người dùng đọc được đúng chuỗi `EXECUTION_ERROR` trên màn hình. Mã lỗi là từ
+ * vựng nội bộ: nó nói cho người viết code biết chuyện gì, và nói cho người dùng
+ * biết rằng có thứ gì đó đã rò rỉ ra ngoài.
+ *
+ * Bảng này chỉ dịch những mã mà người dùng CÓ THỂ gặp và làm được gì đó. Mã lạ
+ * rơi về một câu chung — thà mơ hồ còn hơn để lọt từ vựng nội bộ, và câu chung
+ * vẫn nói được điều quan trọng nhất: thử lại được hay không.
+ */
+const FAILURE_TEXT: Record<string, string> = {
+  EXECUTION_ERROR: 'Bước này chưa chạy xong được. Bạn thử lại giúp mình nhé.',
+  VALIDATION_ERROR: 'Thông tin gửi đi chưa hợp lệ, mình chưa thực hiện được bước này.',
+  PLANNING_ERROR: 'Mình chưa lập được kế hoạch cho yêu cầu này.',
+  SERVICE_UNAVAILABLE: 'Dịch vụ bên cung cấp đang tạm ngừng. Bạn thử lại sau ít phút nhé.',
+  UNKNOWN_EXTERNAL_ERROR: 'Bên cung cấp dịch vụ trả về lỗi không rõ. Bạn thử lại giúp mình nhé.',
+  ACTION_DENIED: 'Việc này cần quyền mà tài khoản của bạn chưa có.',
+  DATABASE_UNAVAILABLE: 'Hệ thống đang bận, chưa ghi lại được. Bạn thử lại sau ít phút nhé.',
+  LLM_CONFIGURATION_ERROR: 'Hệ thống chưa sẵn sàng xử lý yêu cầu. Bạn báo giúp ban quản lý nhé.',
+}
+
 export function describeFailure(task: { error_code?: string | null; error_message?: string | null }): string {
-  return task.error_message ?? task.error_code ?? 'Lỗi không xác định'
+  if (task.error_message) return task.error_message
+  const code = task.error_code
+  if (!code) return 'Bước này chưa hoàn thành được.'
+  return FAILURE_TEXT[code] ?? 'Bước này chưa hoàn thành được. Bạn thử lại giúp mình nhé.'
 }

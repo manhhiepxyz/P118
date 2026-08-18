@@ -150,8 +150,15 @@ const TERMINAL_LABELS = new Set([
   'Chưa hiểu được yêu cầu', 'Yêu cầu chưa hợp lệ', 'Không thực hiện được',
 ])
 
+/**
+ * Trạng thái workflow trên TRANG CHI TIẾT — đọc dữ liệu, không đọc nhãn.
+ *
+ * Bản trước bám vào `header p.text-sm.text-gray-500`, một class của bảng màu đã
+ * bỏ, nên nó luôn trả chuỗi rỗng và mọi phép kiểm dùng nó âm thầm sai.
+ */
 async function statusLabel(page) {
-  return (await page.locator('header p.text-sm.text-gray-500').first().innerText().catch(() => '')).trim()
+  return (await page.locator('[data-workflow-state]').first()
+    .getAttribute('data-workflow-state').catch(() => null)) || ''
 }
 
 async function waitForApprovalCard(page, workflowId, timeoutMs = 240000) {
@@ -263,28 +270,31 @@ async function sendGoal(page, goal) {
  * một workflow khác, nên phép chờ và phép bấm rơi vào nhầm việc. Chỉ đích danh
  * theo id thì không còn chỗ cho nhầm lẫn.
  */
-function cardFor(page, workflowId) {
-  return page.locator(
-    `section[aria-label="Tiến trình yêu cầu"]:has(a[href="/workflow/${workflowId}"])`,
-  )
+/**
+ * Trạng thái workflow đang sống trên workspace — đọc DỮ LIỆU, không đọc nhãn.
+ *
+ * Bản trước suy ngược trạng thái từ tiếng Việt hiển thị trên `ChatWorkflowCard`
+ * (bề mặt chat CŨ, giờ chỉ `HomePage` dùng). Workspace không có nhãn ấy, nên
+ * mọi vòng chờ quay đủ 240 giây rồi trả "(hết giờ chờ)" trong khi workflow đã
+ * xong từ lâu — phép kiểm đỏ vì lý do không liên quan gì tới thứ nó kiểm.
+ */
+async function journeyState(page) {
+  return (await page.locator('[data-journey-state]').first()
+    .getAttribute('data-journey-state').catch(() => null)) || ''
 }
+
+// Backend còn trả trạng thái HIỂN THỊ ngoài ba cái cơ bản — xem
+// `WORKFLOW_STATUS` trong `frontend/src/lib/status.ts`. Thiếu chúng ở đây thì
+// vòng chờ quay đủ 240 giây trên một workflow đã kết thúc từ lâu.
+const TERMINAL_STATES = new Set([
+  'SUCCESS', 'FAILED', 'CANCELLED', 'CHAT',
+  'PLANNING_ERROR', 'VALIDATION_ERROR', 'EXECUTION_ERROR',
+])
 
 /** Nhãn trạng thái của một thẻ cụ thể. */
-async function cardLabel(page, workflowId) {
+async function cardLabel(page) {
   const scope = page.locator('[data-pending-card]').last()
   return (await scope.locator('h3').first().innerText().catch(() => '')).trim()
-}
-
-/** Chờ thẻ rời trạng thái đang chạy — dừng cả ở điểm chờ người dùng. */
-async function waitForCardSettled(page, workflowId, timeoutMs = 240000) {
-  const started = Date.now()
-  let last = ''
-  while (Date.now() - started < timeoutMs) {
-    last = await cardLabel(page, workflowId)
-    if (last && !['Đang chuẩn bị', 'Đang thực hiện'].includes(last)) return last
-    await page.waitForTimeout(1200)
-  }
-  return last || '(hết giờ chờ)'
 }
 
 /** Chờ thẻ KẾT THÚC hẳn.
@@ -297,8 +307,8 @@ async function waitForCardTerminal(page, workflowId, timeoutMs = 240000) {
   const started = Date.now()
   let last = ''
   while (Date.now() - started < timeoutMs) {
-    last = await cardLabel(page, workflowId)
-    if (TERMINAL_LABELS.has(last)) return last
+    last = await journeyState(page)
+    if (TERMINAL_STATES.has(last)) return last
     await page.waitForTimeout(1200)
   }
   return last || '(hết giờ chờ)'
@@ -839,10 +849,18 @@ async function main() {
     new URL(pageA.url()).pathname === '/workspace' && wfPay !== wfCompound,
     `url=${new URL(pageA.url()).pathname} wf=${mask(wfPay)}`)
   const cardShown = await waitForApprovalCard(pageA, wfPay)
-  // `[data-step-list]` thay cho `section[aria-label="Tiến trình yêu cầu"]`:
-  // selector cũ là markup của `ChatWorkflowCard` — bề mặt chat CŨ, giờ chỉ còn
-  // `HomePage` dùng. Workspace dựng danh sách bước bằng `StepList`.
-  const steps = await pageA.locator('[data-step-list] [data-step]').allInnerTexts().catch(() => [])
+  // Workspace vẽ các bước bằng canvas (`JourneyNode`), KHÔNG phải `StepList` —
+  // `StepList` chỉ còn trang chi tiết `/workflow/:id` dùng. Selector gốc
+  // (`section[aria-label="Tiến trình yêu cầu"] ol li p`) là markup của bề mặt
+  // chat CŨ. Cả hai đều trả rỗng, nên phép kiểm này báo đỏ trong khi các bước
+  // vẫn hiện đầy đủ trên màn hình.
+  //
+  // Đọc thuộc tính chứ không đọc `innerText`: node còn mang tóm tắt, chi tiết
+  // và mốc thời gian, nên `innerText` sẽ trộn tất cả vào rồi phép kiểm "không
+  // chứa tên tool" bắt nhầm chuỗi từ chỗ khác.
+  const steps = await pageA.locator('[data-journey-step]')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('data-journey-step') || ''))
+    .catch(() => [])
   check('6c. Hiện đủ bước nghiệp vụ bằng tiếng Việt',
     cardShown && steps.length >= 3 && !steps.some((s) => /register_vehicle|book_parking|pay_fee/.test(s)),
     steps.slice(0, 3).join(' | ').slice(0, 80))
@@ -864,18 +882,22 @@ async function main() {
     `UI="${uiAmount}" DB=${dbAmount}`)
 
   const payBefore = Number(sql('SELECT count(*) FROM payments')[0])
-  await cardFor(pageA, wfPay).locator('button', { hasText: 'Xác nhận thanh toán' }).click()
+  // Nút nằm trong thẻ chờ của workspace. `cardFor` bám vào `ChatWorkflowCard`
+  // — bề mặt chat CŨ — nên phép bấm này treo 30 giây rồi giết cả lượt chạy.
+  await pageA.locator('[data-pending-card="approval"]')
+    .getByRole('button', { name: 'Xác nhận thanh toán' })
+    .click()
   const okLabel = await waitForCardTerminal(pageA, wfPay)
   const payAfter = Number(sql('SELECT count(*) FROM payments')[0])
   check('6e. Duyệt → Hoàn thành, đúng một payment',
-    okLabel === 'Hoàn thành' && payAfter === payBefore + 1, `${okLabel} · payments ${payBefore}→${payAfter}`)
+    okLabel === 'SUCCESS' && payAfter === payBefore + 1, `${okLabel} · payments ${payBefore}→${payAfter}`)
 
   // Response Agent: P-118 phải NÓI một câu về chính yêu cầu này, ngay trong
   // hội thoại. Trước lượt này chỗ đó chỉ có câu ghép cứng theo stage.
   // Câu trả lời tới sau kết quả vài nhịp (backend sinh ở tác vụ nền).
-  await pageA.locator('div.flex.flex-col.items-start p').first()
+  await pageA.locator('[data-turn="agent"]').first()
     .waitFor({ timeout: 30000 }).catch(() => {})
-  const bubbles = await pageA.locator('div.flex.flex-col.items-start p').allInnerTexts().catch(() => [])
+  const bubbles = await pageA.locator('[data-turn="agent"]').allInnerTexts().catch(() => [])
   const spoken = bubbles.filter((b) => b.trim().length > 20)
   check('6h. P-118 trả lời bằng lời trong hội thoại', spoken.length > 0,
     (spoken.at(-1) ?? '').slice(0, 90))
@@ -897,7 +919,9 @@ async function main() {
     `SELECT b.booking_id FROM payment_approvals a JOIN parking_bookings b ON b.booking_id = a.booking_id
      WHERE a.workflow_id = '${wfR}'::uuid`)
   const payBeforeR = Number(sql('SELECT count(*) FROM payments')[0])
-  await cardFor(pageA, wfR).locator('button', { hasText: 'Từ chối' }).click()
+  await pageA.locator('[data-pending-card="approval"]')
+    .getByRole('button', { name: 'Từ chối' })
+    .click()
   const rejLabel = await waitForCardTerminal(pageA, wfR)
   const payAfterR = Number(sql('SELECT count(*) FROM payments')[0])
   check('6f. Từ chối: không thu tiền, chỗ đã giữ vẫn còn',
@@ -923,9 +947,13 @@ async function main() {
     // kế. Điều PHẢI sống sót là workflow: mở trang chi tiết và kiểm ở đó.
     await pageA.goto(`${APP}/workflow/${wfS}`)
     await pageA.waitForTimeout(4000)
-    const stepsAfter = await pageA.locator('ol li p.font-medium').count()
+    // Trang chi tiết `/workflow/:id` dựng bước bằng `StepList` — đây là chỗ
+    // `data-step-list` thuộc về (workspace thì dùng canvas, xem
+    // `data-journey-step`). Số tiền đọc qua `data-quote-amount` thay vì
+    // `p.text-2xl`, một bậc typography.
+    const stepsAfter = await pageA.locator('[data-step-list] [data-step]').count()
     const btns = await pageA.locator('button', { hasText: /Xác nhận thanh toán|Từ chối/ }).count()
-    const amountAfter = await pageA.locator('p.text-2xl').first().innerText().catch(() => '')
+    const amountAfter = await pageA.locator('[data-quote-amount]').first().innerText().catch(() => '')
     check('6g. Restart container: giữ báo giá và hai nút',
       stepsAfter >= 3 && btns === 2 && amountAfter.replace(/\D/g, '').length > 0,
       `bước=${stepsAfter} nút=${btns} tiền="${amountAfter}"`)
@@ -942,7 +970,8 @@ async function main() {
     (await cardWorkflowIds(pageA)).length === 0
     && (await pageA.locator('#clarification-reply').count()) === 0
     && (await pageA.locator('#ws-composer').count()) === 1
-    && new URL(pageA.url()).pathname === '/')
+    // Hội thoại giờ ở `/workspace`; `/` chỉ còn là chặng chuyển hướng.
+    && new URL(pageA.url()).pathname === '/workspace')
 
   // Workflow không mất: người dùng chủ động mở lại từ mục Workflows (ở đây
   // dùng URL đã biết để kiểm đúng contract của trang chi tiết).
@@ -950,13 +979,17 @@ async function main() {
     plate_number: `51H-${STAMP.slice(-5)}`, vehicle_type: 'car',
     booking_date: date4, parking_zone: 'ZONE_A',
   })
-  await pageA.locator('text=Cần bạn xác nhận khoản thanh toán').waitFor({ timeout: 240000 })
+  // Ở đây đang trên TRANG CHI TIẾT `/workflow/:id`, không phải workspace —
+  // `answerOnDetail` vừa điều hướng tới đó. `[data-pending-card]` là thẻ của
+  // workspace và không tồn tại ở trang này; `[data-quote-amount]` chỉ render
+  // khi có báo giá, nên nó vừa là dấu hiệu đúng vừa không bám vào câu chữ.
+  await pageA.locator('[data-quote-amount]').first().waitFor({ timeout: 240000 })
 
   await pageA.reload()
   await pageA.waitForTimeout(5000)
-  const stepsH = await pageA.locator('ol li').count()
+  const stepsH = await pageA.locator('[data-step-list] [data-step]').count()
   const btnsH = await pageA.locator('button', { hasText: /Xác nhận thanh toán|Từ chối/ }).count()
-  const amountH = await pageA.locator('p.text-2xl').first().innerText().catch(() => '')
+  const amountH = await pageA.locator('[data-quote-amount]').first().innerText().catch(() => '')
   check('8b. Workflow đang dở mở lại vẫn có bước, báo giá và hai nút',
     stepsH >= 3 && btnsH === 2 && amountH.replace(/\D/g, '').length > 0,
     `bước=${stepsH} nút=${btnsH} tiền="${amountH}"`)
@@ -1078,7 +1111,9 @@ async function main() {
 
   const wfErr = await sendGoal(pageA, 'Tôi muốn đặt lịch tham quan căn hộ.')
   const errLabel = await waitForCardTerminal(pageA, wfErr, 120000)
-  check('5b. UI hiện lỗi terminal, không quay mãi', TERMINAL_LABELS.has(errLabel), `nhãn="${errLabel}"`)
+  // `waitForCardTerminal` giờ trả TRẠNG THÁI (`SUCCESS`/`FAILED`/`CANCELLED`),
+  // không trả nhãn tiếng Việt — xem `journeyState`.
+  check('5b. UI hiện lỗi terminal, không quay mãi', TERMINAL_STATES.has(errLabel), `trạng thái="${errLabel}"`)
 
   // Polling phải DỪNG HẲN, không phải dừng ngay lập tức.
   //
@@ -1102,7 +1137,7 @@ async function main() {
   const errText = await pageA.locator('body').innerText()
   const dbErr = sql(`SELECT status || '|' || coalesce(error_code,'-') FROM workflows WHERE workflow_id = '${wfErr}'::uuid`)[0]
   check('5d. Reload vẫn thấy lỗi, đọc từ PostgreSQL',
-    TERMINAL_LABELS.has(await statusLabel(pageA)) && dbErr.startsWith('FAILED|LLM_CONFIGURATION_ERROR'),
+    TERMINAL_STATES.has(await statusLabel(pageA)) && dbErr.startsWith('FAILED|LLM_CONFIGURATION_ERROR'),
     `DB=${dbErr}`)
 
   const leaked = ['LLMConfigurationError', 'OPENROUTER_API_KEY', 'postgresql://', 'SELECT ',
