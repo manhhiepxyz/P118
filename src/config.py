@@ -114,6 +114,9 @@ class Settings(BaseSettings):
     )
     zombie_sweep_interval_seconds: int = 300
     zombie_running_ttl_hours: float = 0.5
+    # Số yêu cầu ĐÃ KẾT THÚC giữ lại trong lịch sử mỗi người. Cũ hơn thì tự ẩn
+    # (xoá mềm bằng `archived_at`, xem `trim_history_for_owner`). 0 = không cắt.
+    history_keep_per_user: int = 15
 
 
 @lru_cache

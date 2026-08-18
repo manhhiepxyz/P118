@@ -330,6 +330,52 @@ class WorkflowRepository:
                 )
                 return {"deleted": True, "status": status}
 
+    async def trim_history_for_owner(self, *, owner_user_id: str, keep: int) -> list[str]:
+        """Giữ `keep` yêu cầu gần nhất của một người; cái cũ hơn thì ẩn đi.
+
+        Xoá MỀM bằng `archived_at`, không DELETE — cùng lý do đã ghi ở
+        `delete_workflow_for_owner`: `workflow_tasks`, `payments` và
+        `payment_approvals` là bằng chứng một khoản tiền đã đi. Danh sách gọn
+        lại đúng như người dùng muốn, nhưng dấu vết giao dịch của chính họ
+        không bốc hơi theo. Cần lấy lại thì `archived_at = NULL` là hết.
+
+        CHỈ cắt workflow ĐÃ KẾT THÚC. Một yêu cầu còn đang chờ người dùng xác
+        nhận thanh toán mà biến khỏi lịch sử thì khoản tiền vẫn treo, chỗ đỗ vẫn
+        bị giữ, và họ không còn đường nào nhìn thấy nó. "Cũ" không có nghĩa là
+        "xong": người dùng bỏ dở một việc ba tuần trước thì việc đó vẫn đang
+        chờ họ.
+
+        Vì thế phép đếm cũng chỉ đếm workflow đã kết thúc. Nếu đếm cả cái đang
+        chạy, một người có 15 việc dở dang sẽ thấy lịch sử rỗng trơn — mọi thứ
+        đã xong đều bị đẩy ra khỏi hạn mức bởi những việc chưa xong.
+
+        Trả về danh sách id vừa ẩn, để caller log được số lượng.
+        """
+        if keep < 0:
+            return []
+        terminal = ("SUCCESS", "FAILED", "CANCELLED")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH ranked AS (
+                    SELECT workflow_id,
+                           row_number() OVER (ORDER BY created_at DESC) AS vi_tri
+                    FROM workflows
+                    WHERE owner_user_id = $1
+                      AND archived_at IS NULL
+                      AND status = ANY($2::text[])
+                )
+                UPDATE workflows
+                SET archived_at = NOW(), updated_at = NOW()
+                WHERE workflow_id IN (SELECT workflow_id FROM ranked WHERE vi_tri > $3)
+                RETURNING workflow_id
+                """,
+                _uuid(owner_user_id),
+                list(terminal),
+                keep,
+            )
+        return [str(row["workflow_id"]) for row in rows]
+
     async def cancel_workflow(self, workflow_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         """Huỷ workflow và mọi bước chưa kết thúc trong một transaction.
 

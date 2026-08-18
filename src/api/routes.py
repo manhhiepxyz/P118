@@ -3763,6 +3763,17 @@ async def list_demo_workflows(
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
+        # Cắt lịch sử NGAY TRƯỚC khi đọc, cùng chỗ với lazy zombie sweep.
+        #
+        # Đặt ở đây chứ không đặt trong vòng quét nền: yêu cầu là "lịch sử chỉ
+        # giữ N cái gần nhất", tức là một tính chất của thứ người dùng NHÌN
+        # THẤY. Để vòng nền lo thì có khoảng vài phút danh sách dài hơn hạn mức,
+        # và không có gì giải thích cho người đang nhìn vào nó.
+        keep = get_settings().history_keep_per_user
+        if keep > 0:
+            trimmed = await repository.trim_history_for_owner(owner_user_id=str(user["id"]), keep=keep)
+            if trimmed:
+                logger.info("history trimmed (owner=%s archived=%d)", user["username"], len(trimmed))
         if session_id:
             # Session phải thuộc chính user này. `session_id` là giá trị client
             # biết và gửi lại được, nên nó không phải bằng chứng về quyền. Lọc

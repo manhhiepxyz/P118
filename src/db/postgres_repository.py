@@ -278,6 +278,9 @@ class PostgreSQLWorkflowStateRepository:
     async def consume_clarification(self, workflow_id: str) -> dict | None:
         return await self.workflows.consume_clarification(workflow_id)
 
+    async def trim_history_for_owner(self, *, owner_user_id: str, keep: int) -> list[str]:
+        return await self.workflows.trim_history_for_owner(owner_user_id=owner_user_id, keep=keep)
+
     async def list_workflows(
         self,
         *,
