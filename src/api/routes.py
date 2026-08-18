@@ -279,6 +279,32 @@ def _to_public_missing_fields(fields: list[str]) -> list[str]:
     return [_PUBLIC_FIELD_ALIASES.get(name, name) for name in fields]
 
 
+def _canonical_field(name: str) -> str:
+    """Gộp tên CÔNG KHAI và tên NỘI BỘ của cùng một field về một mối.
+
+    `project_id` và `project_name` là hai tên cho đúng một câu hỏi. Biên API
+    dịch chúng, nhưng phép dịch chỉ chạy trên đường RA — nên nếu hai nguồn ghi
+    hai tên khác nhau thì đường VÀO từ chối chính cái tên nó vừa hỏi.
+
+    Đã đo được, và người dùng thật gặp phải:
+
+        DB lưu       ["project_name", "viewing_date", "viewing_time"]
+        API trả về   ["project_id",   "viewing_date", "viewing_time"]
+        UI gửi lại   {"project_id": "Vinhomes Ocean Park"}   ← đúng thứ API bảo
+        Backend      `project_id` không nằm trong danh sách đang chờ
+                     → coi TOÀN BỘ câu trả lời là sai
+                     → "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ"
+
+    Người dùng nhập đúng tên dự án và bị bảo rằng dự án đó không tồn tại — về
+    đúng cái field duy nhất họ trả lời chính xác. Không có cách nào thoát: gõ
+    lại đúng như cũ vẫn hỏng y hệt.
+
+    Chuẩn hoá ở đây thay vì đi sửa nguồn nào ghi sai: một API phải chấp nhận
+    được chính cái tên nó vừa hỏi, bất kể tầng nào bên trong dùng tên gì.
+    """
+    return _PUBLIC_FIELD_ALIASES.get(name, name)
+
+
 def _resolve_public_answers(answers: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     """Dịch câu trả lời công khai sang khoá nội bộ.
 
@@ -319,17 +345,23 @@ def _extract_structured_follow_up_answers(
     missing_fields: list[str],
 ) -> tuple[dict[str, Any], list[str]]:
     """Validate từng field form bằng cùng luật với câu trả lời chat."""
-    allowed = set(missing_fields)
-    if any(name not in allowed for name in fields):
+    # So sánh theo tên CHUẨN HOÁ: `project_id` và `project_name` là một field.
+    allowed = {_canonical_field(name) for name in missing_fields}
+    if any(_canonical_field(name) not in allowed for name in fields):
         return {}, list(missing_fields)
+
+    by_canonical = {_canonical_field(key): value for key, value in fields.items()}
 
     answers: dict[str, Any] = {}
     unresolved: list[str] = []
     for name in missing_fields:
-        if name not in fields:
+        canonical = _canonical_field(name)
+        if canonical not in by_canonical:
             unresolved.append(name)
             continue
-        raw = fields[name]
+        # Phân tích theo tên MÀ BACKEND ĐANG CHỜ, không theo tên client gửi:
+        # `project_id` cần mã `PRJ-007`, `project_name` cần tên công khai.
+        raw = by_canonical[canonical]
         if isinstance(raw, str) and _is_canonical_enum(name, raw):
             # Giá trị ĐÃ ở dạng chuẩn của contract (`ZONE_B`, `car`, `buy`).
             #

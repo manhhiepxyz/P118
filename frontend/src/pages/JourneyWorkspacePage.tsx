@@ -347,6 +347,31 @@ export function JourneyWorkspacePage() {
   const respond = (intent: ReturnType<typeof normalizeIntent>, value?: string, source: 'chat' | 'field' = 'chat') =>
     respondTo(pending, intent, value, source)
 
+  /**
+   * Gửi TẤT CẢ ô của form trong một lượt.
+   *
+   * Backend áp luật all-or-none cho câu trả lời dạng form: thiếu một ô là từ
+   * chối cả lượt (xem `_extract_structured_follow_up_answers`). Đường cũ gửi
+   * đúng một khoá, nên người dùng điền đúng dự án rồi bị trả lời về ngày tham
+   * quan — một ô họ chưa hề được hỏi.
+   */
+  async function respondWithFields(values: Record<string, string>) {
+    const action = pending
+    if (!action) return
+    try {
+      const fields: Record<string, string> = {}
+      for (const [key, value] of Object.entries(values)) fields[key] = extractValue(value)
+      absorb(await continueWorkflow(action.workflowId, { fields }))
+    } catch (error) {
+      // Nói LẠI LÝ DO backend đưa ra, không phủ lên nó một câu chung chung.
+      // Người dùng từng thấy "Mình chưa gửi được xác nhận của bạn" đè lên câu
+      // giải thích thật — hai câu mâu thuẫn về cùng một sự việc.
+      const detail = error instanceof Error ? error.message : String(error)
+      say('agent', detail || 'Mình chưa gửi được câu trả lời của bạn. Bạn thử lại giúp mình nhé.')
+      setFault(detail)
+    }
+  }
+
   async function respondTo(
     action: PendingAction | null,
     intent: ReturnType<typeof normalizeIntent>,
@@ -455,8 +480,12 @@ export function JourneyWorkspacePage() {
       }
       absorb(res)
     } catch (error) {
-      say('agent', 'Mình chưa gửi được xác nhận của bạn. Bạn thử lại giúp mình nhé.')
-      setFault(error instanceof Error ? error.message : String(error))
+      // Câu mẫu "chưa gửi được" nói SAI chuyện đã xảy ra khi server đã nhận và
+      // từ chối có lý do. Người dùng thấy hai câu chồng lên nhau và không biết
+      // tin câu nào.
+      const detail = error instanceof Error ? error.message : String(error)
+      say('agent', detail || 'Mình chưa gửi được câu trả lời của bạn. Bạn thử lại giúp mình nhé.')
+      setFault(detail)
     }
   }
 
@@ -775,11 +804,19 @@ export function JourneyWorkspacePage() {
                   action={pending}
                   onApprove={() => respond('APPROVE')}
                   onReject={() => respond('REJECT')}
-                  onValue={(value) => {
+                  onValue={(values) => {
                     // Điền vào ô có cấu trúc cũng là một lượt trả lời — ghi vào
                     // hội thoại để hai lối không kể hai câu chuyện khác nhau.
-                    say('user', value)
-                    respond('VALUE', value, 'field')
+                    // Ghi bằng NHÃN người dùng thấy, không bằng khoá nội bộ.
+                    const labelOf = (key: string) =>
+                      (pending?.fields ?? []).find((f) => f.key === key)?.label ?? key
+                    say(
+                      'user',
+                      Object.entries(values)
+                        .map(([key, value]) => `${labelOf(key)}: ${value}`)
+                        .join(' · '),
+                    )
+                    respondWithFields(values)
                   }}
                 />
               )}

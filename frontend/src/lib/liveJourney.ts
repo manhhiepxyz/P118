@@ -347,12 +347,20 @@ export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction |
       status: 'MISSING_INFORMATION',
       title: 'Cần thêm thông tin',
       message: res.question || res.message || 'Mình còn thiếu vài thông tin để tiếp tục.',
-      // Chỉ liệt kê phần CÒN LẠI: field đầu tiên đã là nhãn của ô nhập ngay
-      // bên dưới, nhắc lại thành ra "Còn thiếu: Biển số xe / Biển số xe".
-      details: res.missing_fields.slice(1).map((field) => ({ label: 'Còn thiếu', value: label(field) })),
+      // Không liệt kê "Còn thiếu" nữa: mọi ô đang chờ đã được vẽ thành ô nhập
+      // ngay bên dưới, nên dòng này chỉ lặp lại đúng thứ người dùng đang nhìn.
+      details: [],
       field: first
         ? { key: first, label: label(first), placeholder: `Nhập ${label(first).toLowerCase()}` }
         : { key: 'answer', label: 'Trả lời', placeholder: 'Trả lời P-118' },
+      // Đủ MỌI ô đang chờ — backend từ chối cả lượt nếu thiếu một ô.
+      fields: res.missing_fields.length
+        ? res.missing_fields.map((key) => ({
+            key,
+            label: label(key),
+            placeholder: `Nhập ${label(key).toLowerCase()}`,
+          }))
+        : [{ key: 'answer', label: 'Trả lời', placeholder: 'Trả lời P-118' }],
       fingerprint: res.missing_fields.join(','),
       explain: res.question || 'Mình cần thông tin này để lập kế hoạch tiếp.',
     }
