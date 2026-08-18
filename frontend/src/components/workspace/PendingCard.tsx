@@ -33,6 +33,7 @@ export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
 
   return (
     <section
+      data-pending-card={action.kind}
       className="rise border-b border-[var(--border-subtle)] px-6 py-6"
       style={{
         backgroundColor: `color-mix(in srgb, var(--${
@@ -56,9 +57,12 @@ export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
         {action.title}
       </h3>
 
-      <dl className="mt-4 space-y-3">
+      {/* `data-detail` mang chính NHÃN của dòng, nên kiểm thử hỏi được "số
+          tiền là bao nhiêu" thay vì đếm vị trí hay bám vào cỡ chữ
+          (`p.text-2xl` — selector cũ, đã chết). */}
+      <dl className="mt-4 space-y-3" data-pending-details>
         {action.details.map((detail) => (
-          <div key={detail.label}>
+          <div key={detail.label} data-detail={detail.label}>
             <dt className="text-[11.5px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
               {detail.label}
             </dt>

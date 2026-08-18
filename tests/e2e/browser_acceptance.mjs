@@ -155,9 +155,11 @@ async function statusLabel(page) {
 }
 
 async function waitForApprovalCard(page, workflowId, timeoutMs = 240000) {
-  const scope = workflowId
-    ? cardFor(page, workflowId).locator('text=Cần bạn xác nhận khoản thanh toán')
-    : page.locator('text=Cần bạn xác nhận khoản thanh toán')
+  // Workspace hiện ĐÚNG MỘT hành trình đang sống, nên thẻ chờ không cần lọc
+  // theo workflow — `[data-pending-card="approval"]` là đủ và không lệ thuộc
+  // vào bố cục. `cardFor` bám vào `ChatWorkflowCard`, markup của bề mặt chat
+  // CŨ mà giờ chỉ `HomePage` còn dùng.
+  const scope = page.locator('[data-pending-card="approval"]')
   try {
     await scope.first().waitFor({ timeout: timeoutMs })
     return true
@@ -269,8 +271,8 @@ function cardFor(page, workflowId) {
 
 /** Nhãn trạng thái của một thẻ cụ thể. */
 async function cardLabel(page, workflowId) {
-  const scope = workflowId ? cardFor(page, workflowId) : page.locator('section[aria-label="Tiến trình yêu cầu"]').last()
-  return (await scope.locator('span').first().innerText().catch(() => '')).trim()
+  const scope = page.locator('[data-pending-card]').last()
+  return (await scope.locator('h3').first().innerText().catch(() => '')).trim()
 }
 
 /** Chờ thẻ rời trạng thái đang chạy — dừng cả ở điểm chờ người dùng. */
@@ -467,7 +469,19 @@ async function main() {
   const lockedBefore = await lockedCapabilities(pageA)
   check('3a. Chưa liên kết: dịch vụ cư dân bị khoá', lockedBefore > 0, `khoá=${lockedBefore}`)
 
+  // Đi ĐÚNG đường người dùng đi: `/apartment-link` giờ chỉ là CỬA VÀO — nó cho
+  // biết đang ở bước nào rồi dẫn sang cổng của đơn vị xác thực (`/verify`), nơi
+  // đặt form nộp. Ranh giới đó phản ánh thực tế: xác minh căn hộ không nằm
+  // trong 10 tool của Agent, một đơn vị độc lập mới quyết định.
+  //
+  // Harness cũ `goto('/apartment-link')` rồi đợi thẳng `#link-apartment`, nên
+  // nó treo 20 giây ở một trang không còn form — và cả bộ dừng ngay mục 3.
+  // Bấm nút thay vì `goto('/verify')`: nếu nút gãy thì đó là hỏng thật, còn
+  // `goto` sẽ che mất.
   await pageA.goto(`${APP}/apartment-link`)
+  await pageA.getByRole('link', { name: /xác thực với đơn vị|xem hồ sơ đã gửi/i }).click()
+  await pageA.waitForURL(/\/verify/, { timeout: 20000 })
+  // Màn chuyển giao có sàn hiển thị ~900ms trước khi nhường chỗ cho form.
   await pageA.locator('#link-apartment').waitFor({ timeout: 20000 })
   const linkFormIds = await pageA.locator('form input, form select').evaluateAll((els) => els.map((e) => e.id))
   check('3b. Form chỉ hỏi thông tin người dùng biết',
@@ -501,7 +515,9 @@ async function main() {
   await pageA.reload()
   await pageA.waitForTimeout(2500)
   const afterReload = await pageA.locator('body').innerText()
-  check('3d. Reload vẫn thấy trạng thái chờ duyệt', /chờ ban quản lý duyệt/i.test(afterReload))
+  // "ban quản lý" → "đơn vị xác thực": cùng một hồ sơ mà hai trang gọi bên
+  // duyệt bằng hai tên khác nhau, đã thống nhất lại.
+  check('3d. Reload vẫn thấy trạng thái chờ duyệt', /chờ đơn vị xác thực duyệt/i.test(afterReload))
 
   // Gửi lần hai: form đã bị ẩn khi đang PENDING, nên thử thẳng qua API bằng
   // token của chính trang — kiểm ràng buộc backend chứ không kiểm việc ẩn nút.
@@ -791,13 +807,17 @@ async function main() {
   if (lookupResponse?.status() !== 202) return finish(browser)
   // Câu trả lời là một bubble hội thoại độc lập, không nhét ngược vào card
   // tiến trình. Đây chính là ranh giới giúp card chỉ biểu diễn trạng thái.
-  await pageA.locator('div.flex.flex-col.items-start > p', { hasText: 'Vinhomes Ocean Park' })
+  // `[data-turn="agent"]` thay cho `div.flex.flex-col.items-start > p`: selector
+  // cũ bám vào class Tailwind và đã chết khi bố cục hội thoại đổi — nó treo 30
+  // giây rồi giết cả lượt chạy, trong khi câu trả lời vẫn hiện đúng trên màn
+  // hình. Xem `ConversationStream`.
+  await pageA.locator('[data-turn="agent"]', { hasText: 'Vinhomes Ocean Park' })
     .last().waitFor({ timeout: 30000 })
   check('6b2. Hỏi danh sách dự án được trả lời mà không tạo workflow mới',
     JSON.stringify(await cardWorkflowIds(pageA)) === JSON.stringify(cardsBeforeQuestion)
     && (await pageA.locator('#ws-composer').count()) === 1)
-  const userHistory = await pageA.locator('div.flex.justify-end > p').allInnerTexts()
-  const assistantHistory = await pageA.locator('div.flex.flex-col.items-start > p').allInnerTexts()
+  const userHistory = await pageA.locator('[data-turn="user"]').allInnerTexts()
+  const assistantHistory = await pageA.locator('[data-turn="agent"]').allInnerTexts()
   check('6b3. Hỏi tiếp không làm mất lịch sử cùng workflow',
     userHistory.some((text) => text.includes('Đặt lịch tham quan dự án'))
     && userHistory.some((text) => text.includes('Có những dự án nào'))
@@ -813,21 +833,34 @@ async function main() {
     plate_number: `51B-${STAMP.slice(-5)}`, vehicle_type: 'car',
     booking_date: date1, parking_zone: 'ZONE_A',
   })
+  // Hội thoại giờ ở `/workspace`, không phải `/` — `HomeRedirect` đưa khách
+  // hàng sang đó và `/` chỉ còn là chặng chuyển hướng.
   check('6a2. Trả lời xong vẫn ở lại hội thoại, thẻ chuyển sang lượt chạy mới',
-    new URL(pageA.url()).pathname === '/' && wfPay !== wfCompound,
+    new URL(pageA.url()).pathname === '/workspace' && wfPay !== wfCompound,
     `url=${new URL(pageA.url()).pathname} wf=${mask(wfPay)}`)
   const cardShown = await waitForApprovalCard(pageA, wfPay)
-  const steps = await pageA.locator('section[aria-label="Tiến trình yêu cầu"] ol li p').allInnerTexts().catch(() => [])
+  // `[data-step-list]` thay cho `section[aria-label="Tiến trình yêu cầu"]`:
+  // selector cũ là markup của `ChatWorkflowCard` — bề mặt chat CŨ, giờ chỉ còn
+  // `HomePage` dùng. Workspace dựng danh sách bước bằng `StepList`.
+  const steps = await pageA.locator('[data-step-list] [data-step]').allInnerTexts().catch(() => [])
   check('6c. Hiện đủ bước nghiệp vụ bằng tiếng Việt',
     cardShown && steps.length >= 3 && !steps.some((s) => /register_vehicle|book_parking|pay_fee/.test(s)),
     steps.slice(0, 3).join(' | ').slice(0, 80))
 
-  const uiAmount = await pageA.locator('p.text-2xl').first().innerText().catch(() => '')
+  // Hỏi theo NHÃN thay vì bám vào cỡ chữ (`p.text-2xl`): số tiền vẫn là số
+  // tiền kể cả khi thiết kế đổi bậc typography.
+  const uiAmount = await pageA.locator('[data-detail="Số tiền"] dd').first().innerText().catch(() => '')
   const dbAmount = sql(
     `SELECT b.amount FROM payment_approvals a JOIN parking_bookings b ON b.booking_id = a.booking_id
      WHERE a.workflow_id = '${wfPay}'::uuid AND a.status = 'AWAITING'`)[0]
+  // Hai giá trị RỖNG bằng nhau vẫn là bằng nhau — và phép so ngây thơ ở bản
+  // trước báo xanh cho `UI="" DB=undefined`, tức không đọc được gì mà vẫn nói
+  // "khớp". Một phép kiểm đạt một cách vô nghĩa còn tệ hơn phép kiểm đỏ: nó
+  // khẳng định thứ nó chưa hề nhìn thấy.
+  const uiDigits = uiAmount.replace(/\D/g, '')
+  const dbDigits = String(dbAmount ?? '').replace(/\D/g, '')
   check('6d. Báo giá khớp booking authoritative',
-    uiAmount.replace(/\D/g, '') === String(dbAmount || '').replace(/\D/g, ''),
+    uiDigits.length > 0 && dbDigits.length > 0 && uiDigits === dbDigits,
     `UI="${uiAmount}" DB=${dbAmount}`)
 
   const payBefore = Number(sql('SELECT count(*) FROM payments')[0])
