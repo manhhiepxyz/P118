@@ -3736,12 +3736,22 @@ _ACTIVE_STATUSES = ("PENDING", "RUNNING")
 # danh sách.
 _ATTENTION_STATUSES = ("WAITING_APPROVAL", "NEEDS_INFORMATION")
 _COMPLETED_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
+# "Đã xong" và "Chưa xong" là hai câu trả lời KHÁC NHAU cho cùng một câu hỏi
+# của người dùng: việc này có thành không?
+#
+# `completed` gộp cả ba trạng thái kết thúc, kể cả FAILED — hợp lý cho phép đếm
+# nội bộ, nhưng đặt tên "Đã xong" cho một việc đã hỏng là nói sai với người
+# đang tìm nó.
+_SUCCEEDED_STATUSES = ("SUCCESS",)
+_UNFINISHED_STATUSES = ("FAILED", "CANCELLED")
 
 _LIST_FILTERS: dict[str, tuple[str, ...]] = {
     "active": _ACTIVE_STATUSES + _ATTENTION_STATUSES,
     "running": _ACTIVE_STATUSES,
     "attention": _ATTENTION_STATUSES,
     "completed": _COMPLETED_STATUSES,
+    "succeeded": _SUCCEEDED_STATUSES,
+    "unfinished": _UNFINISHED_STATUSES,
     "all": (),
 }
 

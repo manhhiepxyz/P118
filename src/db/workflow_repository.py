@@ -339,39 +339,59 @@ class WorkflowRepository:
         lại đúng như người dùng muốn, nhưng dấu vết giao dịch của chính họ
         không bốc hơi theo. Cần lấy lại thì `archived_at = NULL` là hết.
 
-        CHỈ cắt workflow ĐÃ KẾT THÚC. Một yêu cầu còn đang chờ người dùng xác
-        nhận thanh toán mà biến khỏi lịch sử thì khoản tiền vẫn treo, chỗ đỗ vẫn
-        bị giữ, và họ không còn đường nào nhìn thấy nó. "Cũ" không có nghĩa là
-        "xong": người dùng bỏ dở một việc ba tuần trước thì việc đó vẫn đang
-        chờ họ.
+        Chỉ MỘT thứ được miễn: `WAITING_APPROVAL`. Đó là yêu cầu đang giữ tiền
+        hoặc giữ chỗ của người dùng và chờ chính họ quyết. Giấu nó đi thì khoản
+        tiền vẫn treo, chỗ đỗ vẫn bị giữ, và họ không còn đường nào nhìn thấy
+        nó — mất mát thật, không phải màn hình gọn hơn.
 
-        Vì thế phép đếm cũng chỉ đếm workflow đã kết thúc. Nếu đếm cả cái đang
-        chạy, một người có 15 việc dở dang sẽ thấy lịch sử rỗng trơn — mọi thứ
-        đã xong đều bị đẩy ra khỏi hạn mức bởi những việc chưa xong.
+        Phần được miễn vẫn CHIẾM CHỖ trong hạn mức — nó đẩy việc cũ hơn ra
+        ngoài, còn bản thân nó ở lại. Không tính nó thì hạn mức thôi nói về thứ
+        người dùng NHÌN THẤY: đo trên dữ liệu thật, tài khoản có 12 PENDING + 5
+        WAITING_APPROVAL không bị cắt gì (12 ≤ 15) mà vẫn hiện 17 dòng.
+
+        Mọi thứ khác đều bị cắt, kể cả PENDING và NEEDS_INFORMATION.
+        Bản đầu chỉ cắt workflow ĐÃ KẾT THÚC, và trên dữ liệu thật nó gần như
+        không cắt gì: một tài khoản có 17 yêu cầu thì cả 17 đều dở dang — bỏ
+        giữa chừng, hỏi lại rồi không ai trả lời. Đó chính là loại rác mà lịch
+        sử cần dọn, mà luật cũ lại bảo vệ đúng nó.
+
+        Một bản nháp bỏ dở ba tuần trước không phải "việc đang chờ bạn"; nó là
+        thứ người dùng đã quên. Và vì đây là xoá MỀM, đoán sai thì `archived_at
+        = NULL` là lấy lại được — khác hẳn khoản tiền đang treo.
 
         Trả về danh sách id vừa ẩn, để caller log được số lượng.
         """
         if keep < 0:
             return []
-        terminal = ("SUCCESS", "FAILED", "CANCELLED")
+        protected = ("WAITING_APPROVAL",)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
+                -- Xếp hạng trên TOÀN BỘ danh sách đang hiện, kể cả phần được
+                -- miễn. Nếu chỉ xếp hạng phần cắt được thì hạn mức không còn
+                -- nói về thứ người dùng NHÌN THẤY: đo trên dữ liệu thật, một
+                -- tài khoản 12 PENDING + 5 WAITING_APPROVAL không bị cắt gì
+                -- (12 ≤ 15) và vẫn hiện 17 dòng.
+                --
+                -- Phần được miễn CHIẾM CHỖ nhưng không bao giờ bị ẩn: nó đẩy
+                -- những việc cũ hơn ra khỏi hạn mức, còn bản thân nó ở lại.
                 WITH ranked AS (
-                    SELECT workflow_id,
+                    SELECT workflow_id, status,
                            row_number() OVER (ORDER BY created_at DESC) AS vi_tri
                     FROM workflows
                     WHERE owner_user_id = $1
                       AND archived_at IS NULL
-                      AND status = ANY($2::text[])
                 )
                 UPDATE workflows
                 SET archived_at = NOW(), updated_at = NOW()
-                WHERE workflow_id IN (SELECT workflow_id FROM ranked WHERE vi_tri > $3)
+                WHERE workflow_id IN (
+                    SELECT workflow_id FROM ranked
+                    WHERE vi_tri > $3 AND status <> ALL($2::text[])
+                )
                 RETURNING workflow_id
                 """,
                 _uuid(owner_user_id),
-                list(terminal),
+                list(protected),
                 keep,
             )
         return [str(row["workflow_id"]) for row in rows]
