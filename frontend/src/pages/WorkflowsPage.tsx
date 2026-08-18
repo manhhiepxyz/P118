@@ -281,18 +281,26 @@ export function WorkflowsPage() {
 
               {turns.map((item) => (
                 <section key={item.workflow_id}>
+                  {/* Gắn nhãn bằng TIÊU ĐỀ, không bằng `#a3f9c1`.
+                      Một UUID cắt ngắn không nói được cuộc trao đổi này thuộc
+                      về việc gì — người dùng phải mở từng cái ra mới biết, mà
+                      tab Hành trình ngay cạnh thì hiện tiêu đề đọc được. Cùng
+                      một danh sách, hai cách gọi tên. */}
                   <div className="flex items-center gap-2.5">
-                    <MessageSquare className="h-3.5 w-3.5 text-[var(--text-muted)]" aria-hidden />
-                    <span className="font-mono text-[11.5px] uppercase tracking-[0.14em] text-[var(--text-muted)]">
-                      #{shortId(item.workflow_id)}
-                    </span>
-                    <span className="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden />
+                    <MessageSquare className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
                     <Link
                       to={`/workflow/${item.workflow_id}`}
-                      className="text-[12.5px] font-medium text-[var(--text-muted)] transition-colors hover:text-[var(--agent)]"
+                      className="min-w-0 truncate text-[13.5px] font-semibold text-[var(--text-primary)] transition-colors hover:text-[var(--agent)]"
                     >
-                      Mở hành trình
+                      {item.title}
                     </Link>
+                    <span className="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden />
+                    <span
+                      className="shrink-0 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--text-muted)]"
+                      title="Mã yêu cầu"
+                    >
+                      #{shortId(item.workflow_id)}
+                    </span>
                   </div>
 
                   {item.goal && (

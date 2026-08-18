@@ -303,6 +303,12 @@ class DemoWorkflowResponse(BaseModel):
     question: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
     summary: str | None = None
+    # Câu người dùng đã nói, nguyên văn.
+    #
+    # `summary`/`message` là câu HỆ THỐNG viết; không có trường nào mang lời của
+    # chính người dùng, nên trang chi tiết không thể dựng lại cuộc trao đổi —
+    # nó hiện được câu P-118 trả lời mà không hiện được câu đã hỏi.
+    goal: str | None = None
     workflow_id: str | None = None
     # Báo giá authoritative đọc từ booking đã persist. Browser KHÔNG được gửi
     # amount/currency; nó chỉ hiển thị lại đúng con số backend đưa xuống.

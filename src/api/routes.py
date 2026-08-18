@@ -3127,6 +3127,46 @@ async def get_demo_workflow_status(
     workflow_id: str,
     user: dict = Depends(get_current_user),
 ) -> DemoWorkflowResponse:
+    """Trạng thái workflow, kèm câu người dùng đã nói.
+
+    `goal` được đóng dấu Ở ĐÂY, sau khi thân hàm chọn xong một trong nhiều
+    nhánh trả về. Thân hàm có sáu đường ra (chờ duyệt lịch, chờ thanh toán,
+    cache RAM, đọc DB, …) và thêm `goal=` vào từng đường là sáu chỗ để quên một
+    chỗ — cái quên đó sẽ im lặng, vì thiếu `goal` chỉ làm trang chi tiết mất
+    một khối, không làm hỏng gì.
+    """
+    response = await _demo_workflow_status(workflow_id, user)
+    if response.goal is not None:
+        return response
+    goal = await _read_workflow_goal(workflow_id)
+    return response.model_copy(update={"goal": goal}) if goal else response
+
+
+async def _read_workflow_goal(workflow_id: str) -> str | None:
+    """Câu người dùng đã nói, đọc thẳng từ `workflows.goal`.
+
+    Best-effort: đọc hỏng thì trang chi tiết mất khối trao đổi, không phải mất
+    cả trang.
+    """
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            async with pool.acquire() as conn:
+                return await conn.fetchval(
+                    "SELECT goal FROM workflows WHERE workflow_id = $1::uuid", workflow_id
+                )
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - phụ trợ, không được làm vỡ GET
+        logger.warning("không đọc được goal của workflow để dựng trao đổi")
+        return None
+
+
+async def _demo_workflow_status(
+    workflow_id: str,
+    user: dict,
+) -> DemoWorkflowResponse:
     """Kết hợp stage của Agent với task status thật đọc từ PostgreSQL."""
     await _require_workflow_owner(workflow_id, user)
     job = _DEMO_JOBS.get(workflow_id)

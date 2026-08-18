@@ -223,11 +223,45 @@ export function WorkflowPage() {
 
               Đó là mất mát thật — các bước nói HỆ THỐNG đã làm gì, còn câu này
               nói KẾT QUẢ nghĩa là gì với họ. */}
-          {!needsInfo && data.answer && (
-            <section className="rise mt-9">
-              <p className="mat-raised whitespace-pre-line rounded-[var(--r-sm)] px-5 py-4 text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                {data.answer}
-              </p>
+          {/* ── Trao đổi ─────────────────────────────────────────────
+              Câu người dùng đã nói + câu P-118 trả lời, đặt cạnh nhau.
+
+              Trước đây trang này chỉ có một trong hai: `data.answer` render
+              trần, không có ngữ cảnh, và chỉ trong nhánh "cần bổ sung thông
+              tin". Người dùng mở lại một yêu cầu cũ thì thấy một câu trả lời
+              mà không thấy mình đã hỏi gì — còn mục "Trao đổi" ở Lịch sử thì
+              nằm tách hẳn, gắn nhãn bằng `#a3f9c1`.
+
+              Cuộc trao đổi THUỘC VỀ workflow. Đặt nó ở đây là bỏ được một mục
+              rời rạc, và câu hỏi lẫn câu trả lời cuối cùng cũng ở cùng chỗ. */}
+          {(data.goal || (!needsInfo && data.answer)) && (
+            <section className="rise mt-9" aria-label="Trao đổi">
+              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                Trao đổi
+              </h2>
+              <div className="mt-4 space-y-3">
+                {data.goal && (
+                  <div className="flex justify-end" data-turn="user">
+                    <p className="max-w-[80%] whitespace-pre-line rounded-[var(--r-sm)] bg-[var(--surface-overlay)] px-4 py-3 text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                      {data.goal}
+                    </p>
+                  </div>
+                )}
+                {!needsInfo && data.answer && (
+                  <div className="flex gap-3" data-turn="agent">
+                    <span
+                      aria-hidden
+                      className="mt-[3px] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--r-xs)] font-mono text-[11px] font-bold"
+                      style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
+                    >
+                      P
+                    </span>
+                    <p className="min-w-0 flex-1 whitespace-pre-line text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                      {data.answer}
+                    </p>
+                  </div>
+                )}
+              </div>
             </section>
           )}
 

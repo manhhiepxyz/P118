@@ -196,6 +196,8 @@ export interface AgentWorkflowResponse {
    * đang chạy hoặc lớp trả lời không dùng được — khi đó hiển thị `message`.
    */
   answer: string | null
+  /** Câu người dùng đã nói, nguyên văn — để dựng lại cuộc trao đổi. */
+  goal: string | null
   /** Tối đa 3 việc gợi ý tiếp theo, chỉ gồm dịch vụ tài khoản đang dùng được. */
   suggestions: string[]
   /**
