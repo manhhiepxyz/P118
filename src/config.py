@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # Groq đổi thường xuyên và họ gỡ model cũ, nên khoá lại sẽ biến một lần dọn
     # danh mục bên họ thành sự cố bên mình.
     groq_api_key: str = ""
-    groq_model_name: str = "llama-3.3-70b-versatile"
+    groq_model_name: str = "openai/gpt-oss-20b"
     groq_base_url: str = "https://api.groq.com/openai/v1"
     deepseek_base_url: str = "https://api.deepseek.com"
 

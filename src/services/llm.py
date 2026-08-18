@@ -69,7 +69,7 @@ def _require_groq_model(value: str) -> str:
     if model.startswith("deepseek-"):
         raise LLMConfigurationError(
             "GROQ_MODEL_NAME đang là tên model DeepSeek. Đổi LLM_PROVIDER sang groq "
-            "thì phải đổi cả tên model (ví dụ: llama-3.3-70b-versatile)."
+            "thì phải đổi cả tên model (ví dụ: openai/gpt-oss-20b)."
         )
     return model
 

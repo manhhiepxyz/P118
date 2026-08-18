@@ -17,7 +17,7 @@ def _settings(**over) -> Settings:
     base = {
         "llm_provider": "groq",
         "groq_api_key": "khoa-gia-cho-test",
-        "groq_model_name": "llama-3.3-70b-versatile",
+        "groq_model_name": "openai/gpt-oss-20b",
     }
     base.update(over)
     return Settings(**base)
@@ -44,7 +44,7 @@ def test_a_deepseek_model_name_left_behind_is_caught():
 
 def test_the_client_points_at_groq():
     client = get_llm(_settings())
-    assert client.model_name == "llama-3.3-70b-versatile"
+    assert client.model_name == "openai/gpt-oss-20b"
     assert "groq.com" in str(client.openai_api_base)
 
 
