@@ -6,7 +6,7 @@ import { CommandRail } from '../components/workspace/CommandRail'
 import { InspectorPanel } from '../components/workspace/InspectorPanel'
 import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 
-import { AgentPresence } from '../components/workspace/AgentPresence'
+import { LogoutButton } from '../components/workspace/LogoutButton'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { SERVICE_FIELDS, SHARED_FIELDS, matchOption, missingFields, today, type FormValues } from '../lib/serviceForms'
 import { JourneySummary } from '../components/workspace/JourneySummary'
@@ -209,7 +209,6 @@ export function JourneyWorkspacePage() {
    * sang "Đang chờ bạn xác nhận thanh toán" thì nó không còn là tên của việc
    * nữa — nó là một dòng trạng thái đặt nhầm chỗ.
    */
-  const [goalText, setGoalText] = useState('')
   const turnId = useRef(0)
   /**
    * Câu P-118 đã nói rồi — để nhịp poll kế tiếp không nói lại y hệt.
@@ -375,7 +374,27 @@ export function JourneyWorkspacePage() {
       { workflowId: action?.workflowId ?? '', fingerprint: action?.fingerprint ?? '' },
       value,
     )
-    if (!outcome.ok || !action) {
+    /*
+     * Câu hỏi phụ phải ĐI TỚI BACKEND, không bị trả lời tại chỗ.
+     *
+     * `resolve()` gặp `intent === 'QUESTION'` thì trả `{ ok: false, reply:
+     * action.explain }` — một câu mẫu như "Mình cần thông tin này để lập kế
+     * hoạch tiếp." Câu hỏi không bao giờ rời khỏi trình duyệt.
+     *
+     * Đo được: đang chờ bổ sung thông tin mà hỏi "Có những dự án nào?" thì
+     * người dùng nhận về câu mẫu vô can. Trong khi cùng câu đó gửi thẳng
+     * `POST /continue` cho kết quả đúng — backend liệt kê bảy dự án thật VÀ
+     * giữ nguyên `NEEDS_INFORMATION`, nên clarification không mất. Toàn bộ
+     * năng lực trả lời đã có sẵn ở backend; chỉ có giao diện là chặn đường.
+     *
+     * `explain` vẫn dùng được cho các loại pending khác (thanh toán, chờ đơn
+     * vị duyệt) — ở đó nó ĐÚNG là câu giải thích cho đúng câu hỏi "việc này là
+     * gì". Chỉ `missing_info` mới cần chuyển tiếp, vì ở đó người dùng đang đối
+     * thoại với Planner chứ không đứng trước một nút bấm.
+     */
+    const forwardAside = intent === 'QUESTION' && action?.kind === 'missing_info'
+
+    if (!action || (!outcome.ok && !forwardAside)) {
       say('agent', outcome.reply)
       return
     }
@@ -396,7 +415,10 @@ export function JourneyWorkspacePage() {
         // BIẾT bảng giá trị ấy; bắt Planner đoán lại là tự tạo một vòng lặp —
         // nó đoán trượt và hỏi lại đúng câu cũ.
         const key = action.field?.key
-        const matched = key && source === 'chat' ? matchOption(key, value ?? '') : null
+        // Câu hỏi thì KHÔNG chạy `matchOption`: "Có những dự án nào?" mà lỡ
+        // khớp một giá trị enum nào đó sẽ bị ghi nhận thành câu trả lời cho
+        // field — im lặng và sai.
+        const matched = !forwardAside && key && source === 'chat' ? matchOption(key, value ?? '') : null
 
         res =
           source === 'field' && action.field
@@ -420,7 +442,17 @@ export function JourneyWorkspacePage() {
       // câu>" — một câu có thể chứa bốn thông tin, và gán tất cả cho field đầu
       // tiên là mô tả sai thứ vừa xảy ra. Để backend nói phần cụ thể ở lượt
       // sau; ở đây chỉ xác nhận đã nhận.
-      say('agent', source === 'chat' && intent === 'VALUE' ? 'Mình đã ghi nhận, để mình xử lý tiếp nhé.' : outcome.reply)
+      // Câu hỏi phụ: câu trả lời do BACKEND viết, `absorb` sẽ hiện nó. Nói
+      // thêm "Mình đã ghi nhận" ở đây là dán một câu xác nhận vô nghĩa lên
+      // trên một câu trả lời — người dùng vừa hỏi, có ghi nhận gì đâu.
+      if (!forwardAside) {
+        say(
+          'agent',
+          source === 'chat' && intent === 'VALUE'
+            ? 'Mình đã ghi nhận, để mình xử lý tiếp nhé.'
+            : outcome.reply,
+        )
+      }
       absorb(res)
     } catch (error) {
       say('agent', 'Mình chưa gửi được xác nhận của bạn. Bạn thử lại giúp mình nhé.')
@@ -485,7 +517,6 @@ export function JourneyWorkspacePage() {
         return
       }
 
-      setGoalText(text)
       setFault(null)
       said.current = new Set()
       pendingSince.current = null
@@ -531,7 +562,6 @@ export function JourneyWorkspacePage() {
 
     said.current = new Set()
     pendingSince.current = null
-    setGoalText(goal)
     setTurns([])
     setFault(null)
     say('user', goal)
@@ -566,7 +596,12 @@ export function JourneyWorkspacePage() {
   const selected = steps.find((step) => step.id === selectedId) ?? null
   const done = steps.filter((step) => step.state === 'success').length
   const needsYou = steps.filter((step) => step.state === 'waiting_user').length
-  const title = goalText || journey?.title || 'Đang chuẩn bị…'
+  // Tiêu đề tóm tắt VIỆC, không phải câu người dùng đã gõ.
+  //
+  // `goalText` từng đứng trước — nghĩa là thanh tiêu đề và cả cột phải hiển thị
+  // nguyên văn tin nhắn vừa gửi, lặp lại đúng thứ đang nằm trong hội thoại ngay
+  // bên dưới. Câu càng dài thì hai chỗ đó càng vô dụng.
+  const title = journey?.title || 'Đang chuẩn bị…'
 
   /**
    * P-118 đang nghĩ: workflow còn chạy, hoặc câu trả lời đang được soạn.
@@ -593,11 +628,15 @@ export function JourneyWorkspacePage() {
 
   return (
     <WorkspaceShell>
-        {/* Chỉ báo P-118 nổi góc phải — trạng thái hệ thống luôn thấy được,
-            không chiếm một dải ngang riêng. */}
+        {/* Góc phải trên: ĐĂNG XUẤT.
+            Chỗ này từng là chỉ báo "P-118 · Sẵn sàng". Nó đọc dữ liệu GIẢ
+            (`JOURNEY_STEPS` trong journeyMock) nên "Sẵn sàng" không phản ánh
+            trạng thái thật — và nhịp ba chấm trong hội thoại đã nói đúng việc
+            đó bằng dữ liệu thật. Một chỉ báo trang trí chiếm mất vị trí đắt
+            nhất màn hình, trong khi lối ra thì không có ở đâu cả. */}
         <div className="pointer-events-none absolute right-6 top-5 z-20">
           <div className="pointer-events-auto">
-            <AgentPresence idle={mode === 'launcher'} />
+            <LogoutButton />
           </div>
         </div>
 
@@ -708,6 +747,7 @@ export function JourneyWorkspacePage() {
               onExecute={execute}
               journeyLabel={mode === 'journey' ? title : undefined}
               busy={leaving}
+              working={thinking}
               notice={blocked ?? fault}
             />
           </div>

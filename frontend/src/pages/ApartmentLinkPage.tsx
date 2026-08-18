@@ -6,6 +6,7 @@ import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { myVerificationRecords } from '../lib/agentApi'
 import { useAuth } from '../lib/auth'
 import type { VerificationRecord } from '../lib/types'
+import { latestApartmentRecord } from '../lib/verification'
 
 /**
  * Cửa vào xác minh căn hộ — P-118 CHỈ dẫn đường, không nhận hồ sơ.
@@ -39,7 +40,7 @@ const STATUS_VIEW: Record<
   },
   REJECTED: {
     label: 'Chưa được duyệt',
-    hint: 'Đơn vị xác thực chưa xác nhận được thông tin. Bạn gửi lại hồ sơ hoặc liên hệ ban quản lý nhé.',
+    hint: 'Đơn vị xác thực chưa đối chiếu được thông tin. Bạn gửi lại hồ sơ với thông tin đã sửa nhé.',
     tone: 'border-red-200 bg-red-50 text-red-900',
     Icon: ShieldX,
   },
@@ -67,7 +68,9 @@ export function ApartmentLinkPage() {
     }
   }, [])
 
-  const latest = records.filter((r) => r.record_type === 'apartment')[0] ?? null
+  // Đơn MỚI NHẤT. Backend trả `ORDER BY created_at` tăng dần nên `[0]` là đơn
+  // cũ nhất — xem `lib/verification.ts`.
+  const latest = latestApartmentRecord(records)
   const view = latest ? STATUS_VIEW[latest.status] : null
   const alreadyVerified = user?.resident_verification_status === 'VERIFIED'
 
@@ -109,10 +112,14 @@ export function ApartmentLinkPage() {
             ) : (
               !loading && (
                 <section className="rounded-2xl border border-gray-200 bg-card p-5 dark:border-gray-800">
+                  {/* Đã nộp rồi thì đừng dặn chuẩn bị giấy tờ nữa — họ vừa
+                      làm xong việc đó, và câu dặn đọc như hồ sơ chưa được
+                      nhận. */}
                   <p className="flex items-start gap-2 text-sm text-gray-600 dark:text-gray-400">
                     <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-                    Bạn sẽ cần mã căn hộ, tên khu đô thị và ảnh giấy tờ nhà (sổ hồng, hợp đồng mua
-                    bán). Toàn bộ hồ sơ do đơn vị xác thực giữ và đối chiếu.
+                    {latest?.status === 'PENDING'
+                      ? 'Hồ sơ của bạn đang ở chỗ đơn vị xác thực. Sang cổng của họ để xem lại những gì đã gửi.'
+                      : 'Bạn sẽ cần mã căn hộ, tên khu đô thị và ảnh giấy tờ nhà (sổ hồng, hợp đồng mua bán). Toàn bộ hồ sơ do đơn vị xác thực giữ và đối chiếu.'}
                   </p>
                   {/* `Link` nội bộ chứ không phải `<a target="_blank">`: cổng
                       xác thực dùng chung phiên đăng nhập, mở tab mới sẽ mất

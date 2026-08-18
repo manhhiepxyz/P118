@@ -2,9 +2,11 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowLeft, BadgeCheck, Clock, Home, ShieldX, UploadCloud } from 'lucide-react'
 
+import { PortalHandoff, usePortalHandoff } from '../components/PortalHandoff'
 import { createVerificationRecord, myVerificationRecords } from '../lib/agentApi'
 import { useAuth } from '../lib/auth'
 import type { VerificationRecord } from '../lib/types'
+import { latestApartmentRecord } from '../lib/verification'
 
 /**
  * Nộp hồ sơ xác minh căn hộ — trên CỔNG CỦA ĐƠN VỊ XÁC THỰC, không phải P-118.
@@ -29,8 +31,8 @@ const STATUS_VIEW: Record<
   { label: string; hint: string; tone: string; Icon: typeof Home }
 > = {
   PENDING: {
-    label: 'Đang chờ ban quản lý duyệt',
-    hint: 'Chúng tôi đã nhận hồ sơ kèm ảnh giấy tờ. Dịch vụ cư dân sẽ mở ngay sau khi được duyệt.',
+    label: 'Đang chờ đơn vị xác thực duyệt',
+    hint: 'Đã nhận hồ sơ kèm ảnh giấy tờ. Dịch vụ cư dân mở ngay sau khi được duyệt.',
     tone: 'border-amber-200 bg-amber-50 text-amber-900',
     Icon: Clock,
   },
@@ -42,14 +44,16 @@ const STATUS_VIEW: Record<
   },
   REJECTED: {
     label: 'Chưa được duyệt',
-    hint: 'Ban quản lý chưa xác nhận được thông tin. Bạn liên hệ ban quản lý toà nhà để được hỗ trợ nhé.',
+    // Nói đúng thứ người dùng làm được TIẾP THEO. Bản cũ bảo họ đi liên hệ ban
+    // quản lý, trong khi form nộp lại nằm ngay bên dưới và dùng được.
+    hint: 'Đơn vị xác thực chưa đối chiếu được thông tin. Bạn sửa lại thông tin bên dưới rồi gửi hồ sơ mới nhé.',
     tone: 'border-red-200 bg-red-50 text-red-900',
     Icon: ShieldX,
   },
 }
 
 export function VerifyApartmentPage() {
-  const { user } = useAuth()
+  const { user, refreshUser } = useAuth()
   const [records, setRecords] = useState<VerificationRecord[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -60,13 +64,29 @@ export function VerifyApartmentPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Chỉ quan tâm đơn căn hộ — đơn xe không nói gì về trạng thái liên kết căn hộ.
-  const apartmentRecords = records.filter((r) => r.record_type === 'apartment')
-  const latest = apartmentRecords[0] ?? null
+  // Chỉ quan tâm đơn căn hộ — đơn xe không nói gì về trạng thái liên kết căn
+  // hộ. `latestApartmentRecord` sắp theo `created_at` giảm dần: backend trả
+  // TĂNG dần, nên `records[0]` là đơn CŨ NHẤT (xem `lib/verification.ts`).
+  const latest = latestApartmentRecord(records)
 
   async function loadMine() {
     try {
-      setRecords(await myVerificationRecords())
+      const rows = await myVerificationRecords()
+      setRecords(rows)
+
+      // Đơn đã được duyệt nhưng phiên vẫn mang trạng thái cũ → đọc lại
+      // `/auth/me`.
+      //
+      // `user.resident_verification_status` được nạp một lần lúc đăng nhập và
+      // trước đây KHÔNG chỗ nào làm mới nó ngoài `ProfilePage`. Trong khi đó
+      // `HomePage`, `VehicleRegistrationPage` và chính trang này đều khoá dịch
+      // vụ dựa trên nó. Nên lời hứa "dịch vụ cư dân mở ngay sau khi được
+      // duyệt" là sai trên thực tế: mọi thứ vẫn khoá cho đến khi người dùng
+      // đăng xuất rồi đăng nhập lại — mà không ai bảo họ phải làm thế.
+      const approved = latestApartmentRecord(rows)?.status === 'APPROVED'
+      if (approved && user?.resident_verification_status !== 'VERIFIED') {
+        await refreshUser()
+      }
     } catch {
       // Không chặn màn: người dùng vẫn gửi được hồ sơ mới.
       setError(null)
@@ -111,6 +131,11 @@ export function VerifyApartmentPage() {
   const alreadyVerified = user?.resident_verification_status === 'VERIFIED'
   const view = latest ? STATUS_VIEW[latest.status] : null
 
+  // Chuyển giao sang cổng bên thứ 3. Chờ đúng việc có thật (nạp hồ sơ) chứ
+  // không phải delay giả — xem `PortalHandoff`.
+  const handingOff = usePortalHandoff(!loading)
+  if (handingOff) return <PortalHandoff />
+
   return (
     <div className="space-y-5">
       <header>
@@ -121,9 +146,7 @@ export function VerifyApartmentPage() {
         </p>
       </header>
 
-      {loading && <div className="h-20 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-900" />}
-
-      {!loading && view && latest && (
+      {view && latest && (
         <section className={`rounded-2xl border p-4 ${view.tone}`}>
           <div className="flex items-start gap-3">
             <view.Icon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
@@ -139,7 +162,7 @@ export function VerifyApartmentPage() {
         </section>
       )}
 
-      {!loading && !alreadyVerified && latest?.status !== 'PENDING' && (
+      {!alreadyVerified && latest?.status !== 'PENDING' && (
         <form
           onSubmit={handleSubmit}
           className="space-y-4 rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900"
@@ -232,7 +255,7 @@ export function VerifyApartmentPage() {
         </form>
       )}
 
-      {!loading && alreadyVerified && (
+      {alreadyVerified && (
         <p className="text-sm text-gray-500">
           Tài khoản của bạn đã được liên kết căn hộ. Cần đổi căn hộ, bạn liên hệ ban quản lý nhé.
         </p>
