@@ -27,7 +27,7 @@ import { InlineServiceForm } from './InlineServiceForm'
 export const IDENTITY: Record<string, { Icon: LucideIcon; group: string }> = {
   'Đặt lịch tham quan dự án': { Icon: Building2, group: 'Bất động sản' },
   'Đăng ký quan tâm / nhận tư vấn': { Icon: MessagesSquare, group: 'Bất động sản' },
-  'Đăng ký phương tiện và chỗ đỗ xe': { Icon: CarFront, group: 'Di chuyển' },
+  'Đăng ký phương tiện và chỗ đỗ xe': { Icon: CarFront, group: 'Xe cộ' },
   'Báo bảo trì / sửa chữa': { Icon: Wrench, group: 'Cư dân' },
   'Đặt lịch chuyển nhà': { Icon: Truck, group: 'Cư dân' },
 }
@@ -47,9 +47,9 @@ const HIDDEN = new Set(['Đặt xe đưa đón tham quan'])
 const FALLBACK: Capability[] = [
   { name: 'Đặt lịch tham quan dự án', description: 'Chọn dự án, ngày và giờ muốn tham quan.', requires_resident: false, available: true, blocked_reason: null },
   { name: 'Đăng ký quan tâm / nhận tư vấn', description: 'Gửi nhu cầu để bộ phận tư vấn liên hệ.', requires_resident: false, available: true, blocked_reason: null },
-  { name: 'Đăng ký phương tiện và chỗ đỗ xe', description: 'Liên kết phương tiện và đặt chỗ tại Khu A hoặc Khu B.', requires_resident: true, available: false, blocked_reason: 'Cần liên kết hồ sơ cư dân đã xác minh.' },
-  { name: 'Báo bảo trì / sửa chữa', description: 'Tạo yêu cầu và hẹn lịch kỹ thuật viên.', requires_resident: true, available: false, blocked_reason: 'Cần liên kết hồ sơ cư dân đã xác minh.' },
-  { name: 'Đặt lịch chuyển nhà', description: 'Đăng ký thời gian, thang máy và hỗ trợ vận chuyển.', requires_resident: true, available: false, blocked_reason: 'Cần liên kết hồ sơ cư dân đã xác minh.' },
+  { name: 'Đăng ký phương tiện và chỗ đỗ xe', description: 'Đăng ký xe và giữ chỗ đỗ ở Khu A hoặc Khu B.', requires_resident: true, available: false, blocked_reason: 'Cần xác minh căn hộ trước.' },
+  { name: 'Báo bảo trì / sửa chữa', description: 'Tạo yêu cầu và hẹn lịch kỹ thuật viên.', requires_resident: true, available: false, blocked_reason: 'Cần xác minh căn hộ trước.' },
+  { name: 'Đặt lịch chuyển nhà', description: 'Đăng ký thời gian, thang máy và hỗ trợ vận chuyển.', requires_resident: true, available: false, blocked_reason: 'Cần xác minh căn hộ trước.' },
 ]
 
 interface Props {
@@ -117,14 +117,14 @@ export function ServiceLauncher({
     <div className={`h-full overflow-y-auto ${leaving ? 'shift-out' : 'rise'}`}>
       <div className="mx-auto w-full max-w-[1000px] px-12 pb-8 pt-12">
         <p className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
-          Không gian điều phối
+          Trợ lý dịch vụ cư dân
         </p>
         <h1 className="mt-4 text-[38px] font-semibold leading-[1.12] tracking-[-0.03em] text-[var(--text-primary)]">
           P-118 làm được gì cho bạn?
         </h1>
         <p className="mt-3.5 max-w-2xl text-[16px] leading-[1.6] text-[var(--text-secondary)]">
-          Chọn một hoặc nhiều năng lực rồi điền thông tin ngay tại chỗ. Hoặc mô
-          tả bằng lời ở ô bên dưới — P-118 tự suy ra phần còn lại.
+          Chọn một hoặc nhiều dịch vụ rồi điền thông tin ngay tại chỗ. Hoặc cứ
+          nói bằng lời ở ô bên dưới — P-118 tự hiểu phần còn lại.
         </p>
 
         {/* Thông tin dùng chung — chỉ hiện khi có việc thật sự cần nó.
@@ -194,7 +194,7 @@ export function ServiceLauncher({
 
         <div className="mt-11 flex items-baseline justify-between">
           <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
-            Năng lực
+            Dịch vụ
           </h2>
           <p className="font-mono text-[12px] tabular-nums text-[var(--text-muted)]">
             {selected.length > 0

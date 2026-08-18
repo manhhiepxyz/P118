@@ -186,11 +186,48 @@ export function journeyFromWorkflow(res: AgentWorkflowResponse): LiveJourney {
   )
 
   return {
-    title: res.summary || res.message || 'Yêu cầu của bạn',
+    title: journeyTitle(res, steps),
     steps,
     edges,
     done: res.status !== 'RUNNING' && res.status !== 'PENDING',
   }
+}
+
+/**
+ * Tiêu đề NGẮN cho hành trình — tóm tắt việc đang làm, không phải câu đã gõ.
+ *
+ * Trước đây tiêu đề là nguyên văn tin nhắn người dùng gửi. Với một câu dài
+ * ("tôi mới chuyển vào căn hộ A1201, hãy đăng ký xe biển 51A-12345 và đặt chỗ
+ * ZONE_A ngày 10/12 rồi thanh toán phí") thì thanh tiêu đề và cả cột phải đều
+ * biến thành một đoạn văn — và nó lặp lại đúng thứ đang hiện trong hội thoại
+ * ngay bên dưới.
+ *
+ * Dựng từ TÊN CÁC BƯỚC, do backend đặt (`_TOOL_PRESENTATION`). Chúng mô tả việc
+ * hệ thống thật sự làm, nên tiêu đề không bao giờ hứa nhiều hơn kế hoạch.
+ *
+ * Cố ý KHÔNG gọi model để đặt tên: thêm một lượt gọi cho một dòng chữ trang trí
+ * là đúng thứ vừa được gỡ khỏi tầng viết câu.
+ */
+function journeyTitle(res: AgentWorkflowResponse, steps: JourneyStep[]): string {
+  // Tên riêng của dự án là thứ phân biệt hai hành trình cùng loại. Nó đến từ
+  // canonical plan phía backend, không phải chữ người dùng gõ.
+  const project = res.viewing_approval?.project_name?.trim()
+
+  const names: string[] = []
+  for (const step of steps) {
+    const name = step.title?.trim()
+    if (name && !names.includes(name)) names.push(name)
+  }
+
+  if (names.length === 0) {
+    // Chưa lập xong kế hoạch thì chưa có gì để tóm tắt. Nói thẳng là đang
+    // chuẩn bị, hơn là bịa một cái tên rồi đổi ngay sau vài giây.
+    return 'Đang chuẩn bị…'
+  }
+
+  const head = names.slice(0, 2).join(' · ')
+  const rest = names.length > 2 ? ` +${names.length - 2}` : ''
+  return project ? `${head}${rest} — ${project}` : `${head}${rest}`
 }
 
 /**

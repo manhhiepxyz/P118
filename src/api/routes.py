@@ -413,12 +413,21 @@ RESIDENT_ACCESS_REQUIRED_MESSAGE = (
 
 RESIDENT_DIRECTORY_UNAVAILABLE_MESSAGE = "Hiện chưa thể kiểm tra hồ sơ cư dân. Bạn vui lòng thử lại sau ít phút."
 
+# Tên mục phải KHỚP menu thật. Sidebar ghi "Xác minh căn hộ"
+# (`AppLayout.tsx`), còn câu này bảo người dùng tìm "Liên kết căn hộ" — một mục
+# không tồn tại. Chỉ sai một cái tên là toàn bộ phần hướng dẫn trở nên vô dụng:
+# người dùng đi tìm đúng thứ mình bảo họ tìm, không thấy, rồi dừng lại.
+LINK_REQUIRED_ACTION = (
+    "Mở mục “Hồ sơ” ở thanh bên, bấm “Xác minh căn hộ”, rồi bấm “Xác thực với đơn vị”; "
+    "ở cổng của họ, nhập mã căn hộ và khu đô thị, đính kèm ảnh giấy tờ nhà rồi gửi. "
+    "Duyệt xong là dùng được ngay."
+)
+
 # Đăng ký/liên kết hồ sơ cư dân nằm NGOÀI workflow của Agent. Câu này hướng
 # người dùng đi đúng đường, không gợi ý rằng trợ lý làm hộ được.
 RESIDENT_LINKING_OUTSIDE_AGENT_MESSAGE = (
-    "Việc đăng ký và xác minh hồ sơ cư dân được thực hiện ngoài trợ lý. "
-    "Bạn vui lòng hoàn tất liên kết căn hộ trong phần tài khoản, "
-    "sau đó quay lại để dùng các dịch vụ dành cho cư dân."
+    "Việc xác minh căn hộ do một đơn vị độc lập duyệt nên mình không tự làm thay được. "
+    + LINK_REQUIRED_ACTION
 )
 
 _DEMO_ACCOUNT_CONTEXTS: dict[str, dict[str, Any]] = {
@@ -1739,7 +1748,17 @@ async def _speak(response: DemoWorkflowResponse, *, goal: str, capabilities: lis
     usage_token = usage_context(workflow_id=response.workflow_id, stage="respond")
     try:
         agent = ResponseAgent(
-            get_llm(callbacks=[usage_logger]),
+            # `fast=True`: TẮT suy luận nội bộ. Tầng này chỉ kể lại dữ liệu đã
+            # được Validator và Executor xác minh — nó không quyết định gì, nên
+            # không cần nghĩ.
+            #
+            # Đo được: trung vị 3.6s → 1.3s, p90 11.8s → 1.6s, chất lượng không
+            # đổi (0/10 rơi về câu nền, 10/10 câu khác nhau, ở cả hai chế độ).
+            # `llm_usage` cho thấy vì sao: tầng này đang sinh 1.535 token cho
+            # một câu ~50 token.
+            #
+            # Planner KHÔNG được đặt cờ này — xem `get_llm()`.
+            get_llm(callbacks=[usage_logger], fast=True),
             structured_output_method=structured_output_method(),
         )
         view = _reply_view(response, goal=goal, capabilities=capabilities)
@@ -2044,16 +2063,6 @@ _RESIDENT_SERVICE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("Báo bảo trì / sửa chữa", ("bảo trì", "sửa chữa", "sửa nhà", "hỏng", "rò rỉ", "sự cố", "kỹ thuật viên")),
     ("Đặt lịch chuyển nhà", ("chuyển nhà", "chuyển đồ", "thang máy", "vận chuyển đồ")),
-)
-
-# Tên mục phải KHỚP menu thật. Sidebar ghi "Xác minh căn hộ"
-# (`AppLayout.tsx`), còn câu này bảo người dùng tìm "Liên kết căn hộ" — một mục
-# không tồn tại. Chỉ sai một cái tên là toàn bộ phần hướng dẫn trở nên vô dụng:
-# người dùng đi tìm đúng thứ mình bảo họ tìm, không thấy, rồi dừng lại.
-LINK_REQUIRED_ACTION = (
-    "Mở mục “Xác minh căn hộ” ở thanh bên rồi bấm “Xác thực với đơn vị”; ở cổng của họ, "
-    "nhập mã căn hộ và khu đô thị, đính kèm ảnh giấy tờ nhà rồi gửi. "
-    "Duyệt xong là dùng được ngay."
 )
 
 _LINK_REQUIRED_TEMPLATE = (
@@ -2729,6 +2738,61 @@ async def continue_demo_workflow(
             )
             return conversational
 
+        # Câu HỎI hay câu xã giao giữa chừng — trả lời, và GIỮ nguyên câu hỏi
+        # đang chờ.
+        #
+        # Trước đây `classify()` chỉ được gọi ở nhánh `supported_goal`, nên với
+        # một `NEEDS_INFORMATION` bình thường, mọi thứ người dùng gõ đều bị ép
+        # thành câu trả lời cho field. Đo được:
+        #
+        #   P-118: "Bạn cho mình biết tên dự án, ngày và giờ nhé"
+        #   Bạn:   "hôm nay là ngày mấy"
+        #   P-118: 422 — "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ."
+        #
+        # Người dùng bị kẹt: đang trong một việc thì không hỏi được gì nữa, và
+        # câu trả lời còn đổ lỗi cho họ đã chọn sai dự án.
+        #
+        # KHÔNG nhận ACKNOWLEDGEMENT vào đây: "ok", "được" có thể chính là câu
+        # trả lời cho một field. Chỉ nhận câu HỎI và câu chào.
+        if request.message is not None and not request.fields:
+            aside = classify(request.message)
+            if isinstance(aside, SmallTalk) and aside.speech_type in {
+                SpeechType.GREETING,
+                SpeechType.CAPABILITY,
+                SpeechType.HOW_TO,
+            }:
+                if aside.speech_type == SpeechType.CAPABILITY:
+                    capability = await answer_capability_question(
+                        request.message,
+                        capabilities=_capability_dicts(),
+                        account_state=account_state,
+                    )
+                    aside_reply = capability.reply if capability else aside.reply
+                else:
+                    aside_reply = aside.reply
+
+                current = response if isinstance(response, DemoWorkflowResponse) else await _public_view_from_db(workflow_id)
+                if current is None:
+                    raise HTTPException(status_code=409, detail="Workflow chưa sẵn sàng để tiếp tục.")
+                conversational = current.model_copy(
+                    update={
+                        "workflow_id": workflow_id,
+                        "answer": aside_reply,
+                        "missing_fields": list(missing_fields),
+                        "response_state": "READY",
+                    }
+                )
+                if previous is not None:
+                    previous["response"] = conversational
+                await _save_answer_safely(
+                    workflow_id,
+                    answer=aside_reply,
+                    suggestions=[],
+                    state="READY",
+                    for_status="NEEDS_INFORMATION",
+                )
+                return conversational
+
         if request.fields:
             answers, unresolved = _extract_structured_follow_up_answers(request.fields, missing_fields)
         elif request.message is not None:
@@ -3308,7 +3372,7 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
     ),
     DemoCapabilityItem(
         name="Đăng ký phương tiện và chỗ đỗ xe",
-        description="Liên kết phương tiện và đặt chỗ tại Khu A hoặc Khu B.",
+        description="Đăng ký xe và giữ chỗ đỗ ở Khu A hoặc Khu B.",
         requires_resident=True,
     ),
     DemoCapabilityItem(
@@ -3386,7 +3450,7 @@ async def list_supported_capabilities(
     blocked_reason = {
         "PENDING": "Hồ sơ cư dân của bạn đang chờ ban quản lý duyệt.",
         "REJECTED": "Hồ sơ cư dân chưa được duyệt. Vui lòng liên hệ ban quản lý.",
-    }.get(status.value if status is not None else "", "Cần liên kết hồ sơ cư dân đã xác minh.")
+    }.get(status.value if status is not None else "", "Cần xác minh căn hộ trước.")
 
     def _resolve(item: DemoCapabilityItem) -> DemoCapabilityItem:
         if not item.requires_resident or is_resident:
