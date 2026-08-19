@@ -1255,6 +1255,41 @@ async def _run_demo_job(
         # Công bố kết quả trước, nói sau.
         _keep_demo_task(asyncio.create_task(_attach_answer(job, workflow_id, goal=job.get("goal") or goal)))
 
+        # Yêu cầu KHÔNG THUỘC dịch vụ nào → ẩn khỏi lịch sử.
+        #
+        # Điều kiện là BA thứ cùng lúc, không phải một mã lỗi cụ thể:
+        #
+        #   - kết thúc ở VALIDATION_ERROR/PLANNING_ERROR — không dựng nổi kế hoạch
+        #   - KHÔNG bước nào chạy — nên không có gì đã xảy ra để kể lại
+        #   - KHÔNG repair hint — nên không có gì để người dùng tiếp tục
+        #
+        # Ba điều đó cộng lại nghĩa là: hệ thống chưa làm gì, và cũng không đợi
+        # ai làm gì. Đó không phải một mục việc.
+        #
+        # Bản đầu tôi bắt theo `missing_fields == ["supported_goal"]`. Đo trên
+        # stack thật thì gõ "qwezxcvbnm" đi ra VALIDATION_ERROR chứ không phải
+        # nhánh ấy — bắt theo một mã lỗi là bắt theo đường đi, mà đường đi thì
+        # nhiều hơn ta tưởng.
+        #
+        # Trước đây chúng để lại một dòng FAILED vĩnh viễn trong Lịch sử. Đo
+        # được trên dữ liệu thật: "jhjs", "jasdkj", "whatsup" nằm đó với nhãn
+        # "Chưa xong", như thể hệ thống đã cố làm gì đó cho người dùng rồi hỏng.
+        # Nó không cố gì cả — không có bước nào chạy, không có gì để tiếp tục.
+        #
+        # Người dùng vẫn NHẬN được câu trả lời (Response Agent đã nói "mình chưa
+        # hiểu rõ yêu cầu"); chỉ là cuộc trao đổi đó không phải một mục việc.
+        #
+        # Xoá MỀM bằng `archived_at`, dùng lại đúng cơ chế của `delete_workflow_
+        # for_owner` và phép cắt lịch sử: hàng vẫn còn để truy vết, chỉ không
+        # hiện ra. Nếu sau này cần biết người dùng gõ gì mà hệ thống không hiểu,
+        # dữ liệu vẫn nguyên.
+        if (
+            response.status in {"VALIDATION_ERROR", "PLANNING_ERROR"}
+            and not response.tasks
+            and not repair_hints
+        ):
+            await _archive_unsupported_workflow(workflow_id)
+
         # Release-on-failure (Phase B): workflow FAILED do máy, không repairable
         # (không có repair hint) → dọn side-effect giữ chỗ/thanh toán. FAILED có
         # repair hint là repairable — user sẽ /continue sửa input, release sẽ phá
@@ -1844,6 +1879,28 @@ async def _speak(
         reset_usage_context(usage_token)
         await usage_logger.flush()
     return response.model_copy(update={"answer": reply.answer, "suggestions": list(reply.suggestions)})
+
+
+async def _archive_unsupported_workflow(workflow_id: str) -> None:
+    """Ẩn workflow của một yêu cầu ngoài phạm vi. Best-effort, không bao giờ raise.
+
+    Ẩn thất bại thì tệ nhất là còn một dòng thừa trong Lịch sử — không đáng để
+    làm hỏng một lượt trả lời vốn đã thành công.
+    """
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE workflows SET archived_at = NOW(), updated_at = NOW() "
+                    "WHERE workflow_id = $1::uuid AND archived_at IS NULL",
+                    workflow_id,
+                )
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - chỉ là dọn màn hình
+        logger.warning("không ẩn được workflow ngoài phạm vi khỏi lịch sử")
 
 
 async def _mark_workflow_failed_safely(workflow_id: str, error_code: str) -> None:
@@ -3400,14 +3457,31 @@ async def _demo_workflow_status(
     ):
         repair_state = _build_repair_state_from_record(record)
         if repair_state["repair_hints"]:
-            return _demo_response(repair_state, payment_approved=False).model_copy(
-                update={
-                    "workflow_id": workflow_id,
-                    "stage": "NEEDS_INFORMATION",
-                    "message": _STAGE_MESSAGES["NEEDS_INFORMATION"],
-                    "persisted": True,
-                    "events": _public_events(job),
-                }
+            return await _with_stored_answer(
+                _demo_response(repair_state, payment_approved=False).model_copy(
+                    update={
+                        "workflow_id": workflow_id,
+                        "stage": "NEEDS_INFORMATION",
+                        "message": _STAGE_MESSAGES["NEEDS_INFORMATION"],
+                        "persisted": True,
+                        "events": _public_events(job),
+                        # Các BƯỚC ĐÃ CHẠY phải đi cùng câu hỏi.
+                        #
+                        # `_demo_response` dựng nhánh NEEDS_INFORMATION không kèm
+                        # `tasks` — hợp lý khi Planner hỏi TRƯỚC lúc chạy gì, vì
+                        # lúc đó chưa có bước nào. Nhưng nhánh này là repair: một
+                        # phần plan ĐÃ chạy rồi mới hỏng, và ở đây `record` có
+                        # đủ 4 dòng task.
+                        #
+                        # Đo được: workflow đăng ký xe + đặt chỗ đỗ, xe đã đăng
+                        # ký xong, chỗ đỗ hỏng. Mở trang chi tiết từ Lịch sử thì
+                        # thấy một trang gần như trống — không bước nào, không
+                        # câu trả lời, không báo giá — trong khi database có đủ.
+                        # Người dùng không có cách nào biết xe đã đăng ký được.
+                        "tasks": _polling_task_views(plan, record),
+                    }
+                ),
+                workflow_id,
             )
 
     # Clarification survive restart: `_DEMO_JOBS` trống nhưng bảng
