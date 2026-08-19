@@ -34,9 +34,9 @@ def test_resume_path_passes_on_failure_to_the_executor() -> None:
     # `resume_viewing_after_approval` chỉ là vỏ; phần chạy task nằm ở
     # `_materialize_and_run_remaining`. Đọc cả hai để test không xanh giả khi
     # ai đó chuyển chỗ dựng Executor sang hàm kia.
-    source = inspect.getsource(demo_service.resume_viewing_after_approval) + inspect.getsource(
-        demo_service._materialize_and_run_remaining
-    )
+    # Đọc CẢ MODULE: phần seed và phần ghim hint đã tách thành helper dùng
+    # chung, nên bám vào thân một hàm là xanh giả ngay lần refactor kế tiếp.
+    source = inspect.getsource(demo_service)
     assert "Executor(" in source, "resume không còn dựng Executor — cập nhật lại test này"
     assert "on_failure=" in source, (
         "resume dựng Executor mà không truyền on_failure — repair hint sẽ không "
@@ -111,8 +111,7 @@ def test_resume_does_not_rerun_tasks_that_already_succeeded() -> None:
     Lượt hai đâm vào chính bản ghi lượt một vừa tạo. Người dùng đổi biển số,
     đổi ngày, đổi khu — lần nào cũng hỏng.
     """
-    source = inspect.getsource(demo_service._materialize_and_run_remaining)
-
+    source = inspect.getsource(demo_service)
     assert "seed_statuses={pending.task_id: TaskStatus.SUCCESS}" not in source, (
         "resume chỉ seed task tham quan — mọi task đã thành công khác sẽ chạy "
         "lại và đâm vào ràng buộc trùng do chính chúng tạo ra"
@@ -155,5 +154,4 @@ def test_seeded_results_are_standard_results_not_raw_json() -> None:
     with pytest.raises(AttributeError):
         executor._resolve_input(_PayFee(), {"T3": {"amount": 150000}})
 
-    source = inspect.getsource(demo_service._materialize_and_run_remaining)
-    assert "StandardResult(" in source, "seed kết quả bằng JSON thô — Executor sẽ nổ khi resolve InputRef"
+    assert "StandardResult(" in inspect.getsource(demo_service), "seed kết quả bằng JSON thô — Executor sẽ nổ khi resolve InputRef"

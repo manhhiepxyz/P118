@@ -7,7 +7,7 @@ import { ResultSummary } from '../components/workspace/ResultSummary'
 import { StepList } from '../components/workspace/StepList'
 import { describeFailure, describeWorkflowFailure } from '../lib/status'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
-import { cancelWorkflow, continueWorkflow, decidePayment, startWorkflow } from '../lib/agentApi'
+import { cancelWorkflow, continueWorkflow, decidePayment, retryWorkflow, startWorkflow } from '../lib/agentApi'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
 /**
@@ -79,6 +79,25 @@ export function WorkflowPage() {
   const { data, error, loading, refresh: load } = useWorkflowPolling(workflowId)
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState<string | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+
+  async function handleRetry() {
+    if (!workflowId || retrying) return
+    setRetryError(null)
+    setRetrying(true)
+    try {
+      await retryWorkflow(workflowId)
+      await load()
+    } catch (err) {
+      // Backend từ chối 409 kèm lý do đã chỉ lối ra ("bạn cho mình biết muốn
+      // đổi gì"). Hiện nguyên văn — đè một câu chung lên là vứt đi thứ hữu ích
+      // duy nhất.
+      setRetryError(err instanceof Error ? err.message : 'Chưa chạy lại được.')
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   async function handleCancel() {
     if (!workflowId || cancelling) return
@@ -316,8 +335,28 @@ export function WorkflowPage() {
                   ở đây dưới dạng một nút bấm. */}
               {data.status === 'FAILED' && (
                 <div className="mt-4">
+                  {/* Nút chạy lại CHỈ có nghĩa với lỗi hạ tầng. Backend là nơi
+                      quyết định — nó đọc `retryable` của bước hỏng thật. Giao
+                      diện không tự đoán: đoán sai theo hướng ẩn nút thì người
+                      gặp lỗi tạm thời mất lối ra, đoán sai theo hướng hiện nút
+                      thì người gặp lỗi nghiệp vụ bấm mãi một thứ không chạy.
+                      Hiện nút, và để backend trả lời kèm lý do. */}
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    disabled={retrying}
+                    className="press mb-3 cursor-pointer rounded-[var(--r-sm)] px-3.5 py-2 text-[13.5px] font-medium disabled:cursor-not-allowed"
+                    style={{ color: 'var(--agent)', boxShadow: 'inset 0 0 0 1px var(--border-subtle)' }}
+                  >
+                    {retrying ? 'Đang chạy lại…' : 'Chạy lại bước hỏng'}
+                  </button>
+                  {retryError && (
+                    <p className="mb-3 text-[13.5px] leading-[1.6]" style={{ color: 'var(--text-secondary)' }} role="alert">
+                      {retryError}
+                    </p>
+                  )}
                   <p className="mb-2 text-[13.5px] text-[var(--text-secondary)]">
-                    Bạn nói cho mình biết muốn đổi gì — mình chạy lại phần còn thiếu.
+                    Hoặc nói cho mình biết muốn đổi gì — mình chạy lại phần còn thiếu.
                   </p>
                   <ClarificationReply onSubmit={handleFollowUp} />
                 </div>

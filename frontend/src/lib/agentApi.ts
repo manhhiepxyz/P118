@@ -203,8 +203,20 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
         // Body không phải JSON: giữ câu generic, không hiện raw response.
       }
     }
-    if (response.status === 409 && conflictMessage) {
-      throw new ApiError(409, conflictMessage)
+    if (response.status === 409 && conflictMessage !== undefined) {
+      // Chuỗi RỖNG nghĩa là "dùng nguyên văn câu backend gửi". Với retry, câu
+      // ấy đã chỉ đúng lối ra ("bạn cho mình biết muốn đổi gì"); đè một câu
+      // chung lên là vứt đi thứ hữu ích duy nhất.
+      let detail = conflictMessage
+      if (!detail) {
+        try {
+          const payload = (await response.clone().json()) as { detail?: unknown }
+          detail = typeof payload.detail === 'string' ? payload.detail : ''
+        } catch {
+          detail = ''
+        }
+      }
+      throw new ApiError(409, detail || messageForStatus(409, fallback))
     }
     throw new ApiError(response.status, messageForStatus(response.status, fallback))
   }
@@ -396,6 +408,20 @@ export async function cancelWorkflow(workflowId: string): Promise<AgentWorkflowR
  * Xoá mềm ở backend: dữ liệu nghiệp vụ và bằng chứng thanh toán được giữ, chỉ
  * ẩn khỏi danh sách. Yêu cầu chưa kết thúc trả 409 — huỷ trước rồi mới xoá.
  */
+/**
+ * Chạy lại từ bước hỏng, giữ nguyên mọi bước đã thành công.
+ *
+ * Backend từ chối 409 nếu lỗi là lỗi NGHIỆP VỤ — "Khu A đã hết chỗ" chạy lại y
+ * nguyên sẽ hỏng như cũ. Câu từ chối của backend đã chỉ đúng lối ra (đổi
+ * input), nên hiện nguyên văn thay vì đè một câu chung.
+ */
+export async function retryWorkflow(workflowId: string): Promise<AgentWorkflowResponse> {
+  return request<AgentWorkflowResponse>(`/workflows/demo/${encodeURIComponent(workflowId)}/retry`, {
+    method: 'POST',
+    conflictMessage: '',
+  })
+}
+
 export async function deleteWorkflow(workflowId: string): Promise<void> {
   await request<void>(`/workflows/demo/${encodeURIComponent(workflowId)}`, {
     method: 'DELETE',

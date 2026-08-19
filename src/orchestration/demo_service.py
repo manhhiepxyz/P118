@@ -873,6 +873,176 @@ async def record_viewing_decision_or_fail(workflow_id: str, decision: str, decid
         await pool.close()
 
 
+async def _seed_completed(repository: Any, workflow_id: str) -> tuple[dict, dict]:
+    """Trạng thái + kết quả của mọi task ĐÃ SUCCESS, để không chạy lại chúng.
+
+    Task đã thành công thật thì chạy lại là gọi provider lần hai với cùng dữ
+    liệu — và các tool này không idempotent. Đo được: chỗ đỗ đã đặt bị đặt lần
+    hai, lần hai đâm vào ràng buộc do lần một tạo ra, rồi lời từ chối ấy ghi đè
+    lên kết quả thành công.
+
+    Executor CHỈ nhận `StandardResult`. `_resolve_input` đọc `ref_result.success`
+    rồi `ref_result.data[field]`; dict thô không có cả hai và sẽ nổ
+    AttributeError ở task đầu tiên có InputRef trỏ tới task đã seed.
+    """
+    done = {
+        row["task_id"]: row
+        for row in await repository.list_tasks(workflow_id)
+        if str(row.get("status")) == TaskStatus.SUCCESS.value
+    }
+    statuses = {task_id: TaskStatus.SUCCESS for task_id in done}
+    results = {
+        task_id: StandardResult(success=True, data=row["result_data"])
+        for task_id, row in done.items()
+        if isinstance(row.get("result_data"), dict)
+    }
+    return statuses, results
+
+
+async def _persist_hints(repository: Any, workflow_id: str, hints: dict) -> None:
+    """Ghim repair hint xuống database — bộ nhớ của manager chết cùng request."""
+    if not hints:
+        return
+    await repository.save_repair_hints(
+        workflow_id,
+        {
+            task_id: {"error_code": hint.error_code.value, "message": hint.message}
+            for task_id, hint in hints.items()
+        },
+    )
+
+
+def _repair_answer_for(hints: dict, plan: Any) -> str | None:
+    """Câu hỏi lại của lỗi GỐC, hoặc None nếu không có lỗi sửa được.
+
+    `DEPENDENCY_ERROR` bị loại: nó là hệ quả của một bước khác hỏng, không phải
+    nguyên nhân. Nói "bước trước không thành công" trong khi biết rõ bước nào và
+    vì sao là giấu đi đúng thứ người dùng cần.
+    """
+    if not hints:
+        return None
+    causes = [h for h in hints.values() if h.error_code is not ErrorCode.DEPENDENCY_ERROR] or list(hints.values())
+    cause = causes[0]
+    task = next((t for t in plan.tasks if t.task_id == cause.task_id), None)
+    if task is None:
+        return None
+    return repair_question(
+        task.tool,
+        getattr(cause.error_code, "value", str(cause.error_code)),
+        dict(task.input),
+    )
+
+
+class RetryNotAllowed(Exception):
+    """Yêu cầu này không chạy lại được, kèm lý do nói cho người dùng."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+async def retry_failed_tasks(
+    workflow_id: str,
+    *,
+    resident_url: str = "http://localhost:8001",
+    transport_url: str = "http://localhost:8002",
+    payment_url: str = "http://localhost:8003",
+    property_url: str = "http://localhost:8008",
+    resident_services_url: str = "http://localhost:8006",
+    tour_url: str = "http://localhost:8005",
+    consultation_url: str = "http://localhost:8007",
+    shuttle_url: str = "http://localhost:8009",
+) -> dict[str, Any]:
+    """Chạy lại TỪ BƯỚC HỎNG, giữ nguyên mọi bước đã thành công.
+
+    Dành cho lỗi HẠ TẦNG — provider tạm chết, timeout, database bận. Chúng có
+    `retryable=True` và chạy lại là hết.
+
+    KHÔNG dành cho lỗi nghiệp vụ. "Khu A đã hết chỗ" chạy lại với đúng input cũ
+    thì hỏng y hệt; lối ra của nó là câu hỏi lại để người dùng đổi khu. Cho
+    retry chạy ở đó là mời người dùng bấm một nút không bao giờ hoạt động, và
+    mỗi lần bấm là một vòng gọi provider vô ích.
+
+    Bước đã SUCCESS được seed, không chạy lại: các tool này không idempotent, và
+    chạy lại một `book_parking` đã thành công sẽ đâm vào ràng buộc do chính nó
+    tạo ra.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        record = await repository.get_workflow(workflow_id)
+        if record is None:
+            raise RetryNotAllowed("NOT_FOUND", "Không tìm thấy yêu cầu này.")
+
+        rows = record.get("tasks") or []
+        failed = [row for row in rows if str(row.get("status")) == TaskStatus.FAILED.value]
+        if not failed:
+            raise RetryNotAllowed("NOTHING_TO_RETRY", "Yêu cầu này không có bước nào đang hỏng.")
+
+        # `DEPENDENCY_ERROR` là hệ quả — nó retry được khi nguyên nhân retry
+        # được, nên không tính nó vào lúc quyết định.
+        causes = [row for row in failed if row.get("error_code") != ErrorCode.DEPENDENCY_ERROR.value] or failed
+        if not any(bool(row.get("retryable")) for row in causes):
+            raise RetryNotAllowed(
+                "NOT_RETRYABLE",
+                "Bước này hỏng vì dữ liệu chưa dùng được, chạy lại y nguyên sẽ hỏng như cũ. "
+                "Bạn cho mình biết muốn đổi gì nhé.",
+            )
+
+        plan = _plan_from_task_rows(record["workflow"].get("goal") or "", rows)
+        if plan is None or not plan.tasks:
+            raise RetryNotAllowed("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy lại.")
+
+        connectors = build_connectors(
+            resident_url=resident_url,
+            transport_url=transport_url,
+            payment_url=payment_url,
+            property_url=property_url,
+            resident_services_url=resident_services_url,
+            tour_url=tour_url,
+            consultation_url=consultation_url,
+            shuttle_url=shuttle_url,
+        )
+        repair_manager = RepairManager()
+        executor = Executor(connectors, repository, on_failure=repair_manager)
+
+        seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
+        await executor.execute(
+            plan,
+            workflow_id,
+            finalize=False,
+            seed_statuses=seed_statuses,
+            seed_results=seed_results,
+        )
+
+        hints = repair_manager.hints_for(workflow_id)
+        await _persist_hints(repository, workflow_id, hints)
+        repair_manager.clear(workflow_id)
+
+        statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
+        all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
+        final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
+
+        repair_answer = _repair_answer_for(hints, plan)
+        try:
+            await repository.save_assistant_response(
+                workflow_id,
+                answer=repair_answer
+                or compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                suggestions=[],
+                state="FALLBACK",
+                for_status="NEEDS_INFORMATION" if repair_answer else final_status.value,
+            )
+        except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+            logger.info("không ghi được câu chốt sau retry (%s)", type(exc).__name__)
+
+        await repository.update_workflow_status(workflow_id, final_status)
+        return {"workflow_id": workflow_id, "status": final_status.value}
+    finally:
+        await pool.close()
+
+
 async def resume_viewing_after_approval(
     workflow_id: str,
     *,
@@ -1082,24 +1252,7 @@ async def _materialize_and_run_remaining(
         #
         # Chỗ đỗ vẫn nằm trong database và vẫn bị tính phí; chỉ có màn hình nói
         # là thất bại.
-        done = {
-            row["task_id"]: row
-            for row in await repository.list_tasks(workflow_id)
-            if str(row.get("status")) == TaskStatus.SUCCESS.value
-        }
-        seed_statuses = {task_id: TaskStatus.SUCCESS for task_id in done}
-        # Executor CHỈ nhận `StandardResult`, không nhận JSON thô.
-        #
-        # `_resolve_input` đọc `ref_result.success` rồi `ref_result.data[field]`
-        # — một dict thô không có cả hai, nên seed dict sẽ nổ AttributeError
-        # ngay ở task đầu tiên có InputRef trỏ tới task đã seed. Trong luồng
-        # đỗ xe, `pay_fee` trỏ ba field sang `book_parking`; seed sai kiểu là
-        # hỏng đúng bước thanh toán.
-        seed_results = {
-            task_id: StandardResult(success=True, data=row["result_data"])
-            for task_id, row in done.items()
-            if isinstance(row.get("result_data"), dict)
-        }
+        seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
         # Task tham quan vừa materialize xong — kết quả mới đè lên hàng cũ.
         seed_statuses[pending.task_id] = TaskStatus.SUCCESS
         seed_results[pending.task_id] = result
@@ -1112,17 +1265,8 @@ async def _materialize_and_run_remaining(
             seed_results=seed_results,
         )
 
-        # Ghim hint TRƯỚC khi chốt trạng thái: `_demo_response` đọc từ database,
-        # còn bộ nhớ của RepairManager chết cùng request này.
         hints = repair_manager.hints_for(workflow_id)
-        if hints:
-            await repository.save_repair_hints(
-                workflow_id,
-                {
-                    task_id: {"error_code": hint.error_code.value, "message": hint.message}
-                    for task_id, hint in hints.items()
-                },
-            )
+        await _persist_hints(repository, workflow_id, hints)
         repair_manager.clear(workflow_id)
 
         statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
@@ -1145,19 +1289,7 @@ async def _materialize_and_run_remaining(
         # `for_status` phải khớp NEEDS_INFORMATION, không phải FAILED: câu ghim
         # chỉ được dùng lại khi trạng thái khớp, và trạng thái người dùng nhìn
         # thấy là trạng thái do `_demo_response` dựng.
-        repair_answer: str | None = None
-        if hints:
-            causes = [h for h in hints.values() if h.error_code is not ErrorCode.DEPENDENCY_ERROR] or list(
-                hints.values()
-            )
-            cause = causes[0]
-            task = next((t for t in plan.tasks if t.task_id == cause.task_id), None)
-            if task is not None:
-                repair_answer = repair_question(
-                    task.tool,
-                    getattr(cause.error_code, "value", str(cause.error_code)),
-                    dict(task.input),
-                )
+        repair_answer = _repair_answer_for(hints, plan)
 
         # Câu trả lời cuối, GHI TRƯỚC khi đổi trạng thái.
         #

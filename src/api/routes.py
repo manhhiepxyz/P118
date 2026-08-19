@@ -47,6 +47,8 @@ from src.models.schemas import (
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
+    RetryNotAllowed,
+    retry_failed_tasks,
     ResumeError,
     persist_pending_approval,
     persist_pending_viewing_approval,
@@ -4117,6 +4119,53 @@ async def cancel_demo_workflow(
         _append_job_event(job, "FINISHED")
     _keep_demo_task(asyncio.create_task(_attach_answer(answer_job, workflow_id, goal=answer_job.get("goal") or "")))
     return response
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/retry",
+    response_model=DemoWorkflowResponse,
+)
+async def retry_demo_workflow(
+    workflow_id: str,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Chạy lại TỪ BƯỚC HỎNG, giữ nguyên mọi bước đã thành công.
+
+    Chỉ cho lỗi HẠ TẦNG (`retryable=True`). Lỗi nghiệp vụ như "Khu A đã hết
+    chỗ" chạy lại y nguyên sẽ hỏng như cũ — lối ra của nó là câu hỏi lại để
+    người dùng đổi input, và endpoint này từ chối kèm đúng lời nhắc đó.
+
+    Bước đã SUCCESS được seed chứ không chạy lại: các tool này không idempotent.
+    """
+    await _require_workflow_owner(workflow_id, user)
+    settings = get_settings()
+
+    # Cache RAM dựng từ lượt chạy trước là ảnh cũ. Không bỏ đi thì mọi lần poll
+    # sau retry vẫn trả trạng thái hỏng cũ (mirror payment/viewing route).
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+
+    try:
+        await retry_failed_tasks(
+            workflow_id,
+            resident_url=settings.resident_service_url,
+            transport_url=settings.transport_service_url,
+            payment_url=settings.payment_service_url,
+            property_url=settings.property_service_url,
+            resident_services_url=settings.resident_services_service_url,
+            tour_url=settings.tour_service_url,
+            consultation_url=settings.consultation_service_url,
+            shuttle_url=settings.shuttle_service_url,
+        )
+    except RetryNotAllowed as exc:
+        status_code = 404 if exc.code == "NOT_FOUND" else 409
+        raise HTTPException(status_code=status_code, detail=exc.message) from None
+
+    view = await _public_view_from_db(workflow_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+    return await _with_stored_answer(view, workflow_id)
 
 
 @router.post(
