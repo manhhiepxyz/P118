@@ -1396,6 +1396,12 @@ async def _run_demo_job(
             type(exc).__name__,
             request_id,
         )
+        # Traceback CHỈ ở mức debug. Message của exception hay kèm URL, tên
+        # biến môi trường, đôi khi cả một phần credential — nên nó không được
+        # nằm ở mức warning trong log production. Nhưng không có traceback nào
+        # thì một `NameError` trong tác vụ nền là bất khả truy: log chỉ nói
+        # "NameError" và không chỉ vào dòng nào.
+        logger.debug("demo background workflow traceback request_id=%s", request_id, exc_info=True)
         _append_job_event(job, "EXECUTION_FAILED")
         job["message"] = failure.message
 

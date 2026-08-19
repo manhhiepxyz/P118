@@ -132,6 +132,7 @@ async def build_execution_boundary(
         resident_services_url,
         contact_profile=contact_profile,
         shuttle_url=shuttle_url,
+        workflow_id=workflow_id,
     )
     executor = Executor(connectors, repository, on_progress=on_task_progress, on_failure=on_failure)
     return ValidatedExecutionBoundary(executor), repository
@@ -147,6 +148,7 @@ async def build_runtime(
     consultation_url: str | None = None,
     shuttle_url: str | None = None,
     contact_profile: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
 ) -> tuple[list[Any], PostgreSQLWorkflowStateRepository]:
     """Dựng toàn bộ runtime: connectors + repository.
 

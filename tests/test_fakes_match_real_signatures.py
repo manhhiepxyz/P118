@@ -66,3 +66,41 @@ def test_the_payment_connector_accepts_a_workflow() -> None:
     from src.connectors.payment import PaymentConnector
 
     assert "workflow_id" in _params(PaymentConnector.__init__)
+
+
+@pytest.mark.asyncio
+async def test_the_workflow_id_survives_the_whole_chain(monkeypatch) -> None:
+    """Đi qua CẢ DÂY thật, không kiểm chữ ký từng hàm.
+
+    Kiểm chữ ký là trò đuổi bắt: hai test ở trên phủ
+    `build_execution_boundary` và `build_connectors`, và mắt xích gãy hoá ra là
+    `build_runtime` ở GIỮA — `NameError: name 'workflow_id' is not defined`,
+    trong tác vụ nền, nơi log chỉ giữ tên loại lỗi. Suite xanh 1845 test trong
+    lúc mọi yêu cầu tạo mới đều chết.
+
+    Test này gọi thật từ đầu dây và soi connector ở cuối dây, nên thêm bao
+    nhiêu hàm trung gian nữa cũng không lọt.
+    """
+    from src.orchestration import deps
+
+    class _StubPool:
+        async def close(self):
+            return None
+
+    class _StubRepository:
+        _pool = _StubPool()
+
+    async def _stub_repository():
+        return _StubRepository()
+
+    monkeypatch.setattr(deps, "build_repository", _stub_repository)
+
+    boundary, _repository = await deps.build_execution_boundary(workflow_id="wf-chain")
+
+    payment = next(
+        connector
+        for connector in deps.build_connectors(workflow_id="wf-chain")
+        if "pay_fee" in connector.tool_names
+    )
+    assert payment.is_retry_safe("pay_fee") is True
+    assert boundary is not None
