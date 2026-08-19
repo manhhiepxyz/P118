@@ -114,6 +114,10 @@ async def build_execution_boundary(
     contact_profile: dict[str, Any] | None = None,
     on_task_progress: Callable[[str, str, TaskStatus], Awaitable[None]] | None = None,
     on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
+    # Đi thẳng xuống `PaymentConnector`: thiếu nó thì `pay_fee` ra provider
+    # không mang khoá idempotency, và một lượt gọi lặp báo "Booking has already
+    # been paid" trong khi tiền đã trừ thật.
+    workflow_id: str | None = None,
 ) -> tuple[ValidatedExecutionBoundary, PostgreSQLWorkflowStateRepository]:
     """Dựng boundary tương thích trực tiếp với Planner graph.
 
