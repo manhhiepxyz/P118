@@ -824,7 +824,23 @@ class WorkflowRepository:
                     w.assistant_response_state,
                     w.assistant_for_status,
                     COUNT(t.id) FILTER (WHERE t.task_id IS NOT NULL) AS total_tasks,
-                    COUNT(t.id) FILTER (WHERE t.status = 'SUCCESS')   AS completed_tasks
+                    COUNT(t.id) FILTER (WHERE t.status = 'SUCCESS')   AS completed_tasks,
+                    -- Yêu cầu này còn chờ NGƯỜI DÙNG trả lời không?
+                    --
+                    -- `workflows.status` một mình nói dối ở đây. Một workflow
+                    -- hỏng giữa chừng nhưng còn clarification mở là việc người
+                    -- dùng SỬA TIẾP ĐƯỢC — trang chi tiết dựng lại đúng như vậy
+                    -- (nhánh repair, trả NEEDS_INFORMATION), còn danh sách đọc
+                    -- thẳng cột `status` và ghi "Chưa xong".
+                    --
+                    -- Đo được: cùng một workflow, DB=FAILED, danh sách=FAILED,
+                    -- chi tiết=NEEDS_INFORMATION. Người dùng nhìn danh sách thấy
+                    -- nút "Xem" và không có tín hiệu nào rằng họ trả lời tiếp
+                    -- được.
+                    EXISTS (
+                        SELECT 1 FROM workflow_clarifications c
+                        WHERE c.workflow_id = w.workflow_id AND c.resolved_at IS NULL
+                    ) AS cho_bo_sung
                 FROM workflows w
                 LEFT JOIN workflow_tasks t ON t.workflow_id = w.workflow_id
                 WHERE {" AND ".join(where)}

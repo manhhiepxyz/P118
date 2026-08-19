@@ -4196,12 +4196,19 @@ async def list_demo_workflows(
             DemoWorkflowListItem(
                 workflow_id=workflow_id,
                 title=goal_to_title(row.get("goal")),
-                status=row["status"],
+                # Danh sách và trang chi tiết phải nói CÙNG một điều.
+                #
+                # Workflow hỏng giữa chừng mà còn clarification mở là việc người
+                # dùng sửa tiếp được; trang chi tiết dựng lại thành
+                # NEEDS_INFORMATION, nên danh sách cũng phải vậy. Đọc thẳng cột
+                # `status` khiến hai màn hình mâu thuẫn về cùng một yêu cầu, và
+                # người dùng mất luôn tín hiệu rằng họ trả lời tiếp được.
+                status="NEEDS_INFORMATION" if row.get("cho_bo_sung") else row["status"],
                 # Tên bước hiện tại lấy từ bảng trình bày nghiệp vụ, không phải tên tool.
                 current_step=_TOOL_PRESENTATION.get(tool, (None, ""))[0] if tool else None,
                 completed_tasks=int(row.get("completed_tasks") or 0),
                 total_tasks=int(row.get("total_tasks") or 0),
-                needs_attention=row["status"] in _ATTENTION_STATUSES,
+                needs_attention=bool(row.get("cho_bo_sung")) or row["status"] in _ATTENTION_STATUSES,
                 created_at=row["created_at"].isoformat() if row.get("created_at") else None,
                 updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
                 goal=row.get("goal"),
