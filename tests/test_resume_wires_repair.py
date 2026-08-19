@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 from src.common.enums import ErrorCode
 from src.common.failure_messages import repair_question
 from src.orchestration import demo_service
@@ -122,3 +124,36 @@ def test_resume_does_not_rerun_tasks_that_already_succeeded() -> None:
         "seed status mà không seed kết quả thì InputRef của bước sau không "
         "resolve được"
     )
+
+
+def test_seeded_results_are_standard_results_not_raw_json() -> None:
+    """Executor CHỈ nhận `StandardResult`.
+
+    `_resolve_input` đọc `ref_result.success` rồi `ref_result.data[field]`.
+    Một dict thô không có cả hai, nên seed sai kiểu nổ AttributeError ngay ở
+    task đầu tiên có InputRef trỏ tới task đã seed.
+
+    Trong luồng đỗ xe, `pay_fee` trỏ ba field (`amount`, `currency`,
+    `booking_id`) sang `book_parking` — đúng task luôn được seed sau khi nó
+    thành công ở lượt chạy đầu. Nên seed sai kiểu là hỏng đúng bước thanh toán,
+    ở đúng luồng mà bản vá này sinh ra để cứu.
+    """
+    from src.common.results import StandardResult
+    from src.common.task_plan import InputRef
+    from src.executor.executor import Executor
+
+    class _PayFee:
+        task_id = "T4"
+        tool = "pay_fee"
+        input = {"amount": InputRef(field="amount", from_task="T3")}
+
+    executor = Executor.__new__(Executor)
+
+    resolved = executor._resolve_input(_PayFee(), {"T3": StandardResult(success=True, data={"amount": 150000})})
+    assert resolved == {"amount": 150000}
+
+    with pytest.raises(AttributeError):
+        executor._resolve_input(_PayFee(), {"T3": {"amount": 150000}})
+
+    source = inspect.getsource(demo_service._materialize_and_run_remaining)
+    assert "StandardResult(" in source, "seed kết quả bằng JSON thô — Executor sẽ nổ khi resolve InputRef"

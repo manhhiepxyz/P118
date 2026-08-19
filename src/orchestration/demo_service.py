@@ -1088,8 +1088,17 @@ async def _materialize_and_run_remaining(
             if str(row.get("status")) == TaskStatus.SUCCESS.value
         }
         seed_statuses = {task_id: TaskStatus.SUCCESS for task_id in done}
+        # Executor CHỈ nhận `StandardResult`, không nhận JSON thô.
+        #
+        # `_resolve_input` đọc `ref_result.success` rồi `ref_result.data[field]`
+        # — một dict thô không có cả hai, nên seed dict sẽ nổ AttributeError
+        # ngay ở task đầu tiên có InputRef trỏ tới task đã seed. Trong luồng
+        # đỗ xe, `pay_fee` trỏ ba field sang `book_parking`; seed sai kiểu là
+        # hỏng đúng bước thanh toán.
         seed_results = {
-            task_id: row.get("result_data") for task_id, row in done.items() if row.get("result_data") is not None
+            task_id: StandardResult(success=True, data=row["result_data"])
+            for task_id, row in done.items()
+            if isinstance(row.get("result_data"), dict)
         }
         # Task tham quan vừa materialize xong — kết quả mới đè lên hàng cũ.
         seed_statuses[pending.task_id] = TaskStatus.SUCCESS
