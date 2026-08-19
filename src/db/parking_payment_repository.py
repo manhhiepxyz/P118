@@ -569,10 +569,22 @@ async def refund_payment(pool: asyncpg.Pool, booking_id: str) -> bool:
     return tag.endswith(" 1") or tag.endswith("1")
 
 
-def payment_idempotency_key(workflow_id: str, task_id: str) -> str:
-    """Khoá deterministic: cùng workflow + cùng task luôn ra cùng một khoá.
+def payment_idempotency_key(workflow_id: str, booking_id: str) -> str:
+    """Khoá deterministic: cùng workflow + cùng booking luôn ra cùng một khoá.
 
     Nhờ vậy retry sau timeout — kể cả từ một process khác sau khi restart —
     vẫn rơi vào đúng row cũ thay vì tạo giao dịch mới.
+
+    Khoá theo BOOKING chứ không theo task_id, vì task_id chỉ có ở tầng
+    orchestration còn connector thì không nhận nó: `Connector.execute` chỉ có
+    `(tool_name, input_data)`, và thêm tham số vào đó là sửa cả 8 connector cho
+    một nhu cầu của đúng một cái.
+
+    `booking_id` nằm sẵn trong input của `pay_fee`, nên connector tự dựng được
+    khoá mà không cần trạng thái thay đổi được — quan trọng vì các task trong
+    cùng một wave chạy đồng thời.
+
+    Vẫn giữ `workflow_id` trong khoá: bỏ nó đi thì một lần trả tiền MỚI cho
+    booding đã hoàn tiền sẽ rơi vào bản ghi REFUNDED cũ và được coi là đã trả.
     """
-    return f"wf:{workflow_id}:task:{task_id}"
+    return f"wf:{workflow_id}:booking:{booking_id}"

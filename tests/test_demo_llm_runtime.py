@@ -244,8 +244,18 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
     monkeypatch.setattr(demo_service, "get_llm", lambda **_: llm)
     monkeypatch.setattr(demo_service, "Planner", lambda received, **_kwargs: planner if received is llm else None)
 
-    async def _build_boundary(*urls: str, on_task_progress=None, on_failure=None, shuttle_url=None):
+    async def _build_boundary(
+        *urls: str,
+        on_task_progress=None,
+        on_failure=None,
+        shuttle_url=None,
+        workflow_id=None,
+    ):
         assert on_task_progress is not None
+        # `workflow_id` là thứ cho phép `pay_fee` mang khoá idempotency. Đồ giả
+        # không nhận nó thì lỗi hiện ra ở đây chứ không phải ở chỗ tiền bị trừ
+        # hai lần — nên nhận, và khẳng định nó có thật.
+        assert workflow_id == "workflow-1", "workflow_id không tới được nơi dựng connector"
         events.append(("runtime", urls))
         return runtime_boundary, _Repository()
 
@@ -270,6 +280,10 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
         resident_url="http://resident",
         transport_url="http://transport",
         payment_url="http://payment",
+        # Production LUÔN truyền id (routes.py dựng nó trước khi chạy job).
+        # Truyền ở đây để khẳng định nó ĐI TỚI được connector — thiếu nó thì
+        # `pay_fee` ra provider không mang khoá idempotency.
+        workflow_id="workflow-1",
     )
 
     assert state["workflow_id"] == "workflow-1"
@@ -284,7 +298,15 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
         ),
     ) in events
     #  rỗng ở lượt đầu: chưa có câu hỏi lại nào để trả lời.
-    assert ("invoke", {"goal": "Đăng ký cư dân", "existing_context": {}, "user_answers": {}}) in events
+    assert (
+        "invoke",
+        {
+            "goal": "Đăng ký cư dân",
+            "existing_context": {},
+            "user_answers": {},
+            "workflow_id": "workflow-1",
+        },
+    ) in events
     assert events[-1] == "pool_closed"
 
 

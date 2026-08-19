@@ -470,7 +470,14 @@ async def run_demo_workflow(
         if stage is not None:
             await on_stage(stage, {"task_id": task_id, "task_status": status.value})
 
-    boundary_kwargs: dict[str, Any] = {"on_task_progress": on_task_progress, "shuttle_url": shuttle_url}
+    boundary_kwargs: dict[str, Any] = {
+        "on_task_progress": on_task_progress,
+        "shuttle_url": shuttle_url,
+        # Không có `workflow_id` thì `pay_fee` đi ra provider KHÔNG mang khoá
+        # idempotency, và mọi lượt gọi lặp thành "Booking has already been paid"
+        # thay vì trả lại đúng giao dịch cũ.
+        "workflow_id": workflow_id,
+    }
     if contact_profile:
         boundary_kwargs["contact_profile"] = contact_profile
     if on_failure is not None:
@@ -711,9 +718,14 @@ async def _execute_payment_only(
     đã chạy xong từ lượt trước, và booking trong database mới là nguồn sự thật
     về số tiền.
     """
+    # MỘT dạng khoá duy nhất cho mọi đường trả tiền.
+    #
+    # Đường này từng dùng `wf:{id}:task:{task_id}` còn đường Executor không có
+    # khoá nào. Hai dạng khác nhau nghĩa là cùng một lần trả tiền đi qua hai
+    # đường sẽ tạo hai giao dịch — đúng thứ khoá idempotency sinh ra để chặn.
     connector = PaymentConnector(
         base_url=payment_url,
-        idempotency_key=payment_idempotency_key(workflow_id, payment_task_id),
+        idempotency_key=payment_idempotency_key(workflow_id, quote.booking_id),
     )
     result = await connector.execute(
         "pay_fee",
@@ -1003,6 +1015,7 @@ async def retry_failed_tasks(
             tour_url=tour_url,
             consultation_url=consultation_url,
             shuttle_url=shuttle_url,
+            workflow_id=workflow_id,
         )
         repair_manager = RepairManager()
         executor = Executor(connectors, repository, on_failure=repair_manager)
@@ -1202,6 +1215,7 @@ async def _materialize_and_run_remaining(
             tour_url=tour_url,
             consultation_url=consultation_url,
             shuttle_url=shuttle_url,
+            workflow_id=workflow_id,
         )
         # Nối RepairManager vào đúng như đường chạy thường.
         #
