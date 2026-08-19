@@ -1881,6 +1881,54 @@ async def _speak(
     return response.model_copy(update={"answer": reply.answer, "suggestions": list(reply.suggestions)})
 
 
+async def _enforce_daily_quota(user: dict) -> None:
+    """Chặn khi người dùng đã tạo quá nhiều workflow trong cửa sổ ngày.
+
+    Khoá theo `owner_user_id`, KHÔNG theo IP. `RateLimitMiddleware` đã khoá theo
+    IP và nó chặn đúng thứ khác: bùng phát tức thời. IP đổi được — tài khoản thì
+    không, và hoá đơn LLM thuộc về tài khoản.
+
+    Chỉ áp cho lane DỊCH VỤ. Lời chào và câu hỏi năng lực không tạo workflow và
+    gần như không tốn gì; chặn "xin chào" bằng một câu về hạn mức là vô lý.
+
+    Fail-OPEN khi database lỗi: hạn ngạch là biện pháp giữ chi phí, không phải
+    biện pháp an toàn. Từ chối một người dùng hợp lệ vì một truy vấn đếm hỏng là
+    đổi một vấn đề nhỏ lấy một vấn đề lớn hơn.
+    """
+    settings = get_settings()
+    quota = settings.daily_workflow_quota
+    if quota <= 0:
+        return
+
+    hours = settings.daily_quota_window_hours
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            usage = await repository.usage_since(owner_user_id=str(user["id"]), hours=hours)
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - xem docstring: fail-open
+        logger.warning("không đếm được hạn ngạch ngày; cho request đi tiếp")
+        return
+
+    if usage["da_dung"] < quota:
+        return
+
+    # Nói RÕ khi nào dùng lại được. "Thử lại sau" mà không nói khi nào thì người
+    # dùng chỉ còn cách bấm lại liên tục để dò — đúng thứ hạn ngạch định chặn.
+    noi_luc = usage.get("noi_luc")
+    khi_nao = f" Bạn dùng tiếp được sau {noi_luc.strftime('%H:%M ngày %d/%m')}." if noi_luc else ""
+    logger.info("chặn theo hạn ngạch ngày user=%s da_dung=%d", user["username"], usage["da_dung"])
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            f"Bạn đã tạo {usage['da_dung']} yêu cầu trong {hours} giờ qua, chạm giới hạn "
+            f"{quota} yêu cầu mỗi ngày.{khi_nao}"
+        ),
+    )
+
+
 async def _archive_unsupported_workflow(workflow_id: str) -> None:
     """Ẩn workflow của một yêu cầu ngoài phạm vi. Best-effort, không bao giờ raise.
 
@@ -2647,6 +2695,9 @@ async def start_demo_workflow(
             answer=reply,
             session_id=session_id,
         )
+
+    # Hạn ngạch chỉ áp cho lane DỊCH VỤ — small-talk đã return ở trên.
+    await _enforce_daily_quota(user)
 
     workflow_id = str(uuid4())
     settings = get_settings()

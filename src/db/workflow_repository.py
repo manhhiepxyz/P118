@@ -836,6 +836,32 @@ class WorkflowRepository:
             )
         return [dict(row) for row in rows]
 
+    async def usage_since(self, *, owner_user_id: str, hours: int) -> dict[str, Any]:
+        """Số workflow người này đã tạo trong `hours` giờ qua, và lúc hạn mức nới ra.
+
+        Đếm CẢ workflow đã lưu trữ. Một yêu cầu gõ nhầm vẫn tốn đúng một lượt
+        gọi Planner — ẩn nó khỏi Lịch sử là chuyện màn hình, không phải chuyện
+        hoá đơn. Đếm theo thứ hiện ra sẽ biến "xoá lịch sử" thành cách reset hạn
+        mức.
+
+        `nới_lúc` là thời điểm workflow CŨ NHẤT trong cửa sổ rời khỏi cửa sổ —
+        tức lúc người dùng có lại đúng một suất. Nói "thử lại sau" mà không nói
+        khi nào là bắt họ đoán, rồi bấm lại liên tục để dò.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT count(*) AS da_dung,
+                       min(created_at) + make_interval(hours => $2) AS noi_luc
+                FROM workflows
+                WHERE owner_user_id = $1
+                  AND created_at > NOW() - make_interval(hours => $2)
+                """,
+                _uuid(owner_user_id),
+                hours,
+            )
+        return {"da_dung": int(row["da_dung"]), "noi_luc": row["noi_luc"]}
+
     async def recent_turns_for_owner(
         self,
         *,

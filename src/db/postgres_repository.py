@@ -278,6 +278,9 @@ class PostgreSQLWorkflowStateRepository:
     async def consume_clarification(self, workflow_id: str) -> dict | None:
         return await self.workflows.consume_clarification(workflow_id)
 
+    async def usage_since(self, **kwargs):
+        return await self.workflows.usage_since(**kwargs)
+
     async def recent_turns_for_owner(self, **kwargs):
         return await self.workflows.recent_turns_for_owner(**kwargs)
 
