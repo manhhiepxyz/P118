@@ -8,7 +8,7 @@ import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 
 import { LogoutButton } from '../components/workspace/LogoutButton'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
-import { SERVICE_FIELDS, SHARED_FIELDS, matchOption, missingFields, today, type FormValues } from '../lib/serviceForms'
+import { SERVICE_FIELDS, matchOption, missingFields, today, type FormValues } from '../lib/serviceForms'
 import { JourneySummary } from '../components/workspace/JourneySummary'
 import { ServiceLauncher } from '../components/workspace/ServiceLauncher'
 import type { ChatTurn } from '../lib/journeyMock'
@@ -65,7 +65,6 @@ const WAITING_AFTER_MS = 8000
 function goalFromForms(
   picked: string[],
   values: Record<string, Record<string, string>>,
-  shared: Record<string, string>,
 ): { goal: string; projectName?: string } {
   let projectName: string | undefined
 
@@ -82,9 +81,9 @@ function goalFromForms(
       // +/-. Bỏ qua nó khi rỗng thì câu gửi đi mất hẳn số khách: màn hình ghi
       // "Số khách 1" mà yêu cầu lại không nói số khách nào. Lấy đúng con số
       // đang HIỆN trên màn hình.
-      const stored = field.shared ? shared[field.key] : values[service]?.[field.key]
-      // Field ẩn do giao diện điền — hiện chỉ có ngày bắt đầu của đăng ký.
-      const raw = field.hidden
+      const stored = values[service]?.[field.key]
+      // Ô do giao diện điền sẵn: ẩn hẳn, hoặc hiện ra với mặc định hôm nay.
+      const raw = field.hidden || field.defaultToday
         ? stored || today()
         : field.kind === 'number'
           ? stored || String(field.min ?? 1)
@@ -160,7 +159,6 @@ export function JourneyWorkspacePage() {
 
   const [picked, setPicked] = useState<string[]>([])
   const [values, setValues] = useState<Record<string, FormValues>>({})
-  const [shared, setShared] = useState<FormValues>({})
   const [invalid, setInvalid] = useState<Record<string, string[]>>({})
   /**
    * Vì sao lần bấm vừa rồi không chạy.
@@ -171,12 +169,8 @@ export function JourneyWorkspacePage() {
    */
   const [blocked, setBlocked] = useState<string | null>(null)
 
-  function setField(service: string, key: string, value: string, isShared: boolean) {
-    if (isShared) {
-      setShared((current) => ({ ...current, [key]: value }))
-    } else {
-      setValues((current) => ({ ...current, [service]: { ...current[service], [key]: value } }))
-    }
+  function setField(service: string, key: string, value: string) {
+    setValues((current) => ({ ...current, [service]: { ...current[service], [key]: value } }))
     // Xoá cờ lỗi ngay khi người dùng bắt đầu sửa — giữ lỗi hiển thị trong lúc
     // họ đang gõ là mắng người đang khắc phục.
     setBlocked(null)
@@ -574,7 +568,7 @@ export function JourneyWorkspacePage() {
     // Chỉ chặn khi THẬT SỰ thiếu thông tin bắt buộc của việc đã chọn.
     const gaps: Record<string, string[]> = {}
     for (const name of picked) {
-      const missing = missingFields(name, values[name] ?? {}, shared).map((field) => field.key)
+      const missing = missingFields(name, values[name] ?? {}).map((field) => field.key)
       if (missing.length > 0) gaps[name] = missing
     }
     if (Object.keys(gaps).length > 0) {
@@ -583,7 +577,6 @@ export function JourneyWorkspacePage() {
       // nhìn một màn hình đầy ô đã điền; câu chung chung bắt họ tự dò lại.
       const names = [...new Set(Object.values(gaps).flat())].map(
         (key) =>
-          SHARED_FIELDS.find((field) => field.key === key)?.label ??
           Object.values(SERVICE_FIELDS)
             .flat()
             .find((field) => field.key === key)?.label ??
@@ -595,7 +588,7 @@ export function JourneyWorkspacePage() {
     setBlocked(null)
 
     // Câu mục tiêu gửi lên: form + phần người dùng gõ thêm.
-    const built = goalFromForms(picked, values, shared)
+    const built = goalFromForms(picked, values)
     const goal = [built.goal, draft.trim()].filter(Boolean).join('. ')
     if (!goal) {
       setBlocked('Bạn chọn một dịch vụ hoặc mô tả việc cần làm nhé.')
@@ -766,7 +759,6 @@ export function JourneyWorkspacePage() {
                   selected={picked}
                   onToggle={togglePick}
                   values={values}
-                  shared={shared}
                   onField={setField}
                   invalid={invalid}
                   leaving={leaving}

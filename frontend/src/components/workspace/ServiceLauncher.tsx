@@ -16,7 +16,6 @@ import type { LucideIcon } from 'lucide-react'
 import { getCapabilities } from '../../lib/agentApi'
 import {
   SERVICE_FIELDS,
-  SHARED_FIELDS,
   missingFields,
   summarise,
   type FormValues,
@@ -56,8 +55,7 @@ interface Props {
   selected: string[]
   onToggle: (name: string) => void
   values: Record<string, FormValues>
-  shared: FormValues
-  onField: (service: string, key: string, value: string, isShared: boolean) => void
+  onField: (service: string, key: string, value: string) => void
   invalid: Record<string, string[]>
   leaving: boolean
 }
@@ -77,7 +75,6 @@ export function ServiceLauncher({
   selected,
   onToggle,
   values,
-  shared,
   onField,
   invalid,
   leaving,
@@ -102,17 +99,6 @@ export function ServiceLauncher({
     }
   }, [])
 
-  const anyShared = selected.some((name) =>
-    (SERVICE_FIELDS[name] ?? []).some((field) => field.shared),
-  )
-
-  /** Key dùng chung đang bị gắn cờ thiếu, gom từ mọi dịch vụ đã chọn. */
-  const sharedInvalid = new Set(
-    Object.values(invalid)
-      .flat()
-      .filter((key) => SHARED_FIELDS.some((field) => field.key === key)),
-  )
-
   return (
     <div className={`h-full overflow-y-auto ${leaving ? 'shift-out' : 'rise'}`}>
       <div className="mx-auto w-full max-w-[1000px] px-12 pb-8 pt-12">
@@ -126,71 +112,6 @@ export function ServiceLauncher({
           Chọn một hoặc nhiều dịch vụ rồi điền thông tin ngay tại chỗ. Hoặc cứ
           nói bằng lời ở ô bên dưới — P-118 tự hiểu phần còn lại.
         </p>
-
-        {/* Thông tin dùng chung — chỉ hiện khi có việc thật sự cần nó.
-
-            Khối này PHẢI biết về `invalid`. Trước đây nó không biết: bấm Thực
-            hiện mà thiếu Dự án/Ngày thì `execute()` chặn và gắn cờ lỗi, nhưng
-            cờ ấy chỉ được vẽ trong form của từng dịch vụ — nơi field dùng
-            chung đã bị lọc ra. Kết quả là bấm nút và KHÔNG có gì xảy ra: không
-            chạy, không báo lỗi, không chỗ nào đỏ. */}
-        {anyShared && (
-          <section className="rise mt-10">
-            <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
-              Thông tin hành trình
-            </h2>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              {SHARED_FIELDS.map((field) => {
-                const bad = sharedInvalid.has(field.key)
-                const border = bad ? 'border-[var(--danger)]' : 'border-[var(--border-subtle)]'
-                return (
-                  <div key={field.key}>
-                    <label
-                      htmlFor={`shared-${field.key}`}
-                      className="block text-[13.5px] font-medium text-[var(--text-secondary)]"
-                    >
-                      {field.label}
-                    </label>
-                    {field.kind === 'select' ? (
-                      <select
-                        id={`shared-${field.key}`}
-                        value={shared[field.key] ?? ''}
-                        onChange={(event) => onField('', field.key, event.target.value, true)}
-                        aria-invalid={bad}
-                        aria-describedby={bad ? `shared-${field.key}-err` : undefined}
-                        className={`mt-2 h-12 w-full cursor-pointer rounded-[var(--r-sm)] border bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)] ${border}`}
-                      >
-                        <option value="">Chọn…</option>
-                        {field.options?.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        id={`shared-${field.key}`}
-                        type="date"
-                        value={shared[field.key] ?? ''}
-                        onChange={(event) => onField('', field.key, event.target.value, true)}
-                        aria-invalid={bad}
-                        aria-describedby={bad ? `shared-${field.key}-err` : undefined}
-                        className={`mt-2 h-12 w-full rounded-[var(--r-sm)] border bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)] ${border}`}
-                      />
-                    )}
-                    {bad ? (
-                      <p id={`shared-${field.key}-err`} className="mt-1.5 text-[12.5px] text-[var(--danger)]">
-                        Chưa chọn {field.label.toLowerCase()}.
-                      </p>
-                    ) : field.hint ? (
-                      <p className="mt-1.5 text-[12.5px] text-[var(--text-muted)]">{field.hint}</p>
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
-          </section>
-        )}
 
         <div className="mt-11 flex items-baseline justify-between">
           <h2 className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
@@ -209,7 +130,7 @@ export function ServiceLauncher({
             const identity = IDENTITY[item.name] ?? FALLBACK_IDENTITY
             const isSelected = selected.includes(item.name)
             const fields = SERVICE_FIELDS[item.name] ?? []
-            const missing = missingFields(item.name, values[item.name] ?? {}, shared)
+            const missing = missingFields(item.name, values[item.name] ?? {})
             const complete = isSelected && fields.length > 0 && missing.length === 0
             const expanded = isSelected && open === item.name && !complete
             const showForm = isSelected && (open === item.name || !complete)
@@ -278,7 +199,7 @@ export function ServiceLauncher({
                     {/* Đã đủ thông tin → thay mô tả bằng chính lựa chọn. */}
                     {complete ? (
                       <span className="mt-1 block text-[14px] leading-[1.5] text-[var(--agent)]">
-                        {summarise(item.name, values[item.name] ?? {}, shared)}
+                        {summarise(item.name, values[item.name] ?? {})}
                       </span>
                     ) : (
                       <span className="mt-1 block text-[14px] leading-[1.5] text-[var(--text-secondary)]">
@@ -332,15 +253,9 @@ export function ServiceLauncher({
                 {showForm && fields.length > 0 && (
                   <div className="rise bg-[var(--surface-raised)] px-4 pb-6 pl-[95px] pr-6">
                     <InlineServiceForm
-                      /* Bỏ field DÙNG CHUNG khỏi form riêng: chúng đã có ở
-                         khối "Thông tin hành trình" phía trên. Hiện lại lần
-                         hai vừa thừa vừa gây nghi ngờ — người dùng không biết
-                         hai ô đó có phải cùng một thứ không. Validation vẫn
-                         xét chúng qua `missingFields`. */
-                      fields={fields.filter((field) => !field.shared)}
+                      fields={fields}
                       values={values[item.name] ?? {}}
-                      shared={shared}
-                      onChange={(key, value, isShared) => onField(item.name, key, value, isShared)}
+                      onChange={(key, value) => onField(item.name, key, value)}
                       invalid={invalid[item.name] ?? []}
                     />
                   </div>

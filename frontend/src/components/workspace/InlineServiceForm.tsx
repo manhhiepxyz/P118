@@ -1,12 +1,11 @@
 import { Minus, Plus } from 'lucide-react'
 
-import type { FieldSpec, FormValues } from '../../lib/serviceForms'
+import { today, type FieldSpec, type FormValues } from '../../lib/serviceForms'
 
 interface Props {
   fields: FieldSpec[]
   values: FormValues
-  shared: FormValues
-  onChange: (key: string, value: string, shared: boolean) => void
+  onChange: (key: string, value: string) => void
   /** Field bị bỏ trống khi người dùng đã bấm Thực hiện. */
   invalid: string[]
 }
@@ -20,7 +19,7 @@ interface Props {
  * Nhãn LUÔN hiện, không dùng placeholder thay nhãn — placeholder biến mất ngay
  * khi gõ, và người dùng quay lại sau vài giây không còn biết ô đó là gì.
  */
-export function InlineServiceForm({ fields, values, shared, onChange, invalid }: Props) {
+export function InlineServiceForm({ fields, values, onChange, invalid }: Props) {
   return (
     <div className="grid gap-4 sm:grid-cols-2">
       {fields
@@ -29,7 +28,7 @@ export function InlineServiceForm({ fields, values, shared, onChange, invalid }:
         .filter((field) => !field.hidden)
         .filter((field) => !field.showIf || values[field.showIf.key] === field.showIf.equals)
         .map((field) => {
-        const value = field.shared ? (shared[field.key] ?? '') : (values[field.key] ?? '')
+        const value = values[field.key] ?? ''
         const bad = invalid.includes(field.key)
         const id = `f-${field.key}`
 
@@ -48,7 +47,7 @@ export function InlineServiceForm({ fields, values, shared, onChange, invalid }:
                 <button
                   type="button"
                   onClick={() =>
-                    onChange(field.key, String(Math.max(field.min ?? 1, Number(value || 1) - 1)), !!field.shared)
+                    onChange(field.key, String(Math.max(field.min ?? 1, Number(value || 1) - 1)))
                   }
                   aria-label={`Giảm ${field.label}`}
                   className="press flex h-10 w-10 cursor-pointer items-center justify-center rounded-[var(--r-xs)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-raised)]"
@@ -64,7 +63,7 @@ export function InlineServiceForm({ fields, values, shared, onChange, invalid }:
                 <button
                   type="button"
                   onClick={() =>
-                    onChange(field.key, String(Math.min(field.max ?? 9, Number(value || 1) + 1)), !!field.shared)
+                    onChange(field.key, String(Math.min(field.max ?? 9, Number(value || 1) + 1)))
                   }
                   aria-label={`Tăng ${field.label}`}
                   className="press flex h-10 w-10 cursor-pointer items-center justify-center rounded-[var(--r-xs)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-raised)]"
@@ -76,7 +75,7 @@ export function InlineServiceForm({ fields, values, shared, onChange, invalid }:
               <select
                 id={id}
                 value={value}
-                onChange={(event) => onChange(field.key, event.target.value, !!field.shared)}
+                onChange={(event) => onChange(field.key, event.target.value)}
                 aria-invalid={bad}
                 aria-describedby={bad ? `${id}-err` : field.hint ? `${id}-hint` : undefined}
                 className={`mt-2 h-12 w-full cursor-pointer rounded-[var(--r-sm)] border bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors duration-[var(--t-hover)] focus:border-[var(--selection)] ${
@@ -94,8 +93,11 @@ export function InlineServiceForm({ fields, values, shared, onChange, invalid }:
               <input
                 id={id}
                 type={field.kind === 'date' ? 'date' : field.kind === 'time' ? 'time' : 'text'}
-                value={value}
-                onChange={(event) => onChange(field.key, event.target.value, !!field.shared)}
+                // Hiện đúng giá trị SẼ ĐƯỢC GỬI. Để trống một ô có mặc định là
+                // nói dối: người dùng nhìn ô rỗng rồi ngạc nhiên khi yêu cầu
+                // mang theo một ngày họ không gõ.
+                value={value || (field.defaultToday ? today() : '')}
+                onChange={(event) => onChange(field.key, event.target.value)}
                 placeholder={field.placeholder}
                 aria-invalid={bad}
                 aria-describedby={bad ? `${id}-err` : field.hint ? `${id}-hint` : undefined}
