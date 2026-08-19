@@ -194,18 +194,21 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
       phrase: 'tại {v}',
       showIf: { key: 'needs_shuttle', equals: 'true' },
       placeholder: 'Ví dụ: Sảnh A toà S1, hoặc 25 Lý Thường Kiệt',
-      hint: 'Điểm gặp chính thức do bộ phận tham quan xác nhận lại',
+      hint: 'Đơn vị tham quan sẽ liên hệ xác nhận điểm đón và báo giờ đón cho bạn',
     },
-    {
-      key: 'pickup_time_note',
-      label: 'Giờ muốn được đón',
-      kind: 'select',
-      freeText: true,
-      phrase: 'khoảng {v}',
-      showIf: { key: 'needs_shuttle', equals: 'true' },
-      options: slots(6, 17),
-      hint: 'Mong muốn của bạn — đơn vị sẽ chốt giờ đón thực tế',
-    },
+    /*
+     * KHÔNG hỏi "Giờ muốn được đón".
+     *
+     * Ô ấy từng ở đây với `freeText: true` và không có `tool`/`field` — nghĩa là
+     * giá trị chỉ chảy vào câu văn gửi Planner, không tới tool nào. Trong khi đó
+     * `pickup_time` là dữ liệu đơn vị vận chuyển TRẢ VỀ (`book_shuttle` sinh ra
+     * nó), không phải input người dùng đặt được. Hỏi một thứ hệ thống không dùng
+     * là hứa suông: người dùng chọn 12:00 rồi nhận lịch đón giờ khác.
+     *
+     * Nó còn phản tác dụng ở chỗ khác: giờ đón do người dùng đặt có thể mâu
+     * thuẫn với giờ tham quan (chọn xem lúc 10:00, đón lúc 12:00), và câu văn
+     * dài thêm một mệnh đề vô nghĩa làm Planner khó đọc hơn.
+     */
     {
       key: 'pickup_phone',
       label: 'Số điện thoại cho tài xế',
