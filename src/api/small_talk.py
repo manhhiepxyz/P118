@@ -201,6 +201,27 @@ _SERVICE_NOUNS = (
 
 _REPETITION_THRESHOLD = 3
 
+# Token lặp phải chiếm ÍT NHẤT phần này của câu mới bị coi là spam.
+#
+# Đếm tuyệt đối một mình không phân biệt được "ok ok ok" với một yêu cầu ghép
+# hai dịch vụ. Đo được, nguyên văn câu do CHÍNH giao diện sinh ra khi người
+# dùng chọn hai dịch vụ từ menu:
+#
+#     "Đặt lịch tham quan … xe đưa đón cho 1 khách … Đăng ký phương tiện và
+#      chỗ đỗ xe … Xe máy biển số 66A-92183 chỗ đỗ Khu B"
+#
+# → "xe" đếm được 3 trên 48 token (6%) và câu bị chặn với "Bạn gõ lặp". Người
+# dùng không gõ một chữ nào — họ bấm chọn từ danh sách — mà vẫn bị mắng là gõ
+# lặp, và không có cách nào sửa vì chính hệ thống viết ra câu ấy.
+#
+# Tiếng Việt khiến chuyện này gần như chắc chắn xảy ra: "xe đưa đón", "chỗ đỗ
+# xe", "Xe máy" là ba việc khác nhau cùng chứa chữ "xe". Càng ghép nhiều dịch
+# vụ càng dễ dính — bộ lọc spam mạnh tay nhất đúng với yêu cầu đáng giá nhất.
+#
+# Spam thật thì token lặp CHIẾM câu: "ok ok ok" 100%, "đặt chỗ đặt chỗ đặt
+# chỗ" 50%, "đặt chỗ xe máy" lặp ba lần 25%.
+_REPETITION_MIN_SHARE = 0.25
+
 
 def _detect_repetition(message: str) -> bool:
     """Câu spam lặp từ (>= 3 lần) → chặn sớm, 0 LLM call.
@@ -231,7 +252,14 @@ def _detect_repetition(message: str) -> bool:
     if len(words) < _REPETITION_THRESHOLD:
         return False
     most_common = Counter(words).most_common(1)
-    return bool(most_common) and most_common[0][1] >= _REPETITION_THRESHOLD
+    if not most_common:
+        return False
+    count = most_common[0][1]
+    if count < _REPETITION_THRESHOLD:
+        return False
+    # Lặp 3 lần trong một câu dài không phải spam — nó là một yêu cầu ghép
+    # nhiều việc. Chỉ chặn khi token ấy CHIẾM câu.
+    return count / len(words) >= _REPETITION_MIN_SHARE
 
 
 def _normalize(message: str) -> str:
