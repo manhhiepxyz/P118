@@ -7,7 +7,7 @@ import { ResultSummary } from '../components/workspace/ResultSummary'
 import { StepList } from '../components/workspace/StepList'
 import { describeFailure, describeWorkflowFailure } from '../lib/status'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
-import { continueWorkflow, decidePayment, startWorkflow } from '../lib/agentApi'
+import { cancelWorkflow, continueWorkflow, decidePayment, startWorkflow } from '../lib/agentApi'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
 /**
@@ -62,6 +62,9 @@ function formatVnd(amount: number | undefined, currency: string | undefined): st
  * không mất — `message` do backend trả đã nói rõ "Đã thanh toán 150.000 VND".
  */
 
+/** Trạng thái đã chốt — không còn gì để dừng. */
+const TERMINAL_STATUSES = new Set(['SUCCESS', 'FAILED', 'CANCELLED'])
+
 export function WorkflowPage() {
   const { workflowId = '' } = useParams()
   const navigate = useNavigate()
@@ -74,6 +77,22 @@ export function WorkflowPage() {
   // thì một bản được sửa còn bản kia giữ nguyên lỗi — và vòng lặp này đã từng
   // hỏng theo một cách rất khó thấy.
   const { data, error, loading, refresh: load } = useWorkflowPolling(workflowId)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+
+  async function handleCancel() {
+    if (!workflowId || cancelling) return
+    setCancelError(null)
+    setCancelling(true)
+    try {
+      await cancelWorkflow(workflowId)
+      await load()
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : 'Chưa dừng được yêu cầu này.')
+    } finally {
+      setCancelling(false)
+    }
+  }
 
   async function handleDecision(decision: 'approve' | 'reject') {
     if (deciding) return
@@ -284,7 +303,50 @@ export function WorkflowPage() {
                   Dừng ở bước “{failedStep.title}”: {describeFailure(failedStep)}
                 </p>
               )}
+
+              {/* Lối ra, đặt ngay cạnh lý do.
+                  Trước đây trang này KHÔNG có hành động nào cho một yêu cầu đã
+                  hỏng: người dùng đọc lý do rồi hết. Ô nhập vốn chỉ hiện ở
+                  nhánh hỏi bổ sung.
+
+                  Cố ý KHÔNG có nút "Gửi lại yêu cầu này". Gửi lại nguyên văn
+                  sẽ chạy lại cả những bước ĐÃ thành công — chỗ đỗ đã đặt bị
+                  đặt lần hai, và lần hai đâm vào ràng buộc do lần một tạo ra.
+                  Đó đúng là lỗi vừa phải sửa ở tầng resume; không dựng lại nó
+                  ở đây dưới dạng một nút bấm. */}
+              {data.status === 'FAILED' && (
+                <div className="mt-4">
+                  <p className="mb-2 text-[13.5px] text-[var(--text-secondary)]">
+                    Bạn nói cho mình biết muốn đổi gì — mình chạy lại phần còn thiếu.
+                  </p>
+                  <ClarificationReply onSubmit={handleFollowUp} />
+                </div>
+              )}
             </section>
+          )}
+
+          {/* Yêu cầu còn treo thì phải dừng được.
+              `WAITING_APPROVAL` chờ người khác, `NEEDS_INFORMATION` chờ chính
+              người dùng — cả hai đều chiếm một suất hạn ngạch ngày và một dòng
+              đang-chờ trong Lịch sử cho tới khi có ai đó chốt. Đo được: 42
+              workflow nằm ở trạng thái chờ bổ sung không ai giải quyết. */}
+          {!TERMINAL_STATUSES.has(data.status) && (
+            <div className="mt-6">
+              <button
+                type="button"
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="press cursor-pointer rounded-[var(--r-sm)] px-3.5 py-2 text-[13.5px] font-medium disabled:cursor-not-allowed"
+                style={{ color: 'var(--danger)', boxShadow: 'inset 0 0 0 1px var(--border-subtle)' }}
+              >
+                {cancelling ? 'Đang dừng…' : 'Dừng yêu cầu này'}
+              </button>
+              {cancelError && (
+                <p className="mt-2 text-[13px]" style={{ color: 'var(--danger)' }} role="alert">
+                  {cancelError}
+                </p>
+              )}
+            </div>
           )}
 
 
