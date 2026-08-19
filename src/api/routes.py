@@ -1182,7 +1182,21 @@ async def _run_demo_job(
         # PostgreSQL. `state["plan"]` vẫn là plan ĐẦY ĐỦ (plan node set, boundary
         # chỉ thêm policy_error) — không được lấy `job["plan"]` làm nguồn, vì
         # on_stage ghi đè nó bằng plan prefix đã bỏ bước tham quan.
-        if state.get("policy_error") == "VIEWING_APPROVAL_REQUIRED":
+        # Hồ sơ chờ duyệt tham quan phải được ghi kể cả khi lỗi NỔI LÊN là
+        # thanh toán.
+        #
+        # Một plan có cả hai thì boundary thanh toán dừng trước, và
+        # `policy_error` mang mã của NÓ — nhưng lịch tham quan vẫn đang chờ đơn
+        # vị tour. Chỉ ghi khi `policy_error` là VIEWING_APPROVAL_REQUIRED nghĩa
+        # là bỏ rơi đúng trường hợp này: bước tham quan nằm WAITING_APPROVAL mà
+        # không có hàng nào trong `viewing_approvals`, nên không ai được yêu cầu
+        # duyệt và người dùng không có cách nào biết.
+        #
+        # `viewing_pending` do `ViewingApprovalBoundary` gắn vào context của lỗi
+        # bên trong trước khi ném lại.
+        if state.get("policy_error") == "VIEWING_APPROVAL_REQUIRED" or (
+            state.get("policy_context") or {}
+        ).get("viewing_pending"):
             applicant = await _applicant_snapshot(job.get("owner_user_id"))
             await persist_pending_viewing_approval(
                 workflow_id,

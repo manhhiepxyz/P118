@@ -380,27 +380,55 @@ class ViewingApprovalBoundary:
             await persist_full_plan(self._repository, resolved_workflow_id, plan)
 
         if prefix_plan is not None:
-            executed_id, partial_results = await self._boundary.execute(
-                prefix_plan,
-                resolved_workflow_id,
-                finalize=False,
-                parent_workflow_id=parent_workflow_id,
-                session_id=session_id,
-            )
+            try:
+                executed_id, partial_results = await self._boundary.execute(
+                    prefix_plan,
+                    resolved_workflow_id,
+                    finalize=False,
+                    parent_workflow_id=parent_workflow_id,
+                    session_id=session_id,
+                )
+            except PolicyInterruptionError as inner:
+                # Boundary bên trong dừng lại hỏi (thường là duyệt thanh toán).
+                #
+                # Trước đây exception này bay thẳng ra ngoài, nên phần ghim lịch
+                # tham quan bên dưới KHÔNG BAO GIỜ chạy. Hậu quả đo được: người
+                # dùng gửi "đặt lịch tham quan + đăng ký xe + chỗ đỗ", hệ thống
+                # giữ chỗ đỗ và đòi tiền, còn bước tham quan nằm PENDING vĩnh
+                # viễn — không có dòng nào trong `viewing_approvals`, không ai
+                # được yêu cầu duyệt, và không màn hình nào nói ra điều đó.
+                # Người dùng xin đặt lịch và lịch im lặng biến mất.
+                #
+                # Hai việc chờ hai NGƯỜI khác nhau: thanh toán chờ chính người
+                # dùng, lịch tham quan chờ đơn vị tour. Chúng độc lập, nên phải
+                # cùng tồn tại chứ không loại trừ nhau.
+                await self._park_viewing_tasks(inner.workflow_id or resolved_workflow_id, viewing_task_ids)
+                # Nổi lên câu hỏi dành cho NGƯỜI DÙNG. Lịch tham quan chờ đơn vị
+                # tour nên không có gì để họ làm với nó lúc này; hỏi hai thứ một
+                # lúc chỉ khiến họ phải chọn cái nào trả lời trước.
+                inner.context = {**(inner.context or {}), "viewing_pending": True}
+                raise
+
             resolved_workflow_id = resolved_workflow_id or executed_id
             if any(not result.success for result in partial_results.values()):
                 return resolved_workflow_id, partial_results
 
-        if self._repository is not None and resolved_workflow_id is not None:
-            for task_id in sorted(viewing_task_ids):
-                await self._repository.update_task_status(
-                    resolved_workflow_id,
-                    task_id,
-                    TaskStatus.WAITING_APPROVAL,
-                )
+        await self._park_viewing_tasks(resolved_workflow_id, viewing_task_ids)
 
         raise ViewingApprovalRequiredError(
             "Tour approval is required.",
             workflow_id=resolved_workflow_id,
             partial_results=partial_results,
         )
+
+    async def _park_viewing_tasks(self, workflow_id: str | None, task_ids: set[str]) -> None:
+        """Đưa các bước tham quan về WAITING_APPROVAL.
+
+        Tách ra vì nó phải chạy trên CẢ HAI đường: khi boundary bên trong chạy
+        trót lọt, và khi nó dừng lại hỏi. Để inline ở một đường là cách bước
+        tham quan bị bỏ quên ở đường kia.
+        """
+        if self._repository is None or workflow_id is None:
+            return
+        for task_id in sorted(task_ids):
+            await self._repository.update_task_status(workflow_id, task_id, TaskStatus.WAITING_APPROVAL)
