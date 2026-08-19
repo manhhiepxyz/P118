@@ -7,7 +7,7 @@ import { ResultSummary } from '../components/workspace/ResultSummary'
 import { StepList } from '../components/workspace/StepList'
 import { describeFailure, describeWorkflowFailure } from '../lib/status'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
-import { continueWorkflow, decidePayment } from '../lib/agentApi'
+import { continueWorkflow, decidePayment, startWorkflow } from '../lib/agentApi'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
 /**
@@ -89,6 +89,22 @@ export function WorkflowPage() {
     } finally {
       setDeciding(null)
     }
+  }
+
+  /**
+   * Nói tiếp từ trang chi tiết — một yêu cầu MỚI trong CÙNG cuộc trò chuyện.
+   *
+   * Khác `handleClarification`: chỗ đó trả lời một câu hỏi đang treo của chính
+   * workflow này. Chỗ này dành cho lúc yêu cầu đã xong (hoặc đã hỏng) mà người
+   * dùng còn muốn nhờ tiếp — "đặt thêm một chỗ nữa", "đổi sang khu B".
+   *
+   * Gửi kèm `session_id` của workflow đang xem. Không có nó, câu tiếp theo mở
+   * một cuộc mới và toàn bộ ngữ cảnh người dùng vừa đọc trên màn hình không đi
+   * theo — họ phải kể lại từ đầu đúng thứ đang hiện trước mắt.
+   */
+  async function handleFollowUp(message: string) {
+    const next = await startWorkflow(message, undefined, data?.session_id ?? null)
+    if (next.workflow_id) navigate(`/workflow/${next.workflow_id}`)
   }
 
   async function handleClarification(message: string) {
@@ -251,6 +267,21 @@ export function WorkflowPage() {
                   Dừng ở bước “{failedStep.title}”: {describeFailure(failedStep)}
                 </p>
               )}
+            </section>
+          )}
+
+          {/* Nói tiếp — chỉ hiện khi KHÔNG còn câu hỏi treo.
+              Đang có câu hỏi thì ô trả lời của `ClarificationReply` mới là chỗ
+              đúng; dựng hai ô nhập cạnh nhau cho hai việc khác nhau là bắt
+              người dùng đoán cái nào gửi đi đâu. */}
+          {!needsInfo && (
+            <section className="rise mt-9" aria-label="Nói tiếp">
+              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                Cần gì thêm không?
+              </h2>
+              <div className="mt-4">
+                <ClarificationReply onSubmit={handleFollowUp} />
+              </div>
             </section>
           )}
 

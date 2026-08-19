@@ -3333,10 +3333,20 @@ async def get_demo_workflow_status(
     một khối, không làm hỏng gì.
     """
     response = await _demo_workflow_status(workflow_id, user)
-    if response.goal is not None:
+    if response.goal is not None and response.session_id is not None:
         return response
-    goal = await _read_workflow_goal(workflow_id)
-    return response.model_copy(update={"goal": goal}) if goal else response
+    goal, session_id = await _read_workflow_goal(workflow_id)
+    update: dict[str, Any] = {}
+    if response.goal is None and goal:
+        update["goal"] = goal
+    # `session_id` là thứ cho phép NÓI TIẾP từ trang chi tiết.
+    #
+    # Thiếu nó, màn hình biết yêu cầu cũ là gì nhưng không biết nó thuộc cuộc
+    # trò chuyện nào — nên câu tiếp theo của người dùng lại mở một cuộc mới, và
+    # ngữ cảnh họ vừa đọc trên màn hình không đi theo.
+    if response.session_id is None and session_id:
+        update["session_id"] = session_id
+    return response.model_copy(update=update) if update else response
 
 
 _RECALL_LIMIT = 10
@@ -3442,7 +3452,7 @@ async def _recall_recent_turns(user_id: str, exclude_workflow_id: str | None = N
     return turns
 
 
-async def _read_workflow_goal(workflow_id: str) -> str | None:
+async def _read_workflow_goal(workflow_id: str) -> tuple[str | None, str | None]:
     """Câu người dùng đã nói, đọc thẳng từ `workflows.goal`.
 
     Best-effort: đọc hỏng thì trang chi tiết mất khối trao đổi, không phải mất
@@ -3453,14 +3463,16 @@ async def _read_workflow_goal(workflow_id: str) -> str | None:
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         try:
             async with pool.acquire() as conn:
-                return await conn.fetchval(
-                    "SELECT goal FROM workflows WHERE workflow_id = $1::uuid", workflow_id
+                row = await conn.fetchrow(
+                    "SELECT goal, session_id FROM workflows WHERE workflow_id = $1::uuid",
+                    workflow_id,
                 )
+                return (row["goal"], row["session_id"]) if row else (None, None)
         finally:
             await pool.close()
     except Exception:  # noqa: BLE001 - phụ trợ, không được làm vỡ GET
-        logger.warning("không đọc được goal của workflow để dựng trao đổi")
-        return None
+        logger.warning("không đọc được goal/session của workflow")
+        return None, None
 
 
 async def _demo_workflow_status(
