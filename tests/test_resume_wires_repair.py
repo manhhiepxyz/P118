@@ -44,6 +44,21 @@ def test_resume_path_passes_on_failure_to_the_executor() -> None:
         "hint chỉ nằm trong bộ nhớ của request; không ghim xuống database thì "
         "`_demo_response` không đọc được"
     )
+    assert "repair_question(" in source, "không còn dựng câu hỏi lại từ hint"
+    # Dựng câu thôi chưa đủ — phải THẬT SỰ ghim nó.
+    #
+    # Bản assertion đầu chỉ kiểm `repair_question(` có mặt. Xoá `repair_answer or`
+    # khỏi lời gọi `save_assistant_response` thì câu chung ghi đè trở lại, mà
+    # test vẫn xanh: biến vẫn được tính, chỉ là không ai dùng.
+    assert "answer=repair_answer" in source, (
+        "câu hỏi lại được tính rồi bỏ đi: câu chốt vẫn là "
+        "compose_final_answer(FAILED) = 'Yêu cầu chưa hoàn tất được', và nó đè "
+        "lên câu mà `_demo_response` dựng ra ở các lượt poll sau"
+    )
+    assert 'for_status="NEEDS_INFORMATION" if repair_answer' in source, (
+        "câu ghim phải mang for_status NEEDS_INFORMATION; ghim dưới FAILED thì "
+        "trạng thái không khớp và câu không bao giờ được dùng lại"
+    )
 
 
 def test_repair_manager_keeps_a_zone_full_failure() -> None:

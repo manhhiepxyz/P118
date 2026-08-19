@@ -24,6 +24,7 @@ from src.connectors.payment import PaymentConnector
 from src.connectors.tour import TourConnector
 from src.db.parking_payment_repository import payment_idempotency_key
 from src.executor.executor import Executor
+from src.common.failure_messages import repair_question
 from src.orchestration.repair import RepairManager
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
@@ -1082,6 +1083,36 @@ async def _materialize_and_run_remaining(
         all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
         final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
 
+        # Lỗi SỬA ĐƯỢC thì câu chốt phải là câu hỏi lại, không phải cáo phó.
+        #
+        # `compose_final_answer(..., FAILED)` trả "Yêu cầu chưa hoàn tất được.
+        # Bạn xem chi tiết từng bước để biết vướng ở đâu nhé" — đúng về mặt
+        # trạng thái, vô dụng với người đọc. Trong khi hệ thống biết chính xác
+        # vướng gì và lối ra nào: "Bạn đã có chỗ đỗ xe ngày 2026-08-23 rồi. Bạn
+        # chọn ngày khác giúp mình nhé."
+        #
+        # `_demo_response` sẽ dựng NEEDS_INFORMATION từ repair hint ở mọi lượt
+        # poll sau đó, nhưng câu ĐÃ GHIM mới là thứ giao diện hiển thị — ghim
+        # câu chung ở đây là đè mất câu đúng, y như tầng Response Agent từng
+        # làm với chính câu này.
+        #
+        # `for_status` phải khớp NEEDS_INFORMATION, không phải FAILED: câu ghim
+        # chỉ được dùng lại khi trạng thái khớp, và trạng thái người dùng nhìn
+        # thấy là trạng thái do `_demo_response` dựng.
+        repair_answer: str | None = None
+        if hints:
+            causes = [h for h in hints.values() if h.error_code is not ErrorCode.DEPENDENCY_ERROR] or list(
+                hints.values()
+            )
+            cause = causes[0]
+            task = next((t for t in plan.tasks if t.task_id == cause.task_id), None)
+            if task is not None:
+                repair_answer = repair_question(
+                    task.tool,
+                    getattr(cause.error_code, "value", str(cause.error_code)),
+                    dict(task.input),
+                )
+
         # Câu trả lời cuối, GHI TRƯỚC khi đổi trạng thái.
         #
         # Dùng thẳng `repository` đang mở thay vì `write_final_answer()`: hàm
@@ -1090,10 +1121,11 @@ async def _materialize_and_run_remaining(
         try:
             await repository.save_assistant_response(
                 workflow_id,
-                answer=compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                answer=repair_answer
+                or compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
                 suggestions=[],
                 state="FALLBACK",
-                for_status=final_status.value,
+                for_status="NEEDS_INFORMATION" if repair_answer else final_status.value,
             )
         except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
             # Ghi hỏng thì khách đọc câu cũ. Ném lỗi thì workflow treo ở
