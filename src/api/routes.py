@@ -2562,6 +2562,42 @@ async def start_demo_workflow(
     `_run_demo_job` ghim persona xuống bảng `sessions`. Mọi lần sau (`/continue`,
     list) đọc từ session, không từ body — chặn leo thang đặc quyền giữa chuỗi.
     """
+    # Cuộc trò chuyện được giải MỘT LẦN, dùng cho CẢ HAI lane.
+    #
+    # Trước đây mỗi lane tự `str(uuid4())`, nên "xin chào" rồi "bạn làm được gì"
+    # là hai cuộc khác nhau — người dùng không hỏi tiếp được, và Lịch sử thành
+    # nhật ký từng tin nhắn.
+    #
+    # `_load_session` giới hạn theo `user_id` NGAY TRONG SQL, nên một session_id
+    # đoán được cũng không mở được cuộc của người khác. Không hợp lệ thì tạo
+    # cuộc mới, IM LẶNG: người dùng không sửa được gì, và câu họ gõ vẫn hợp lệ.
+    #
+    # `account_state` VẪN đọc từ bảng `sessions`, không từ body — đó mới là thứ
+    # chặn leo thang đặc quyền, và nó không đổi.
+    session_id: str | None = None
+    if request.session_id:
+        if await _load_session(request.session_id, user_id=str(user["id"])) is not None:
+            session_id = request.session_id
+    if session_id is None:
+        session_id = str(uuid4())
+
+    # Ghim session NGAY, trước cả hai lane.
+    #
+    # Trước đây chỉ `_run_demo_job` ghim, mà lane small-talk return sớm nên
+    # không bao giờ tới đó. Hệ quả: "xin chào" trả về một `session_id` KHÔNG
+    # tồn tại trong bảng `sessions`, nên câu tiếp theo gửi kèm nó cũng không nối
+    # được — và cuộc trò chuyện đứt ngay ở lượt thứ hai.
+    #
+    # `create_session` dùng `ON CONFLICT DO NOTHING`: gọi lại trên session đã có
+    # không đổi persona đã ghim. Nên gọi ở đây an toàn cho cả lượt nối tiếp.
+    pinned_state, pinned_context = await _trusted_account_context(user)
+    await _persist_session(
+        session_id,
+        pinned_state,
+        resident_id=pinned_context.get("resident_id"),
+        user_id=str(user["id"]),
+    )
+
     # Speech lane: greeting/acknowledgement/capability → trả CHAT ngay, 0 LLM.
     small_talk = classify(request.goal)
     if isinstance(small_talk, SmallTalk):
@@ -2569,7 +2605,6 @@ async def start_demo_workflow(
         # vụ cư dân cho người chưa liên kết là hứa một việc sẽ bị từ chối ngay sau đó.
         small_talk_state, small_talk_context = await _trusted_account_context(user)
         workflow_id = str(uuid4())
-        session_id = str(uuid4())
         if small_talk.speech_type == SpeechType.CAPABILITY:
             capability = await answer_capability_question(
                 request.goal,
@@ -2614,7 +2649,6 @@ async def start_demo_workflow(
         )
 
     workflow_id = str(uuid4())
-    session_id = str(uuid4())
     settings = get_settings()
     # Quyền suy ra từ token + PostgreSQL, KHÔNG từ body. Đây là điểm mà một
     # dòng JSON `"account_state": "resident"` từng đủ để mở toàn bộ dịch vụ cư dân.

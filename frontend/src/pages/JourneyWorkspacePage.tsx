@@ -199,6 +199,18 @@ export function JourneyWorkspacePage() {
    */
   const [turns, setTurns] = useState<ChatTurn[]>([])
   const [pending, setPending] = useState<PendingAction | null>(null)
+  /**
+   * Cuộc trò chuyện đang mở.
+   *
+   * Không có nó, mỗi câu người dùng gõ là một cuộc riêng: không hỏi tiếp được,
+   * và Lịch sử thành nhật ký từng tin nhắn. Đo trên dữ liệu thật trước khi sửa:
+   * 201 workflow gốc, không session nào quá 2 workflow.
+   *
+   * Dùng `useRef` chứ không `useState`: nó được đọc ngay trong cùng một lượt
+   * xử lý sự kiện với lúc được ghi (gửi câu thứ hai ngay sau câu thứ nhất), mà
+   * `useState` thì chưa cập nhật kịp ở thời điểm đó.
+   */
+  const sessionRef = useRef<string | null>(null)
   const [live, setLive] = useState<AgentWorkflowResponse | null>(null)
   const [fault, setFault] = useState<string | null>(null)
   /**
@@ -247,6 +259,7 @@ export function JourneyWorkspacePage() {
    */
   function absorb(res: AgentWorkflowResponse) {
     setLive(res)
+    if (res.session_id) sessionRef.current = res.session_id
     const next = pendingFromWorkflow(res)
     setPending(next)
     // Ưu tiên `answer` (câu Response Agent viết về CHÍNH yêu cầu này) rồi mới
@@ -549,7 +562,7 @@ export function JourneyWorkspacePage() {
       setFault(null)
       said.current = new Set()
       pendingSince.current = null
-      startWorkflow(text)
+      startWorkflow(text, undefined, sessionRef.current)
         .then(absorb)
         .catch((error) => {
           const detail = error instanceof Error ? error.message : String(error)
@@ -607,7 +620,7 @@ export function JourneyWorkspacePage() {
       setPicked([])
       setInvalid({})
       try {
-        absorb(await startWorkflow(goal, built.projectName))
+        absorb(await startWorkflow(goal, built.projectName, sessionRef.current))
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         setFault(detail)
