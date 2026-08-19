@@ -118,9 +118,13 @@ class _FakeExecutor:
 
     instances: list["_FakeExecutor"] = []
 
-    def __init__(self, connectors, repository) -> None:
+    def __init__(self, connectors, repository, on_failure=None) -> None:
         self.connectors = connectors
         self.repository = repository
+        # `on_failure` là đường DUY NHẤT sinh repair hint. Bản giả từng không
+        # nhận tham số này, và khi caller bắt đầu truyền nó thì route trả 502 —
+        # một thất bại của ĐỒ GIẢ trông y hệt một thất bại của sản phẩm.
+        self.on_failure = on_failure
         self.calls: list[dict] = []
         _FakeExecutor.instances.append(self)
 
