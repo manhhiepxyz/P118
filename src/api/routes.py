@@ -1708,6 +1708,43 @@ async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) 
     )
 
 
+def _root_failure_code(record: dict[str, Any]) -> str | None:
+    """Mã lỗi GỐC của một workflow — kể cả khi nó hỏng giữa lúc chạy task.
+
+    `workflows.error_code` chỉ được ghi khi hỏng TRƯỚC lúc thực thi (lập kế
+    hoạch, kiểm tra đầu vào). Hỏng trong lúc chạy thì mã nằm ở
+    `workflow_tasks.error_code`, còn cột của workflow để trống.
+
+    Đo trên dữ liệu thật, 107 workflow FAILED chia đôi tuyệt đối:
+
+        wf có mã, task không có mã   102   ← hỏng lúc lập kế hoạch
+        wf THIẾU mã, task có mã        5   ← hỏng lúc THỰC THI
+
+    5/5, không phải ngẫu nhiên. Nghĩa là đúng loại hỏng có lý do cụ thể nhất —
+    "phương tiện này đã có chỗ đỗ trong ngày được chọn" — lại là loại người
+    dùng không bao giờ được nghe lý do. Họ nhận "Yêu cầu này dừng giữa chừng",
+    và vì `retryable` cũng None nên nhận thêm "gửi lại cũng sẽ hỏng như cũ" —
+    sai, vì đổi ngày là chạy được.
+
+    `DEPENDENCY_ERROR` bị đẩy xuống cuối: nó là HỆ QUẢ của một bước khác hỏng,
+    không phải nguyên nhân. Nói với người dùng "bước trước không thành công"
+    trong khi biết rõ bước nào và vì sao là giấu đi đúng thứ họ cần.
+    """
+    code = record["workflow"].get("error_code")
+    if code:
+        return code
+    rows = [
+        row
+        for row in (record.get("tasks") or [])
+        if row.get("status") == "FAILED" and row.get("error_code")
+    ]
+    if not rows:
+        return None
+    rows.sort(key=lambda row: str(row.get("task_id") or ""))
+    causes = [row for row in rows if row["error_code"] != "DEPENDENCY_ERROR"]
+    return (causes or rows)[0]["error_code"]
+
+
 async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     """Dựng một view công khai TỐI THIỂU từ database, đủ cho lớp trả lời.
 
@@ -1747,15 +1784,43 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     #
     # Mã lạ (ghi bởi phiên bản cũ hơn) trả None thay vì đoán: đoán sai
     # `retryable` sẽ mời người dùng thử lại một việc không bao giờ chạy được.
-    failure = failure_for_code(record["workflow"].get("error_code"))
+    root_code = _root_failure_code(record)
+    failure = failure_for_code(root_code)
+
+    # Câu tóm tắt của một workflow hỏng phải nói VÌ SAO, lấy từ chính bước hỏng.
+    #
+    # `failure_for_code` chỉ biết mã HẠ TẦNG (database, provider, LLM). Mã
+    # nghiệp vụ do connector trả về — `BOOKING_ALREADY_EXISTS`,
+    # `VEHICLE_ALREADY_EXISTS`, `SLOT_UNAVAILABLE` — không nằm trong sổ ấy, nên
+    # `failure` là None và tóm tắt rơi về câu mặc định. Người dùng đọc được
+    # "Yêu cầu này dừng giữa chừng" cho một sự việc mà hệ thống biết chính xác:
+    # phương tiện này đã có chỗ đỗ trong ngày được chọn.
+    #
+    # Không dựng bảng câu chữ thứ hai ở đây. Câu đúng ĐÃ được `_polling_task_views`
+    # tính cho bước hỏng, từ `failure_messages.py` — nguồn duy nhất. Lấy lại
+    # đúng câu ấy.
+    summary = _DEFAULT_BASELINE.get(status) if status in {"SUCCESS", "FAILED", "CANCELLED"} else None
+    if status == "FAILED" and root_code:
+        cause = next(
+            (view for view in tasks if view.status == "FAILED" and view.error_code == root_code),
+            None,
+        )
+        if cause is not None and cause.message:
+            summary = cause.message
+
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status=status,
         message=_DEFAULT_BASELINE.get(status),
-        summary=_DEFAULT_BASELINE.get(status) if status in {"SUCCESS", "FAILED", "CANCELLED"} else None,
+        summary=summary,
         tasks=tasks,
         persisted=True,
-        error_code=failure.code if failure else None,
+        # Gửi mã GỐC kể cả khi sổ hạ tầng không biết nó — giấu mã đi thì giao
+        # diện không còn gì để phân biệt hai kiểu hỏng khác hẳn nhau.
+        error_code=failure.code if failure else root_code,
+        # `retryable` thì KHÔNG đoán. Đoán sai theo hướng "thử lại được" mời
+        # người dùng lặp lại một việc không bao giờ chạy; đoán sai theo hướng
+        # ngược lại bảo họ bỏ cuộc trong khi chỉ cần đổi ngày.
         retryable=failure.retryable if failure else None,
     )
 

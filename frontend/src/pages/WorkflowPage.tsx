@@ -271,7 +271,13 @@ export function WorkflowPage() {
                   qua hai lần cùng một thông tin để tới câu họ cần. `aria-label`
                   giữ lại cho trình đọc màn hình, vốn không thấy vị trí. */}
               <p className="text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                {describeWorkflowFailure(data.error_code, data.retryable)}
+                {/* Câu của BACKEND đi trước — nó biết bước nào hỏng và vì
+                    sao, kèm cả dữ liệu của bước ấy ("ngày 2026-08-19"). Bảng
+                    `FAILURE_TEXT` ở đây chỉ có mã hạ tầng, nên với lỗi nghiệp
+                    vụ nó chỉ nói được "Yêu cầu này dừng giữa chừng". */}
+                {data.summary && data.status === 'FAILED'
+                  ? data.summary
+                  : describeWorkflowFailure(data.error_code, data.retryable)}
               </p>
               {failedStep && (
                 <p className="mt-2.5 text-[13.5px] text-[var(--text-secondary)]">

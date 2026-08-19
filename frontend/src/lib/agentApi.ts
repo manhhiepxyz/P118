@@ -147,10 +147,23 @@ type RequestOptions = {
    * rằng "phiên đăng nhập đã hết hạn" thì họ sẽ đi tìm một phiên chưa từng có.
    */
   unauthorizedMessage?: string
+  /**
+   * Câu để hiện khi request này nhận 409.
+   *
+   * Cùng lý do như `unauthorizedMessage`: 409 mang nhiều nghĩa khác hẳn nhau
+   * tuỳ endpoint. Xoá một yêu cầu chưa kết thúc là một chuyện; gửi câu trả lời
+   * cho một workflow không còn hỏi gì, hay xác nhận thanh toán cho một việc vừa
+   * hỏng ở bước trước, là chuyện khác hẳn.
+   *
+   * Câu mặc định từng là lời khuyên viết riêng cho endpoint XOÁ — "Bạn huỷ
+   * trước rồi xoá nhé" — rồi bị áp cho mọi 409. Người vừa gõ "ok" trong hội
+   * thoại nhận được một lời khuyên về việc xoá mà họ không hề định làm.
+   */
+  conflictMessage?: string
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, anonymous = false, unauthorizedMessage } = options
+  const { method = 'GET', body, anonymous = false, unauthorizedMessage, conflictMessage } = options
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
 
   if (!anonymous) {
@@ -189,6 +202,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       } catch {
         // Body không phải JSON: giữ câu generic, không hiện raw response.
       }
+    }
+    if (response.status === 409 && conflictMessage) {
+      throw new ApiError(409, conflictMessage)
     }
     throw new ApiError(response.status, messageForStatus(response.status, fallback))
   }
@@ -381,7 +397,10 @@ export async function cancelWorkflow(workflowId: string): Promise<AgentWorkflowR
  * ẩn khỏi danh sách. Yêu cầu chưa kết thúc trả 409 — huỷ trước rồi mới xoá.
  */
 export async function deleteWorkflow(workflowId: string): Promise<void> {
-  await request<void>(`/workflows/demo/${encodeURIComponent(workflowId)}`, { method: 'DELETE' })
+  await request<void>(`/workflows/demo/${encodeURIComponent(workflowId)}`, {
+    method: 'DELETE',
+    conflictMessage: 'Yêu cầu này chưa kết thúc. Bạn huỷ trước rồi xoá nhé.',
+  })
 }
 
 /* ------------------------------------------------------------------ */

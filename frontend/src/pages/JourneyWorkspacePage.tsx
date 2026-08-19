@@ -16,7 +16,7 @@ import { ConversationStream } from '../components/workspace/ConversationStream'
 import { PendingCard } from '../components/workspace/PendingCard'
 import { extractValue, normalizeIntent, resolve, type PendingAction } from '../lib/pendingAction'
 import { closingLine, journeyFromWorkflow, pendingFromWorkflow } from '../lib/liveJourney'
-import { continueWorkflow, decidePayment, getWorkflow, startWorkflow } from '../lib/agentApi'
+import { ApiError, continueWorkflow, decidePayment, getWorkflow, startWorkflow } from '../lib/agentApi'
 import type { AgentWorkflowResponse } from '../lib/types'
 
 /** Trạng thái không còn chuyển nữa — ngừng poll. */
@@ -62,6 +62,28 @@ const WAITING_AFTER_MS = 8000
  * Planner đọc "Khu A" tốt hơn đọc "parking_zone=ZONE_A", và nếu có sai thì
  * câu sai ấy vẫn đọc được trong log.
  */
+/**
+ * Câu báo trước những bước sẽ phải dừng lại chờ — nói MỘT lần, lúc kế hoạch
+ * vừa có bước.
+ *
+ * Hai loại chờ, hai người khác nhau: lịch tham quan chờ ĐƠN VỊ duyệt, còn phí
+ * thì chờ CHÍNH người dùng bấm xác nhận. Gộp làm một câu "đang chờ duyệt" thì
+ * người cần bấm không biết mình phải bấm.
+ */
+function waitingAhead(res: AgentWorkflowResponse): string | null {
+  const tools = new Set((res.tasks ?? []).map((task) => task.tool))
+  if (tools.size === 0) return null
+  const bits: string[] = []
+  if (tools.has('schedule_property_viewing')) {
+    bits.push('lịch tham quan cần đơn vị tham quan duyệt trước khi chốt')
+  }
+  if (tools.has('pay_fee')) {
+    bits.push('có một khoản phí mình sẽ hỏi bạn xác nhận trước khi trừ tiền')
+  }
+  if (bits.length === 0) return null
+  return `Trong kế hoạch này: ${bits.join('; và ')}. Mình sẽ báo bạn ở từng bước.`
+}
+
 function goalFromForms(
   picked: string[],
   values: Record<string, Record<string, string>>,
@@ -295,6 +317,16 @@ export function JourneyWorkspacePage() {
     // Mốc thời gian, KHÔNG phải loại tác vụ: "chat" và "tác vụ" không tách bạch
     // — câu hỏi ngày tháng cũng đi qua planner như một workflow. Thứ quyết định
     // câu này có ích hay lố bịch là người dùng đã chờ bao lâu.
+    // Nói TRƯỚC những bước sẽ phải dừng lại chờ, ngay khi kế hoạch có bước.
+    //
+    // Không có câu này thì người dùng gửi yêu cầu, thấy nó chạy, rồi bất ngờ
+    // dừng ở một thẻ "chờ duyệt" mà họ không biết sẽ có — và với khoản tiền
+    // thì bất ngờ ấy là bất ngờ tệ nhất. Biết trước "sẽ có một khoản phí mình
+    // hỏi bạn xác nhận" khác hẳn với việc gặp nó giữa chừng.
+    //
+    // Đọc từ danh sách TOOL của kế hoạch, không đoán theo tên dịch vụ.
+    sayOnce(waitingAhead(res))
+
     if (res.response_state === 'PENDING') {
       if (pendingSince.current === null) pendingSince.current = performance.now()
       if (performance.now() - pendingSince.current >= WAITING_AFTER_MS) sayOnce(WAITING)
@@ -376,6 +408,15 @@ export function JourneyWorkspacePage() {
       const detail = error instanceof Error ? error.message : String(error)
       say('agent', detail || 'Mình chưa gửi được câu trả lời của bạn. Bạn thử lại giúp mình nhé.')
       setFault(detail)
+      // 409 = màn hình đang vẽ một trạng thái đã cũ.
+      //
+      // Đo được: `book_parking` hỏng vì xe đã có chỗ, workflow chuyển FAILED,
+      // nhưng thẻ "Xác nhận thanh toán" vẫn nằm đó từ nhịp poll trước. Người
+      // dùng bấm — 409. Bấm lại — 409 lần nữa. Không tải lại thì thẻ ấy còn
+      // mãi và mọi cú bấm đều hỏng y hệt.
+      if (error instanceof ApiError && error.status === 409 && live?.workflow_id) {
+        getWorkflow(live.workflow_id).then(absorb).catch(() => {})
+      }
     }
   }
 
@@ -493,6 +534,15 @@ export function JourneyWorkspacePage() {
       const detail = error instanceof Error ? error.message : String(error)
       say('agent', detail || 'Mình chưa gửi được câu trả lời của bạn. Bạn thử lại giúp mình nhé.')
       setFault(detail)
+      // 409 = màn hình đang vẽ một trạng thái đã cũ.
+      //
+      // Đo được: `book_parking` hỏng vì xe đã có chỗ, workflow chuyển FAILED,
+      // nhưng thẻ "Xác nhận thanh toán" vẫn nằm đó từ nhịp poll trước. Người
+      // dùng bấm — 409. Bấm lại — 409 lần nữa. Không tải lại thì thẻ ấy còn
+      // mãi và mọi cú bấm đều hỏng y hệt.
+      if (error instanceof ApiError && error.status === 409 && live?.workflow_id) {
+        getWorkflow(live.workflow_id).then(absorb).catch(() => {})
+      }
     }
   }
 
