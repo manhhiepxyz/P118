@@ -4090,6 +4090,25 @@ async def cancel_demo_workflow(
     if not outcome.get("cancelled") and previous_status != "CANCELLED":
         raise HTTPException(status_code=409, detail="Yêu cầu đã kết thúc nên không thể huỷ.")
 
+    # Người dùng BỎ CUỘC một lỗi sửa được → gỡ side-effect ngay.
+    #
+    # `release_on_failure` bị chặn có chủ ý khi workflow còn repair hint: hint
+    # nghĩa là "người dùng sẽ sửa input rồi chạy tiếp", và hoàn tác sẽ phá đúng
+    # thứ họ định tiếp tục. Nhưng bấm Dừng là câu trả lời dứt khoát cho chính
+    # giả định đó — họ không tiếp tục nữa.
+    #
+    # Không đợi sweeper 48 giờ: người vừa nói "thôi" mà chỗ đỗ còn giữ và phí
+    # còn tính suốt hai ngày là một lời hứa bị bội.
+    #
+    # Chỉ chạy khi CÓ repair hint. Huỷ một workflow đang chờ thanh toán vẫn
+    # theo chính sách cũ — từ chối tiền, giữ booking — và đó là quyết định
+    # riêng, không đổi ở đây.
+    try:
+        if await _read_repair_hints(workflow_id):
+            await release_on_failure(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - hoàn tác hỏng không được chặn việc huỷ
+        logger.info("không release được sau khi huỷ (%s)", type(exc).__name__)
+
     # Dừng coroutine đúng workflow trong tiến trình hiện tại. Sau restart không
     # có task RAM nào; PostgreSQL vừa được chốt CANCELLED là nguồn sự thật.
     running_task = _DEMO_WORKFLOW_TASKS.get(workflow_id)
