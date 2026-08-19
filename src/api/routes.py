@@ -1907,6 +1907,23 @@ async def _capability_names_safely(owner_user_id: Any) -> list[str]:
     return [item.name for item in _CAPABILITY_CATALOGUE if is_resident or not item.requires_resident]
 
 
+# Dấu hiệu một câu hỏi lại được dựng bởi `repair_question`, không phải bởi
+# nhánh thiếu thông tin.
+#
+# Nhận diện bằng NỘI DUNG chứ không bằng một cờ trong response: cờ phải đi qua
+# `DemoWorkflowResponse`, qua database, qua cả đường dựng lại sau restart — bốn
+# chỗ để quên đồng bộ. Điểm chung của mọi câu sửa lỗi là chúng nêu LÝ DO,
+# và tập lý do đó là đóng (`failure_messages.repair_question`).
+_REPAIR_QUESTION_MARKERS = ("hết chỗ", "kín lịch", "đã có chỗ đỗ", "đã được đăng ký", "đã được đăng ký trước đó")
+
+
+def _is_repair_question(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.casefold()
+    return any(marker in lowered for marker in _REPAIR_QUESTION_MARKERS)
+
+
 async def _speak(
     response: DemoWorkflowResponse,
     *,
@@ -1920,6 +1937,27 @@ async def _speak(
     Gọi ở mỗi lượt poll sẽ tốn một request LLM mỗi 1.5 giây cho một trạng thái
     không đổi.
     """
+    # Câu SỬA LỖI không được diễn đạt lại.
+    #
+    # `repair_question` mang những dữ kiện mà Response Agent không có cách nào
+    # biết: khu nào kín, ngày nào, khu nào còn trống. Đo được nguyên văn trên
+    # stack thật, cùng một workflow, hai câu cùng tồn tại:
+    #
+    #   question         "Khu A đã hết chỗ ngày 2026-08-19. Bạn thử Khu B
+    #                     hoặc chọn ngày khác giúp mình nhé."
+    #   assistant_answer "Bạn ơi, mình cần biết thêm khu vực đỗ xe bạn muốn là
+    #                     Khu A hay Khu B để hoàn tất đăng ký nhé."
+    #
+    # Giao diện ưu tiên `answer`, nên người dùng chỉ đọc câu thứ hai — và họ đã
+    # nói Khu A rồi, nên họ trả lời Khu A lần nữa, rồi hỏng y hệt. Đúng vòng
+    # lặp mà `repair_question` được viết ra để phá, tái xuất hiện ở một tầng
+    # khác: lần này không phải dùng nhầm câu, mà là để model viết lại câu đúng.
+    #
+    # Bỏ qua luôn lượt gọi model ở đây cũng tiết kiệm một request — tầng trả
+    # lời trung bình 1.469 ms, không nhiều, nhưng nó không mua được gì cả.
+    if response.status == "NEEDS_INFORMATION" and _is_repair_question(response.question):
+        return response.model_copy(update={"answer": response.question})
+
     usage_logger = LlmUsageLogger()
     # Theo dõi token/cost riêng cho lớp trả lời. Không tách stage thì mọi chi
     # phí dồn vào "plan", và không ai biết lớp diễn đạt đang tốn bao nhiêu —
