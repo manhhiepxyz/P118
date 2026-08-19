@@ -24,6 +24,7 @@ from src.connectors.payment import PaymentConnector
 from src.connectors.tour import TourConnector
 from src.db.parking_payment_repository import payment_idempotency_key
 from src.executor.executor import Executor
+from src.orchestration.repair import RepairManager
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.deps import build_connectors, build_execution_boundary
@@ -1031,7 +1032,19 @@ async def _materialize_and_run_remaining(
             consultation_url=consultation_url,
             shuttle_url=shuttle_url,
         )
-        executor = Executor(connectors, repository)
+        # Nối RepairManager vào đúng như đường chạy thường.
+        #
+        # Đường resume này thiếu nó, và hệ quả không nhìn thấy được từ code:
+        # `Executor.on_failure` là thứ DUY NHẤT sinh repair hint, và repair hint
+        # là thứ duy nhất mở nhánh hỏi lại người dùng ở `_demo_response`. Không
+        # có nó thì một lỗi hoàn toàn sửa được — "Khu A đã hết chỗ" — kết thúc
+        # bằng workflow FAILED, không câu hỏi, không cách đổi khu.
+        #
+        # Đo được trên dữ liệu thật: toàn bộ database chỉ có 3 repair hint từng
+        # được ghi, và không cái nào thuộc workflow đi qua duyệt lịch tham quan.
+        # Mọi yêu cầu ghép "tham quan + đỗ xe" đều rơi vào đường này.
+        repair_manager = RepairManager()
+        executor = Executor(connectors, repository, on_failure=repair_manager)
         # `finalize=False` — Executor KHÔNG được tự chốt SUCCESS ở đây.
         #
         # Thứ tự cũ là: chạy task → set SUCCESS → (không ai sinh lại câu trả
@@ -1051,6 +1064,19 @@ async def _materialize_and_run_remaining(
             seed_statuses={pending.task_id: TaskStatus.SUCCESS},
             seed_results={pending.task_id: result},
         )
+
+        # Ghim hint TRƯỚC khi chốt trạng thái: `_demo_response` đọc từ database,
+        # còn bộ nhớ của RepairManager chết cùng request này.
+        hints = repair_manager.hints_for(workflow_id)
+        if hints:
+            await repository.save_repair_hints(
+                workflow_id,
+                {
+                    task_id: {"error_code": hint.error_code.value, "message": hint.message}
+                    for task_id, hint in hints.items()
+                },
+            )
+        repair_manager.clear(workflow_id)
 
         statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
         all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
