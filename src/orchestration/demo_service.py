@@ -1058,12 +1058,49 @@ async def _materialize_and_run_remaining(
         # Khi giao diện nhìn thấy SUCCESS thì mọi thứ nó cần đã nằm sẵn trong
         # database; không còn khoảng thời gian nào mà trạng thái đã xong còn
         # nội dung thì chưa.
+        # Giữ MỌI task đã SUCCESS, không chỉ task tham quan.
+        #
+        # `schedule_property_viewing` không phải dependency của `register_vehicle`
+        # hay `book_parking`, nên ở lượt chạy ĐẦU chúng chạy song song và thành
+        # công thật trước khi ranh giới duyệt lịch ngắt luồng. Seed mỗi task
+        # tham quan nghĩa là resume chạy LẠI tất cả những task kia.
+        #
+        # Chúng không idempotent. Đo được, nguyên văn hai lượt:
+        #
+        #   14:28:45  BOOK-046 tạo thành công
+        #   14:28:59  provider duyệt
+        #   14:28:59  book_parking ghi FAILED — BOOKING_ALREADY_EXISTS
+        #
+        #   14:02:32  BOOK-044 tạo, chiếm nốt chỗ cuối của Khu A (3/3)
+        #   14:02:53  provider duyệt
+        #   14:03:23  book_parking ghi FAILED — NO_AVAILABILITY
+        #
+        # Lượt hai đâm vào ràng buộc `uq_bookings_vehicle_date` do chính lượt
+        # một tạo ra, rồi lời từ chối ấy ghi đè lên kết quả thành công. Người
+        # dùng đổi biển số, đổi ngày, đổi khu — lần nào cũng hỏng, vì thứ chặn
+        # họ là bản ghi mà chính yêu cầu của họ vừa tạo.
+        #
+        # Chỗ đỗ vẫn nằm trong database và vẫn bị tính phí; chỉ có màn hình nói
+        # là thất bại.
+        done = {
+            row["task_id"]: row
+            for row in await repository.list_tasks(workflow_id)
+            if str(row.get("status")) == TaskStatus.SUCCESS.value
+        }
+        seed_statuses = {task_id: TaskStatus.SUCCESS for task_id in done}
+        seed_results = {
+            task_id: row.get("result_data") for task_id, row in done.items() if row.get("result_data") is not None
+        }
+        # Task tham quan vừa materialize xong — kết quả mới đè lên hàng cũ.
+        seed_statuses[pending.task_id] = TaskStatus.SUCCESS
+        seed_results[pending.task_id] = result
+
         final_workflow_id, task_results = await executor.execute(
             plan,
             workflow_id,
             finalize=False,
-            seed_statuses={pending.task_id: TaskStatus.SUCCESS},
-            seed_results={pending.task_id: result},
+            seed_statuses=seed_statuses,
+            seed_results=seed_results,
         )
 
         # Ghim hint TRƯỚC khi chốt trạng thái: `_demo_response` đọc từ database,

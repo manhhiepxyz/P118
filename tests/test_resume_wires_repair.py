@@ -86,3 +86,39 @@ def test_the_question_names_the_full_zone_and_offers_the_other_one() -> None:
     assert "Khu A" in question and "hết chỗ" in question, "không nói khu nào kín"
     assert "Khu B" in question, "không chỉ ra khu còn lại"
     assert "2026-08-19" in question, "không nói ngày nào"
+
+
+def test_resume_does_not_rerun_tasks_that_already_succeeded() -> None:
+    """Task đã SUCCESS ở lượt đầu KHÔNG được chạy lại sau khi duyệt lịch.
+
+    `schedule_property_viewing` không phải dependency của `register_vehicle`
+    hay `book_parking`, nên lượt chạy đầu làm chúng SONG SONG và thành công
+    thật trước khi ranh giới duyệt lịch ngắt luồng. Seed mỗi task tham quan
+    nghĩa là resume chạy lại tất cả những task kia — mà chúng không idempotent.
+
+    Đo được nguyên văn trên stack thật:
+
+        14:28:45  BOOK-046 tạo thành công
+        14:28:59  provider duyệt
+        14:28:59  book_parking ghi FAILED — BOOKING_ALREADY_EXISTS
+
+        14:02:32  BOOK-044 tạo, chiếm nốt chỗ cuối Khu A (3/3)
+        14:02:53  provider duyệt
+        14:03:23  book_parking ghi FAILED — NO_AVAILABILITY
+
+    Lượt hai đâm vào chính bản ghi lượt một vừa tạo. Người dùng đổi biển số,
+    đổi ngày, đổi khu — lần nào cũng hỏng.
+    """
+    source = inspect.getsource(demo_service._materialize_and_run_remaining)
+
+    assert "seed_statuses={pending.task_id: TaskStatus.SUCCESS}" not in source, (
+        "resume chỉ seed task tham quan — mọi task đã thành công khác sẽ chạy "
+        "lại và đâm vào ràng buộc trùng do chính chúng tạo ra"
+    )
+    assert "list_tasks(workflow_id)" in source and "TaskStatus.SUCCESS.value" in source, (
+        "resume không đọc lại danh sách task đã SUCCESS từ database"
+    )
+    assert "seed_results=seed_results" in source, (
+        "seed status mà không seed kết quả thì InputRef của bước sau không "
+        "resolve được"
+    )
