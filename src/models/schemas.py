@@ -187,6 +187,15 @@ class DemoWorkflowEvent(BaseModel):
         "VALIDATION_FAILED",
         "EXECUTION_FAILED",
         "FINISHED",
+        # `CHAT` được `_append_job_event` phát ra ở hai chỗ (small-talk và
+        # nhánh trả lời câu hỏi giữa hội thoại), nhưng Literal này không có nó
+        # — nên mọi GET một workflow chat còn trong RAM đều trả HTTP 500.
+        #
+        # Cùng khuôn với `WAITING_VIEWING_APPROVAL`: giá trị thêm vào
+        # `DemoWorkflowResponse.stage` mà quên `DemoWorkflowEvent.stage`. Lần
+        # này không phải quên — nó chưa từng được thêm, và không ai thấy vì
+        # không test nào dựng một sự kiện CHAT.
+        "CHAT",
     ]
     message: str
     task_id: str | None = None
