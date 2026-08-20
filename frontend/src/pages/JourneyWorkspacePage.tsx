@@ -8,7 +8,14 @@ import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 
 import { LogoutButton } from '../components/workspace/LogoutButton'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
-import { SERVICE_FIELDS, matchOption, missingFields, today, type FormValues } from '../lib/serviceForms'
+import {
+  SERVICE_FIELDS,
+  expectedTools,
+  matchOption,
+  missingFields,
+  today,
+  type FormValues,
+} from '../lib/serviceForms'
 import { JourneySummary } from '../components/workspace/JourneySummary'
 import { ServiceLauncher } from '../components/workspace/ServiceLauncher'
 import type { ChatTurn } from '../lib/journeyMock'
@@ -16,6 +23,7 @@ import { ConversationStream } from '../components/workspace/ConversationStream'
 import { PendingCard } from '../components/workspace/PendingCard'
 import { extractValue, normalizeIntent, resolve, type PendingAction } from '../lib/pendingAction'
 import { closingLine, journeyFromWorkflow, pendingFromWorkflow } from '../lib/liveJourney'
+import { toolLabel } from '../lib/status'
 import {
   ApiError,
   cancelWorkflow,
@@ -716,7 +724,7 @@ export function JourneyWorkspacePage() {
 
     // Giữ lại tên dịch vụ TRƯỚC khi xoá chip — đây là thứ duy nhất vẽ được
     // trong lúc Planner còn chạy.
-    provisional.current = picked.length > 0 ? [...picked] : [goal.slice(0, 60)]
+    provisional.current = expectedTools(picked)
 
     setLeaving(true)
     window.setTimeout(async () => {
@@ -745,24 +753,45 @@ export function JourneyWorkspacePage() {
   // gọi được backend, để canvas không bao giờ là một khung trắng không lời.
 
   const journey = live ? journeyFromWorkflow(live) : null
-  const planning = !!live && (journey?.steps.length ?? 0) === 0 && provisional.current.length > 0
+  const planning = !!live && (journey?.steps.length ?? 0) === 0
   const shownJourney =
     planning && journey
       ? {
           ...journey,
-          steps: provisional.current.map((name, index) => ({
-            id: `provisional-${index}`,
-            title: name,
-            state: 'proposed' as const,
-            summary: 'Đã nhận yêu cầu, đang chuẩn bị các bước.',
-            timestamp: null,
-            details: [],
-            actions: [],
-            waitingOn: null,
-            x: index * 380,
-            y: 0,
-            lane: 'main',
-          })),
+          steps: [
+            // Bước LẬP KẾ HOẠCH là bước đang chạy thật — Planner đang chạy.
+            // Cho nó trạng thái `running` là nói đúng, và `STEP_STATE.running`
+            // đã có sẵn vòng xoay + vệt quét, nên khung hành trình động ngay từ
+            // giây đầu thay vì đứng im chờ plan.
+            {
+              id: 'provisional-plan',
+              title: 'Lập kế hoạch',
+              state: 'running' as const,
+              summary: 'Đang xác định các bước cần thực hiện.',
+              timestamp: null,
+              details: [],
+              actions: [],
+              waitingOn: null,
+              x: 0,
+              y: 0,
+              lane: 'main',
+            },
+            // Các bước SẮP làm, để trống — người dùng thấy trước cả hình dạng
+            // hành trình chứ không chỉ bước hiện tại.
+            ...provisional.current.map((tool, index) => ({
+              id: `provisional-${tool}`,
+              title: toolLabel(tool),
+              state: 'proposed' as const,
+              summary: 'Chưa bắt đầu.',
+              timestamp: null,
+              details: [],
+              actions: [],
+              waitingOn: null,
+              x: (index + 1) * 380,
+              y: 0,
+              lane: 'main',
+            })),
+          ],
           edges: [],
         }
       : journey

@@ -556,3 +556,28 @@ export function today(): string {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }
+
+/**
+ * Các tool một dịch vụ SẼ gọi — đọc từ chính metadata `tool` của form.
+ *
+ * Dùng để vẽ khung hành trình NGAY khi bấm Thực hiện, trong lúc Planner còn
+ * chạy 20–120 giây. Không phải phỏng đoán: mỗi ô nhập đã khai nó thuộc tool
+ * nào, nên danh sách này là thứ chính form đang hứa với backend.
+ *
+ * Vẫn có thể LỆCH với plan thật — Planner có thể thêm `pay_fee`, hoặc bỏ một
+ * bước đã làm xong ở lượt trước. Vì vậy khung này chỉ sống tới khi plan thật
+ * tới, rồi bị thay hoàn toàn. Nó trả lời "sắp làm những gì", không phải "đã
+ * quyết làm những gì".
+ */
+export function expectedTools(services: string[]): string[] {
+  const tools: string[] = []
+  for (const service of services) {
+    for (const field of SERVICE_FIELDS[service] ?? []) {
+      if (field.tool && !tools.includes(field.tool)) tools.push(field.tool)
+    }
+    // `pay_fee` không có ô nhập nào nên không khai được ở trên, nhưng mọi lần
+    // đặt chỗ đỗ đều kéo theo nó — `book_parking` luôn sinh một khoản phí.
+    if (tools.includes('book_parking') && !tools.includes('pay_fee')) tools.push('pay_fee')
+  }
+  return tools
+}
