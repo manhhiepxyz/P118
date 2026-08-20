@@ -559,8 +559,20 @@ def build_planner_graph(
             # trả một khoản tiền mà họ không nhìn thấy.
             # Chờ người dùng duyệt không phải lỗi thực thi. Ghi nó thành lỗi
             # khiến UI vừa hiện báo giá vừa nói workflow đã dừng giữa chừng.
-            if exc.code in {"PAYMENT_APPROVAL_REQUIRED", "VIEWING_APPROVAL_REQUIRED"}:
+            # Hai loại chờ, hai người khác nhau — và câu chữ phải nói đúng ai.
+            #
+            # Gộp cả hai vào `WAITING_APPROVAL` khiến một yêu cầu chỉ có lịch
+            # tham quan phát ra "Đang chờ bạn xác nhận thanh toán": nó chờ ĐƠN
+            # VỊ, không chờ người dùng, và không có khoản tiền nào. Người đọc đi
+            # tìm một nút thanh toán không tồn tại.
+            #
+            # Giai đoạn mới đi kèm hai chỗ nữa: câu công khai trong
+            # `_STAGE_MESSAGES`, và giá trị hợp lệ trong `DemoWorkflowResponse.
+            # stage`. Thiếu chỗ thứ hai thì Pydantic từ chối cả response.
+            if exc.code == "PAYMENT_APPROVAL_REQUIRED":
                 await emit("WAITING_APPROVAL")
+            elif exc.code == "VIEWING_APPROVAL_REQUIRED":
+                await emit("WAITING_VIEWING_APPROVAL")
             else:
                 await emit("EXECUTION_FAILED")
             update: dict = {"policy_error": exc.code}

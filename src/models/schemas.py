@@ -294,6 +294,11 @@ class DemoWorkflowResponse(BaseModel):
             "RESIDENT_CHECKING",
             "RESIDENT_VERIFIED",
             "WAITING_APPROVAL",
+            # Chờ ĐƠN VỊ duyệt lịch tham quan — khác hẳn `WAITING_APPROVAL`,
+            # vốn là chờ chính người dùng xác nhận một khoản tiền. Gộp hai thứ
+            # làm một khiến người đặt lịch xem nhà được bảo đi xác nhận thanh
+            # toán, và họ đi tìm một nút không tồn tại.
+            "WAITING_VIEWING_APPROVAL",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",

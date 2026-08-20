@@ -633,11 +633,15 @@ _STAGE_MESSAGES = {
     "RESIDENT_CHECKING": "Đang kiểm tra liên kết cư dân với ban quản lý.",
     "RESIDENT_VERIFIED": "Đã xác nhận tài khoản cư dân.",
     "WAITING_APPROVAL": "Đang chờ bạn xác nhận thanh toán.",
+    "WAITING_VIEWING_APPROVAL": "Đang chờ đơn vị xác nhận lịch tham quan.",
     "EXECUTING": "Đang thực hiện yêu cầu.",
     "TASK_RUNNING": "Đang thực hiện một bước trong yêu cầu.",
     "TASK_SUCCESS": "Đã hoàn thành một bước trong yêu cầu.",
     "TASK_FAILED": "Một bước không thể hoàn thành.",
     "NEEDS_INFORMATION": "Cần bạn bổ sung thêm thông tin.",
+    # `QUESTION` được phát nhưng chưa từng có câu, nên rơi về câu mặc định
+    # "Đang xử lý yêu cầu" — đúng mà vô nghĩa với người vừa HỎI một điều.
+    "QUESTION": "Đang trả lời câu hỏi của bạn.",
     "VALIDATION_FAILED": "Thông tin chưa đủ điều kiện để thực hiện.",
     "EXECUTION_FAILED": "Yêu cầu đã dừng lại giữa chừng.",
     "FINISHED": "Yêu cầu đã hoàn tất.",
