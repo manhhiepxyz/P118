@@ -202,11 +202,41 @@ export interface Resolution {
  * Bốn điều kiện, đúng theo luồng đã thống nhất: cùng workflow, cùng action,
  * action vẫn đang mở, và thứ được duyệt chưa đổi.
  */
+/**
+ * Câu chữ nói RÕ RÀNG là đồng ý trả tiền — không phải một tiếng đệm.
+ *
+ * `APPROVE` gom cả "ok", "được", "ừ": đúng cho một xác nhận thông thường,
+ * nhưng "ok" là tiếng đệm phổ biến nhất tiếng Việt. Người dùng đọc xong thẻ
+ * báo phí, gõ "ok" với nghĩa "à, tôi thấy rồi", và 100.000 đồng đi mất.
+ *
+ * Đo được trên stack thật: `/continue` (đổi khu) rồi 8 giây sau
+ * `/payment-decision` — không có cú bấm nút nào ở giữa.
+ */
+const EXPLICIT_PAYMENT_APPROVAL = [
+  'đồng ý thanh toán',
+  'dong y thanh toan',
+  'xác nhận thanh toán',
+  'xac nhan thanh toan',
+  'thanh toán đi',
+  'thanh toan di',
+  'trả tiền',
+  'tra tien',
+  'trả đi',
+  'tra di',
+]
+
 export function resolve(
   action: PendingAction | null,
   intent: Intent,
   context: { workflowId: string; fingerprint: string },
   value?: string,
+  /**
+   * Quyết định đến từ đâu — và với TIỀN thì đây không phải chi tiết vụn vặt.
+   *
+   * `button`: người dùng bấm đúng nút "Xác nhận thanh toán". Không mơ hồ.
+   * `chat`  : họ gõ chữ. Chữ thì mơ hồ, và "ok" mơ hồ nhất.
+   */
+  source: 'chat' | 'button' = 'chat',
 ): Resolution {
   if (!action) {
     return { ok: false, reply: 'Hiện không có việc nào đang chờ bạn xác nhận.' }
@@ -253,6 +283,21 @@ export function resolve(
     if (action.kind === 'missing_info') {
       return { ok: false, reply: `Mình vẫn còn thiếu ${action.field?.label.toLowerCase()}. Bạn cho mình xin thông tin này nhé.` }
     }
+
+    // TIỀN thì không nhận tiếng đệm.
+    //
+    // Từ chối bằng chữ vẫn được — hỏng theo hướng an toàn, không ai mất gì.
+    // Nhưng ĐỒNG Ý thì phải là một hành động không thể hiểu nhầm: bấm đúng
+    // nút, hoặc nói thẳng ra là đồng ý trả tiền.
+    const spoken = (value ?? '').trim().toLowerCase()
+    const explicit = EXPLICIT_PAYMENT_APPROVAL.some((phrase) => spoken.includes(phrase))
+    if (source !== 'button' && !explicit) {
+      return {
+        ok: false,
+        reply: `Khoản này cần bạn xác nhận rõ ràng. Bạn bấm "Xác nhận thanh toán", hoặc nhắn "đồng ý thanh toán" nhé.`,
+      }
+    }
+
     return { ok: true, next: 'RESOLVED', reply: `Đã xác nhận. Mình tiếp tục với "${action.title}".` }
   }
 

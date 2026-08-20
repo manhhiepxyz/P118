@@ -592,7 +592,7 @@ export function JourneyWorkspacePage() {
      * giao diện chỉ nói "Mình chưa gửi được xác nhận của bạn" — người dùng gõ
      * lại đúng thứ được hỏi thì vẫn hỏng y hệt.
      */
-    source: 'chat' | 'field' = 'chat',
+    source: 'chat' | 'field' | 'button' = 'chat',
   ) {
     // Lỗi CŨ phải biến mất ngay khi người dùng thử lại.
     //
@@ -606,6 +606,8 @@ export function JourneyWorkspacePage() {
       intent,
       { workflowId: action?.workflowId ?? '', fingerprint: action?.fingerprint ?? '' },
       value,
+      // Với TIỀN, "bấm nút" và "gõ chữ" là hai mức chắc chắn khác hẳn nhau.
+      source === 'button' ? 'button' : 'chat',
     )
     /*
      * Câu hỏi phụ phải ĐI TỚI BACKEND, không bị trả lời tại chỗ.
@@ -1150,7 +1152,7 @@ export function JourneyWorkspacePage() {
               {pending && (
                 <PendingCard
                   action={pending}
-                  onApprove={() => respond('APPROVE')}
+                  onApprove={() => respondTo(pending, 'APPROVE', undefined, 'button')}
                   onReject={() => respond('REJECT')}
                   onValue={(values) => {
                     // Điền vào ô có cấu trúc cũng là một lượt trả lời — ghi vào
