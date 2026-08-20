@@ -530,6 +530,28 @@ const CONTRACT_FIELD_OVERRIDES: Record<string, FieldSpec> = {
   move_date: { key: 'move_date', label: 'Ngày chuyển', kind: 'date' },
   booking_date: { key: 'booking_date', label: 'Ngày đặt chỗ', kind: 'date' },
   tour_date: { key: 'tour_date', label: 'Ngày đi', kind: 'date' },
+  // Ô GIỜ: enum khung giờ, không phải ô text.
+  //
+  // Biên lấy từ `TaskPlanValidator.TIME_INPUTS` — nguồn sự thật của backend:
+  //
+  //     viewing_time            08:00–17:30
+  //     preferred_time          08:00–18:00
+  //     preferred_contact_time  08:00–18:00
+  //     move_time               07:00–20:00
+  //
+  // Chép biên vào đây là dựng bảng thứ hai, nên nếu backend nới giờ thì hai
+  // bên lệch. Đổi lại được: ô chọn không bao giờ đề nghị một giờ mà backend sẽ
+  // từ chối, còn ô text thì để người dùng gõ 19:00 cho lịch tham quan rồi mới
+  // báo sai sau một vòng gọi model.
+  viewing_time: { key: 'viewing_time', label: 'Giờ tham quan', kind: 'select', options: slots(8, 17) },
+  preferred_time: { key: 'preferred_time', label: 'Giờ hẹn', kind: 'select', options: slots(8, 18) },
+  preferred_contact_time: {
+    key: 'preferred_contact_time',
+    label: 'Giờ muốn được liên hệ',
+    kind: 'select',
+    options: slots(8, 18),
+  },
+  move_time: { key: 'move_time', label: 'Giờ chuyển nhà', kind: 'select', options: slots(7, 20) },
   passenger_count: {
     key: 'passenger_count',
     label: 'Số khách',

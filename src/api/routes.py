@@ -3272,7 +3272,26 @@ async def continue_demo_workflow(
                 sorted(request.fields),
                 sorted(unresolved),
             )
-            raise HTTPException(status_code=422, detail=_follow_up_validation_message(unresolved))
+            # Field lạ và giá trị sai là HAI chuyện, đừng nói chung một câu.
+            #
+            # `_extract_structured_follow_up_answers` từ chối cả lượt khi client
+            # gửi một field không được hỏi — đúng, đó là all-or-none có chủ ý.
+            # Nhưng nó trả về toàn bộ `missing_fields` làm "chưa hiểu", nên câu
+            # báo ra đổ lỗi cho GIÁ TRỊ người dùng nhập: họ chọn đúng Khu B và
+            # vẫn nghe "Hãy chọn Khu A hoặc Khu B".
+            #
+            # Người dùng không sửa được lỗi này — nó nằm ở hợp đồng giữa giao
+            # diện và API. Nói đúng chuyện thì ít nhất người đọc log biết tìm ở
+            # đâu, thay vì đi kiểm lại giá trị vốn đã đúng.
+            expected = {_canonical_field(name) for name in missing_fields}
+            unexpected = sorted({name for name in request.fields if _canonical_field(name) not in expected})
+            detail = (
+                "Biểu mẫu gửi lên có mục không nằm trong câu hỏi, nên mình chưa nhận được. "
+                "Bạn tải lại trang rồi trả lời giúp mình nhé."
+                if unexpected
+                else _follow_up_validation_message(unresolved)
+            )
+            raise HTTPException(status_code=422, detail=detail)
         if not answers:
             logger.info(
                 "clarification contained no usable answer (expected=%s received=%s)",
