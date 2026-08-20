@@ -534,6 +534,13 @@ export function JourneyWorkspacePage() {
   async function respondWithFields(values: Record<string, string>) {
     const action = pending
     if (!action) return
+    // Lỗi CŨ phải biến mất ngay khi người dùng thử lại.
+    //
+    // Đo được: nhập sai khu → backend trả 422 "Hãy chọn Khu A hoặc Khu B." →
+    // câu đó nằm lại ở dải thông báo. Chọn đúng khu rồi gửi lại thì màn hình
+    // VẪN mắng, vì `fault` chỉ được ghi lúc lỗi mà không ai xoá lúc gửi lại.
+    // Người dùng đã làm đúng và không có cách nào biết.
+    setFault(null)
     try {
       const fields: Record<string, string> = {}
       for (const [key, value] of Object.entries(values)) fields[key] = extractValue(value)
@@ -578,6 +585,13 @@ export function JourneyWorkspacePage() {
      */
     source: 'chat' | 'field' = 'chat',
   ) {
+    // Lỗi CŨ phải biến mất ngay khi người dùng thử lại.
+    //
+    // Đo được: nhập sai khu → backend trả 422 "Hãy chọn Khu A hoặc Khu B." →
+    // câu đó nằm lại ở dải thông báo. Chọn đúng khu rồi gửi lại thì màn hình
+    // VẪN mắng, vì `fault` chỉ được ghi lúc lỗi mà không ai xoá lúc gửi lại.
+    // Người dùng đã làm đúng và không có cách nào biết.
+    setFault(null)
     const outcome = resolve(
       action,
       intent,
@@ -831,6 +845,7 @@ export function JourneyWorkspacePage() {
     // Giữ lại tên dịch vụ TRƯỚC khi xoá chip — đây là thứ duy nhất vẽ được
     // trong lúc Planner còn chạy.
     provisional.current = expectedTools(picked)
+    sawRealPlan.current = false
 
     setLeaving(true)
     window.setTimeout(async () => {
@@ -859,7 +874,24 @@ export function JourneyWorkspacePage() {
   // gọi được backend, để canvas không bao giờ là một khung trắng không lời.
 
   const journey = live ? journeyFromWorkflow(live) : null
-  const planning = !!live && (journey?.steps.length ?? 0) === 0
+  /**
+   * Đã từng thấy kế hoạch THẬT chưa.
+   *
+   * Khung tạm chỉ được phép xuất hiện MỘT LẦN, trước kế hoạch đầu tiên. Không
+   * có chốt này, nó hiện lại bất cứ khi nào một response tình cờ không mang
+   * `plan` — kể cả sau khi mọi việc đã xong — và người dùng thấy "Lập kế hoạch
+   * — Đang thực hiện" quay trở lại ngay sau khi trả tiền. Đọc lên đúng như hệ
+   * thống tự chạy lại kế hoạch, dù database cho thấy không có gì chạy lại.
+   */
+  const sawRealPlan = useRef(false)
+  if ((journey?.steps.length ?? 0) > 0) sawRealPlan.current = true
+
+  const planning =
+    !!live &&
+    !sawRealPlan.current &&
+    !TERMINAL.has(live.status) &&
+    (journey?.steps.length ?? 0) === 0 &&
+    provisional.current.length > 0
   const shownJourney = planning && journey ? { ...journey, ...provisionalCanvas(provisional.current) } : journey
 
   const steps = shownJourney?.steps ?? []

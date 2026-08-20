@@ -97,6 +97,55 @@ export function InspectorPanel({ step }: Props) {
             </dl>
           </section>
         )}
+
+        {/* Bước này đang chờ bước nào.
+            Người dùng bấm vào một chặng "Chưa bắt đầu" và câu hỏi đầu tiên là
+            "sao nó chưa chạy". Trả lời đúng là tên bước đang chặn nó — trước
+            đây inspector không nói, dù `depends_on` nằm sẵn trong kế hoạch. */}
+        {(step.blockedBy?.length ?? 0) > 0 && (
+          <section>
+            <div className="flex items-baseline gap-3">
+              <h3 className="text-[10px] font-bold uppercase tracking-[0.15em] text-[var(--text-muted)]">
+                Cần xong trước
+              </h3>
+              <span className="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden />
+            </div>
+            <ul className="mt-3 space-y-1.5">
+              {step.blockedBy!.map((name) => (
+                <li key={name} className="text-[13.5px] leading-[1.5] text-[var(--text-secondary)]">
+                  {name}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {/* Nhật ký của RIÊNG chặng này — dòng thời gian có thật, không phải
+            một câu tóm tắt. Đây là chỗ trả lời "hệ thống đang làm gì ở bước
+            này". `events` sống trong RAM nên yêu cầu cũ mở lại sẽ không có,
+            và khi đó khối này tự ẩn thay vì hiện một danh sách rỗng. */}
+        {(step.log?.length ?? 0) > 0 && (
+          <section>
+            <div className="flex items-baseline gap-3">
+              <h3 className="text-[10px] font-bold uppercase tracking-[0.15em] text-[var(--text-muted)]">
+                Diễn biến
+              </h3>
+              <span className="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden />
+            </div>
+            <ol className="mt-3 space-y-2">
+              {step.log!.map((line, index) => (
+                <li key={`${index}-${line}`} className="flex gap-2.5 text-[13.5px] leading-[1.5]">
+                  <span
+                    aria-hidden
+                    className="mt-[7px] h-1 w-1 shrink-0 rounded-full"
+                    style={{ backgroundColor: 'var(--text-muted)' }}
+                  />
+                  <span className="text-[var(--text-secondary)]">{line}</span>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
       </div>
 
       {step.actions.length > 0 && (

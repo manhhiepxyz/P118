@@ -49,6 +49,20 @@ export interface JourneyStep {
   actions: StepAction[]
   /** Câu nói rõ ai đang phải hành động. Null khi không chờ ai. */
   waitingOn: string | null
+  /**
+   * TÊN các bước phải xong trước bước này — không phải task_id.
+   *
+   * Người dùng bấm vào một chặng "Chưa bắt đầu" và câu hỏi đầu tiên của họ là
+   * "sao nó chưa chạy". Trả lời đúng là tên bước đang chặn nó.
+   */
+  blockedBy?: string[]
+  /**
+   * Nhật ký của RIÊNG chặng này, lấy từ `events` lọc theo `task_id`.
+   *
+   * Trả lời "hệ thống đang làm gì ở bước này" bằng dòng thời gian có thật,
+   * không phải một câu tóm tắt.
+   */
+  log?: string[]
 }
 
 export interface JourneyEdge {
