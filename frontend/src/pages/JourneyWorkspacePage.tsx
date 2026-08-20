@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronRight, FileText, Home } from 'lucide-react'
+import { CheckCircle2, ChevronRight, FileText, Home } from 'lucide-react'
 
 import { ActivityFeed } from '../components/workspace/ActivityFeed'
 import { CommandRail } from '../components/workspace/CommandRail'
@@ -365,6 +365,17 @@ export function JourneyWorkspacePage() {
       pendingSince.current = null
       sayOnce(res.answer || res.question || (next ? next.message : null))
     }
+    // Xong thì NÓI NGAY, đừng đợi model soạn văn.
+    //
+    // `summary` do backend dựng từ dữ liệu thật — "Đã thanh toán 150.000 VND.
+    // Chỗ đỗ xe của bạn đã được xác nhận." Nó có mặt ngay khi workflow chuyển
+    // SUCCESS, còn `answer` thì tới sau một lượt gọi LLM nữa.
+    //
+    // Chờ `answer` nghĩa là người vừa bấm Xác nhận thanh toán nhìn ba chấm
+    // quay tiếp — tiền đã trừ, việc đã xong, mà màn hình vẫn nói "đang thực
+    // hiện". `sayOnce` đảm bảo câu của model tới sau không bị nói trùng.
+    if (res.status === 'SUCCESS') sayOnce(res.summary)
+
     // Lời kết nói SAU cùng, và chỉ khi thật sự xong. `sayOnce` lo phần không
     // lặp lại ở những nhịp poll tiếp theo.
     sayOnce(closingLine(res))
@@ -841,6 +852,14 @@ export function JourneyWorkspacePage() {
     // và một chỉ báo "đang xử lý" không bao giờ tắt là lời nói dối tệ hơn cả
     // việc không có chỉ báo nào.
     !live.answer &&
+    // ĐÃ XONG thì không còn gì để quay.
+    //
+    // Điều kiện cũ giữ nhịp chấm khi `response_state === 'PENDING'`, kể cả ở
+    // trạng thái kết thúc — chủ ý là "model còn đang soạn câu". Nhưng với
+    // người vừa trả tiền, ba chấm nghĩa là việc chưa xong, trong khi tiền đã
+    // trừ và chỗ đỗ đã giữ. Câu văn đẹp hơn không đáng để nói dối về trạng
+    // thái; `summary` đã được nói ngay ở trên rồi.
+    live.status !== 'SUCCESS' &&
     (!TERMINAL.has(live.status) || live.response_state === 'PENDING')
 
   return (
@@ -868,6 +887,32 @@ export function JourneyWorkspacePage() {
             của sản phẩm. */}
         <div className="flex min-h-0 flex-1" data-journey-state={live?.status ?? 'IDLE'}>
           <div className="relative flex min-w-0 flex-1 flex-col">
+            {/* Dải BÁO HOÀN TẤT — đứng trên cùng, không lẫn vào hội thoại.
+                Người vừa bấm Xác nhận thanh toán cần một tín hiệu dứt khoát là
+                xong; một dòng chat trôi giữa các dòng khác thì không phải tín
+                hiệu ấy. Nội dung lấy nguyên `summary` của backend — nó dựng từ
+                dữ liệu thật ("Đã thanh toán 150.000 VND…"), không phải câu do
+                model viết. */}
+            {mode === 'journey' && live?.status === 'SUCCESS' && live.summary && (
+              <div className="rise shrink-0 pt-6">
+                <div className="mx-auto w-full max-w-[1000px] px-12">
+                  <div
+                    role="status"
+                    className="flex items-start gap-3 rounded-[var(--r-sm)] px-4 py-3"
+                    style={{ backgroundColor: 'color-mix(in srgb, var(--success) 10%, transparent)' }}
+                  >
+                    <CheckCircle2
+                      className="mt-[2px] h-[18px] w-[18px] shrink-0"
+                      style={{ color: 'var(--success)' }}
+                      strokeWidth={2.2}
+                      aria-hidden
+                    />
+                    <p className="text-[15px] leading-[1.6] text-[var(--text-primary)]">{live.summary}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {mode === 'journey' && (
               <div className="rise shrink-0 pb-5 pt-6">
                 {/* Cùng trục ngang với danh sách năng lực và ô nhập: đổi chế
