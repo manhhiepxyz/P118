@@ -26,6 +26,7 @@ import type {
   Capability,
   LoginResponse,
   NotificationSummary,
+  ServiceApprovalRecord,
   VerificationClaim,
   VerificationDecision,
   VerificationRecord,
@@ -624,6 +625,40 @@ export async function decideViewingApproval(
 ): Promise<{ summary: string; status: string }> {
   return request<{ summary: string; status: string }>(
     `/viewing-approvals/${encodeURIComponent(workflowId)}/decide`,
+    { method: 'POST', body },
+  )
+}
+
+/**
+ * Hàng đợi duyệt của đơn vị — MỌI dịch vụ, một danh sách.
+ *
+ * Sau khi gộp hai hàng đợi, endpoint này trả về cả lịch tham quan lẫn sáu dịch
+ * vụ còn lại. Người duyệt nhìn một chỗ; trước đây họ phải nhìn hai.
+ */
+export async function listServiceApprovals(
+  status: 'AWAITING' | 'decided' = 'AWAITING',
+): Promise<{ items: ServiceApprovalRecord[]; total: number }> {
+  // `total` là TỔNG, không phải số đang hiện. Thiếu nó thì một hàng đợi dài
+  // hơn giới hạn trông y hệt một hàng đợi vừa đủ, và mục mới nhất — xếp cuối
+  // vì cũ-nhất-trước — nằm ngoài tầm nhìn mà không dấu hiệu nào.
+  return request<{ items: ServiceApprovalRecord[]; total: number }>(
+    `/service-approvals?status=${status}`,
+  )
+}
+
+/**
+ * Quyết định MỘT bước.
+ *
+ * Theo từng bước, không theo cả yêu cầu: hai đơn vị khác nhau có thể cùng xuất
+ * hiện trong một yêu cầu, và người này không được quyết thay người kia.
+ */
+export async function decideServiceApproval(
+  workflowId: string,
+  taskId: string,
+  body: { decision: 'approve' | 'reject'; reject_reason?: string },
+): Promise<{ status?: string }> {
+  return request<{ status?: string }>(
+    `/service-approvals/${encodeURIComponent(workflowId)}/${encodeURIComponent(taskId)}/decide`,
     { method: 'POST', body },
   )
 }

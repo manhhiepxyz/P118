@@ -82,3 +82,26 @@ def test_a_plate_written_with_a_dot_is_not_truncated() -> None:
 def test_the_form_explains_the_format_at_the_field() -> None:
     source = _FORMS.read_text(encoding="utf-8")
     assert "patternHint" in source, "sai luật mà không có câu chỉ dẫn ngay tại ô"
+
+
+def test_a_wrong_format_is_not_reported_as_an_empty_field() -> None:
+    """"Chưa chọn X" chỉ đúng khi ô RỖNG.
+
+    Đo được: gõ "2A-42343" — thiếu một chữ số đầu, biển Việt Nam có 2 chữ số mã
+    tỉnh — và nhận "Chưa chọn biển số xe." Người dùng đi tìm chỗ mình quên
+    nhập, trong một ô họ vừa nhập xong. Cùng loại lỗi đã sửa ở phía server,
+    còn sót ở biểu mẫu.
+    """
+    form = (
+        Path(__file__).resolve().parents[1]
+        / "frontend" / "src" / "components" / "workspace" / "InlineServiceForm.tsx"
+    )
+    source = form.read_text(encoding="utf-8")
+    assert "(value ?? '').trim()" in source, "câu lỗi không phân biệt ô rỗng với ô sai định dạng"
+    assert "field.patternHint" in source, "sai định dạng mà không nói định dạng đúng là gì"
+
+
+def test_a_one_digit_prefix_is_rejected_by_both_sides() -> None:
+    """"2A-42343" phải bị từ chối ở CẢ HAI phía, không chỉ một."""
+    assert _extract_plate_number("2A-42343") is None
+    assert _frontend_pattern().match("2A-42343") is None

@@ -13,6 +13,7 @@ này; câu chữ tự do vẫn lập lại như cũ.
 from __future__ import annotations
 
 import inspect
+import re
 
 import pytest
 
@@ -175,7 +176,10 @@ def test_no_shortcut_talks_to_the_executor_directly(func: str) -> None:
     """
     source = inspect.getsource(getattr(demo_service, func))
     assert "Executor(" in source, "cập nhật lại test: đường tắt không còn dựng Executor"
-    assert "ValidatedExecutionBoundary(Executor(" in source, (
+    # So khớp sau khi BỎ khoảng trắng: bám vào cách xuống dòng nghĩa là một lần
+    # định dạng lại cũng làm test đỏ, và cái đỏ ấy không nói được gì về an toàn.
+    compact = re.sub(r"\s+", "", source)
+    assert "ValidatedExecutionBoundary(Executor(" in compact, (
         f"{func} gọi Executor TRẦN — đường vòng quanh mọi boundary"
     )
 

@@ -49,6 +49,11 @@ async def clean_e2e_tables(e2e_pool: asyncpg.Pool) -> None:
         await conn.execute(
             """
             TRUNCATE TABLE
+                -- Hàng đợi duyệt của MỌI dịch vụ. Sau khi gộp hai hàng đợi,
+                -- `viewing_approvals` chỉ còn là khung nhìn trên bảng này —
+                -- dọn khung nhìn thì không dọn được gì, và test sau đọc phải
+                -- dữ liệu của test trước.
+                service_approvals,
                 approval_decisions,
                 execution_logs,
                 workflow_tasks,

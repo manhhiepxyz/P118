@@ -9,6 +9,7 @@ from scripts import demo_llm_runtime
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
 from src.orchestration import demo_service
+from src.orchestration.service_approval import ServiceApprovalBoundary
 
 
 def _plan(tool: str) -> TaskPlan:
@@ -262,10 +263,16 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
 
     def _build_graph(received_planner, received_boundary, *, on_stage=None, **kwargs):
         assert received_planner is planner
-        # Boundary ngoài cùng là viewing (chặn schedule_property_viewing TRƯỚC
-        # mọi guard khác); bên trong nó là chuỗi payment → resident → runtime.
-        assert isinstance(received_boundary, demo_service.ViewingApprovalBoundary)
-        inner = received_boundary._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        # Boundary NGOÀI CÙNG là cổng đơn vị cung cấp: mọi dịch vụ phải được
+        # bên kia nhận làm trước đã. Trong nó là cổng duyệt lịch tham quan, rồi
+        # tới payment → resident → runtime.
+        #
+        # Thứ tự này không tuỳ ý: đặt cổng đơn vị bên trong cổng thanh toán
+        # nghĩa là hỏi người dùng trả tiền cho một dịch vụ chưa ai nhận làm.
+        assert isinstance(received_boundary, ServiceApprovalBoundary)
+        viewing = received_boundary._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        assert isinstance(viewing, demo_service.ViewingApprovalBoundary)
+        inner = viewing._boundary  # noqa: SLF001 - test kiểm cấu trúc
         assert isinstance(inner, demo_service.PaymentApprovalBoundary)
         assert on_stage is None
         assert kwargs.get("parent_workflow_id") is None

@@ -381,6 +381,31 @@ export interface ViewingApprovalRecord {
   decided_by: string | null
 }
 
+/**
+ * Một bước đang chờ ĐƠN VỊ CUNG CẤP duyệt — mọi dịch vụ.
+ *
+ * Một dòng cho MỖI BƯỚC, không phải mỗi yêu cầu: một yêu cầu có thể gồm nhiều
+ * dịch vụ của nhiều đơn vị, và mỗi đơn vị chỉ quyết định phần của mình.
+ *
+ * `details` để mở vì mỗi dịch vụ có dữ kiện khác nhau — thêm một dịch vụ không
+ * được kéo theo một lần đổi kiểu ở đây.
+ */
+export interface ServiceApprovalRecord {
+  workflow_id: string
+  task_id: string
+  tool: string
+  service_label: string
+  details: Record<string, string | number | boolean | null>
+  applicant_name: string | null
+  applicant_phone: string | null
+  created_at: string | null
+  /** AWAITING khi ở hàng đợi; APPROVED/REJECTED/EXPIRED khi xem lịch sử. */
+  status?: string
+  decided_by?: string | null
+  decided_at?: string | null
+  reject_reason?: string | null
+}
+
 /** Body duyệt/từ chối lịch tham quan — từ chối bắt buộc lý do. */
 export interface ViewingApprovalDecision {
   decision: 'approve' | 'reject'

@@ -109,9 +109,17 @@ export function InlineServiceForm({ fields, values, onChange, invalid }: Props) 
 
             {/* Lỗi nằm NGAY DƯỚI ô sai, không dồn lên đầu — và không đẩy layout
                 vì nó thay chỗ dòng gợi ý. */}
+            {/* "Chưa chọn X" chỉ đúng khi ô RỖNG.
+                Ô có chữ mà sai định dạng thì câu ấy nói sai sự thật, và người
+                dùng đi tìm chỗ mình quên nhập — trong một ô họ vừa nhập xong.
+                Đo được: gõ "2A-42343" (thiếu một chữ số đầu) và nhận "Chưa
+                chọn biển số xe."
+                Sai định dạng thì nói ĐỊNH DẠNG, kèm ví dụ. */}
             {bad ? (
               <p id={`${id}-err`} className="mt-1.5 text-[12.5px] text-[var(--danger)]">
-                Chưa chọn {field.label.toLowerCase()}.
+                {(value ?? '').trim()
+                  ? (field.patternHint ?? `${field.label} chưa đúng định dạng.`)
+                  : `Chưa chọn ${field.label.toLowerCase()}.`}
               </p>
             ) : field.hint ? (
               <p id={`${id}-hint`} className="mt-1.5 text-[12.5px] text-[var(--text-muted)]">

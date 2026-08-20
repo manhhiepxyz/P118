@@ -908,7 +908,7 @@ export function JourneyWorkspacePage() {
 
     // Giữ lại tên dịch vụ TRƯỚC khi xoá chip — đây là thứ duy nhất vẽ được
     // trong lúc Planner còn chạy.
-    provisional.current = expectedTools(picked)
+    provisional.current = expectedTools(picked, values)
     sawRealPlan.current = false
 
     setLeaving(true)

@@ -17,6 +17,7 @@ from src.api.notification_routes import router as notification_router
 from src.api.readiness import evaluate_readiness
 from src.api.routes import router
 from src.api.verification_routes import router as verification_router
+from src.api.service_approval_routes import router as service_approval_router
 from src.api.viewing_approval_routes import router as viewing_approval_router
 from src.config import get_settings
 from src.monitoring.llm_trace import trace_enabled
@@ -172,6 +173,8 @@ app.include_router(admin_router, prefix="/api/v1")
 # Xác thực căn hộ/xe có ảnh, provider duyệt (Path B song song với Agent).
 app.include_router(verification_router, prefix="/api/v1")
 # Yêu cầu lịch tham quan chờ duyệt — provider/admin quyết định trong /review.
+# Hàng đợi duyệt của đơn vị cho SÁU dịch vụ ngoài lịch tham quan.
+app.include_router(service_approval_router, prefix="/api/v1")
 app.include_router(viewing_approval_router, prefix="/api/v1")
 # Thông báo realtime: GET /api/v1/notifications/summary + /stream (SSE).
 app.include_router(notification_router, prefix="/api/v1")
