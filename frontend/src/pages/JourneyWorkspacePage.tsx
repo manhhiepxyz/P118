@@ -10,6 +10,7 @@ import { LogoutButton } from '../components/workspace/LogoutButton'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import {
   SERVICE_FIELDS,
+  expectedDependency,
   expectedTools,
   matchOption,
   missingFields,
@@ -177,6 +178,81 @@ function goalFromForms(
 /* Điều hướng và nút đổi theme đã chuyển vào `WorkspaceShell` — hai trang
    dùng chung, nên không thể lệch nhau. */
 
+/**
+ * Khung hành trình TẠM: các bước sắp chạy, xếp theo đúng công thức toạ độ của
+ * hành trình thật (`liveJourney.layout`) — cột = độ sâu phụ thuộc, hàng = thứ
+ * tự trong cột.
+ *
+ * Bản đầu xếp mọi bước trên MỘT hàng ngang và bỏ hẳn đường nối. Sáu thẻ trải
+ * ngang thành một dải mỏng, không thấy bước nào phụ thuộc bước nào, và lúc
+ * plan thật tới thì bố cục nhảy hẳn sang dạng khác.
+ *
+ * Bước "Lập kế hoạch" đứng ở cột 0 với trạng thái `running` — Planner đang
+ * chạy thật, nên nói vậy là đúng, và `STEP_STATE.running` có sẵn vòng xoay +
+ * vệt quét.
+ */
+function provisionalCanvas(tools: string[]) {
+  const COLUMN = 380
+  const ROW = 150
+
+  const depthOf = (tool: string): number => {
+    let depth = 1 // cột 0 dành cho bước Lập kế hoạch
+    let current: string | null = tool
+    const seen = new Set<string>()
+    while (current && !seen.has(current)) {
+      seen.add(current)
+      const parent: string | null = expectedDependency(current)
+      if (!parent || !tools.includes(parent)) break
+      depth += 1
+      current = parent
+    }
+    return depth
+  }
+
+  const rowOf = new Map<number, number>()
+  const place = (column: number) => {
+    const row = rowOf.get(column) ?? 0
+    rowOf.set(column, row + 1)
+    return { x: 60 + column * COLUMN, y: 40 + row * ROW }
+  }
+
+  const base = {
+    timestamp: null,
+    details: [],
+    actions: [],
+    waitingOn: null,
+    lane: 'main',
+  }
+
+  const steps = [
+    {
+      ...base,
+      id: 'provisional-plan',
+      title: 'Lập kế hoạch',
+      state: 'running' as const,
+      summary: 'Đang xác định các bước cần thực hiện.',
+      ...place(0),
+    },
+    ...tools.map((tool) => ({
+      ...base,
+      id: `provisional-${tool}`,
+      title: toolLabel(tool),
+      state: 'proposed' as const,
+      summary: 'Chưa bắt đầu.',
+      ...place(depthOf(tool)),
+    })),
+  ]
+
+  const edges = tools.map((tool) => {
+    const parent = expectedDependency(tool)
+    const source = parent && tools.includes(parent) ? `provisional-${parent}` : 'provisional-plan'
+    const target = `provisional-${tool}`
+    return { id: `${source}->${target}`, source, target }
+  })
+
+  return { steps, edges }
+}
+
 export function JourneyWorkspacePage() {
   // Mặc định chọn chặng CẦN CHÚ Ý nhất, không phải chặng đầu: người mở màn hình
   // lên thường vào để xử lý việc đang vướng, không để đọc lại việc đã xong.
@@ -205,6 +281,25 @@ export function JourneyWorkspacePage() {
    * không chạy, không lời giải thích. Người dùng chỉ có thể kết luận là hỏng.
    */
   const [blocked, setBlocked] = useState<string | null>(null)
+
+  const [stopping, setStopping] = useState(false)
+
+  /** Dừng yêu cầu đang chạy — cùng đường với việc từ chối trong hội thoại. */
+  async function stopWorkflow() {
+    const id = live?.workflow_id
+    if (!id || stopping) return
+    setStopping(true)
+    try {
+      absorb(await cancelWorkflow(id))
+      say('agent', 'Mình đã dừng yêu cầu này. Các bước đã hoàn thành trước đó vẫn được giữ lại.')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      say('agent', `Mình chưa dừng được yêu cầu này. ${detail}`)
+      setFault(detail)
+    } finally {
+      setStopping(false)
+    }
+  }
 
   function setField(service: string, key: string, value: string) {
     setValues((current) => ({ ...current, [service]: { ...current[service], [key]: value } }))
@@ -765,47 +860,7 @@ export function JourneyWorkspacePage() {
 
   const journey = live ? journeyFromWorkflow(live) : null
   const planning = !!live && (journey?.steps.length ?? 0) === 0
-  const shownJourney =
-    planning && journey
-      ? {
-          ...journey,
-          steps: [
-            // Bước LẬP KẾ HOẠCH là bước đang chạy thật — Planner đang chạy.
-            // Cho nó trạng thái `running` là nói đúng, và `STEP_STATE.running`
-            // đã có sẵn vòng xoay + vệt quét, nên khung hành trình động ngay từ
-            // giây đầu thay vì đứng im chờ plan.
-            {
-              id: 'provisional-plan',
-              title: 'Lập kế hoạch',
-              state: 'running' as const,
-              summary: 'Đang xác định các bước cần thực hiện.',
-              timestamp: null,
-              details: [],
-              actions: [],
-              waitingOn: null,
-              x: 0,
-              y: 0,
-              lane: 'main',
-            },
-            // Các bước SẮP làm, để trống — người dùng thấy trước cả hình dạng
-            // hành trình chứ không chỉ bước hiện tại.
-            ...provisional.current.map((tool, index) => ({
-              id: `provisional-${tool}`,
-              title: toolLabel(tool),
-              state: 'proposed' as const,
-              summary: 'Chưa bắt đầu.',
-              timestamp: null,
-              details: [],
-              actions: [],
-              waitingOn: null,
-              x: (index + 1) * 380,
-              y: 0,
-              lane: 'main',
-            })),
-          ],
-          edges: [],
-        }
-      : journey
+  const shownJourney = planning && journey ? { ...journey, ...provisionalCanvas(provisional.current) } : journey
 
   const steps = shownJourney?.steps ?? []
   const selected = steps.find((step) => step.id === selectedId) ?? null
@@ -948,6 +1003,22 @@ export function JourneyWorkspacePage() {
                   </div>
 
                   <div className="mt-1 flex shrink-0 items-center gap-2.5">
+                    {/* Nút DỪNG phải ở đây, nơi người dùng đang đứng.
+                        Nó vốn chỉ có ở trang chi tiết, mà workspace mới là màn
+                        hình họ nhìn lúc yêu cầu đang chạy — đo được: 0 nút dừng
+                        trên canvas. Muốn dừng thì phải đi tìm sang trang khác,
+                        hoặc gõ "thôi" và hy vọng hệ thống hiểu. */}
+                    {live && !TERMINAL.has(live.status) && (
+                      <button
+                        type="button"
+                        onClick={stopWorkflow}
+                        disabled={stopping}
+                        className="press cursor-pointer rounded-full px-3 py-1.5 text-[13px] font-medium disabled:cursor-not-allowed"
+                        style={{ color: 'var(--danger)', boxShadow: 'inset 0 0 0 1px var(--border-subtle)' }}
+                      >
+                        {stopping ? 'Đang dừng…' : 'Dừng'}
+                      </button>
+                    )}
                     <span className="rounded-full border border-[var(--border-subtle)] px-3 py-1.5 font-mono text-[13px] tabular-nums text-[var(--text-secondary)]">
                       {done}/{steps.length}
                     </span>
@@ -995,7 +1066,11 @@ export function JourneyWorkspacePage() {
                   selectedId={selectedId}
                   onSelect={setSelectedId}
                   steps={steps}
-                  edges={journey?.edges ?? []}
+                  // `shownJourney`, KHÔNG phải `journey`: chặng lấy từ cái
+                  // này còn đường nối lấy từ cái kia thì lúc chưa có plan,
+                  // canvas có sáu thẻ mà không đường nào — đo được 6 node,
+                  // 0 edge.
+                  edges={shownJourney?.edges ?? []}
                 />
               )}
             </div>

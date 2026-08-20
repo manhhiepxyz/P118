@@ -581,3 +581,24 @@ export function expectedTools(services: string[]): string[] {
   }
   return tools
 }
+
+/**
+ * Bước nào phải chạy TRƯỚC bước nào — quan hệ có thật giữa các tool.
+ *
+ * `book_shuttle` cần `viewing_id` từ lịch tham quan; `book_parking` cần
+ * `vehicle_id` từ đăng ký xe; `pay_fee` cần `booking_id` từ đặt chỗ. Đây là
+ * ràng buộc InputRef của chính tool contract, không phải phỏng đoán về thứ tự.
+ *
+ * Dùng để khung tạm có ĐƯỜNG NỐI và xếp theo cột giống hành trình thật, thay
+ * vì một hàng ngang rời rạc. Nhờ vậy lúc plan thật tới, bố cục gần như không
+ * nhảy.
+ */
+const TOOL_DEPENDS_ON: Record<string, string> = {
+  book_shuttle: 'schedule_property_viewing',
+  book_parking: 'register_vehicle',
+  pay_fee: 'book_parking',
+}
+
+export function expectedDependency(tool: string): string | null {
+  return TOOL_DEPENDS_ON[tool] ?? null
+}
