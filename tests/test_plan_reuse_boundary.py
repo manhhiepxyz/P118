@@ -123,48 +123,61 @@ def _plan_with(tools: list[str]):
     )
 
 
-def test_a_plan_with_an_unpaid_fee_is_refused_by_the_shortcut() -> None:
-    """`Executor` trần không có `PaymentApprovalBoundary`.
+def test_the_shortcut_runs_behind_the_payment_gate() -> None:
+    """Đường tắt KHÔNG còn từ chối `pay_fee` — nó chạy sau cổng duyệt.
 
-    Đo được trên stack thật, chính bản vá này trước khi có guard:
+    Bản trước chặn hẳn, vì `Executor` trần là đường vòng quanh mọi boundary và
+    nó đã trừ 100.000 VND với 0 bản ghi duyệt. Chặn là đúng lúc đó, nhưng cái
+    giá là luồng đỗ xe — luôn có `pay_fee` — không bao giờ được hưởng tốc độ.
 
-        PAY-021   BOOK-055   100.000 VND   PAID
-        payment_approvals cho workflow đó: 0
-
-    Tiền bị trừ mà không có bản ghi duyệt nào. Tài liệu của dự án nói rõ bước
-    duyệt "không được phép là tuỳ chọn".
+    Giờ chuỗi boundary nhận `seed_statuses`/`seed_results`, nên bọc được mà vẫn
+    giữ phần seed. `pay_fee` dừng đúng chỗ nó phải dừng, và đường tắt áp dụng
+    cho cả luồng có phí.
     """
-    plan = _plan_with(["register_vehicle", "book_parking", "pay_fee"])
-
-    with pytest.raises(RetryNotAllowed) as caught:
-        demo_service._refuse_unapproved_payment(plan, rows=[])
-
-    assert caught.value.code == "PAYMENT_NEEDS_APPROVAL"
-
-
-def test_a_fee_already_paid_does_not_block_the_shortcut() -> None:
-    """Đã trả rồi thì không còn cổng nào để đi qua — chặn nữa là chặn oan."""
-    plan = _plan_with(["register_vehicle", "book_parking", "pay_fee"])
-    rows = [{"task_id": "T3", "status": "SUCCESS"}]
-
-    demo_service._refuse_unapproved_payment(plan, rows)  # không raise
+    for name in ("rerun_with_answers", "retry_failed_tasks"):
+        source = inspect.getsource(getattr(demo_service, name))
+        assert "PaymentApprovalBoundary(" in source, f"{name} chạy Executor trần, không qua cổng tiền"
+        assert "ValidatedExecutionBoundary(" in source, f"{name} không validate plan trước khi chạy"
+        assert "False,  # KHÔNG bao giờ pre-approve" in source, f"{name} có thể tự duyệt thanh toán"
 
 
-def test_a_plan_without_any_fee_is_allowed() -> None:
-    plan = _plan_with(["schedule_property_viewing", "book_shuttle"])
+def test_the_shortcut_treats_an_approval_pause_as_waiting_not_failure() -> None:
+    """Dừng lại hỏi KHÔNG phải lỗi.
 
-    demo_service._refuse_unapproved_payment(plan, rows=[])  # không raise
+    Boundary ném `PolicyInterruptionError` khi cần duyệt tiền. Không bắt thì
+    đường tắt đánh workflow FAILED trong khi nó chỉ đang chờ người dùng bấm —
+    và bản ghi duyệt đã được ghim, nên thẻ xác nhận vẫn hiện: hai tầng nói hai
+    chuyện khác nhau về cùng một workflow.
+    """
+    for name in ("rerun_with_answers", "retry_failed_tasks"):
+        source = inspect.getsource(getattr(demo_service, name))
+        assert "except PolicyInterruptionError as pause:" in source, f"{name} coi việc dừng lại hỏi là lỗi"
+        # Bắt lỗi thôi CHƯA đủ: việc GHIM yêu cầu duyệt là của caller, và
+        # đường chạy thường làm điều đó ở `_run_demo_job`. Bỏ bước ấy thì đo
+        # được `pay_fee` PENDING, `payment_approvals` 0 dòng, workflow
+        # WAITING_APPROVAL — không rò tiền, nhưng người dùng chờ một nút không
+        # tồn tại.
+        assert "persist_pending_approval(" in source, f"{name} không ghim yêu cầu duyệt — người dùng kẹt"
+        assert "WorkflowStatus.WAITING_APPROVAL" in source
 
 
 @pytest.mark.parametrize("func", ["rerun_with_answers", "retry_failed_tasks"])
-def test_every_shortcut_checks_the_payment_gate(func: str) -> None:
-    """Lá chắn cho CHỖ DÙNG.
+def test_no_shortcut_talks_to_the_executor_directly(func: str) -> None:
+    """`Executor` trần là đường vòng quanh MỌI boundary.
 
-    Ba test trên gọi thẳng hàm guard. Gỡ lời gọi khỏi một đường tắt thì cả ba
-    vẫn xanh — trong khi đúng đường ấy lại trừ tiền không qua cổng.
+    Đây là bài học đắt nhất của phiên này: mỗi đường tắt thêm vào vì một lý do
+    chính đáng — resume, retry, vá plan — là thêm một cửa sau. Guard chặn
+    `pay_fee` từng là câu trả lời, nhưng nó chỉ chặn được đúng một tool.
+
+    Luật giờ đơn giản hơn và rộng hơn: không ai được gọi `Executor` mà không
+    bọc. Bọc rồi thì `pay_fee` dừng đúng chỗ, và những guard ad-hoc kia không
+    cần tồn tại.
     """
     source = inspect.getsource(getattr(demo_service, func))
-    assert "_refuse_unapproved_payment(" in source, f"{func} không kiểm cổng thanh toán"
+    assert "Executor(" in source, "cập nhật lại test: đường tắt không còn dựng Executor"
+    assert "ValidatedExecutionBoundary(Executor(" in source, (
+        f"{func} gọi Executor TRẦN — đường vòng quanh mọi boundary"
+    )
 
 
 def test_the_viewing_resume_never_runs_an_unapproved_fee() -> None:

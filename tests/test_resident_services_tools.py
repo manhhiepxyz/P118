@@ -103,7 +103,11 @@ class _Boundary:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def execute(self, plan, workflow_id=None, *, finalize=True, parent_workflow_id=None, session_id=None):
+    # `**_forwarded`: đồ giả phải RỘNG bằng hàng thật, nếu không `TypeError`
+    # lúc chạy trông y hệt một thất bại của sản phẩm.
+    async def execute(
+        self, plan, workflow_id=None, *, finalize=True, parent_workflow_id=None, session_id=None, **_forwarded
+    ):
         self.calls += 1
         return workflow_id or "workflow", {}
 

@@ -327,6 +327,8 @@ class _ExecutionBoundary(Protocol):
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        seed_statuses: dict[str, Any] | None = None,
+        seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         """`finalize=False` nghĩa là caller chỉ chạy MỘT PHẦN plan."""
         ...
@@ -360,6 +362,8 @@ class ViewingApprovalBoundary:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        seed_statuses: dict[str, Any] | None = None,
+        seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         viewing_task_ids = {task.task_id for task in plan.tasks if task.tool == "schedule_property_viewing"}
         if not viewing_task_ids or self._viewing_approved:
@@ -369,6 +373,8 @@ class ViewingApprovalBoundary:
                 finalize=finalize,
                 parent_workflow_id=parent_workflow_id,
                 session_id=session_id,
+                seed_statuses=seed_statuses,
+                seed_results=seed_results,
             )
 
         prefix_plan = plan_without(plan, viewing_task_ids)
@@ -387,6 +393,8 @@ class ViewingApprovalBoundary:
                     finalize=False,
                     parent_workflow_id=parent_workflow_id,
                     session_id=session_id,
+                    seed_statuses=seed_statuses,
+                    seed_results=seed_results,
                 )
             except PolicyInterruptionError as inner:
                 # Boundary bên trong dừng lại hỏi (thường là duyệt thanh toán).

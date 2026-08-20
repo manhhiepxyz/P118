@@ -41,6 +41,7 @@ class _Executor:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        **_forwarded,
     ) -> tuple[str, dict[str, StandardResult]]:
         # `finalize` thuộc contract: double phải nhận, nếu không nó che mất
         # việc boundary thật có chuyển tiếp cờ hay không.
