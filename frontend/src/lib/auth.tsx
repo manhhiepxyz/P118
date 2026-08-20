@@ -40,7 +40,7 @@ interface AuthContextValue {
   token: string | null
   initializing: boolean
   isAdmin: boolean
-  /** provider hoặc admin — cả hai được duyệt hồ sơ xác thực. */
+  /** CHỈ provider (bên thứ 3) mới được duyệt hồ sơ xác thực, Admin không có quyền này. */
   isProvider: boolean
   login: (username: string, password: string) => Promise<void>
   register: (
@@ -119,7 +119,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       token,
       initializing,
       isAdmin: user?.role === 'admin',
-      isProvider: user?.role === 'provider' || user?.role === 'admin',
+      isProvider: user?.role === 'provider',
       login,
       register,
       refreshUser,
@@ -155,11 +155,8 @@ export function useAuth(): AuthContextValue {
  * và để nó tự phân luồng thì mỗi lần đi lạc là một lần nhảy hai chặng.
  */
 const ROLE_HOME: Record<string, string> = {
-  // CHỈ provider. Admin là người của P-118 — chặn họ khỏi `/profile` nghĩa là
-  // admin không sửa được hồ sơ của chính mình, một mất mát thật để đổi lấy
-  // không gì cả. Vấn đề cần giải là danh tính bên thứ 3 lang thang trong bề
-  // mặt khách hàng, không phải "ai không phải khách hàng thì cấm hết".
   provider: '/review',
+  admin: '/admin',
 }
 
 export function ProtectedRoute({ children }: { children: ReactNode }) {
@@ -199,7 +196,7 @@ export function AdminRoute({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
-/** Chỉ người duyệt hồ sơ xác thực — provider hoặc admin. */
+/** Chỉ người duyệt hồ sơ xác thực — provider. */
 export function ProviderRoute({ children }: { children: ReactNode }) {
   const { user, isProvider, initializing } = useAuth()
 

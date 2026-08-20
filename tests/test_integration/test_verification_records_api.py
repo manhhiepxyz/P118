@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from pathlib import Path
 
 import pytest
 import pytest_asyncio

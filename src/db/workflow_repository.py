@@ -1301,3 +1301,66 @@ class WorkflowRepository:
         if record.get("parent_workflow_id"):
             record["parent_workflow_id"] = str(record["parent_workflow_id"])
         return record
+
+    async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
+        """Lấy danh sách tất cả các luồng hoạt động cho Admin.
+
+        Đã bỏ cơ chế ẩn danh theo yêu cầu để hỗ trợ quản lý. Trả về `goal` gốc,
+        `owner_username`, và `input_data` của task bị lỗi.
+        Hỗ trợ lọc theo `search_user`.
+        """
+        offset = (page - 1) * limit
+        async with self._pool.acquire() as conn:
+            if search_user:
+                total_query = """
+                    SELECT COUNT(*) 
+                    FROM workflows w
+                    LEFT JOIN users u ON w.owner_user_id = u.id
+                    WHERE u.username ILIKE '%' || $1 || '%'
+                """
+                total = await conn.fetchval(total_query, search_user)
+            else:
+                total = await conn.fetchval("SELECT COUNT(*) FROM workflows")
+
+            rows_query = """
+                SELECT 
+                    w.workflow_id, 
+                    w.goal, 
+                    w.status, 
+                    w.error_code,
+                    w.created_at, 
+                    w.updated_at,
+                    w.assistant_answer,
+                    u.username as owner_username,
+                    (
+                        SELECT COALESCE(json_agg(t.tool), '[]'::json)
+                        FROM (
+                            SELECT tool FROM workflow_tasks wt 
+                            WHERE wt.workflow_id = w.workflow_id 
+                            ORDER BY wt.id
+                        ) t
+                    ) as tools,
+                    (
+                        SELECT json_build_object('tool', wt.tool, 'message', wt.error_message, 'input', wt.input_data)
+                        FROM workflow_tasks wt
+                        WHERE wt.workflow_id = w.workflow_id AND wt.status = 'FAILED'
+                        LIMIT 1
+                    ) as failed_task
+                FROM workflows w
+                LEFT JOIN users u ON w.owner_user_id = u.id
+                WHERE ($3::text IS NULL OR u.username ILIKE '%' || $3 || '%')
+                ORDER BY w.created_at DESC
+                LIMIT $1 OFFSET $2
+            """
+            rows = await conn.fetch(rows_query, limit, offset, search_user)
+
+        items = []
+        for r in rows:
+            item = dict(r)
+            item["workflow_id"] = str(item["workflow_id"])
+            if isinstance(item.get("tools"), str):
+                item["tools"] = json.loads(item["tools"])
+            if isinstance(item.get("failed_task"), str):
+                item["failed_task"] = json.loads(item["failed_task"])
+            items.append(item)
+        return {"items": items, "total": total, "page": page, "limit": limit}

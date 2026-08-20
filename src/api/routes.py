@@ -19,9 +19,9 @@ from src.api.small_talk import SmallTalk, SpeechType, answer_capability_question
 from src.common.enums import ErrorCode, WorkflowStatus
 from src.common.failure_messages import repair_question, task_failure_message
 from src.common.failures import classify_failure, failure_for_code
-from src.common.tool_contract import TOOL_CONTRACTS
 from src.common.projects import PROJECTS, find_project_id, project_name, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
+from src.common.tool_contract import TOOL_CONTRACTS
 from src.config import get_settings
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.session_repository import create_session, get_session
@@ -47,15 +47,15 @@ from src.models.schemas import (
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
-    RetryNotAllowed,
-    rerun_with_answers,
-    retry_failed_tasks,
     ResumeError,
+    RetryNotAllowed,
     persist_pending_approval,
     persist_pending_viewing_approval,
     read_demo_workflow,
     reject_payment,
+    rerun_with_answers,
     resume_payment_after_approval,
+    retry_failed_tasks,
     run_demo_workflow,
 )
 from src.orchestration.payment_approval import quote_from_results

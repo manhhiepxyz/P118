@@ -34,16 +34,16 @@ import type {
   ViewingApprovalListResponse,
   ViewingApprovalRecord,
   ViewingApprovalStatus,
-} from './types'
+} from "./types";
 
-const BASE = '/api/v1'
+const BASE = "/api/v1";
 
 export class ApiError extends Error {
-  status: number
+  status: number;
 
   constructor(status: number, message: string) {
-    super(message)
-    this.status = status
+    super(message);
+    this.status = status;
   }
 }
 
@@ -57,20 +57,20 @@ export class ApiError extends Error {
  * PRODUCTION nên dùng cookie HttpOnly + refresh flow để token không nằm trong
  * tầm với của JavaScript. Chưa triển khai ở Gate 2.
  */
-const TOKEN_KEY = 'p118.access_token'
+const TOKEN_KEY = "p118.access_token";
 
 export function getStoredToken(): string | null {
   try {
-    return sessionStorage.getItem(TOKEN_KEY)
+    return sessionStorage.getItem(TOKEN_KEY);
   } catch {
-    return null
+    return null;
   }
 }
 
 export function storeToken(token: string | null): void {
   try {
-    if (token) sessionStorage.setItem(TOKEN_KEY, token)
-    else sessionStorage.removeItem(TOKEN_KEY)
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
   } catch {
     /* Trình duyệt chặn storage (private mode) — phiên chỉ sống trong RAM. */
   }
@@ -80,21 +80,23 @@ export function storeToken(token: string | null): void {
 function messageForStatus(status: number, fallback: string): string {
   switch (status) {
     case 401:
-      return 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.'
+      return "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
     case 403:
-      return 'Bạn không có quyền thực hiện thao tác này.'
+      return "Bạn không có quyền thực hiện thao tác này.";
     case 404:
-      return 'Không tìm thấy yêu cầu này.'
+      return "Không tìm thấy yêu cầu này.";
     case 422:
       // KHÔNG hiện lỗi Pydantic thô: nó chứa tên field nội bộ và cả giá trị
       // người dùng vừa nhập, và không ai đọc được nó.
-      return fallback || 'Dữ liệu chưa hợp lệ. Vui lòng kiểm tra lại thông tin.'
+      return (
+        fallback || "Dữ liệu chưa hợp lệ. Vui lòng kiểm tra lại thông tin."
+      );
     case 429:
-      return 'Bạn thao tác hơi nhanh. Vui lòng thử lại sau giây lát.'
+      return "Bạn thao tác hơi nhanh. Vui lòng thử lại sau giây lát.";
     case 503:
-      return 'Hệ thống đang bận. Vui lòng thử lại sau ít phút.'
+      return "Hệ thống đang bận. Vui lòng thử lại sau ít phút.";
     default:
-      return fallback
+      return fallback;
   }
 }
 
@@ -110,34 +112,37 @@ function messageForStatus(status: number, fallback: string): string {
  * `_FOLLOW_UP_VALIDATION_MESSAGES` của backend, nên lệch là đỏ.
  */
 const SAFE_VALIDATION_MESSAGES = [
-  'Ngày tham quan chưa phù hợp.',
-  'Ngày đặt chỗ chưa phù hợp.',
-  'Ngày bảo trì chưa phù hợp.',
-  'Ngày chuyển nhà chưa phù hợp.',
-  'Giờ xem phải theo định dạng',
-  'Giờ bảo trì phải theo định dạng',
-  'Giờ chuyển nhà phải theo định dạng',
-  'Hãy chọn Khu A hoặc Khu B.',
-  'Vui lòng nhập biển số xe',
-  'Hãy cho biết phương tiện',
-  'Dự án bạn chọn chưa nằm trong danh sách',
-  'Giờ liên hệ phải theo định dạng',
-  'Số người đi xe phải là một số từ 1 đến 30.',
-  'Thông tin bổ sung chưa đúng định dạng',
-]
+  "Ngày tham quan chưa phù hợp.",
+  "Ngày đặt chỗ chưa phù hợp.",
+  "Ngày bảo trì chưa phù hợp.",
+  "Ngày chuyển nhà chưa phù hợp.",
+  "Giờ xem phải theo định dạng",
+  "Giờ bảo trì phải theo định dạng",
+  "Giờ chuyển nhà phải theo định dạng",
+  "Hãy chọn Khu A hoặc Khu B.",
+  "Vui lòng nhập biển số xe",
+  "Hãy cho biết phương tiện",
+  "Dự án bạn chọn chưa nằm trong danh sách",
+  "Giờ liên hệ phải theo định dạng",
+  "Số người đi xe phải là một số từ 1 đến 30.",
+  "Thông tin bổ sung chưa đúng định dạng",
+];
 
 function safeValidationDetail(payload: unknown): string | null {
-  if (!payload || typeof payload !== 'object' || !('detail' in payload)) return null
-  const detail = (payload as { detail?: unknown }).detail
-  if (typeof detail !== 'string') return null
-  return SAFE_VALIDATION_MESSAGES.some((prefix) => detail.startsWith(prefix)) ? detail : null
+  if (!payload || typeof payload !== "object" || !("detail" in payload))
+    return null;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail !== "string") return null;
+  return SAFE_VALIDATION_MESSAGES.some((prefix) => detail.startsWith(prefix))
+    ? detail
+    : null;
 }
 
 type RequestOptions = {
-  method?: string
-  body?: unknown
+  method?: string;
+  body?: unknown;
   /** Bỏ qua khi gọi login/register — lúc đó chưa có token. */
-  anonymous?: boolean
+  anonymous?: boolean;
   /**
    * Câu để hiện khi request này nhận 401.
    *
@@ -146,7 +151,7 @@ type RequestOptions = {
    * nghĩa là sai tài khoản hoặc mật khẩu — và bảo một người vừa gõ mật khẩu
    * rằng "phiên đăng nhập đã hết hạn" thì họ sẽ đi tìm một phiên chưa từng có.
    */
-  unauthorizedMessage?: string
+  unauthorizedMessage?: string;
   /**
    * Câu để hiện khi request này nhận 409.
    *
@@ -159,29 +164,43 @@ type RequestOptions = {
    * trước rồi xoá nhé" — rồi bị áp cho mọi 409. Người vừa gõ "ok" trong hội
    * thoại nhận được một lời khuyên về việc xoá mà họ không hề định làm.
    */
-  conflictMessage?: string
-}
+  conflictMessage?: string;
+};
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, anonymous = false, unauthorizedMessage, conflictMessage } = options
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+async function request<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  const {
+    method = "GET",
+    body,
+    anonymous = false,
+    unauthorizedMessage,
+    conflictMessage,
+  } = options;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
 
   if (!anonymous) {
-    const token = getStoredToken()
-    if (token) headers.Authorization = `Bearer ${token}`
+    const token = getStoredToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
   }
 
-  let response: Response
+  let response: Response;
   try {
     response = await fetch(`${BASE}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-    })
+    });
   } catch {
     // Lỗi mạng: không có status để phân loại, và message của fetch không nói
     // được gì hữu ích cho người dùng.
-    throw new ApiError(0, 'Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.')
+    throw new ApiError(
+      0,
+      "Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.",
+    );
   }
 
   if (response.status === 401) {
@@ -190,15 +209,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     //
     // Request ẩn danh (login/register) thì KHÔNG có phiên để xoá, và 401 ở đó
     // nói về thông tin đăng nhập chứ không nói về phiên.
-    if (!anonymous) storeToken(null)
-    throw new ApiError(401, unauthorizedMessage ?? messageForStatus(401, ''))
+    if (!anonymous) storeToken(null);
+    throw new ApiError(401, unauthorizedMessage ?? messageForStatus(401, ""));
   }
 
   if (!response.ok) {
-    let fallback = 'Đã có lỗi xảy ra. Vui lòng thử lại.'
+    let fallback = "Đã có lỗi xảy ra. Vui lòng thử lại.";
     if (response.status === 422) {
       try {
-        fallback = safeValidationDetail(await response.clone().json()) ?? fallback
+        fallback =
+          safeValidationDetail(await response.clone().json()) ?? fallback;
       } catch {
         // Body không phải JSON: giữ câu generic, không hiện raw response.
       }
@@ -207,22 +227,27 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       // Chuỗi RỖNG nghĩa là "dùng nguyên văn câu backend gửi". Với retry, câu
       // ấy đã chỉ đúng lối ra ("bạn cho mình biết muốn đổi gì"); đè một câu
       // chung lên là vứt đi thứ hữu ích duy nhất.
-      let detail = conflictMessage
+      let detail = conflictMessage;
       if (!detail) {
         try {
-          const payload = (await response.clone().json()) as { detail?: unknown }
-          detail = typeof payload.detail === 'string' ? payload.detail : ''
+          const payload = (await response.clone().json()) as {
+            detail?: unknown;
+          };
+          detail = typeof payload.detail === "string" ? payload.detail : "";
         } catch {
-          detail = ''
+          detail = "";
         }
       }
-      throw new ApiError(409, detail || messageForStatus(409, fallback))
+      throw new ApiError(409, detail || messageForStatus(409, fallback));
     }
-    throw new ApiError(response.status, messageForStatus(response.status, fallback))
+    throw new ApiError(
+      response.status,
+      messageForStatus(response.status, fallback),
+    );
   }
 
-  if (response.status === 204) return undefined as T
-  return (await response.json()) as T
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
 }
 
 /**
@@ -231,63 +256,80 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
  * KHÔNG set `Content-Type`: trình duyệt tự sinh boundary. Để nguyên header mặc
  * định mà vẫn JSON.stringify thì form file sẽ gửi nhầm như chuỗi.
  */
-async function requestFormData<T>(path: string, form: FormData, method = 'POST'): Promise<T> {
-  const headers: Record<string, string> = {}
-  const token = getStoredToken()
-  if (token) headers.Authorization = `Bearer ${token}`
+async function requestFormData<T>(
+  path: string,
+  form: FormData,
+  method = "POST",
+): Promise<T> {
+  const headers: Record<string, string> = {};
+  const token = getStoredToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
 
-  let response: Response
+  let response: Response;
   try {
-    response = await fetch(`${BASE}${path}`, { method, headers, body: form })
+    response = await fetch(`${BASE}${path}`, { method, headers, body: form });
   } catch {
-    throw new ApiError(0, 'Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.')
+    throw new ApiError(
+      0,
+      "Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.",
+    );
   }
 
   if (response.status === 401) {
-    storeToken(null)
-    throw new ApiError(401, 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.')
+    storeToken(null);
+    throw new ApiError(
+      401,
+      "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.",
+    );
   }
 
   if (!response.ok) {
-    let fallback = 'Đã có lỗi xảy ra. Vui lòng thử lại.'
+    let fallback = "Đã có lỗi xảy ra. Vui lòng thử lại.";
     if (response.status === 422) {
       try {
-        fallback = safeValidationDetail(await response.clone().json()) ?? fallback
+        fallback =
+          safeValidationDetail(await response.clone().json()) ?? fallback;
       } catch {
         // Body không phải JSON: giữ câu generic.
       }
     }
-    throw new ApiError(response.status, messageForStatus(response.status, fallback))
+    throw new ApiError(
+      response.status,
+      messageForStatus(response.status, fallback),
+    );
   }
 
-  return (await response.json()) as T
+  return (await response.json()) as T;
 }
 
 /* ------------------------------------------------------------------ */
 /* Auth                                                                */
 /* ------------------------------------------------------------------ */
 
-export async function login(username: string, password: string): Promise<LoginResponse> {
-  const data = await request<LoginResponse>('/auth/login', {
-    method: 'POST',
+export async function login(
+  username: string,
+  password: string,
+): Promise<LoginResponse> {
+  const data = await request<LoginResponse>("/auth/login", {
+    method: "POST",
     body: { username, password },
     anonymous: true,
     // Không phân biệt sai tên với sai mật khẩu — phân biệt sẽ biến form đăng
     // nhập thành công cụ dò tài khoản có tồn tại hay không.
-    unauthorizedMessage: 'Tên đăng nhập hoặc mật khẩu không đúng.',
-  })
-  storeToken(data.access_token)
-  return data
+    unauthorizedMessage: "Tên đăng nhập hoặc mật khẩu không đúng.",
+  });
+  storeToken(data.access_token);
+  return data;
 }
 
 /** Profile tự khai ở form đăng ký — tất cả optional, backend chấp nhận null. */
 export interface RegisterProfileInput {
-  full_name?: string
-  phone?: string
-  address?: string
-  date_of_birth?: string
-  gender?: string
-  cccd_last4?: string
+  full_name?: string;
+  phone?: string;
+  address?: string;
+  date_of_birth?: string;
+  gender?: string;
+  cccd_last4?: string;
 }
 
 export async function register(
@@ -298,20 +340,24 @@ export async function register(
 ): Promise<AuthUser> {
   // Backend luôn tạo role `customer`. Browser không chọn được role, và cũng
   // không tạo được liên kết cư dân — việc đó thuộc đường admin/provider.
-  const body: Record<string, unknown> = { username, password }
-  if (email) body.email = email
+  const body: Record<string, unknown> = { username, password };
+  if (email) body.email = email;
   for (const [key, value] of Object.entries(profile)) {
-    if (value) body[key] = value
+    if (value) body[key] = value;
   }
-  return request<AuthUser>('/auth/register', { method: 'POST', body, anonymous: true })
+  return request<AuthUser>("/auth/register", {
+    method: "POST",
+    body,
+    anonymous: true,
+  });
 }
 
 export async function getMe(): Promise<AuthUser> {
-  return request<AuthUser>('/auth/me')
+  return request<AuthUser>("/auth/me");
 }
 
 export function logout(): void {
-  storeToken(null)
+  storeToken(null);
 }
 
 /* ------------------------------------------------------------------ */
@@ -329,15 +375,18 @@ export async function startWorkflow(
   projectName?: string,
   sessionId?: string | null,
 ): Promise<AgentWorkflowResponse> {
-  const body: Record<string, string> = { goal }
-  if (projectName) body.project_name = projectName
+  const body: Record<string, string> = { goal };
+  if (projectName) body.project_name = projectName;
   // Nối vào cuộc trò chuyện đang mở. Không gửi = bắt đầu cuộc mới.
   //
   // Server KHÔNG tin giá trị này: nó đọc session bằng truy vấn giới hạn chủ sở
   // hữu, và `account_state` vẫn lấy từ bảng `sessions`. Gửi session của người
   // khác thì bị bỏ qua, không phải được chấp nhận.
-  if (sessionId) body.session_id = sessionId
-  return request<AgentWorkflowResponse>('/workflows/demo/start', { method: 'POST', body })
+  if (sessionId) body.session_id = sessionId;
+  return request<AgentWorkflowResponse>("/workflows/demo/start", {
+    method: "POST",
+    body,
+  });
 }
 
 /**
@@ -348,29 +397,43 @@ export async function startWorkflow(
  */
 export async function continueWorkflow(
   workflowId: string,
-  answer: { fields?: Record<string, string | number | boolean>; message?: string },
+  answer: {
+    fields?: Record<string, string | number | boolean>;
+    message?: string;
+  },
 ): Promise<AgentWorkflowResponse> {
   // Ưu tiên `fields`: backend đã nói rõ nó thiếu field nào, nên gửi đúng từng
   // field để nó tự map. Ghép câu trả lời vào goal ở phía browser sẽ bắt Planner
   // đọc lại một câu tiếng Việt mà chính backend vừa phân tích xong.
-  const body: Record<string, unknown> = {}
-  if (answer.fields && Object.keys(answer.fields).length > 0) body.fields = answer.fields
-  if (answer.message) body.message = answer.message
+  const body: Record<string, unknown> = {};
+  if (answer.fields && Object.keys(answer.fields).length > 0)
+    body.fields = answer.fields;
+  if (answer.message) body.message = answer.message;
 
-  return request<AgentWorkflowResponse>(`/workflows/demo/${encodeURIComponent(workflowId)}/continue`, {
-    method: 'POST',
-    body,
-  })
+  return request<AgentWorkflowResponse>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/continue`,
+    {
+      method: "POST",
+      body,
+    },
+  );
 }
 
-export async function getWorkflow(workflowId: string): Promise<AgentWorkflowResponse> {
-  return request<AgentWorkflowResponse>(`/workflows/demo/${encodeURIComponent(workflowId)}`)
+export async function getWorkflow(
+  workflowId: string,
+): Promise<AgentWorkflowResponse> {
+  return request<AgentWorkflowResponse>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}`,
+  );
 }
 
-export async function listWorkflows(status = 'active', limit = 20): Promise<AgentWorkflowListResponse> {
+export async function listWorkflows(
+  status = "active",
+  limit = 20,
+): Promise<AgentWorkflowListResponse> {
   return request<AgentWorkflowListResponse>(
     `/workflows/demo?status=${encodeURIComponent(status)}&limit=${limit}`,
-  )
+  );
 }
 
 /**
@@ -381,12 +444,12 @@ export async function listWorkflows(status = 'active', limit = 20): Promise<Agen
  */
 export async function decidePayment(
   workflowId: string,
-  decision: 'approve' | 'reject',
+  decision: "approve" | "reject",
 ): Promise<AgentWorkflowResponse> {
   return request<AgentWorkflowResponse>(
     `/workflows/demo/${encodeURIComponent(workflowId)}/payment-decision`,
-    { method: 'POST', body: { decision } },
-  )
+    { method: "POST", body: { decision } },
+  );
 }
 
 /**
@@ -395,11 +458,13 @@ export async function decidePayment(
  * Backend giữ nguyên các bước đã SUCCESS; đây không phải rollback. Với workflow
  * chờ thanh toán, huỷ tương đương từ chối khoản thanh toán.
  */
-export async function cancelWorkflow(workflowId: string): Promise<AgentWorkflowResponse> {
+export async function cancelWorkflow(
+  workflowId: string,
+): Promise<AgentWorkflowResponse> {
   return request<AgentWorkflowResponse>(
     `/workflows/demo/${encodeURIComponent(workflowId)}/cancel`,
-    { method: 'POST' },
-  )
+    { method: "POST" },
+  );
 }
 
 /**
@@ -415,18 +480,23 @@ export async function cancelWorkflow(workflowId: string): Promise<AgentWorkflowR
  * nguyên sẽ hỏng như cũ. Câu từ chối của backend đã chỉ đúng lối ra (đổi
  * input), nên hiện nguyên văn thay vì đè một câu chung.
  */
-export async function retryWorkflow(workflowId: string): Promise<AgentWorkflowResponse> {
-  return request<AgentWorkflowResponse>(`/workflows/demo/${encodeURIComponent(workflowId)}/retry`, {
-    method: 'POST',
-    conflictMessage: '',
-  })
+export async function retryWorkflow(
+  workflowId: string,
+): Promise<AgentWorkflowResponse> {
+  return request<AgentWorkflowResponse>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/retry`,
+    {
+      method: "POST",
+      conflictMessage: "",
+    },
+  );
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<void> {
   await request<void>(`/workflows/demo/${encodeURIComponent(workflowId)}`, {
-    method: 'DELETE',
-    conflictMessage: 'Yêu cầu này chưa kết thúc. Bạn huỷ trước rồi xoá nhé.',
-  })
+    method: "DELETE",
+    conflictMessage: "Yêu cầu này chưa kết thúc. Bạn huỷ trước rồi xoá nhé.",
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -434,13 +504,13 @@ export async function deleteWorkflow(workflowId: string): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 export async function getCapabilities(): Promise<Capability[]> {
-  const data = await request<{ capabilities: Capability[] }>('/capabilities')
-  return data.capabilities
+  const data = await request<{ capabilities: Capability[] }>("/capabilities");
+  return data.capabilities;
 }
 
 export async function listProjects(): Promise<string[]> {
-  const data = await request<{ projects: string[] }>('/projects')
-  return data.projects
+  const data = await request<{ projects: string[] }>("/projects");
+  return data.projects;
 }
 
 /* ------------------------------------------------------------------ */
@@ -448,12 +518,12 @@ export async function listProjects(): Promise<string[]> {
 /* ------------------------------------------------------------------ */
 
 export interface ProfileUpdateInput {
-  full_name?: string | null
-  phone?: string | null
-  address?: string | null
-  date_of_birth?: string | null
-  gender?: string | null
-  cccd_last4?: string | null
+  full_name?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  date_of_birth?: string | null;
+  gender?: string | null;
+  cccd_last4?: string | null;
 }
 
 /** Cập nhật profile tự khai (form fields + optional avatar file). */
@@ -461,12 +531,12 @@ export async function updateProfile(
   input: ProfileUpdateInput,
   avatar?: File,
 ): Promise<AuthUser> {
-  const form = new FormData()
+  const form = new FormData();
   for (const [key, value] of Object.entries(input)) {
-    if (value !== null && value !== undefined) form.append(key, String(value))
+    if (value !== null && value !== undefined) form.append(key, String(value));
   }
-  if (avatar) form.append('avatar', avatar)
-  return requestFormData<AuthUser>('/users/me', form, 'PATCH')
+  if (avatar) form.append("avatar", avatar);
+  return requestFormData<AuthUser>("/users/me", form, "PATCH");
 }
 
 /* ------------------------------------------------------------------ */
@@ -480,7 +550,7 @@ export async function updateProfile(
  * nguồn dự phòng khi kết nối SSE mất.
  */
 export async function fetchNotificationSummary(): Promise<NotificationSummary> {
-  return request<NotificationSummary>('/notifications/summary')
+  return request<NotificationSummary>("/notifications/summary");
 }
 
 /* ------------------------------------------------------------------ */
@@ -499,17 +569,22 @@ export async function createVerificationRecord(
   claimedData: VerificationClaim,
   files: File[],
 ): Promise<{ item: VerificationRecord }> {
-  const form = new FormData()
-  form.append('record_type', recordType)
-  form.append('claimed_data', JSON.stringify(claimedData))
-  for (const file of files) form.append('files', file)
-  return requestFormData<{ item: VerificationRecord }>('/verification-records', form)
+  const form = new FormData();
+  form.append("record_type", recordType);
+  form.append("claimed_data", JSON.stringify(claimedData));
+  for (const file of files) form.append("files", file);
+  return requestFormData<{ item: VerificationRecord }>(
+    "/verification-records",
+    form,
+  );
 }
 
 /** Đơn xác thực của CHÍNH mình — không nhận user_id, không dò được người khác. */
 export async function myVerificationRecords(): Promise<VerificationRecord[]> {
-  const data = await request<{ items: VerificationRecord[] }>('/verification-records/my')
-  return data.items
+  const data = await request<{ items: VerificationRecord[] }>(
+    "/verification-records/my",
+  );
+  return data.items;
 }
 
 /** Danh sách hồ sơ cho người duyệt (provider/admin). */
@@ -517,14 +592,14 @@ export async function listVerificationRecords(
   recordType?: VerificationRecordType,
   status?: VerificationStatus,
 ): Promise<VerificationRecord[]> {
-  const params = new URLSearchParams()
-  if (recordType) params.set('record_type', recordType)
-  if (status) params.set('status', status)
-  const qs = params.toString()
+  const params = new URLSearchParams();
+  if (recordType) params.set("record_type", recordType);
+  if (status) params.set("status", status);
+  const qs = params.toString();
   const data = await request<{ items: VerificationRecord[] }>(
-    `/verification-records${qs ? `?${qs}` : ''}`,
-  )
-  return data.items
+    `/verification-records${qs ? `?${qs}` : ""}`,
+  );
+  return data.items;
 }
 
 /** Duyệt / từ chối một hồ sơ. Chỉ gửi quyết định — từ chối bắt buộc lý do. */
@@ -534,8 +609,8 @@ export async function decideVerificationRecord(
 ): Promise<{ item: VerificationRecord }> {
   return request<{ item: VerificationRecord }>(
     `/verification-records/${encodeURIComponent(recordId)}/decide`,
-    { method: 'POST', body },
-  )
+    { method: "POST", body },
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -551,9 +626,11 @@ export async function decideVerificationRecord(
 export async function listViewingApprovals(
   status?: ViewingApprovalStatus,
 ): Promise<ViewingApprovalRecord[]> {
-  const qs = status ? `?status=${encodeURIComponent(status)}` : ''
-  const data = await request<ViewingApprovalListResponse>(`/viewing-approvals${qs}`)
-  return data.items
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  const data = await request<ViewingApprovalListResponse>(
+    `/viewing-approvals${qs}`,
+  );
+  return data.items;
 }
 
 /**
@@ -568,8 +645,8 @@ export async function decideViewingApproval(
 ): Promise<{ summary: string; status: string }> {
   return request<{ summary: string; status: string }>(
     `/viewing-approvals/${encodeURIComponent(workflowId)}/decide`,
-    { method: 'POST', body },
-  )
+    { method: "POST", body },
+  );
 }
 
 /* Số liệu vận hành TOÀN hệ thống — chỉ admin.                           */
@@ -577,16 +654,108 @@ export async function decideViewingApproval(
    màn quản trị là lý do dashboard từng hiện 0 trong khi database có 92
    workflow. Xem `GET /admin/metrics` phía backend. */
 export interface AdminMetrics {
-  total: number
-  running: number
-  waiting_approval: number
-  failed: number
-  success: number
-  cancelled: number
-  awaiting_user: number
-  orphaned: number
+  total: number;
+  running: number;
+  waiting_approval: number;
+  failed: number;
+  success: number;
+  cancelled: number;
+  awaiting_user: number;
+  llm_tokens: number;
+  llm_calls: number;
+  total_cost: number;
+  avg_latency_ms: number;
 }
 
 export async function adminMetrics(): Promise<AdminMetrics> {
-  return request<AdminMetrics>('/admin/metrics')
+  return request<AdminMetrics>("/admin/metrics");
 }
+
+export interface AdminUser {
+  id: string;
+  username: string;
+  email: string | null;
+  role: "customer" | "admin" | "provider";
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  full_name: string | null;
+  phone: string | null;
+}
+
+export async function adminListUsers(): Promise<{ items: AdminUser[] }> {
+  return request<{ items: AdminUser[] }>("/admin/users");
+}
+
+export async function adminUpdateUserRole(
+  userId: string,
+  role: "customer" | "admin" | "provider",
+): Promise<AdminUser> {
+  return request<AdminUser>(`/admin/users/${encodeURIComponent(userId)}/role`, {
+    method: "PATCH",
+    body: { role },
+  });
+}
+
+export async function adminUpdateUserStatus(
+  userId: string,
+  isArchived: boolean,
+): Promise<AdminUser> {
+  return request<AdminUser>(
+    `/admin/users/${encodeURIComponent(userId)}/status`,
+    {
+      method: "PATCH",
+      body: { is_archived: isArchived },
+    },
+  );
+}
+
+export interface AdminWorkflowHistoryItem {
+  workflow_id: string;
+  goal: string;
+  status: string;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+  assistant_answer?: string | null;
+  owner_username: string | null;
+  tools: string[];
+  failed_task: { tool: string; message: string; input?: any } | null;
+}
+
+export async function adminWorkflowsHistory(
+  page = 1,
+  limit = 50,
+  search_user?: string
+): Promise<{
+  items: AdminWorkflowHistoryItem[];
+  total: number;
+  page: number;
+  limit: number;
+}> {
+  const query = new URLSearchParams({
+    page: page.toString(),
+    limit: limit.toString(),
+  });
+  if (search_user) {
+    query.append("search_user", search_user);
+  }
+  return request<{
+    items: AdminWorkflowHistoryItem[];
+    total: number;
+    page: number;
+    limit: number;
+  }>(`/admin/workflows/history?${query.toString()}`);
+}
+
+export async function adminRetryWorkflow(
+  workflowId: string,
+): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/admin/workflows/${encodeURIComponent(workflowId)}/retry`,
+    {
+      method: "POST",
+    },
+  );
+}
+

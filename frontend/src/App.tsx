@@ -5,6 +5,9 @@ import { ReviewPortalLayout } from './components/ReviewPortalLayout'
 import { AdminRoute, AuthProvider, ProtectedRoute, ProviderRoute, useAuth } from './lib/auth'
 import { NotificationProvider } from './lib/notifications'
 import { AdminDashboardPage } from './pages/AdminDashboardPage'
+import { AdminUsersPage } from './pages/AdminUsersPage'
+import { AdminWorkflowsPage } from './pages/AdminWorkflowsPage'
+import { AdminLayout } from './components/AdminLayout'
 import { ApartmentLinkPage } from './pages/ApartmentLinkPage'
 import { SupportPage } from './pages/SupportPage'
 import { VerifyApartmentPage } from './pages/VerifyApartmentPage'
@@ -172,20 +175,19 @@ export default function App() {
             }
           />
 
-          {/* Admin — chỉ admin; dashboard chỉ còn số liệu vận hành. Việc duyệt
-              hồ sơ xác thực đã chuyển hẳn cho cổng bên thứ 3 (`/review`).
-
-              Nằm NGOÀI `AppLayout` như `/workspace` và `/workflows`: trang này
-              dựng `WorkspaceShell`, vốn tự có sidebar và khoá 100dvh. Để trong
-              AppLayout sẽ ra hai sidebar chồng nhau. */}
+          {/* Admin — chỉ admin; dashboard chỉ còn số liệu vận hành. Cấu trúc lồng nhau qua AdminLayout. */}
           <Route
             path="/admin"
             element={
               <AdminRoute>
-                <AdminDashboardPage />
+                <AdminLayout />
               </AdminRoute>
             }
-          />
+          >
+            <Route index element={<AdminDashboardPage />} />
+            <Route path="users" element={<AdminUsersPage />} />
+            <Route path="workflows" element={<AdminWorkflowsPage />} />
+          </Route>
 
           {/* App chính — yêu cầu đăng nhập */}
           <Route

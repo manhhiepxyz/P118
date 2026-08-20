@@ -715,3 +715,16 @@ BEGIN
     END IF;
 END
 $$;
+
+-- =============================================================
+-- 2026-08 — Observability Metrics
+-- =============================================================
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_cost NUMERIC(10, 4) NOT NULL DEFAULT 0.0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
+    END IF;
+END
+$$;

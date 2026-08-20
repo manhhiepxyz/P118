@@ -240,6 +240,12 @@ CREATE TABLE IF NOT EXISTS workflows (
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
 
+    -- Observability Metrics
+    total_tokens INTEGER     NOT NULL DEFAULT 0,
+    total_cost   NUMERIC(10, 4) NOT NULL DEFAULT 0.0,
+    latency_ms   INTEGER,
+
+
     -- [fix] Soft delete thay vì DELETE cứng.
     -- Lý do: execution_logs cần giữ audit trail ngay cả khi workflow "bị xóa".
     -- NULL = active; NOT NULL = archived (không hiển thị ở UI nhưng không mất dữ liệu).

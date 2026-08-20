@@ -1,5 +1,6 @@
 from src.api.routes import _flatten_task_inputs, _recalled_hints
 
+
 def test_hints_come_from_the_most_recent_turn_that_has_the_field():
     """Gợi ý một giá trị từ ba tháng trước trong khi tháng trước họ đã đổi là
     gợi ý SAI — và người dùng gật đầu theo thói quen thì hệ thống vừa đặt lại

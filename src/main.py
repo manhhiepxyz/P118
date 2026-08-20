@@ -14,19 +14,20 @@ from src.api.auth_routes import router as auth_router
 from src.api.auth_routes import users_router
 from src.api.middleware import RateLimitMiddleware
 from src.api.notification_routes import router as notification_router
+from src.api.observability import CorrelationIdMiddleware, setup_observability_logging
 from src.api.readiness import evaluate_readiness
 from src.api.routes import router
 from src.api.verification_routes import router as verification_router
 from src.api.viewing_approval_routes import router as viewing_approval_router
 from src.config import get_settings
 from src.monitoring.llm_trace import trace_enabled
+from src.orchestration.auto_approve import auto_approve_due_viewings
 from src.orchestration.deps import build_repository
 from src.orchestration.runtime_provider import (
     SharedPool,
     clear_repository_provider,
     set_repository_provider,
 )
-from src.orchestration.auto_approve import auto_approve_due_viewings
 from src.orchestration.sweeper import sweep_zombie_workflows
 from src.services.llm import LLMConfigurationError, check_llm_configuration
 
@@ -38,8 +39,10 @@ async def _ready(repository):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_observability_logging()
+    
     settings = get_settings()
-    print(f"Starting {settings.app_name} in {settings.app_env} mode")
+    logging.getLogger("p118.main").info(f"Starting {settings.app_name} in {settings.app_env} mode")
 
     # Composition root: dựng pool MỘT LẦN và đăng ký provider.
     #
@@ -60,7 +63,7 @@ async def lifespan(app: FastAPI):
     try:
         check_llm_configuration(settings)
     except LLMConfigurationError as exc:
-        print(f"[CẤU HÌNH] LLM chưa dùng được: {exc} — /ready sẽ báo not_ready.")
+        logging.getLogger("p118.main").error(f"[CẤU HÌNH] LLM chưa dùng được: {exc} — /ready sẽ báo not_ready.")
 
     sweep_task = None
     if settings.zombie_sweep_enabled:
@@ -73,11 +76,11 @@ async def lifespan(app: FastAPI):
                 try:
                     await sweep_zombie_workflows()
                 except Exception:  # noqa: BLE001 - vòng sweep không được chết
-                    print("zombie sweep error", exc_info=True)
+                    logging.getLogger("p118.sweeper").exception("zombie sweep error")
                 await asyncio.sleep(settings.zombie_sweep_interval_seconds)
 
         sweep_task = asyncio.create_task(_sweep_forever())
-        print("Zombie sweep loop started")
+        logging.getLogger("p118.main").info("Zombie sweep loop started")
 
     # Tự duyệt lịch tham quan — CHỈ khi được bật tường minh. Xem
     # `src/orchestration/auto_approve.py` để biết vì sao mặc định là tắt.
@@ -90,7 +93,7 @@ async def lifespan(app: FastAPI):
                 try:
                     await auto_approve_due_viewings(delay)
                 except Exception as exc:  # noqa: BLE001 - vòng lặp không được chết
-                    print(f"auto-approve error: {type(exc).__name__}")
+                    logging.getLogger("p118.main").error(f"auto-approve error: {type(exc).__name__}")
                 # Nhịp quét bằng 1/3 độ trễ, tối thiểu 5 giây: chờ đúng bằng
                 # `delay` thì thời gian thực tế có thể gấp đôi khi yêu cầu đến
                 # ngay sau một lượt quét, và người demo sẽ ngồi nhìn màn hình
@@ -98,7 +101,7 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(max(5, delay // 3))
 
         auto_task = asyncio.create_task(_auto_approve_forever())
-        print(f"Auto-approve viewing loop started ({delay}s) — CHẾ ĐỘ DEMO")
+        logging.getLogger("p118.main").info(f"Auto-approve viewing loop started ({delay}s) — CHẾ ĐỘ DEMO")
     yield
 
     clear_repository_provider()
@@ -114,7 +117,7 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
-    print("Shutting down...")
+    logging.getLogger("p118.main").info("Shutting down...")
 
 
 if trace_enabled():  # pragma: no cover - phụ thuộc biến môi trường
@@ -148,6 +151,9 @@ async def safe_request_validation_error(_request, _exc: RequestValidationError) 
 
 
 settings = get_settings()
+
+app.add_middleware(CorrelationIdMiddleware)
+
 app.add_middleware(
     RateLimitMiddleware,
     requests_per_minute=settings.rate_limit_per_minute,

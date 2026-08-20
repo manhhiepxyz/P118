@@ -116,7 +116,7 @@ class _FakeExecutor:
     thành FAILED — một thất bại của ĐỒ GIẢ, không phải của sản phẩm.
     """
 
-    instances: list["_FakeExecutor"] = []
+    instances: list[_FakeExecutor] = []
 
     def __init__(self, connectors, repository, on_failure=None) -> None:
         self.connectors = connectors

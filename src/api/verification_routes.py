@@ -40,9 +40,9 @@ from pydantic import BaseModel, Field
 
 from src.api.deps import get_current_user, require_roles
 from src.common.enums import ErrorCode
+from src.config import get_settings
 from src.connectors.ownership import OwnershipConnector, OwnershipProviderError
 from src.connectors.transport import TransportConnector
-from src.config import get_settings
 from src.db.link_request_repository import materialize_resident_link
 from src.db.resident_link_repository import get_verified_identity
 from src.orchestration.runtime_provider import acquire_repository

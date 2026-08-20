@@ -40,9 +40,8 @@ from src.api.deps import require_roles
 from src.api.routes import _DEMO_JOBS
 from src.config import get_settings
 from src.orchestration.demo_service import reject_viewing, resume_viewing_after_approval
-from src.orchestration.viewing_approval import expire_stale_viewing_approvals
 from src.orchestration.runtime_provider import acquire_repository
-from src.orchestration.viewing_approval import list_viewing_approvals
+from src.orchestration.viewing_approval import expire_stale_viewing_approvals, list_viewing_approvals
 
 logger = logging.getLogger(__name__)
 
