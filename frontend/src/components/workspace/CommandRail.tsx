@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from 'react'
-import { ArrowUp, Loader2, Sparkles, X } from 'lucide-react'
+import { ArrowUp, Loader2, Sparkles, Square, X } from 'lucide-react'
 
 interface Props {
   mode: 'launcher' | 'journey'
@@ -23,6 +23,17 @@ interface Props {
    * giữa chừng trong lúc một workflow đang chờ thông tin.
    */
   working?: boolean
+  /**
+   * Dừng việc đang chạy.
+   *
+   * Có nó thì nút gửi ĐỔI VAI khi `working`: mũi tên thành ô vuông dừng, viền
+   * quay để nói có việc đang chạy. Nút dừng vốn nằm trên đầu trang, cách xa
+   * chỗ tay người dùng đang đặt — họ gõ ở đáy, gửi ở đáy, rồi phải đi tìm nút
+   * dừng ở một chỗ khác. Đặt nó ngay dưới ngón tay vừa bấm gửi.
+   */
+  onStop?: () => void | Promise<void>
+  /** Lệnh dừng đang bay — khoá nút để không gửi hai lần. */
+  stopping?: boolean
   /** Lý do lần bấm vừa rồi không chạy. Hiện ngay cạnh chỉ báo trạng thái. */
   notice?: string | null
 }
@@ -57,8 +68,13 @@ export function CommandRail({
   journeyLabel,
   busy = false,
   working = false,
+  onStop,
+  stopping = false,
   notice = null,
 }: Props) {
+  // Đang chạy VÀ có đường dừng → nút đổi vai. Thiếu `onStop` thì giữ nguyên
+  // hành vi cũ, không có nút chết.
+  const showStop = working && Boolean(onStop)
   const canRun = (selected.length > 0 || value.trim().length > 0) && !busy
   const input = useRef<HTMLTextAreaElement>(null)
 
@@ -187,6 +203,34 @@ export function CommandRail({
               )}
             </div>
 
+            {showStop ? (
+              <button
+                type="button"
+                onClick={onStop}
+                disabled={stopping}
+                aria-label="Dừng việc đang chạy"
+                title="Dừng việc đang chạy"
+                className="press relative inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[var(--r-sm)] disabled:cursor-not-allowed"
+                style={{ color: 'var(--danger)', boxShadow: 'inset 0 0 0 1px var(--border-subtle)' }}
+              >
+                {/* VÒNG TRÒN quay bên trong, ô vuông đứng yên ở tâm.
+                    Quay chính cái viền vuông của nút thì chuyển động bám theo
+                    bốn góc — mắt đọc ra một khung đang rung chứ không ra một
+                    thứ đang chạy. Vòng tròn quay đều quanh tâm là hình dạng
+                    duy nhất mà chuyển động xoay trông đứng yên tại chỗ. */}
+                <span
+                  aria-hidden
+                  className="absolute inset-0 m-auto h-5 w-5 animate-spin rounded-full border-2 border-transparent"
+                  style={{ borderTopColor: 'var(--danger)', borderRightColor: 'color-mix(in srgb, var(--danger) 28%, transparent)' }}
+                />
+                {/* Ô vuông KHÔNG quay: nó là cái nút bấm để dừng, không phải
+                    một phần của chỉ báo tiến trình. */}
+                {/* 8px trong một vòng có đường kính trong 16px: đường chéo ô vuông là
+                    11.3px nên bốn góc còn thở. Ở 10px thì góc gần chạm vành và
+                    hai hình dính vào nhau thành một khối. */}
+                <Square className="relative h-2 w-2 fill-current" strokeWidth={0} aria-hidden />
+              </button>
+            ) : (
             <button
               type="button"
               onClick={onExecute}
@@ -213,6 +257,7 @@ export function CommandRail({
               )}
               {mode === 'launcher' && (busy ? 'Đang chạy' : 'Thực hiện')}
             </button>
+            )}
           </div>
         </div>
       </div>

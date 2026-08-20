@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS parking_bookings (
 CREATE TABLE IF NOT EXISTS parking_capacity (
     parking_zone VARCHAR(20)  NOT NULL,
     booking_date DATE         NOT NULL,
-    capacity     INTEGER      NOT NULL CHECK (capacity > 0),
+    -- `>= 0`: sức chứa 0 nghĩa là khu không còn nhận đăng ký.
+    capacity     INTEGER      NOT NULL CHECK (capacity >= 0),
     PRIMARY KEY (parking_zone, booking_date)
     -- Không có booked_count — tránh race condition và lệch dữ liệu.
     -- Lý do: nếu update booked_count ở service layer mà không có

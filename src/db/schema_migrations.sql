@@ -715,3 +715,33 @@ BEGIN
     END IF;
 END
 $$;
+
+
+-- Sức chứa 0 phải hợp lệ: nó nghĩa là khu KHÔNG còn nhận đăng ký.
+--
+-- Ràng buộc cũ `CHECK (capacity > 0)` cấm đúng trạng thái ấy, nên muốn diễn lại
+-- luồng "khu A hết chỗ → đổi sang khu B" thì phải gieo booking giả cho từng
+-- ngày — vừa sai sự thật vừa không bao giờ phủ hết ngày.
+DO $$
+BEGIN
+    IF to_regclass('zone_capacity_config') IS NOT NULL THEN
+        ALTER TABLE zone_capacity_config DROP CONSTRAINT IF EXISTS zone_capacity_config_capacity_check;
+        ALTER TABLE zone_capacity_config ADD CONSTRAINT zone_capacity_config_capacity_check CHECK (capacity >= 0);
+    END IF;
+END
+$$;
+
+-- Ràng buộc THỨ HAI, dễ bỏ sót.
+--
+-- `parking_capacity` (bảng theo NGÀY) có check riêng, tách khỏi
+-- `zone_capacity_config` (bảng cấu hình). Nới mỗi bảng cấu hình thì seed chạy
+-- tới câu đồng bộ là đổ `CheckViolationError`, và vì migration dừng ở đó nên
+-- cả file seed không hoàn tất.
+DO $$
+BEGIN
+    IF to_regclass('parking_capacity') IS NOT NULL THEN
+        ALTER TABLE parking_capacity DROP CONSTRAINT IF EXISTS parking_capacity_capacity_check;
+        ALTER TABLE parking_capacity ADD CONSTRAINT parking_capacity_capacity_check CHECK (capacity >= 0);
+    END IF;
+END
+$$;

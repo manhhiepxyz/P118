@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -145,6 +146,21 @@ class TaskNotFoundError(RuntimeError):
 
     def __init__(self, workflow_id: str, task_id: str) -> None:
         super().__init__(f"Workflow task không tồn tại: workflow={workflow_id} task={task_id}")
+
+
+
+def _to_timestamp(value: Any) -> datetime | None:
+    """`datetime`, chuỗi ISO, hoặc `None` → `datetime` cho cột `timestamptz`."""
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            # Chuỗi không đọc được thì để `NOW()` lo — mất độ chính xác của
+            # một mốc còn hơn mất cả sự kiện.
+            return None
+    return None
 
 
 class WorkflowRepository:
@@ -796,7 +812,25 @@ class WorkflowRepository:
         `upcoming=False` lấy phần còn lại. None = không quan tâm. Xem
         `_FUTURE_EVENT_SQL`.
         """
-        where = ["w.archived_at IS NULL"]
+        # Lượt TRÒ CHUYỆN không phải một yêu cầu, nên nó không có chỗ trong
+        # danh sách yêu cầu.
+        #
+        # Chúng vẫn được ghi xuống database — đó là thứ giữ cho hội thoại không
+        # mất và cho `GET /workflows/demo/{id}` khỏi trả 404. Nhưng "bạn giúp
+        # được những gì" nằm cạnh "Đặt lịch tham quan Ocean Park" như hai việc
+        # ngang hàng thì mỗi câu hỏi lại đẩy một yêu cầu thật xuống dưới, và
+        # Lịch sử thành bản ghi âm cuộc trò chuyện thay vì danh sách việc.
+        #
+        # Điều kiện `NOT EXISTS` giữ phần an toàn: chỉ ẩn lượt KHÔNG có bước
+        # nào. Có bước nghĩa là đã có việc chạy thật, và việc đó thuộc về danh
+        # sách bất kể câu trả lời được đóng dấu gì.
+        where = [
+            "w.archived_at IS NULL",
+            """(
+                w.assistant_for_status IS DISTINCT FROM 'CHAT'
+                OR EXISTS (SELECT 1 FROM workflow_tasks ct WHERE ct.workflow_id = w.workflow_id)
+            )""",
+        ]
         params: list[object] = []
         if owner_user_id is not None:
             params.append(_uuid(owner_user_id))
@@ -872,6 +906,30 @@ class WorkflowRepository:
                 FROM workflows
                 WHERE owner_user_id = $1
                   AND created_at > NOW() - make_interval(hours => $2)
+                  -- Đếm thứ TỐN TIỀN, không đếm mọi dòng trong bảng.
+                  --
+                  -- Hạn ngạch tồn tại để giữ hoá đơn LLM. Từ khi mỗi lượt trò
+                  -- chuyện cũng được ghi thành một dòng workflow (để hội thoại
+                  -- không mất và `GET` không trả 404), `count(*)` gộp luôn cả
+                  -- lời chào — và "xin chào" ăn mất một suất đặt lịch.
+                  --
+                  -- Đo được trên dữ liệu thật, 100 lượt mang dấu CHAT:
+                  --    53 KHÔNG gọi mô hình  (chào hỏi, xác nhận — gần như 0đ)
+                  --    47 CÓ gọi mô hình     (câu hỏi đi qua Planner)
+                  -- và lượt hỏi tốn 12.957 token, gần bằng một tác vụ thật
+                  -- (15.135). Nên loại hết cả nhóm CHAT cũng sai: nó mở một
+                  -- đường tiêu tiền không có trần.
+                  --
+                  -- FAIL-CLOSED: có kế hoạch thì luôn đếm, kể cả khi ghi nhận
+                  -- token hỏng. Đảo lại — chỉ tin `llm_usage` — thì một lần
+                  -- ghi hỏng là hạn ngạch biến mất.
+                  AND (
+                      task_plan::text <> 'null'
+                      OR EXISTS (
+                          SELECT 1 FROM llm_usage u
+                          WHERE u.workflow_id = workflows.workflow_id
+                      )
+                  )
                 """,
                 _uuid(owner_user_id),
                 hours,
@@ -912,7 +970,43 @@ class WorkflowRepository:
                 """
                 SELECT
                     w.goal,
-                    w.assistant_answer,
+                    -- Lượt này thuộc CUỘC TRÒ CHUYỆN nào.
+                    --
+                    -- Ký ức phục vụ HAI việc khác nhau, và chúng cần phạm vi
+                    -- khác nhau:
+                    --
+                    --   gợi ý giá trị ô  "vẫn khu A như lần trước phải không?"
+                    --                    → xuyên phiên, đó mới là chỗ nó có ích
+                    --   ngữ cảnh câu nói "đường đi đến ĐÓ"
+                    --                    → chỉ trong cùng cuộc trò chuyện
+                    --
+                    -- Trộn hai phạm vi lại thì một câu mơ hồ sẽ được diễn giải
+                    -- bằng một việc người dùng làm hôm khác. Đo được: sau khi
+                    -- huỷ một lịch tham quan rồi gõ "tôi muốn thực hiện dịch
+                    -- vụ khác", câu trả lời là "Mình thấy bạn muốn đổi ngày
+                    -- tham quan sang 29" — con số 29 đến từ một lượt hoàn toàn
+                    -- khác. Trên một tài khoản sạch, cùng câu ấy trả lời đúng.
+                    w.session_id,
+                    w.status,
+                    -- CHỈ câu P-118 thật sự viết ra.
+                    --
+                    -- `FALLBACK` là câu deterministic dùng khi mô hình lỗi hoặc
+                    -- đầu ra bị guard loại — ví dụ "Mình đã trả lời bạn ở
+                    -- trên.". Nó không mang thông tin gì, nhưng đưa vào ký ức
+                    -- thì mô hình đọc nó như một câu P-118 ĐÃ NÓI và bắt chước:
+                    -- lượt sau lại ra đúng câu ấy, rồi lượt sau nữa. Một vòng
+                    -- lặp tự nuôi, và mỗi vòng lại ghi thêm một `FALLBACK` vào
+                    -- ký ức.
+                    --
+                    -- Đo được: cùng một câu hỏi, cùng dữ liệu, chỉ khác ở chỗ
+                    -- ký ức có chứa câu nền hay không — không chứa thì trả lời
+                    -- đúng ngữ cảnh ("Bạn muốn biết đường đến Vinhomes Ocean
+                    -- Park đúng không?"), có chứa thì lặp lại câu nền.
+                    --
+                    -- Câu người dùng gõ thì GIỮ nguyên: nó luôn là ngữ cảnh
+                    -- thật, bất kể P-118 đáp lại được hay không.
+                    CASE WHEN w.assistant_response_state = 'READY'
+                         THEN w.assistant_answer END AS assistant_answer,
                     w.created_at,
                     array_remove(array_agg(DISTINCT t.tool), NULL) AS tools,
                     -- Input ĐÃ CHẠY THẬT của các bước, gộp lại. Đây là nguồn
@@ -928,8 +1022,38 @@ class WorkflowRepository:
                 LEFT JOIN workflow_tasks t ON t.workflow_id = w.workflow_id
                 WHERE w.owner_user_id = $1
                   AND w.goal IS NOT NULL
+                  -- Yêu cầu người dùng đã CHỦ ĐỘNG huỷ không phải là mong muốn
+                  -- của họ nữa.
+                  --
+                  -- Ký ức được đọc trước khi Planner chạy, và Planner dùng nó
+                  -- để hiểu một câu nói cụt. Giữ lại một yêu cầu vừa bị dừng
+                  -- nghĩa là câu cụt nào cũng có thể được dựng lại thành chính
+                  -- yêu cầu ấy — tức là bấm Dừng không dừng được gì.
+                  --
+                  -- Đo được nguyên văn:
+                  --
+                  --   Bạn:   đặt lịch tham quan Vinhomes Green Paradise…
+                  --   P-118: Mình đã dừng yêu cầu này.
+                  --   Bạn:   a
+                  --   P-118: Mình cần thêm chút thông tin để đặt lịch tham
+                  --          quan Vinhomes Green Paradise…
+                  --
+                  -- Gõ một ký tự vô nghĩa và nhận lại việc vừa chủ động huỷ.
+                  --
+                  -- Bước đã CHẠY XONG vẫn nằm nguyên trong `workflow_tasks` —
+                  -- huỷ không đụng tới chúng.
+                  --
+                  -- KHÔNG lọc `CANCELLED` ở đây. Bản trước lọc, và nó cắt luôn
+                  -- thứ cần giữ: người dùng huỷ một lịch tham quan rồi hỏi
+                  -- "tôi muốn đổi dịch vụ", và P-118 hỏi lại "bạn đang dùng
+                  -- dịch vụ nào?" — nó không còn biết vừa nói chuyện gì.
+                  --
+                  -- Hai bên đọc ký ức vì hai lý do khác nhau:
+                  --   Planner      cần biết NÊN LÀM GÌ  → yêu cầu đã huỷ phải bỏ
+                  --   tầng trả lời cần biết ĐANG NÓI GÌ → phải giữ
+                  -- Nên lọc ở phía người đọc, không lọc ở nguồn.
                   AND ($2::uuid IS NULL OR w.workflow_id <> $2::uuid)
-                GROUP BY w.workflow_id, w.goal, w.assistant_answer, w.created_at
+                GROUP BY w.workflow_id, w.goal, w.session_id, w.status, w.assistant_answer, w.assistant_response_state, w.created_at
                 ORDER BY w.created_at DESC
                 LIMIT $3
                 """,
@@ -984,7 +1108,18 @@ class WorkflowRepository:
                         event.get("task_status"),
                         # Giờ do caller đóng dấu lúc sự kiện XẢY RA. Ghim theo
                         # lô ở điểm dừng nên `NOW()` lúc ghim muộn hơn thực tế.
-                        event.get("at"),
+                        #
+                        # Caller đóng dấu bằng `.isoformat()` — một CHUỖI. Cột
+                        # là `timestamptz`, và asyncpg không tự ép: nó ném
+                        # `DataError`. Lỗi ấy rơi vào một khối bắt-tất-cả ghi ở
+                        # mức `info`, nên cả lớp dòng thời gian ngừng hoạt động
+                        # trong im lặng — đo được 0 sự kiện suốt 6 giờ, trong
+                        # khi giao diện vẫn chạy bình thường.
+                        #
+                        # Ép ở ĐÂY, tầng tiếp giáp database, chứ không bắt mọi
+                        # caller nhớ đúng kiểu: `$7::timestamptz` trong câu SQL
+                        # đã hứa nhận chuỗi, và lời hứa ấy phải đúng.
+                        _to_timestamp(event.get("at")),
                     )
                     for event in events
                 ],
@@ -1067,6 +1202,16 @@ class WorkflowRepository:
                     w.session_id,
                     w.created_at,
                     w.updated_at,
+                    -- Câu P-118 đã trả lời cho lượt này.
+                    --
+                    -- Một phiên gồm NHIỀU workflow: mỗi câu người dùng gõ tiếp
+                    -- sinh ra một workflow mới. Thiếu các cột này thì màn hội
+                    -- thoại chỉ dựng lại được câu của người dùng, còn phía
+                    -- P-118 trống — nhìn như hệ thống chưa từng trả lời.
+                    w.assistant_answer,
+                    w.assistant_suggestions,
+                    w.assistant_response_state,
+                    w.assistant_for_status,
                     COUNT(t.id) FILTER (WHERE t.task_id IS NOT NULL) AS total_tasks,
                     COUNT(t.id) FILTER (WHERE t.status = 'SUCCESS')   AS completed_tasks
                 FROM workflows w

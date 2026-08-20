@@ -299,10 +299,17 @@ export function JourneyWorkspacePage() {
     if (!id || stopping) return
     setStopping(true)
     try {
+      // Đặt cờ TRƯỚC `absorb`: response của lệnh huỷ đã có thể mang sẵn câu
+      // chốt của backend, và nếu cờ chưa bật thì nó lọt qua rồi câu của mình
+      // nói tiếp — hai câu huỷ liền nhau cho một lần bấm.
+      stopAnnouncedFor.current = id
       absorb(await cancelWorkflow(id))
       say('agent', 'Mình đã dừng yêu cầu này. Các bước đã hoàn thành trước đó vẫn được giữ lại.')
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
+      // Không dừng được thì cũng không có gì để nín: mở lại cờ, để câu chốt
+      // thật của backend vẫn tới được người dùng.
+      stopAnnouncedFor.current = null
       say('agent', `Mình chưa dừng được yêu cầu này. ${detail}`)
       setFault(detail)
     } finally {
@@ -363,6 +370,18 @@ export function JourneyWorkspacePage() {
    * Không có nó thì mỗi 1.5 giây workflow trả về cùng một `answer` và hội thoại
    * bị lặp vô hạn cùng một dòng.
    */
+  /**
+   * Yêu cầu NÀO đã được nói câu dừng.
+   *
+   * Ghi id chứ không ghi một cờ bật/tắt. Cờ phải mở lại ở đâu đó, và mọi thời
+   * điểm mở đều sai: mở lúc gửi lượt mới thì nhịp poll CUỐI của yêu cầu vừa
+   * huỷ vẫn còn đang bay, nó về sau khi cờ đã mở, và câu huỷ của backend lọt
+   * ra giữa lúc việc mới đang chạy. Đo được: dừng xong 1 câu, gõ tiếp một câu
+   * nữa là thành 2.
+   *
+   * Id thì không cần mở lại — yêu cầu mới có id khác, tự nhiên không khớp.
+   */
+  const stopAnnouncedFor = useRef<string | null>(null)
   const said = useRef<Set<string>>(new Set())
   /**
    * Thời điểm bắt đầu chờ câu trả lời của lượt hiện tại, hoặc null nếu không chờ.
@@ -410,6 +429,8 @@ export function JourneyWorkspacePage() {
    */
   function absorb(res: AgentWorkflowResponse) {
     setLive(res)
+    // Kế hoạch có thật → giờ mới có hành trình để xem.
+    if (res.plan.length > 0) setMode('journey')
     if (res.session_id) sessionRef.current = res.session_id
     const next = pendingFromWorkflow(res)
     setPending(next)
@@ -467,7 +488,16 @@ export function JourneyWorkspacePage() {
       if (performance.now() - pendingSince.current >= WAITING_AFTER_MS) sayOnce(WAITING)
     } else {
       pendingSince.current = null
-      sayOnce(res.answer || res.question || (next ? next.message : null))
+      // Yêu cầu đã huỷ và mình vừa nói câu dừng rồi thì thôi.
+      //
+      // Backend cũng có câu chốt riêng cho `CANCELLED` ("Mình đã huỷ yêu cầu.
+      // Các bước đã hoàn thành trước đó vẫn được giữ lại."). `sayOnce` dedupe
+      // theo NỘI DUNG, mà hai câu này khác chữ, nên người dùng nhận đủ cả hai
+      // cho một lần bấm Dừng — và câu thứ hai còn đọng lại sau khi họ đã gõ
+      // tiếp và việc mới đang chạy, đọc như thể việc mới vừa bị huỷ.
+      if (!(res.status === 'CANCELLED' && res.workflow_id === stopAnnouncedFor.current)) {
+        sayOnce(res.answer || res.question || (next ? next.message : null))
+      }
     }
     // Xong thì NÓI NGAY, đừng đợi model soạn văn.
     //
@@ -808,6 +838,22 @@ export function JourneyWorkspacePage() {
       setFault(null)
       said.current = new Set()
       pendingSince.current = null
+      // Câu gõ tự do ở màn hành trình cũng CHƯA BIẾT là gì — y như ở màn khởi
+      // động. Nhánh này trước đây không đặt lại gì cả, nên canvas giữ nguyên
+      // các bước DỰ KIẾN của yêu cầu trước và vẽ chúng cho câu vừa gõ.
+      //
+      // Đo được: huỷ một lịch tham quan, gõ "tôi muốn đổi dịch vụ", màn hình
+      // hiện "Lập kế hoạch — ĐANG THỰC HIỆN" nối sang "Đặt lịch xem nhà" và
+      // "Đặt xe đưa đón" — cả ba đều thuộc yêu cầu vừa bị huỷ, và không bước
+      // nào trong số đó sẽ chạy.
+      //
+      // Trả về màn hội thoại. `absorb` mở lại màn hành trình ngay khi kế
+      // hoạch có thật — cùng một cơ chế với đường kia, nên hai đường vào
+      // không thể lệch nhau nữa.
+      provisional.current = []
+      sawRealPlan.current = false
+      setSelectedId(null)
+      setMode('launcher')
       startWorkflow(text, undefined, sessionRef.current)
         .then(absorb)
         .catch((error) => {
@@ -849,7 +895,14 @@ export function JourneyWorkspacePage() {
 
     said.current = new Set()
     pendingSince.current = null
-    setTurns([])
+    // KHÔNG xoá hội thoại.
+    //
+    // Câu này từng đúng khi nhánh đây chỉ chạy lúc bắt đầu một hành trình từ
+    // bảng dịch vụ. Giờ nó chạy cho cả lượt gõ tiếp, nên tin nhắn thứ hai xoá
+    // sạch tin nhắn thứ nhất — đo được: gõ lần hai, cả khung chat trống trơn.
+    //
+    // Muốn bắt đầu lại thì đã có nút "Hành trình mới"; đó mới là chỗ để xoá,
+    // vì người dùng chủ động bấm nó.
     setFault(null)
     say('user', goal)
 
@@ -860,7 +913,21 @@ export function JourneyWorkspacePage() {
 
     setLeaving(true)
     window.setTimeout(async () => {
-      setMode('journey')
+      // Chỉ sang màn hành trình khi ĐÃ BIẾT sẽ có hành trình.
+      //
+      // Người dùng chọn dịch vụ từ danh sách → chắc chắn có kế hoạch, sang
+      // ngay là đúng. Gõ tự do thì chưa biết gì: câu ấy có thể là một yêu cầu,
+      // mà cũng có thể chỉ là một câu hỏi. Planner mất 20–120 giây mới trả
+      // lời, và suốt quãng đó màn hành trình treo tiêu đề "Đang chuẩn bị…" —
+      // hứa một kế hoạch có thể không bao giờ tồn tại.
+      //
+      // Đo được: gõ "tôi muốn đổi dịch vụ", màn hành trình hiện 26 giây với 0
+      // bước và tiêu đề "Đang chuẩn bị…", rồi kết thúc bằng một câu trả lời.
+      // Không có tác vụ nào chạy — chỉ là giao diện nói sai chuyện đang xảy ra.
+      //
+      // Gõ tự do thì ở lại hội thoại; nhịp ba chấm nói đúng thứ đang diễn ra
+      // cho CẢ HAI kết cục. `absorb` sẽ chuyển màn ngay khi kế hoạch có thật.
+      if (provisional.current.length > 0) setMode('journey')
       setLeaving(false)
       setSelectedId(null)
       setDraft('')
@@ -934,10 +1001,30 @@ export function JourneyWorkspacePage() {
    * Đọc từ `events` chứ không dịch lại `status`: câu chữ thuộc về backend, và
    * một bảng thứ hai ở đây là một chỗ nữa để hai bên nói khác nhau.
    */
-  const stageLine = live?.events?.length ? (live.events[live.events.length - 1].message ?? null) : null
+  const stageLine = (() => {
+    const latest = live?.events?.length ? (live.events[live.events.length - 1] ?? null) : null
+    if (!latest) return null
+    // Giai đoạn `PLANNING` HỨA một kế hoạch. Nó chạy cho MỌI yêu cầu, kể cả
+    // những câu chỉ cần trả lời — nên "Đang chuẩn bị kế hoạch thực hiện." hiện
+    // ra cho một câu chat, rồi câu trả lời về và không có kế hoạch nào cả.
+    //
+    // Chỉ nói câu đó khi kế hoạch ĐÃ CÓ THẬT. Trước đó, ba chấm là đủ và đúng:
+    // chúng nói "đang làm", không nói đang làm gì — mà lúc ấy hệ thống cũng
+    // chưa biết.
+    if (latest.stage === 'PLANNING' && (live?.plan?.length ?? 0) === 0) return null
+    return latest.message ?? null
+  })()
+
+  // ĐANG CÓ HỘI THOẠI — khác với "đang ở màn hành trình".
+  //
+  // `mode` nói sân khấu đang vẽ gì; nó KHÔNG được quyết định khung trang, nhịp
+  // ba chấm hay tin nhắn. Trộn hai thứ này là gốc của một loạt lỗi: gõ một câu
+  // thì mất thanh trên, mất cột phải, mất luôn nhịp ba chấm — ba triệu chứng,
+  // một nguyên nhân.
+  const talking = turns.length > 0
 
   const thinking =
-    mode === 'journey' &&
+    (mode === 'journey' || talking) &&
     !!live &&
     // Thẻ chờ hiện lên KHÔNG có nghĩa là hết chuyện để nói. Nó mang dữ kiện có
     // cấu trúc ("chờ ai, việc gì"); câu của model mới là lời giải thích. Trước
@@ -1011,7 +1098,7 @@ export function JourneyWorkspacePage() {
               </div>
             )}
 
-            {mode === 'journey' && (
+            {(mode === 'journey' || talking) && (
               <div className="rise shrink-0 pb-5 pt-6">
                 {/* Cùng trục ngang với danh sách năng lực và ô nhập: đổi chế
                     độ thì tiêu đề không nhảy sang trái. Canvas bên dưới vẫn
@@ -1094,8 +1181,20 @@ export function JourneyWorkspacePage() {
               </div>
             )}
 
-            <div className="min-h-0 flex-1">
-              {mode === 'launcher' ? (
+            {/* `flex-1` CHỈ khi có thứ để chiếm chỗ.
+                Ở trạng thái đang-nói, cả bảng dịch vụ lẫn canvas đều không vẽ
+                — giữ `flex-1` thì ô này nuốt hết chiều cao và đẩy hội thoại
+                xuống sát đáy, để lại một khoảng trống bằng nửa màn hình. */}
+            <div className={mode === 'journey' || !talking ? 'min-h-0 flex-1' : ''}>
+              {/* Ba trạng thái, không phải hai.
+                    chưa nói gì   → bảng dịch vụ
+                    đang nói      → hội thoại (bảng dịch vụ LÙI đi)
+                    có kế hoạch   → canvas hành trình
+                  Gộp "đang nói" vào "chưa nói gì" thì sau khi huỷ một yêu cầu
+                  rồi gõ tiếp, cả bảng dịch vụ ập trở lại phía trên và đẩy hội
+                  thoại xuống đáy — người dùng đọc thành "bị văng ra trang
+                  chủ", dù câu của họ vẫn còn nguyên bên dưới. */}
+              {mode === 'journey' || talking ? null : (
                 <ServiceLauncher
                   selected={picked}
                   onToggle={togglePick}
@@ -1104,7 +1203,8 @@ export function JourneyWorkspacePage() {
                   invalid={invalid}
                   leaving={leaving}
                 />
-              ) : (
+              )}
+              {mode === 'journey' && (
                 <JourneyCanvas
                   selectedId={selectedId}
                   onSelect={setSelectedId}
@@ -1122,8 +1222,16 @@ export function JourneyWorkspacePage() {
                 Đặt nó ngoài cột thì nó trải cả dưới cột phải và trục ngang
                 lệch khỏi tiêu đề — đo được 296 so với 422. Cùng cột thì cùng
                 trục, ở cả hai chế độ. */}
-            {mode === 'journey' && (
-              <ConversationStream turns={turns} thinking={thinking} stage={stageLine} />
+            {/* Hội thoại hiện khi CÓ hội thoại, không phụ thuộc đang ở màn nào.
+                Trước đây nó bị buộc vào chế độ hành trình, nên khi màn khởi
+                động thôi chuyển cảnh cho một câu hỏi, người dùng gõ xong và
+                không thấy gì cả — cả câu của họ lẫn câu trả lời đều nằm trong
+                `turns` mà không được vẽ. Đo được: gõ "tôi muốn đổi dịch vụ",
+                40 giây sau trên màn hình vẫn không có chữ nào của lượt đó. */}
+            {(mode === 'journey' || talking) && (
+              <div className={mode === 'journey' ? '' : 'flex min-h-0 flex-1 flex-col justify-end'}>
+                <ConversationStream turns={turns} thinking={thinking} stage={stageLine} />
+              </div>
             )}
 
             <CommandRail
@@ -1136,6 +1244,8 @@ export function JourneyWorkspacePage() {
               journeyLabel={mode === 'journey' ? title : undefined}
               busy={leaving}
               working={thinking}
+              onStop={stopWorkflow}
+              stopping={stopping}
               notice={blocked ?? fault}
             />
           </div>
@@ -1144,7 +1254,12 @@ export function JourneyWorkspacePage() {
               chi tiết chặng đang chọn, hoạt động, và trao đổi. Nhờ vậy mép
               dưới chỉ còn đúng một việc — nhận lệnh — và dùng được cùng trục
               ngang với nội dung. */}
-          {mode === 'journey' && (
+          {/* Cột phải là KHUNG TRANG, không phải nội dung của một chế độ.
+              Buộc nó vào `mode` thì gõ một câu chat làm cả cột 360px biến mất
+              — trang đổi hình dạng, và người dùng đọc thành "bị chuyển sang
+              trang khác". Câu chat không được quyền đổi bố cục ứng dụng.
+              Chưa có hành trình thì cột vẫn ở đó và nói thẳng là chưa có. */}
+          {(mode === 'journey' || talking) && (
             <aside
               className="w-[360px] shrink-0 overflow-y-auto border-l border-[var(--border-subtle)] bg-[var(--surface-raised)]"
               aria-label="Chi tiết hành trình"
@@ -1170,10 +1285,29 @@ export function JourneyWorkspacePage() {
                   }}
                 />
               )}
-              {selected ? <InspectorPanel step={selected} /> : <JourneySummary steps={steps} title={title} hideWaiting={!!pending} />}
-              <div className="border-t border-[var(--border-subtle)]">
-                <ActivityFeed events={live?.events ?? []} />
-              </div>
+              {steps.length === 0 && !pending ? (
+                /* Nói thẳng là chưa có, thay vì dựng một bảng tóm tắt rỗng.
+                   `JourneySummary` với 0 chặng vẽ ra một khung có tiêu đề và
+                   không có gì bên dưới — đọc như một hành trình đã hỏng. */
+                /* `pt-20`: chip tài khoản nổi ở góc phải trên, ngoài luồng
+                   tài liệu. Dùng `py-8` thì chữ chui xuống dưới nó và hai
+                   thứ chồng lên nhau — đo được trên ảnh chụp. */
+                <p className="px-6 pb-8 pt-20 text-[13px] leading-[1.65] text-[var(--text-muted)]">
+                  Chưa có hành trình nào đang chạy. Nói việc bạn cần ở ô bên
+                  dưới, hoặc chọn một dịch vụ để bắt đầu.
+                </p>
+              ) : (
+                <>
+                  {selected ? (
+                    <InspectorPanel step={selected} />
+                  ) : (
+                    <JourneySummary steps={steps} title={title} hideWaiting={!!pending} />
+                  )}
+                  <div className="border-t border-[var(--border-subtle)]">
+                    <ActivityFeed events={live?.events ?? []} />
+                  </div>
+                </>
+              )}
             </aside>
           )}
         </div>

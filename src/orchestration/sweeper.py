@@ -108,6 +108,15 @@ async def _sweep_zombie_workflows(pool: Any, running_ttl_hours: float, live_ids:
                   WHERE clarification.workflow_id = workflows.workflow_id
                     AND clarification.resolved_at IS NULL
               )
+              -- Câu HỎI đã được trả lời cũng không phải tiến trình mồ côi.
+              --
+              -- Workflow chỉ-hỏi không có task nào để chạy, nên nó nằm lại
+              -- PENDING mãi mãi trong khi câu trả lời đã được ghi xong. Sweep
+              -- nó biến một lượt trò chuyện thành một yêu cầu FAILED trong
+              -- Lịch sử — đo được trên 186a24b3: `assistant_for_status='CHAT'`
+              -- kèm `status='FAILED'`, người dùng chỉ hỏi một câu và nhận về
+              -- một yêu cầu hỏng.
+              AND assistant_for_status IS DISTINCT FROM 'CHAT'
               AND updated_at < NOW() - make_interval(secs => $1)
             """,
             ttl_seconds,

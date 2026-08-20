@@ -253,6 +253,18 @@ export interface AgentWorkflowListResponse {
   items: AgentWorkflowListItem[]
 }
 
+/**
+ * Toàn bộ các lượt của MỘT cuộc hội thoại, cũ đến mới.
+ *
+ * Mỗi câu người dùng gõ tiếp sinh ra một workflow riêng — plan mới, id mới.
+ * Nên "cuộc hội thoại" không nằm trên một workflow nào cả; nó là cả nhóm cùng
+ * `session_id`. Đọc mỗi workflow đang mở thì mọi lượt trước biến mất.
+ */
+export interface AgentSessionResponse {
+  session_id: string
+  workflows: AgentWorkflowListItem[]
+}
+
 /** Trạng thái liên kết căn hộ. Chỉ VERIFIED mở dịch vụ cư dân. */
 /** PENDING: đang sinh · READY: câu tự nhiên · FALLBACK: câu deterministic. */
 export type AgentResponseState = 'PENDING' | 'READY' | 'FALLBACK'

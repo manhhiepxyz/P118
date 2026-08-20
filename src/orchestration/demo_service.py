@@ -49,11 +49,13 @@ from src.orchestration.payment_approval import (
 )
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.viewing_approval import (
+    expire_pending_viewing_approval as _expire_pending_viewing,
     AWAITING as VIEWING_AWAITING,
     APPROVED as VIEWING_APPROVED,
     REJECTED as VIEWING_REJECTED,
     PendingViewingApproval,
     ViewingApprovalBoundary,
+    ViewingApprovalRequiredError,
     get_pending_viewing_approval,
     record_viewing_decision,
     save_pending_viewing_approval,
@@ -850,6 +852,25 @@ def _viewing_request_info(plan: TaskPlan | None) -> dict[str, Any] | None:
     }
 
 
+
+async def _persist_viewing_pause(repository: Any, workflow_id: str, plan: TaskPlan | None) -> None:
+    """Ghim yêu cầu duyệt lịch cho các ĐƯỜNG TẮT.
+
+    Đường chạy thường ghim ở `_run_demo_job` (tầng API, nơi có sẵn snapshot
+    người yêu cầu). Đường tắt không đi qua đó, nên nó tự đọc chủ sở hữu từ bản
+    ghi workflow — cùng một nguồn, `bảng users`, không nhận từ body.
+    """
+    record = await repository.get_workflow(workflow_id)
+    owner = (record or {}).get("workflow", {}).get("owner_user_id")
+    user = await repository.get_user_by_id(str(owner)) if owner else None
+    await persist_pending_viewing_approval(
+        workflow_id,
+        plan,
+        applicant_user_id=str(owner) if owner else None,
+        applicant_name=(user or {}).get("full_name"),
+        applicant_phone=(user or {}).get("phone"),
+    )
+
 async def persist_pending_viewing_approval(
     workflow_id: str,
     plan: TaskPlan | None,
@@ -890,6 +911,17 @@ async def persist_pending_viewing_approval(
     finally:
         await pool.close()
     return {"task_id": info["task_id"], "project_name": resolve_project_name(info["project_id"])}
+
+
+
+async def expire_pending_viewing_approval(workflow_id: str) -> bool:
+    """Rút lời nhờ đơn vị tour duyệt, khi người dùng đã huỷ yêu cầu."""
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        return await _expire_pending_viewing(pool, workflow_id)
+    finally:
+        await pool.close()
 
 
 async def record_viewing_decision_or_fail(workflow_id: str, decision: str, decided_by: str | None = None) -> bool:
@@ -1023,9 +1055,24 @@ async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: 
         # của đường tắt này trừ 100.000 VND với 0 bản ghi duyệt. Bọc lại thì
         # `pay_fee` dừng đúng chỗ nó phải dừng, và đường tắt lấy lại được tốc
         # độ cho cả luồng có phí.
-        guarded = PaymentApprovalBoundary(
-            ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
-            False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
+        # Cổng duyệt LỊCH THAM QUAN nằm ngoài cùng, y như đường chạy thường.
+        #
+        # Bản trước chỉ bọc cổng thanh toán. Đo được trên workflow 7019d64a:
+        # `schedule_property_viewing` ghi SUCCESS lúc 12:11:24 với ĐÚNG 0 dòng
+        # trong `viewing_approvals` — lịch tự xác nhận, không ai duyệt. Cổng
+        # thanh toán ở cùng workflow đó thì chạy đúng, nên lỗi không lộ ra:
+        # người dùng bấm duyệt một lần và tưởng đã duyệt tất cả.
+        #
+        # Đường tắt này là đường người dùng đi MỖI KHI họ sửa một ô rồi chạy
+        # lại — nghĩa là toàn bộ luồng "Khu A hết chỗ → đổi Khu B" đều bỏ qua
+        # cổng duyệt lịch.
+        guarded = ViewingApprovalBoundary(
+            PaymentApprovalBoundary(
+                ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
+                False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
+                repository=repository,
+            ),
+            False,  # lịch tham quan luôn phải qua đơn vị tour
             repository=repository,
         )
 
@@ -1048,7 +1095,14 @@ async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: 
             # workflow WAITING_APPROVAL — người dùng chờ một nút không tồn tại.
             #
             # Không rò tiền, nhưng kẹt cứng. Ghim ở đây, đúng như caller kia.
-            await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
+            #
+            # HAI loại chờ, hai người duyệt khác nhau, hai bảng khác nhau.
+            # Ghim nhầm bảng thì bên kia không có dòng nào, và người phải duyệt
+            # không bao giờ nhận được yêu cầu.
+            if isinstance(pause, ViewingApprovalRequiredError) or (pause.context or {}).get("viewing_pending"):
+                await _persist_viewing_pause(repository, workflow_id, plan)
+            if not isinstance(pause, ViewingApprovalRequiredError):
+                await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
             return {"workflow_id": workflow_id, "status": WorkflowStatus.WAITING_APPROVAL.value}
 
         hints = repair_manager.hints_for(workflow_id)
@@ -1148,9 +1202,24 @@ async def retry_failed_tasks(
         # của đường tắt này trừ 100.000 VND với 0 bản ghi duyệt. Bọc lại thì
         # `pay_fee` dừng đúng chỗ nó phải dừng, và đường tắt lấy lại được tốc
         # độ cho cả luồng có phí.
-        guarded = PaymentApprovalBoundary(
-            ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
-            False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
+        # Cổng duyệt LỊCH THAM QUAN nằm ngoài cùng, y như đường chạy thường.
+        #
+        # Bản trước chỉ bọc cổng thanh toán. Đo được trên workflow 7019d64a:
+        # `schedule_property_viewing` ghi SUCCESS lúc 12:11:24 với ĐÚNG 0 dòng
+        # trong `viewing_approvals` — lịch tự xác nhận, không ai duyệt. Cổng
+        # thanh toán ở cùng workflow đó thì chạy đúng, nên lỗi không lộ ra:
+        # người dùng bấm duyệt một lần và tưởng đã duyệt tất cả.
+        #
+        # Đường tắt này là đường người dùng đi MỖI KHI họ sửa một ô rồi chạy
+        # lại — nghĩa là toàn bộ luồng "Khu A hết chỗ → đổi Khu B" đều bỏ qua
+        # cổng duyệt lịch.
+        guarded = ViewingApprovalBoundary(
+            PaymentApprovalBoundary(
+                ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
+                False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
+                repository=repository,
+            ),
+            False,  # lịch tham quan luôn phải qua đơn vị tour
             repository=repository,
         )
 
@@ -1173,7 +1242,14 @@ async def retry_failed_tasks(
             # workflow WAITING_APPROVAL — người dùng chờ một nút không tồn tại.
             #
             # Không rò tiền, nhưng kẹt cứng. Ghim ở đây, đúng như caller kia.
-            await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
+            #
+            # HAI loại chờ, hai người duyệt khác nhau, hai bảng khác nhau.
+            # Ghim nhầm bảng thì bên kia không có dòng nào, và người phải duyệt
+            # không bao giờ nhận được yêu cầu.
+            if isinstance(pause, ViewingApprovalRequiredError) or (pause.context or {}).get("viewing_pending"):
+                await _persist_viewing_pause(repository, workflow_id, plan)
+            if not isinstance(pause, ViewingApprovalRequiredError):
+                await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
             return {"workflow_id": workflow_id, "status": WorkflowStatus.WAITING_APPROVAL.value}
 
         hints = repair_manager.hints_for(workflow_id)
@@ -1376,7 +1452,16 @@ async def _materialize_and_run_remaining(
         # được ghi, và không cái nào thuộc workflow đi qua duyệt lịch tham quan.
         # Mọi yêu cầu ghép "tham quan + đỗ xe" đều rơi vào đường này.
         repair_manager = RepairManager()
-        executor = Executor(connectors, repository, on_failure=repair_manager)
+        # Bọc Validator, kể cả khi plan này đã qua Validator một lần.
+        #
+        # Plan ở đây KHÔNG còn là plan đã được duyệt: nó được dựng lại từ
+        # `workflow_tasks`, rồi bị `plan_without` cắt bớt `pay_fee`. Cắt task
+        # là chỗ sinh ra `depends_on` trỏ vào khoảng không, và `Executor` trần
+        # không kiểm điều đó — nó chỉ đơn giản không bao giờ chạy tới bước phụ
+        # thuộc, và bước ấy nằm PENDING vĩnh viễn.
+        executor = ValidatedExecutionBoundary(
+            Executor(connectors, repository, on_failure=repair_manager)
+        )
         # `finalize=False` — Executor KHÔNG được tự chốt SUCCESS ở đây.
         #
         # Thứ tự cũ là: chạy task → set SUCCESS → (không ai sinh lại câu trả

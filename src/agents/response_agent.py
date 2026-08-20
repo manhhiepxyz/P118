@@ -87,6 +87,21 @@ class ReplyView(BaseModel):
     # Đây là GỢI Ý, không phải câu trả lời: Planner vẫn coi field đó là thiếu,
     # và người dùng vẫn phải xác nhận. Xem `Planner._fields_taken_from_recall`.
     recalled_hints: dict[str, str] = Field(default_factory=dict)
+    # Các lượt ĐÃ DIỄN RA của chính người này, cũ đến mới.
+    #
+    # `recalled_hints` ở trên bóp toàn bộ ký ức xuống thành `{field: giá trị}`
+    # cho riêng những ô đang thiếu — nội dung cuộc trò chuyện bị vứt đi. Nên
+    # tầng viết câu trả lời không hề biết người dùng vừa nói gì ở lượt trước,
+    # và một câu chỉ có nghĩa nhờ lượt trước sẽ không trả lời được:
+    #
+    #   khách  "tôi đã đặt lịch tham quan lúc nào"
+    #   P-118  "Lịch tham quan Ocean Park ngày 22/08 lúc 10:00."
+    #   khách  "tôi muốn biết đường đi đến đó"
+    #   P-118  "Bạn muốn biết đường đi đến ĐÂU vậy?"     ← không có "đó"
+    #
+    # Không phá cam kết ở đầu class: đây đúng là những gì người dùng đã nói và
+    # đã đọc, không thêm gì họ chưa thấy.
+    recent_turns: list[dict[str, str]] = Field(default_factory=list)
     payment_quote: dict[str, Any] | None = None
     # Đã có bước `pay_fee` chạy xong THÀNH CÔNG hay chưa. Có `payment_quote`
     # KHÔNG đồng nghĩa đã trả tiền: báo giá xuất hiện ngay khi giữ chỗ, còn tiền
@@ -180,7 +195,22 @@ _COMPLETION_CLAIMS: tuple[str, ...] = (
 )
 
 # Số tiền — "150.000 VND", "150000đ", "150.000 ₫".
-_MONEY = re.compile(r"\d[\d.,]*\s*(?:vnd|vnđ|đồng|đ|₫)", re.IGNORECASE)
+# `đ` viết tắt của "đồng" — nhưng `đ` cũng là chữ cái mở đầu vô số từ tiếng
+# Việt thường gặp: đã, đến, được, đó, đơn, đợt. Không có ranh giới từ thì
+# "ngày 25/09 đến" khớp `"09 đ"` và bị đọc là một khoản tiền.
+#
+# Hậu quả không nằm ở guard mà ở CÂU TRẢ LỜI: guard loại câu đó, tầng trả lời
+# lùi về câu deterministic, và người dùng đọc "Mình đã trả lời bạn ở trên."
+# cho một câu hỏi chưa hề được trả lời. Đo được 3/3 lượt gọi liên tiếp bị loại
+# với lý do "nêu số tiền như đã trả trong khi chưa thanh toán", cho một câu
+# hỏi đường đi không hề nhắc tới tiền.
+#
+# `(?![^\W\d_])` = không được theo sau bởi một CHỮ CÁI. `₫` tách riêng vì nó
+# không phải ký tự chữ, nên mọi ràng buộc ranh giới từ đều sai với nó.
+_MONEY = re.compile(
+    r"\d[\d.,]*\s*(?:₫|(?:vnd|vnđ|đồng|đ)(?![^\W\d_]))",
+    re.IGNORECASE,
+)
 
 # Chữ cho người đọc biết khoản tiền CHƯA được trả. Chỉ cần một trong số này.
 _UNPAID_MARKERS: tuple[str, ...] = (
@@ -285,7 +315,12 @@ class ResponseAgent:
         if rejection is not None:
             # Ghi LÝ DO, không ghi nội dung bị loại: nội dung đó có thể chính là
             # thứ không nên nằm trong log.
-            logger.info("response agent bị loại (%s); dùng câu mặc định", rejection)
+            # `warning`, không phải `info`: log ứng dụng chạy trên mức INFO,
+            # nên dòng này vô hình đúng lúc cần nhất. Một câu bị loại nghĩa
+            # là người dùng nhận câu mặc định thay cho câu trả lời — im lặng
+            # về nó là để cả một lớp hỏng chạy ngầm. Đo được: guard loại 3/3
+            # lượt suốt nhiều ngày mà không dòng log nào hiện ra.
+            logger.warning("response agent bị loại (%s); dùng câu mặc định", rejection)
             return _fallback(view)
 
         return candidate
@@ -413,6 +448,20 @@ def _numbers_in_view(view: ReplyView) -> set[str]:
             # 15/01/2029" và guard không có gì để đối chiếu. Kết quả: nhánh chờ
             # duyệt luôn rơi về câu mặc định, lần nào cũng y hệt.
             " ".join(str(v) for v in (view.viewing or {}).values()),
+            # Con số trong câu P-118 ĐÃ NÓI ở các lượt trước.
+            #
+            # Chỉ lấy `p118_dap`, KHÔNG lấy `khach_noi` — đúng lý do khiến
+            # `view.goal` bị loại khỏi danh sách này: chữ người dùng tự gõ có
+            # thể chứa con số sai, và coi nó là nguồn nghĩa là cho phép model
+            # nhắc lại con số sai ấy như một sự thật của hệ thống. Câu P-118 đã
+            # viết thì do backend dựng và người dùng đã đọc.
+            #
+            # Thiếu dòng này thì việc đưa hội thoại vào prompt tự phá chính nó:
+            # model trích đúng "10:00 ngày 25/09" từ câu nó vừa nói ở lượt
+            # trước, guard không có gì đối chiếu và loại cả câu. Đo được 3/3
+            # lượt gọi liên tiếp bị loại vì "nêu một con số không có trong dữ
+            # liệu", và người dùng nhận câu mặc định.
+            " ".join(turn.get("p118_dap", "") for turn in view.recent_turns),
             view.today or "",
         ]
     )

@@ -520,10 +520,22 @@ async def test_capacity_check_allows_booking_within_limit(db_pool):
 
 @pytest.mark.asyncio
 async def test_capacity_check_raises_no_availability_when_full(db_pool):
-    """ZONE_A có 3 chỗ — booking thứ 4 phải raise NoAvailabilityError."""
+    """Đầy sức chứa → booking kế tiếp raise NoAvailabilityError.
+
+    Sức chứa do TEST đặt. Bản trước mượn con số 3 từ seed của ZONE_A, nên khi
+    khu A chuyển sang kín (sức chứa 0, để dựng kịch bản đổi khu) test đỏ dù
+    cơ chế đếm không đổi. Con số thuộc về cấu hình sản phẩm; cơ chế thì không.
+    """
     repo = make_repo(db_pool)
+    capacity = 3
 
     async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO parking_capacity (parking_zone, booking_date, capacity) "
+            "VALUES ('ZONE_A', DATE '2026-08-15', $1) "
+            "ON CONFLICT (parking_zone, booking_date) DO UPDATE SET capacity = $1",
+            capacity,
+        )
         await conn.execute("INSERT INTO residents VALUES ('RES-001','Test User','A101','VinHomes')")
         for i in range(1, 5):  # 4 xe
             await conn.execute(f"INSERT INTO vehicles VALUES ('VEH-{i:03d}','RES-001','51A-{i:05d}','car')")
@@ -550,7 +562,7 @@ async def test_capacity_check_raises_no_availability_when_full(db_pool):
 
     err = exc_info.value
     assert err.parking_zone == "ZONE_A"
-    assert err.capacity == 3
+    assert err.capacity == capacity
 
 
 @pytest.mark.asyncio

@@ -129,6 +129,9 @@ def build_response_user_message(view: ReplyView) -> str:
         # Lần trước người dùng chọn gì cho đúng những field này. Dùng để HỎI
         # cho gọn, KHÔNG phải để coi như đã có câu trả lời.
         **({"lan_truoc_chon": view.recalled_hints} if view.recalled_hints else {}),
+        # Cuộc trò chuyện trước đó, để những câu như "đến ĐÓ", "cái ĐÓ", "lúc
+        # nào" có chỗ bám. Thiếu nó, model hỏi lại một thứ vừa được nói xong.
+        **({"cuoc_tro_chuyen_truoc_do": view.recent_turns} if view.recent_turns else {}),
         "khoan_can_xac_nhan": view.payment_quote,
         # Luôn gửi, kể cả khi False: đây là một sự thật cần khẳng định, không
         # phải một field tuỳ chọn. `compact` phía dưới lọc bỏ None/[]/{} chứ
@@ -176,7 +179,15 @@ def _human_status(status: str, approval_actor: str | None = None, error_code: st
         "FAILED": "đã dừng lại vì lỗi",
         "EXECUTION_ERROR": "đã dừng lại vì lỗi",
         "PLANNING_ERROR": "chưa hiểu được yêu cầu",
-        "VALIDATION_ERROR": "thông tin chưa hợp lệ",
+        # "chưa hợp lệ" BUỘC TỘI khách đã đưa một thứ sai. Phần lớn lần rơi
+        # vào đây thì họ chưa đưa gì cả: gõ "tôi muốn đổi dịch vụ" — không một
+        # giá trị nào trong câu — và nhận lại "thông tin bạn cung cấp chưa hợp
+        # lệ". Họ đi tìm chỗ mình gõ sai, trong một câu không có gì để sai.
+        #
+        # Câu mới đúng cho CẢ HAI trường hợp: thiếu và sai đều là chưa đủ để
+        # thực hiện, và nó hướng người đọc sang việc cần làm tiếp thay vì sang
+        # một lỗi họ phải tự dò.
+        "VALIDATION_ERROR": "chưa đủ thông tin để thực hiện",
         "NEEDS_INFORMATION": "đang chờ khách bổ sung thông tin",
         "WAITING_APPROVAL": "đang chờ khách xác nhận khoản thanh toán",
         "CHAT": "đã trả lời",

@@ -74,9 +74,9 @@ def _future_day(offset: int = 30) -> str:
 
 @pytest.mark.asyncio
 async def test_booking_is_persisted_with_an_authoritative_quote(pool) -> None:
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
 
-    assert booking.amount == ZONE_PRICES["ZONE_A"]
+    assert booking.amount == ZONE_PRICES["ZONE_B"]
     assert booking.currency == "VND"
 
     # Đọc lại từ database, không tin giá trị trả về trong bộ nhớ.
@@ -89,7 +89,7 @@ async def test_booking_is_persisted_with_an_authoritative_quote(pool) -> None:
 @pytest.mark.asyncio
 async def test_booking_rejects_an_unknown_vehicle(pool) -> None:
     with pytest.raises(BookingError) as exc_info:
-        await create_booking(pool, vehicle_id="VEH-NOPE", parking_zone="ZONE_A", booking_date=_future_day())
+        await create_booking(pool, vehicle_id="VEH-NOPE", parking_zone="ZONE_B", booking_date=_future_day())
     assert exc_info.value.code == "VEHICLE_NOT_FOUND"
 
 
@@ -118,7 +118,7 @@ async def test_concurrent_bookings_never_exceed_capacity(pool) -> None:
     warm_pool = await asyncpg.create_pool(require_test_database_url(), min_size=8, max_size=8)
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO parking_capacity (parking_zone, booking_date, capacity) VALUES ('ZONE_A', $1, 1) "
+            "INSERT INTO parking_capacity (parking_zone, booking_date, capacity) VALUES ('ZONE_B', $1, 1) "
             "ON CONFLICT (parking_zone, booking_date) DO UPDATE SET capacity = 1",
             date.fromisoformat(day),
         )
@@ -126,7 +126,7 @@ async def test_concurrent_bookings_never_exceed_capacity(pool) -> None:
     try:
         results = await asyncio.gather(
             *[
-                create_booking(warm_pool, vehicle_id=f"VEH-T0{index}", parking_zone="ZONE_A", booking_date=day)
+                create_booking(warm_pool, vehicle_id=f"VEH-T0{index}", parking_zone="ZONE_B", booking_date=day)
                 for index in range(1, 9)
             ],
             return_exceptions=True,
@@ -144,7 +144,7 @@ async def test_concurrent_bookings_never_exceed_capacity(pool) -> None:
 
     async with pool.acquire() as conn:
         stored = await conn.fetchval(
-            "SELECT COUNT(*) FROM parking_bookings WHERE parking_zone = 'ZONE_A' AND booking_date = $1",
+            "SELECT COUNT(*) FROM parking_bookings WHERE parking_zone = 'ZONE_B' AND booking_date = $1",
             date.fromisoformat(day),
         )
     assert stored == 1
@@ -164,7 +164,7 @@ async def test_payment_requires_an_existing_booking(pool) -> None:
 
 @pytest.mark.asyncio
 async def test_payment_rejects_a_mismatched_amount(pool) -> None:
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
 
     # Kịch bản "thanh toán 1 đồng" trong khi báo giá là 150.000.
     with pytest.raises(BookingError) as exc_info:
@@ -177,7 +177,7 @@ async def test_payment_rejects_a_mismatched_amount(pool) -> None:
 
 @pytest.mark.asyncio
 async def test_payment_rejects_a_mismatched_currency(pool) -> None:
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
 
     with pytest.raises(BookingError) as exc_info:
         await create_payment(pool, booking_id=booking.booking_id, amount=booking.amount, currency="USD")
@@ -186,7 +186,7 @@ async def test_payment_rejects_a_mismatched_currency(pool) -> None:
 
 @pytest.mark.asyncio
 async def test_the_same_idempotency_key_never_charges_twice(pool) -> None:
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
     key = payment_idempotency_key("wf-001", "T3")
 
     first = await create_payment(
@@ -204,7 +204,7 @@ async def test_the_same_idempotency_key_never_charges_twice(pool) -> None:
 @pytest.mark.asyncio
 async def test_paying_an_already_paid_booking_is_refused(pool) -> None:
     """Không cùng idempotency key, nhưng booking đã trả rồi."""
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
     await create_payment(
         pool,
         booking_id=booking.booking_id,
@@ -230,7 +230,7 @@ async def test_paying_an_already_paid_booking_is_refused(pool) -> None:
 @pytest.mark.asyncio
 async def test_concurrent_payments_create_at_most_one_paid_row(pool) -> None:
     """Hai lệnh thanh toán đến cùng lúc cho cùng booking."""
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
 
     results = await asyncio.gather(
         *[
@@ -273,7 +273,7 @@ async def test_error_messages_never_leak_the_payload_or_connection_string(pool) 
 
 @pytest.mark.asyncio
 async def test_cancel_unpaid_booking_releases_capacity(pool) -> None:
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
 
     assert await cancel_booking(pool, booking.booking_id) is True
 
@@ -286,7 +286,7 @@ async def test_cancel_unpaid_booking_releases_capacity(pool) -> None:
 @pytest.mark.asyncio
 async def test_cancel_paid_booking_is_refused(pool) -> None:
     """Booking đã PAID không bị xoá — phải refund trước (Phase C ranee)."""
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
     await create_payment(
         pool,
         booking_id=booking.booking_id,
@@ -305,7 +305,7 @@ async def test_cancel_paid_booking_is_refused(pool) -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_is_idempotent(pool) -> None:
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
 
     assert await cancel_booking(pool, booking.booking_id) is True
     assert await cancel_booking(pool, booking.booking_id) is False  # lần hai xoá 0 row
@@ -313,7 +313,7 @@ async def test_cancel_is_idempotent(pool) -> None:
 
 @pytest.mark.asyncio
 async def test_refund_flips_paid_to_refunded_and_is_idempotent(pool) -> None:
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
     payment = await create_payment(
         pool,
         booking_id=booking.booking_id,
@@ -334,7 +334,7 @@ async def test_refund_flips_paid_to_refunded_and_is_idempotent(pool) -> None:
 @pytest.mark.asyncio
 async def test_refund_then_cancel_releases_a_paid_booking(pool) -> None:
     """Trình tự release đầy đủ: refund PAID → cancel booking → capacity về."""
-    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_A", booking_date=_future_day())
+    booking = await create_booking(pool, vehicle_id="VEH-T01", parking_zone="ZONE_B", booking_date=_future_day())
     await create_payment(
         pool,
         booking_id=booking.booking_id,

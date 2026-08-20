@@ -19,15 +19,28 @@
 CREATE TABLE IF NOT EXISTS zone_capacity_config (
     parking_zone VARCHAR(20) PRIMARY KEY
                      CHECK (parking_zone IN ('ZONE_A', 'ZONE_B')),
-    capacity     INTEGER     NOT NULL CHECK (capacity > 0),
+    -- `>= 0`, không phải `> 0`.
+    --
+    -- Sức chứa 0 nghĩa là khu KHÔNG còn nhận đăng ký — một trạng thái nghiệp vụ
+    -- có thật (bãi đã kín dài hạn), và `check_and_reserve_capacity` xử lý nó
+    -- đúng ngay: `booked_count >= capacity_limit` thành `0 >= 0`, trả
+    -- NO_AVAILABILITY. Cách này áp cho MỌI ngày mà không cần gieo booking giả —
+    -- booking giả vừa sai sự thật vừa phải gieo lại cho từng ngày.
+    capacity     INTEGER     NOT NULL CHECK (capacity >= 0),
     price_per_day INTEGER    NOT NULL CHECK (price_per_day >= 0),  -- VND
     description  TEXT
 );
 
 INSERT INTO zone_capacity_config (parking_zone, capacity, price_per_day, description)
 VALUES
-    ('ZONE_A', 3,  150000, 'Bãi đỗ xe khu A — gần tòa nhà, sức chứa nhỏ, giá cao'),
-    ('ZONE_B', 10, 100000, 'Bãi đỗ xe khu B — xa hơn, sức chứa lớn, giá thấp hơn')
+    -- Khu A KÍN, khu B luôn còn chỗ — kịch bản demo cố định.
+    --
+    -- Luồng đáng xem nhất của sản phẩm là: chọn khu A → hết chỗ → hệ thống nêu
+    -- lý do và gợi ý khu B → người dùng đổi → chạy tiếp. Muốn diễn lại được
+    -- luồng ấy thì kết quả phải ĐOÁN TRƯỚC ĐƯỢC, không phụ thuộc hôm nay đã có
+    -- ai đặt chưa.
+    ('ZONE_A', 0,   150000, 'Bãi đỗ xe khu A — gần tòa nhà, hiện đã kín'),
+    ('ZONE_B', 100, 100000, 'Bãi đỗ xe khu B — xa hơn, sức chứa lớn, giá thấp hơn')
 ON CONFLICT (parking_zone) DO UPDATE
     SET capacity      = EXCLUDED.capacity,
         price_per_day = EXCLUDED.price_per_day,
@@ -66,3 +79,23 @@ VALUES
     ('Vinhomes Smart City', 'AFTERNOON', 3)
 ON CONFLICT (residential_area, tour_slot) DO UPDATE
     SET capacity = EXCLUDED.capacity;
+
+
+-- Đồng bộ các ngày ĐÃ vật hoá sang cấu hình vừa cập nhật ở TRÊN.
+--
+-- PHẢI nằm ở seed.sql, không phải schema_migrations.sql: thứ tự chạy là
+-- schema → schema_migrations → seed, nên đặt ở file giữa thì lúc UPDATE bảng
+-- cấu hình vẫn còn giá trị CŨ và câu lệnh không đổi gì cả. Đo được: config
+-- thành 0/100 mà các ngày vẫn 3/10.
+--
+-- `parking_capacity` sinh một dòng cho mỗi (khu, ngày) ở lần dùng đầu, chép
+-- sức chứa TẠI THỜI ĐIỂM ĐÓ. Không đụng tới chúng thì những ngày đã chạm giữ
+-- số cũ, và kịch bản demo hỏng đúng vào ngày hay dùng nhất.
+--
+-- Chỉ sửa từ HÔM NAY trở đi: ngày đã qua là bằng chứng chuyện đã xảy ra.
+UPDATE parking_capacity c
+   SET capacity = z.capacity
+  FROM zone_capacity_config z
+ WHERE c.parking_zone = z.parking_zone
+   AND c.booking_date >= CURRENT_DATE
+   AND c.capacity <> z.capacity;

@@ -52,6 +52,7 @@ from src.orchestration.demo_service import (
     retry_failed_tasks,
     ResumeError,
     persist_pending_approval,
+    expire_pending_viewing_approval,
     persist_pending_viewing_approval,
     read_demo_workflow,
     reject_payment,
@@ -96,7 +97,11 @@ _FOLLOW_UP_VALIDATION_MESSAGES = {
     "move_time": "Giờ chuyển nhà phải theo định dạng HH:MM và trong khoảng 07:00–20:00.",
     "preferred_contact_time": "Giờ liên hệ phải theo định dạng HH:MM và trong khoảng 08:00–18:00.",
     "parking_zone": "Hãy chọn Khu A hoặc Khu B.",
-    "plate_number": "Vui lòng nhập biển số xe, ví dụ 59A-12345.",
+    # "Vui lòng nhập" nói người dùng BỎ TRỐNG ô. Phần lớn lần rơi vào đây
+    # thì họ đã nhập, chỉ là sai độ dài — "50A-82812312" (8 chữ số) bị từ
+    # chối đúng, nhưng họ đọc câu này rồi nhập lại y hệt, vì theo câu đó
+    # thì họ chưa nhập gì.
+    "plate_number": "Biển số xe chưa đúng định dạng. Ví dụ: 59A-12345 (2 chữ số, 1–2 chữ cái, rồi 3–6 chữ số).",
     "vehicle_type": "Hãy cho biết phương tiện là ô tô hoặc xe máy.",
     "passenger_count": "Số người đi xe phải là một số từ 1 đến 30.",
 }
@@ -143,10 +148,34 @@ def _extract_parking_zone(text: str) -> str | None:
 
 
 def _extract_plate_number(text: str) -> str | None:
-    # Contract chỉ yêu cầu chuỗi biển số; demo chấp nhận 3–6 chữ số phía sau
-    # để không tự áp một chuẩn đăng kiểm cụ thể lên dữ liệu mock.
-    match = re.search(r"\b(\d{2}[a-z]{1,2})[ .-]?(\d{3,6})\b", text, re.IGNORECASE)
-    return f"{match.group(1).upper()}-{match.group(2)}" if match else None
+    """Chuẩn hoá biển số. `None` nếu không tìm thấy biển hợp lệ.
+
+    Biển Việt Nam viết có DẤU CHẤM ở giữa phần số: `30A-123.45`. Mẫu cũ không
+    nhận dấu ấy, nên nó khớp phần trước dấu chấm rồi dừng — và vì `re.search`
+    tìm thấy một kết quả, không có lỗi nào được nêu.
+    #
+    Đo được, và đây là chính ví dụ mẫu in trong ô nhập của ứng dụng:
+
+        30A-123.45  →  30A-123     ← mất hai chữ số cuối
+        59A-123.45  →  59A-123
+        51F-678.90  →  51F-678
+
+    Xe được đăng ký dưới một biển KHÁC biển người dùng gõ, và không màn hình
+    nào nói ra điều đó. Hỏng lặng lẽ ở đúng trường định danh chiếc xe.
+
+    Chấp nhận 3–6 chữ số để không tự áp một chuẩn đăng kiểm cụ thể lên dữ liệu
+    mock; đếm sau khi đã bỏ dấu phân cách, nên `30A-123.45` và `30A-12345` cho
+    cùng một kết quả.
+    """
+    match = re.search(
+        r"\b(\d{2}[a-z]{1,2})[ .-]?(\d{3,6}(?:[. ]\d{1,3})?)\b", text, re.IGNORECASE
+    )
+    if match is None:
+        return None
+    digits = re.sub(r"\D", "", match.group(2))
+    if not 3 <= len(digits) <= 6:
+        return None
+    return f"{match.group(1).upper()}-{digits}"
 
 
 def _extract_vehicle_type(text: str) -> str | None:
@@ -1209,7 +1238,13 @@ async def _run_demo_job(
             workflow_id=workflow_id,
             on_stage=on_stage,
             existing_context=job["existing_context"],
-            recalled=job.get("recalled") or None,
+            # Planner CHỈ nhận lượt chưa bị huỷ.
+            #
+            # Nó dùng ký ức để đoán NÊN LÀM GÌ, nên một yêu cầu đã dừng nằm
+            # trong đó là lời mời dựng lại nó từ bất kỳ câu nói cụt nào — tức
+            # bấm Dừng không dừng được gì. Tầng trả lời thì nhận đủ, vì nó cần
+            # biết ĐANG NÓI CHUYỆN GÌ.
+            recalled=[turn for turn in (job.get("recalled") or []) if not turn.get("_da_huy")] or None,
             user_answers=job.get("user_answers") or {},
             approve_mock_payment=approve_mock_payment,
             resident_url=service_urls["resident"],
@@ -1636,6 +1671,9 @@ def _reply_view(
     goal: str,
     capabilities: list[str],
     recalled: list[dict[str, Any]] | None = None,
+    # Cuộc trò chuyện ĐANG diễn ra. Thiếu nó thì phần ngữ cảnh hội thoại bỏ
+    # trống — an toàn hơn là ghép nhầm một việc người dùng làm hôm khác.
+    session_id: str | None = None,
 ) -> ReplyView:
     """View model cho Response Agent, dựng TỪ response công khai.
 
@@ -1667,6 +1705,7 @@ def _reply_view(
         # đang hỏi, và chỉ để hỏi cho gọn. Field vẫn thiếu; người dùng vẫn xác
         # nhận. Tra bằng tên field NỘI BỘ, không phải nhãn hiển thị.
         recalled_hints=_recalled_hints(recalled or [], list(response.missing_fields)),
+        recent_turns=_recent_turns_view(recalled or [], session_id),
         payment_quote=(
             {"amount": response.payment_quote.get("amount"), "currency": response.payment_quote.get("currency")}
             if response.payment_quote
@@ -1726,7 +1765,13 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             return
 
         capabilities = await _capability_names_safely(job.get("owner_user_id"))
-        spoken = await _speak(current, goal=goal, capabilities=capabilities, recalled=job.get("recalled"))
+        spoken = await _speak(
+            current,
+            goal=goal,
+            capabilities=capabilities,
+            recalled=job.get("recalled"),
+            session_id=job.get("session_id"),
+        )
         if spoken.answer is None:
             # `_speak` không dựng được client (thiếu key chẳng hạn). Dùng CHÍNH
             # câu deterministic mà Response Agent vốn lấy làm bản dự phòng, để
@@ -1745,12 +1790,46 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             state=state,
             for_status=for_status,
         )
+        if for_status == "CHAT":
+            # Một CÂU HỎI đã được trả lời là đã xong việc.
+            #
+            # Đường planner chỉ ghi câu trả lời rồi thôi, nên bản ghi nằm lại
+            # `PENDING` vĩnh viễn: Lịch sử đọc nó thành "Đang thực hiện" cho
+            # một câu hỏi đã đáp từ lâu, và trước khi sweeper được vá thì đúng
+            # một chu kỳ quét sau nó thành FAILED. Đo được trên `cảm ơn bạn
+            # nhé`: `CHAT` + có câu trả lời + 0 bước, mà vẫn `PENDING`.
+            #
+            # Lane small-talk đã chốt SUCCESS ngay lúc ghi; đường này phải chốt
+            # ở đây, vì câu trả lời tới sau một lượt gọi mô hình.
+            await _finish_chat_workflow(workflow_id)
         spoken = spoken.model_copy(update={"response_state": state})
         # Chỉ ghi đè nếu chưa có ai thay response trong lúc chờ mô hình.
         if job.get("response") is current:
             job["response"] = spoken
     except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
         logger.info("không gắn được câu trả lời cho %s (%s)", workflow_id[:8], type(exc).__name__)
+
+
+
+async def _finish_chat_workflow(workflow_id: str) -> None:
+    """Chốt SUCCESS cho một workflow chỉ-hỏi, nếu nó thật sự không có bước nào.
+
+    Điều kiện "không có bước nào" là thứ giữ cho lệnh này an toàn: có bước
+    nghĩa là đã có việc chạy thật, và trạng thái của nó thuộc về Executor chứ
+    không phải về tầng sinh câu trả lời.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        if await repository.list_tasks(workflow_id):
+            return
+        await repository.update_workflow_status(workflow_id, WorkflowStatus.SUCCESS)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("không chốt được lượt hỏi %s (%s)", workflow_id[:8], type(exc).__name__)
+    finally:
+        if pool is not None:
+            await pool.close()
 
 
 async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) -> DemoWorkflowResponse:
@@ -1910,6 +1989,68 @@ async def _claim_answer_safely(workflow_id: str, for_status: str) -> bool:
             await pool.close()
 
 
+
+async def _persist_chat_turn(
+    workflow_id: str,
+    *,
+    goal: str,
+    reply: str,
+    owner_user_id: str | None,
+    session_id: str | None,
+    parent_workflow_id: str | None,
+) -> None:
+    """Ghi một lượt trò chuyện xuống PostgreSQL như mọi lượt khác.
+
+    Lane small-talk trước đây chỉ sống trong `_DEMO_JOBS`. Nó vẫn trả về một
+    `workflow_id`, và giao diện điều hướng sang id đó — nơi `GET` trả 404, nên
+    màn hình trắng và cả cuộc hội thoại biến mất. Đo được: gõ một câu ở khung
+    chat rồi nhấn Enter, trang nhảy sang `/workflow/19a713c4…` và 2 lượt trước
+    đó không còn dòng nào.
+
+    Ghi ở đây cũng là thứ duy nhất giữ được "toàn bộ lịch sử từ đầu đến cuối":
+    một lượt chỉ nằm trong RAM thì mất khi restart, và không bao giờ xuất hiện
+    trong danh sách phiên.
+
+    Best-effort: ghi hỏng thì câu trả lời VẪN được trả về. Lưu lại là để đọc
+    lại sau, không phải điều kiện để nói chuyện.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.create_workflow(
+            {
+                "id": workflow_id,
+                "goal": goal,
+                # Câu hỏi đã được trả lời — không còn gì để chạy. Để PENDING thì
+                # sweeper coi là tiến trình mồ côi và biến nó thành FAILED.
+                "status": WorkflowStatus.SUCCESS.value,
+                "owner_user_id": owner_user_id,
+                "session_id": session_id,
+                "parent_workflow_id": parent_workflow_id,
+            }
+        )
+        await repository.save_assistant_response(
+            workflow_id,
+            answer=reply,
+            suggestions=[],
+            # Tên tham số là `state`, KHÔNG phải `response_state`. Bản đầu gọi
+            # sai tên, `TypeError` rơi vào chính khối `except` bên dưới và chỉ
+            # để lại một dòng `info` — nên bản ghi được tạo, câu trả lời thì
+            # không, và không có gì báo hiệu. Đo được: `assistant_answer IS
+            # NULL` trên đúng lượt vừa hiện ra màn hình.
+            state="READY",
+            for_status="CHAT",
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        # `warning`, không phải `info`: khối này bắt cả sự cố database lẫn lỗi
+        # lập trình (gọi sai tên tham số). Cái sau im lặng thì hỏng lặng lẽ.
+        logger.warning("không ghi được lượt trò chuyện (%s)", type(exc).__name__)
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
 async def _save_answer_safely(workflow_id: str, **fields: Any) -> None:
     pool = None
     try:
@@ -2000,6 +2141,7 @@ async def _speak(
     goal: str,
     capabilities: list[str],
     recalled: list[dict[str, Any]] | None = None,
+    session_id: str | None = None,
 ) -> DemoWorkflowResponse:
     """Gắn câu trả lời tự nhiên vào response. Không bao giờ raise.
 
@@ -2048,7 +2190,7 @@ async def _speak(
             get_llm(callbacks=[usage_logger], fast=True),
             structured_output_method=structured_output_method(),
         )
-        view = _reply_view(response, goal=goal, capabilities=capabilities, recalled=recalled)
+        view = _reply_view(response, goal=goal, capabilities=capabilities, recalled=recalled, session_id=session_id)
         reply = await agent.reply(view)
         # `ResponseAgent.reply()` fail-closed về baseline khi provider lỗi hoặc
         # output bị guard loại. Thử đúng MỘT lần nữa: model không tất định và
@@ -2331,6 +2473,9 @@ async def _persist_events(workflow_id: str, job: dict[str, Any] | None) -> None:
     """
     events = (job or {}).get("events") or []
     if not events:
+        # Không có gì để ghim cũng là một tin: nghĩa là không giai đoạn nào
+        # được phát ra cho workflow này.
+        logger.warning("không có sự kiện nào để ghim cho %s", workflow_id[:8])
         return
     pool = None
     try:
@@ -2338,7 +2483,12 @@ async def _persist_events(workflow_id: str, job: dict[str, Any] | None) -> None:
         pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
         await repository.append_events(workflow_id, [{k: v for k, v in e.items() if k != "signature"} for e in events])
     except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
-        logger.info("không ghim được dòng thời gian (%s)", type(exc).__name__)
+        # `warning`: dòng thời gian mất là mất luôn mọi dấu vết của giai
+        # đoạn — không "Chi tiết xử lý", không câu báo tiến trình, và sau
+        # restart thì yêu cầu cũ trông như chưa từng chạy bước nào. Ghi ở
+        # mức `info` nghĩa là log ứng dụng (chạy trên INFO) nuốt sạch, và
+        # cả lớp này hỏng ngầm — đo được 0 sự kiện suốt 6 giờ.
+        logger.warning("không ghim được dòng thời gian (%s)", type(exc).__name__)
     finally:
         if pool is not None:
             await pool.close()
@@ -2940,6 +3090,14 @@ async def start_demo_workflow(
             "parent_workflow_id": None,
         }
         _append_job_event(_DEMO_JOBS[workflow_id], "CHAT")
+        await _persist_chat_turn(
+            workflow_id,
+            goal=request.goal,
+            reply=reply,
+            owner_user_id=user["id"],
+            session_id=session_id,
+            parent_workflow_id=None,
+        )
         return DemoWorkflowResponse(
             workflow_id=workflow_id,
             status="CHAT",
@@ -3157,6 +3315,14 @@ async def continue_demo_workflow(
                 "parent_workflow_id": parent_workflow_id,
             }
             _append_job_event(_DEMO_JOBS[new_workflow_id], "CHAT")
+            await _persist_chat_turn(
+                new_workflow_id,
+                goal=goal,
+                reply=reply,
+                owner_user_id=user["id"],
+                session_id=session_id,
+                parent_workflow_id=parent_workflow_id,
+            )
             return DemoWorkflowResponse(
                 workflow_id=new_workflow_id,
                 status="CHAT",
@@ -3703,6 +3869,87 @@ def _flatten_task_inputs(inputs: Any) -> dict[str, Any]:
     return flat
 
 
+
+# Số lượt gửi kèm khi VIẾT CÂU TRẢ LỜI.
+#
+# Ít hơn 10 lượt mà `_recall_recent_turns` đọc về: tầng này chỉ cần đủ để hiểu
+# "đó", "cái kia", "lúc nào" trỏ vào đâu — đó là chuyện của vài lượt gần nhất.
+# Ký ức xa hơn thuộc về Planner, nơi nó dùng để đoán lựa chọn quen thuộc.
+_ANSWER_CONTEXT_TURNS = 4
+
+
+
+# Trạng thái của một lượt cũ, viết cho model đọc.
+#
+# `CANCELLED` mang thêm lệnh cấm: giữ nó làm ngữ cảnh là đúng, nhưng không nói
+# rõ thì model đọc nó như một việc đang chạy và đi tiếp theo hướng đó — chính
+# thứ việc huỷ vừa phủ định.
+_TURN_NOTE: dict[str, str] = {
+    "CANCELLED": "yêu cầu này đã bị huỷ, KHÔNG tự làm lại",
+    "WAITING_APPROVAL": "việc này ĐANG DỞ, đang chờ xác nhận",
+    "NEEDS_INFORMATION": "việc này ĐANG DỞ, còn thiếu thông tin",
+    "RUNNING": "việc này ĐANG chạy",
+    "PENDING": "việc này ĐANG chạy",
+    "SUCCESS": "việc này đã xong",
+    "FAILED": "việc này đã dừng giữa chừng",
+}
+
+
+def _recent_turns_view(
+    recalled: list[dict[str, Any]],
+    session_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Vài lượt gần nhất, dựng thành hội thoại cho tầng viết câu trả lời.
+
+    `recalled` được sắp MỚI-NHẤT-TRƯỚC. Model đọc một cuộc trò chuyện theo
+    chiều thời gian, nên đảo lại — đưa nguyên thứ tự ngược nghĩa là lượt gần
+    nhất trông như lượt đầu tiên, và "sau đó" trỏ ngược về quá khứ.
+
+    Lượt chưa có câu đáp vẫn giữ: câu người dùng đã nói tự nó là ngữ cảnh.
+    """
+    # CHỈ lượt cùng một cuộc trò chuyện.
+    #
+    # Ký ức đọc 10 lượt gần nhất của cả TÀI KHOẢN, xuyên mọi phiên — đúng cho
+    # việc gợi ý giá trị ô ("vẫn khu A như lần trước?"), sai cho việc hiểu một
+    # câu nói. Một câu mơ hồ gặp lịch sử cũ thì được diễn giải bằng việc người
+    # dùng làm hôm khác. Đo được: sau khi huỷ một lịch tham quan rồi gõ "tôi
+    # muốn thực hiện dịch vụ khác", câu trả lời là "Mình thấy bạn muốn đổi
+    # ngày tham quan sang 29" — con số 29 đến từ một lượt hoàn toàn khác. Cùng
+    # câu ấy trên tài khoản sạch thì trả lời đúng.
+    #
+    # Không biết phiên nào thì KHÔNG lấy gì: đoán bừa ngữ cảnh tệ hơn không có.
+    same_session = [
+        row for row in recalled if session_id is not None and row.get("_session_id") == session_id
+    ]
+
+    turns: list[dict[str, str]] = []
+    for row in same_session[:_ANSWER_CONTEXT_TURNS]:
+        said = (row.get("ban_da_noi") or "").strip()
+        if not said:
+            continue
+        turn = {"khach_noi": said}
+        answered = (row.get("p118_da_tra_loi") or row.get("assistant_answer") or "").strip()
+        if answered:
+            turn["p118_dap"] = answered
+        # NÓI RÕ lượt này đã bị huỷ. Giữ mà không nói thì model đọc nó như một
+        # việc đang chạy và tiếp tục theo hướng đó — đúng thứ việc huỷ vừa phủ
+        # định. Nói rõ thì nó vừa biết vừa nói chuyện gì, vừa biết việc ấy đã
+        # dừng.
+        # Việc này ĐANG Ở ĐÂU. Không có nó, prompt chỉ kể lại người dùng đã
+        # nói gì — và model không có cách nào trả lời "dịch vụ hiện tại của
+        # bạn là gì", nên nó hỏi ngược lại chính điều người dùng vừa làm.
+        #
+        # Đo được: hội thoại có đủ 3 lượt cùng phiên, model vẫn hỏi "mình cần
+        # biết dịch vụ hiện tại". Nó không thiếu ngữ cảnh — nó thiếu TRẠNG
+        # THÁI của ngữ cảnh ấy.
+        ghi_chu = _TURN_NOTE.get(row.get("_trang_thai") or "")
+        if ghi_chu:
+            turn["ghi_chu"] = ghi_chu
+        turns.append(turn)
+    turns.reverse()
+    return turns
+
+
 def _recalled_hints(recalled: list[dict[str, Any]], missing_fields: list[str]) -> dict[str, str]:
     """Lần trước người dùng chọn gì cho ĐÚNG những field đang hỏi.
 
@@ -3759,6 +4006,14 @@ async def _recall_recent_turns(user_id: str, exclude_workflow_id: str | None = N
             _TOOL_PRESENTATION[tool][0] for tool in (row.get("tools") or []) if tool in _TOOL_PRESENTATION
         ]
         turn: dict[str, Any] = {"ban_da_noi": row["goal"]}
+        # Không gửi cho model — chỉ để lọc "lượt này có thuộc cuộc trò chuyện
+        # đang diễn ra không". `_recent_turns_view` bóc nó ra trước khi dựng
+        # payload.
+        turn["_session_id"] = str(row["session_id"]) if row.get("session_id") else None
+        # Đã huỷ hay chưa. Tầng trả lời GIỮ để biết vừa nói chuyện gì; Planner
+        # thì BỎ, để không dựng lại một việc người dùng đã chủ động dừng.
+        turn["_da_huy"] = row.get("status") == "CANCELLED"
+        turn["_trang_thai"] = row.get("status")
         chosen = _flatten_task_inputs(row.get("inputs"))
         if chosen:
             turn["ban_da_chon"] = chosen
@@ -3961,8 +4216,8 @@ async def _demo_workflow_status(
             )
 
     task_views = _polling_task_views(plan, record)
-    stage = job["stage"] if job is not None else "FINISHED"
-    message = job["message"] if job is not None else _STAGE_MESSAGES["FINISHED"]
+    stage = job["stage"] if job is not None else None
+    message = job["message"] if job is not None else None
     if database_status == "SUCCESS":
         status = "SUCCESS"
     elif database_status == "CANCELLED":
@@ -3971,6 +4226,19 @@ async def _demo_workflow_status(
         status = "FAILED"
     else:
         status = "RUNNING"
+
+    if stage is None:
+        # `_DEMO_JOBS` trống KHÔNG có nghĩa là yêu cầu đã xong.
+        #
+        # Nó chỉ nói tiến trình theo dõi trong RAM không còn — sau một lần
+        # restart backend thì mọi workflow đều rơi vào đây. Mặc định cũ là
+        # `FINISHED`, nên một yêu cầu vẫn đang chạy hiện đồng thời "Yêu cầu đã
+        # hoàn tất." ở tiêu đề và "Đang thực hiện" ở dòng trạng thái — hai câu
+        # mâu thuẫn về cùng một việc, trên cùng một màn hình.
+        #
+        # Nguồn sự thật duy nhất còn lại lúc này là PostgreSQL, nên đọc từ đó.
+        stage = "FINISHED" if status in {"SUCCESS", "CANCELLED", "FAILED"} else "EXECUTING"
+        message = _STAGE_MESSAGES[stage]
 
     # Lỗi đã ghim thì đọc lại từ PostgreSQL, kể cả khi `_DEMO_JOBS` đã mất.
     #
@@ -4063,6 +4331,10 @@ async def list_demo_workflows_by_session(
                 needs_attention=row["status"] in _ATTENTION_STATUSES,
                 created_at=row["created_at"].isoformat() if row.get("created_at") else None,
                 updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
+                # `title` là bản cắt ngắn cho danh sách. Dựng bong bóng chat từ
+                # nó thì người dùng đọc lại chính câu mình vừa viết, bị cụt.
+                goal=row.get("goal"),
+                **_assistant_fields(row),
             )
         )
     return DemoSessionListResponse(session_id=session_id, workflows=items)
@@ -4286,6 +4558,28 @@ async def cancel_demo_workflow(
     # Chỉ chạy khi CÓ repair hint. Huỷ một workflow đang chờ thanh toán vẫn
     # theo chính sách cũ — từ chối tiền, giữ booking — và đó là quyết định
     # riêng, không đổi ở đây.
+    # Huỷ yêu cầu phải RÚT LUÔN lời nhờ duyệt đã gửi đi.
+    #
+    # `viewing_approvals` sống độc lập với `workflows.status`, nên huỷ chỉ đổi
+    # bảng workflow còn thẻ duyệt vẫn AWAITING. Hai hậu quả, cả hai đều đo được
+    # trên dữ liệu thật:
+    #
+    #   5 yêu cầu CANCELLED vẫn AWAITING  → đơn vị tour vẫn đang được hỏi về
+    #                                       một lịch khách đã huỷ
+    #   1 yêu cầu CANCELLED đã APPROVED   → và họ đã DUYỆT nó
+    #
+    # Cái thứ hai không dừng ở màn hình: có người sắp xếp đi phục vụ một buổi
+    # tham quan không còn tồn tại.
+    #
+    # Giao diện cũng đọc bảng này. Thẻ duyệt còn treo thì yêu cầu đã huỷ vẫn
+    # hiện là "đang chờ đơn vị xác nhận", và câu tiếp theo người dùng gõ bị
+    # đọc thành câu trả lời cho nó — đo được: gõ "tôi muốn đổi dịch vụ" sau
+    # khi huỷ, KHÔNG workflow nào được tạo và màn hình vẫn vẽ lịch cũ.
+    try:
+        await expire_pending_viewing_approval(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("không rút được yêu cầu duyệt lịch (%s)", type(exc).__name__)
+
     try:
         if await _read_repair_hints(workflow_id):
             await release_on_failure(workflow_id)
@@ -4548,6 +4842,24 @@ def _assistant_fields(row: Any) -> dict[str, Any]:
     workflow: màn hình chính dựng lại vài cuộc hội thoại cùng lúc, và N+1 ở
     đó là N+1 người dùng phải ngồi chờ.
     """
+    # Ngoại lệ DUY NHẤT: câu trả lời cho một CÂU HỎI.
+    #
+    # Bộ lọc dưới đây tồn tại để câu MÔ TẢ TRẠNG THÁI không sống lâu hơn trạng
+    # thái nó mô tả. Câu trả lời cho "tôi đã đặt lịch lúc nào" không mô tả
+    # trạng thái nào cả, nên nó không thể lỗi thời theo cách đó.
+    #
+    # Workflow chỉ-hỏi giữ `status` của riêng nó (PENDING rồi SUCCESS) trong
+    # khi câu được đóng dấu `CHAT`. Hai giá trị không bao giờ khớp, nên mọi câu
+    # P-118 nói trong hội thoại đều bị loại — đo được: 4 workflow liên tiếp có
+    # `assistant_answer` đầy đủ mà danh sách trả về `answer=None`, và người
+    # dùng nhìn một khung chat chỉ có lời của chính mình.
+    if row.get("assistant_for_status") == "CHAT":
+        raw_chat = row.get("assistant_suggestions")
+        return {
+            "answer": row.get("assistant_answer"),
+            "suggestions": json.loads(raw_chat) if isinstance(raw_chat, str) else list(raw_chat or []),
+            "response_state": row.get("assistant_response_state"),
+        }
     if row.get("assistant_for_status") != row.get("status"):
         return {"answer": None, "suggestions": [], "response_state": None}
     raw = row.get("assistant_suggestions")

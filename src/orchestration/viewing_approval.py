@@ -440,3 +440,24 @@ class ViewingApprovalBoundary:
             return
         for task_id in sorted(task_ids):
             await self._repository.update_task_status(workflow_id, task_id, TaskStatus.WAITING_APPROVAL)
+
+async def expire_pending_viewing_approval(pool: asyncpg.Pool, workflow_id: str) -> bool:
+    """Rút lời nhờ duyệt khi người dùng huỷ yêu cầu. Trả True nếu có rút.
+
+    `EXPIRED` chứ không phải `REJECTED`: từ chối là quyết định của ĐƠN VỊ tour,
+    và ghi nó vào đây là gán cho họ một việc họ chưa từng làm — rồi mọi báo cáo
+    "tỉ lệ đơn vị từ chối" đều sai theo.
+
+    Chỉ đụng hàng còn AWAITING. Đơn vị đã quyết rồi thì quyết định của họ là
+    dữ kiện, không được viết đè.
+    """
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE viewing_approvals
+               SET status = 'EXPIRED', decided_at = NOW()
+             WHERE workflow_id = $1 AND status = 'AWAITING'
+            """,
+            _uuid(workflow_id),
+        )
+    return result.endswith(" 1")

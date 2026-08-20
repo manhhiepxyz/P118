@@ -83,7 +83,7 @@ def _full_flow_plan(
     apartment_code: str,
     plate_number: str,
     booking_date: str,
-    parking_zone: str = "ZONE_A",
+    parking_zone: str = "ZONE_B",
 ) -> TaskPlan:
     """TaskPlan 4 bước với chuỗi InputRef đầy đủ (giống fake Planner)."""
     return TaskPlan(
@@ -221,14 +221,11 @@ async def test_boundary_no_availability_returns_standard_result(e2e_pool: asyncp
     booking_date = _unique_booking_date()
 
     async with _real_connectors() as connectors:
-        # Đổ đầy ZONE_A (capacity = 3) bằng các workflow thật.
-        for _ in range(3):
-            filler = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date)
-            _, filler_results = await _boundary(connectors, repository).execute(filler)
-            assert all(result.success for result in filler_results.values())
-
-        # Workflow tiếp theo phải chạm NO_AVAILABILITY ở T3.
-        plan = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date)
+        # ZONE_A được CẤU HÌNH kín (sức chứa 0), không cần đổ đầy bằng
+        # booking giả. Vòng lặp cũ đặt ba booking thật rồi mới chạm được lỗi —
+        # nó phụ thuộc sức chứa đúng bằng 3, và mỗi lần đổi cấu hình là test
+        # này hỏng theo. Giờ nó đọc thẳng cấu hình.
+        plan = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date, parking_zone="ZONE_A")
         workflow_id, task_results = await _boundary(connectors, repository).execute(plan)
 
     failure = task_results["T3"]

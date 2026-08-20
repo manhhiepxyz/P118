@@ -19,6 +19,7 @@
  */
 
 import type {
+  AgentSessionResponse,
   AgentWorkflowListResponse,
   AgentWorkflowResponse,
   AuthUser,
@@ -76,6 +77,42 @@ export function storeToken(token: string | null): void {
   }
 }
 
+
+
+/**
+ * `detail` thô của response, để `messageForStatus` tự quyết định dùng hay bỏ.
+ *
+ * Trước đây body CHỈ được đọc khi mã là 422. Nên câu hạn ngạch — thứ backend
+ * viết riêng, kèm mốc thời gian mở lại — không bao giờ tới được nhánh 429, và
+ * người hết suất trong ngày vẫn đọc "thử lại sau giây lát". Bản vá đầu của tôi
+ * thêm bộ lọc ở nhánh 429 nhưng bỏ quên chính chỗ này, nên nó lọc một chuỗi
+ * luôn rỗng.
+ *
+ * Đọc KHÔNG có nghĩa là hiện: mỗi nhánh mã lỗi tự lọc theo dấu hiệu nó biết.
+ */
+async function rawDetail(response: Response): Promise<string | null> {
+  try {
+    const payload = (await response.clone().json()) as { detail?: unknown }
+    return typeof payload.detail === 'string' ? payload.detail : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Câu hạn ngạch do backend viết — chỉ nhận đúng dạng đã biết.
+ *
+ * Không hiện `detail` thô cho mọi 429: `detail` là chuỗi từ server, và một
+ * đường 429 khác sau này có thể mang nội dung không dành cho người dùng đọc.
+ * Nhận theo DẤU HIỆU của câu hạn ngạch, đúng cùng cách `safeValidationDetail`
+ * lọc câu 422.
+ */
+function quotaDetail(detail: string): string | null {
+  const text = detail.trim()
+  if (!text || text.length > 200) return null
+  return text.includes('giới hạn') && text.includes('dùng tiếp được sau') ? text : null
+}
+
 /** Thông báo cho người dùng theo mã lỗi. Không bao giờ hiện body thô. */
 function messageForStatus(status: number, fallback: string): string {
   switch (status) {
@@ -90,7 +127,19 @@ function messageForStatus(status: number, fallback: string): string {
       // người dùng vừa nhập, và không ai đọc được nó.
       return fallback || 'Dữ liệu chưa hợp lệ. Vui lòng kiểm tra lại thông tin.'
     case 429:
-      return 'Bạn thao tác hơi nhanh. Vui lòng thử lại sau giây lát.'
+      // HAI giới hạn khác nhau trả về CÙNG mã 429, và chúng cần hai hành động
+      // khác nhau:
+      //
+      //   bùng phát   chờ vài giây rồi bấm lại
+      //   hạn ngạch   hết suất trong ngày — chờ hàng GIỜ, hoặc xin nâng trần
+      //
+      // Bản trước trả một câu duy nhất, và đó là câu của trường hợp thứ nhất.
+      // Người dùng đã dùng hết 50/50 suất trong ngày được bảo "thử lại sau
+      // giây lát", nên họ bấm lại liên tục — đúng thứ hạn ngạch định chặn, và
+      // họ không có cách nào biết chuyện gì đang xảy ra.
+      //
+      // Backend đã viết sẵn câu đúng kèm MỐC THỜI GIAN mở lại. Dùng nó khi có.
+      return quotaDetail(fallback) ?? 'Bạn thao tác hơi nhanh. Vui lòng thử lại sau giây lát.'
     case 503:
       return 'Hệ thống đang bận. Vui lòng thử lại sau ít phút.'
     default:
@@ -118,7 +167,7 @@ const SAFE_VALIDATION_MESSAGES = [
   'Giờ bảo trì phải theo định dạng',
   'Giờ chuyển nhà phải theo định dạng',
   'Hãy chọn Khu A hoặc Khu B.',
-  'Vui lòng nhập biển số xe',
+  'Biển số xe chưa đúng định dạng.',
   'Hãy cho biết phương tiện',
   'Dự án bạn chọn chưa nằm trong danh sách',
   'Giờ liên hệ phải theo định dạng',
@@ -203,6 +252,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
         // Body không phải JSON: giữ câu generic, không hiện raw response.
       }
     }
+    fallback = (await rawDetail(response)) ?? fallback
     if (response.status === 409 && conflictMessage !== undefined) {
       // Chuỗi RỖNG nghĩa là "dùng nguyên văn câu backend gửi". Với retry, câu
       // ấy đã chỉ đúng lối ra ("bạn cho mình biết muốn đổi gì"); đè một câu
@@ -257,6 +307,7 @@ async function requestFormData<T>(path: string, form: FormData, method = 'POST')
         // Body không phải JSON: giữ câu generic.
       }
     }
+    fallback = (await rawDetail(response)) ?? fallback
     throw new ApiError(response.status, messageForStatus(response.status, fallback))
   }
 
@@ -371,6 +422,11 @@ export async function listWorkflows(status = 'active', limit = 20): Promise<Agen
   return request<AgentWorkflowListResponse>(
     `/workflows/demo?status=${encodeURIComponent(status)}&limit=${limit}`,
   )
+}
+
+/** Mọi lượt của một cuộc hội thoại, cũ đến mới. */
+export async function listSessionWorkflows(sessionId: string): Promise<AgentSessionResponse> {
+  return request<AgentSessionResponse>(`/workflows/demo/session/${encodeURIComponent(sessionId)}`)
 }
 
 /**
