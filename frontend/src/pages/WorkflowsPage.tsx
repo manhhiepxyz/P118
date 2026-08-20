@@ -71,7 +71,14 @@ const TONE: Record<string, { label: string; token: string }> = {
 export function WorkflowsPage() {
   // Mặc định "Đang xử lý": thứ người dùng mở Lịch sử để tìm gần như luôn là
   // việc còn dở, không phải kho lưu trữ.
-  const [filter, setFilter] = useState<FilterValue>('in-progress')
+  /**
+   * Mở ra là thấy TẤT CẢ.
+   *
+   * Mặc định cũ là "Đang xử lý" — hợp lý về mặt ưu tiên, nhưng nó ẩn mất mọi
+   * thứ đã xong, và người vào Lịch sử thường đi tìm đúng những thứ ấy. Tệ hơn,
+   * khi nhóm đó rỗng thì màn hình trông như chưa từng có yêu cầu nào.
+   */
+  const [filter, setFilter] = useState<FilterValue>('all')
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
