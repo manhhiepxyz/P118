@@ -970,8 +970,8 @@ class WorkflowRepository:
             await conn.executemany(
                 """
                 INSERT INTO workflow_events
-                    (workflow_id, sequence, stage, message, task_id, task_status)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                    (workflow_id, sequence, stage, message, task_id, task_status, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, NOW()))
                 ON CONFLICT (workflow_id, sequence) DO NOTHING
                 """,
                 [
@@ -982,6 +982,9 @@ class WorkflowRepository:
                         str(event.get("message") or ""),
                         event.get("task_id"),
                         event.get("task_status"),
+                        # Giờ do caller đóng dấu lúc sự kiện XẢY RA. Ghim theo
+                        # lô ở điểm dừng nên `NOW()` lúc ghim muộn hơn thực tế.
+                        event.get("at"),
                     )
                     for event in events
                 ],
@@ -992,7 +995,8 @@ class WorkflowRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT sequence, stage, message, task_id, task_status
+                SELECT sequence, stage, message, task_id, task_status,
+                       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS at
                 FROM workflow_events WHERE workflow_id = $1 ORDER BY sequence
                 """,
                 _uuid(workflow_id),

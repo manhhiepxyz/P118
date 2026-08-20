@@ -1172,7 +1172,7 @@ export function JourneyWorkspacePage() {
               )}
               {selected ? <InspectorPanel step={selected} /> : <JourneySummary steps={steps} title={title} hideWaiting={!!pending} />}
               <div className="border-t border-[var(--border-subtle)]">
-                <ActivityFeed />
+                <ActivityFeed events={live?.events ?? []} />
               </div>
             </aside>
           )}

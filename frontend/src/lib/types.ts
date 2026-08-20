@@ -137,6 +137,8 @@ export interface AgentWorkflowEvent {
   sequence: number
   stage: AgentWorkflowStage
   message: string
+  /** Thời điểm xảy ra, ISO. Backend đóng dấu lúc phát, không phải lúc ghim. */
+  at?: string | null
   /**
    * Sự kiện này thuộc về BƯỚC nào. Null với các mốc của cả workflow
    * (lập kế hoạch, kiểm tra, hoàn tất).

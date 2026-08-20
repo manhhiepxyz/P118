@@ -4,7 +4,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from datetime import date, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -676,6 +676,10 @@ def _append_job_event(job: dict[str, Any], stage: str, payload: dict[str, Any] |
             "sequence": len(events) + 1,
             "stage": stage,
             "message": message,
+            # Đóng dấu NGAY lúc xảy ra, không để database tự stamp: sự kiện
+            # được ghim theo lô ở điểm dừng, nên `NOW()` lúc ghim có thể muộn
+            # hơn lúc xảy ra cả phút.
+            "at": datetime.now(UTC).isoformat(),
             "task_id": payload.get("task_id"),
             "task_status": payload.get("task_status"),
             "signature": signature,
