@@ -48,6 +48,7 @@ from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, us
 from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
     RetryNotAllowed,
+    rerun_with_answers,
     retry_failed_tasks,
     ResumeError,
     persist_pending_approval,
@@ -3292,6 +3293,67 @@ async def continue_demo_workflow(
         if bad_field is not None:
             raise HTTPException(status_code=422, detail=_UNSUPPORTED_PROJECT_MESSAGE)
         context.update(answers)
+
+    # ĐƯỜNG NHANH: vá kế hoạch cũ thay vì hỏi Planner lại từ đầu.
+    #
+    # Đo được trên một lần sửa đúng MỘT ô: 175 giây trong Planner trên tổng 200
+    # giây, hai lượt gọi model. Kế hoạch đã có và đã qua Validator; hỏi lại là
+    # đặt cược lại một ván đã thắng — và ván ấy thua thật, cùng một câu ba lượt
+    # chạy cho ba kết quả khác nhau.
+    #
+    # Ba điều kiện, thiếu một là đi đường cũ:
+    #
+    #   1. Câu trả lời là DỮ LIỆU CÓ CẤU TRÚC (`fields`). Ô có cấu trúc chỉ
+    #      nhận giá trị trong allowlist đóng nên nó không thể mang ý định đổi
+    #      hình dạng kế hoạch; câu chữ tự do thì có.
+    #   2. Workflow cha CÓ repair hint — tức đây là sửa sau khi một bước hỏng,
+    #      không phải lần hỏi đầu lúc chưa có kế hoạch nào.
+    #   3. Cha còn task đã chạy để seed lại.
+    #
+    # Đo được: 83/90 lượt hỏi lại là lần hỏi ĐẦU (chưa có plan để tái dùng),
+    # nên đường nhanh này chạm 7 lượt — nhưng đúng 7 lượt đó là toàn bộ trải
+    # nghiệm "chờ ba phút".
+    if request.fields and answers and await _read_repair_hints(workflow_id):
+        settings = get_settings()
+        try:
+            await rerun_with_answers(
+                workflow_id,
+                answers,
+                resident_url=settings.resident_service_url,
+                transport_url=settings.transport_service_url,
+                payment_url=settings.payment_service_url,
+                property_url=settings.property_service_url,
+                resident_services_url=settings.resident_services_service_url,
+                tour_url=settings.tour_service_url,
+                consultation_url=settings.consultation_service_url,
+                shuttle_url=settings.shuttle_service_url,
+            )
+        except RetryNotAllowed as exc:
+            # Không dùng được đường nhanh thì RƠI VỀ đường cũ, không báo lỗi:
+            # người dùng vừa trả lời đúng, họ không có lỗi gì để nghe.
+            logger.info("không vá được kế hoạch cũ (%s), lập lại từ đầu", exc.code)
+        else:
+            # Cache RAM dựng lúc còn chờ là ảnh cũ; giữ lại thì mọi lượt poll
+            # sau vẫn trả trạng thái hỏng.
+            job = _DEMO_JOBS.get(workflow_id)
+            if job is not None:
+                job["response"] = None
+            # Đóng câu hỏi lại: đường này chạy tiếp trên CHÍNH workflow đó
+            # nên không có child nào để claim, nhưng để ngỏ thì nó nằm mãi ở
+            # "chờ bổ sung" — chiếm hạn ngạch và là một dòng đang-chờ vĩnh viễn.
+            pool = None
+            try:
+                repository = await acquire_repository()
+                pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+                await repository.resolve_clarification(workflow_id)
+            except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+                logger.info("không đóng được câu hỏi sau khi vá plan (%s)", type(exc).__name__)
+            finally:
+                if pool is not None:
+                    await pool.close()
+            view = await _public_view_from_db(workflow_id)
+            if view is not None:
+                return await _with_stored_answer(view, workflow_id)
 
     # CONSUME atomic ngay trước khi tạo child. Đây là điểm duy nhất quyết định
     # ai được đi tiếp: `UPDATE ... WHERE resolved_at IS NULL ... RETURNING *`

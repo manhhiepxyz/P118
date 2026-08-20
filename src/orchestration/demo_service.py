@@ -25,6 +25,8 @@ from src.connectors.tour import TourConnector
 from src.db.parking_payment_repository import payment_idempotency_key
 from src.executor.executor import Executor
 from src.common.failure_messages import repair_question
+from src.agents.graph import _apply_user_answers
+from src.agents.validator import TaskPlanValidator
 from src.orchestration.repair import RepairManager
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
@@ -954,6 +956,117 @@ class RetryNotAllowed(Exception):
         super().__init__(message)
 
 
+def _refuse_unapproved_payment(plan: Any, rows: list[dict]) -> None:
+    """Chặn mọi đường chạy TRẦN đụng vào `pay_fee`.
+
+    `Executor` trần không có `PaymentApprovalBoundary`. Đo được trên stack
+    thật, chính bản vá tái-dùng-kế-hoạch của tôi:
+
+        PAY-021   BOOK-055   100.000 VND   PAID
+        payment_approvals cho workflow này: 0
+
+    Tiền bị trừ mà không có một bản ghi duyệt nào. Tài liệu của chính dự án nói
+    rõ: "`pay_fee` là action tài chính và PHẢI qua approval ở runtime trước khi
+    Executor gọi Payment API", và "bước duyệt tồn tại chính vì nó không được
+    phép là tuỳ chọn".
+
+    Nên các đường tắt (vá kế hoạch, chạy lại bước hỏng) từ chối hẳn khi plan
+    còn `pay_fee` chưa chạy xong, và rơi về đường đầy đủ có cổng duyệt. Mất tốc
+    độ ở luồng đỗ xe, nhưng một đường tắt quanh cổng tiền thì không có tốc độ
+    nào bù nổi.
+    """
+    done = {row["task_id"] for row in rows if str(row.get("status")) == TaskStatus.SUCCESS.value}
+    unpaid = [task.task_id for task in plan.tasks if task.tool == "pay_fee" and task.task_id not in done]
+    if unpaid:
+        raise RetryNotAllowed(
+            "PAYMENT_NEEDS_APPROVAL",
+            "Yêu cầu này có bước thanh toán, nên phải đi qua bước xác nhận thay vì chạy tắt.",
+        )
+
+
+async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: str) -> dict[str, Any]:
+    """Vá câu trả lời vào kế hoạch ĐÃ CÓ rồi chạy tiếp — KHÔNG gọi lại Planner.
+
+    Người dùng sửa đúng một ô ("Khu B") và hệ thống đi hỏi model lại toàn bộ
+    yêu cầu. Đo được: 175 giây trong Planner trên tổng 200 giây, hai lượt gọi.
+    Kế hoạch đã có sẵn và đã qua Validator; đem nó ra hỏi lại là đặt cược lại
+    một ván đã thắng — và ván ấy thua thật: cùng một câu, ba lượt chạy cho ba
+    kết quả khác nhau (READY / thiếu project_id / không hiểu yêu cầu).
+
+    Ranh giới hẹp có chủ ý — chỉ dùng khi câu trả lời là DỮ LIỆU CÓ CẤU TRÚC:
+
+      - Ô có cấu trúc chỉ nhận giá trị trong allowlist đóng, nên nó không thể
+        mang ý định đổi hình dạng kế hoạch ("bỏ chỗ đỗ đi, chỉ giữ tham quan").
+        Câu chữ tự do thì có, và những câu ấy vẫn đi đường lập lại như cũ.
+      - Vá xong PHẢI validate lại. `Executor` trần không validate — việc đó do
+        `ValidatedExecutionBoundary` làm, mà đường này không đi qua nó. Bỏ bước
+        validate là mở một cửa sau vào tầng thực thi.
+
+    Bước đã SUCCESS được seed, không chạy lại: các tool này không idempotent.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        record = await repository.get_workflow(workflow_id)
+        if record is None:
+            raise RetryNotAllowed("NOT_FOUND", "Không tìm thấy yêu cầu này.")
+
+        rows = record.get("tasks") or []
+        plan = _plan_from_task_rows(record["workflow"].get("goal") or "", rows)
+        if plan is None or not plan.tasks:
+            raise RetryNotAllowed("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy lại.")
+
+        # Ép giá trị người dùng VỪA trả lời đè lên giá trị cũ trong plan — cùng
+        # một hàm mà graph dùng, không viết bản thứ hai.
+        _refuse_unapproved_payment(plan, rows)
+        _apply_user_answers(plan, answers)
+
+        # Cửa duy nhất vào tầng thực thi cho đường này.
+        try:
+            TaskPlanValidator.validate(plan)
+        except ValueError as exc:
+            raise RetryNotAllowed("INVALID_PLAN", str(exc)) from None
+
+        connectors = build_connectors(workflow_id=workflow_id, **urls)
+        repair_manager = RepairManager()
+        executor = Executor(connectors, repository, on_failure=repair_manager)
+
+        seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
+        await executor.execute(
+            plan,
+            workflow_id,
+            finalize=False,
+            seed_statuses=seed_statuses,
+            seed_results=seed_results,
+        )
+
+        hints = repair_manager.hints_for(workflow_id)
+        await _persist_hints(repository, workflow_id, hints)
+        repair_manager.clear(workflow_id)
+
+        statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
+        all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
+        final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
+
+        repair_answer = _repair_answer_for(hints, plan)
+        try:
+            await repository.save_assistant_response(
+                workflow_id,
+                answer=repair_answer
+                or compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                suggestions=[],
+                state="FALLBACK",
+                for_status="NEEDS_INFORMATION" if repair_answer else final_status.value,
+            )
+        except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+            logger.info("không ghi được câu chốt sau khi vá plan (%s)", type(exc).__name__)
+
+        await repository.update_workflow_status(workflow_id, final_status)
+        return {"workflow_id": workflow_id, "status": final_status.value}
+    finally:
+        await pool.close()
+
+
 async def retry_failed_tasks(
     workflow_id: str,
     *,
@@ -1005,6 +1118,8 @@ async def retry_failed_tasks(
         plan = _plan_from_task_rows(record["workflow"].get("goal") or "", rows)
         if plan is None or not plan.tasks:
             raise RetryNotAllowed("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy lại.")
+
+        _refuse_unapproved_payment(plan, rows)
 
         connectors = build_connectors(
             resident_url=resident_url,

@@ -105,6 +105,10 @@ class PostgreSQLWorkflowStateRepository:
         """Trả dict gồm workflow metadata + danh sách tasks."""
         return await self.workflows.get_workflow(workflow_id)
 
+    async def resolve_clarification(self, workflow_id: str) -> bool:
+        """Đóng câu hỏi đang mở, không tạo workflow con."""
+        return await self.workflows.resolve_clarification(workflow_id)
+
     async def consume_clarification_and_create_child(self, parent_workflow_id: str, **kwargs) -> dict | None:
         """Claim clarification + tạo child atomic. Xem WorkflowRepository."""
         return await self.workflows.consume_clarification_and_create_child(parent_workflow_id, **kwargs)

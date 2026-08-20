@@ -1178,6 +1178,29 @@ class WorkflowRepository:
             return None
         return _decode_clarification_row(row)
 
+    async def resolve_clarification(self, workflow_id: str) -> bool:
+        """Đánh dấu câu hỏi đã được trả lời, KHÔNG tạo workflow con.
+
+        Đường vá-kế-hoạch chạy tiếp trên CHÍNH workflow đó, nên nó không cần
+        child — nhưng vẫn phải đóng câu hỏi lại, nếu không workflow nằm mãi ở
+        "chờ bổ sung": chiếm một suất hạn ngạch và là một dòng đang-chờ trong
+        Lịch sử vĩnh viễn.
+
+        `WHERE resolved_at IS NULL` giữ nguyên tính tuần tự hoá: hai request
+        đồng thời thì chỉ một cái nhận True.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE workflow_clarifications
+                SET resolved_at = NOW(), updated_at = NOW()
+                WHERE workflow_id = $1 AND resolved_at IS NULL
+                RETURNING workflow_id
+                """,
+                _uuid(workflow_id),
+            )
+        return row is not None
+
     async def consume_clarification_and_create_child(
         self,
         parent_workflow_id: str,
