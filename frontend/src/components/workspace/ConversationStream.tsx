@@ -19,10 +19,21 @@ import type { ChatTurn } from '../../lib/journeyMock'
 export function ConversationStream({
   turns,
   thinking = false,
+  stage = null,
 }: {
   turns: ChatTurn[]
   /** P-118 đang soạn câu trả lời — hiện nhịp chấm thay vì im lặng. */
   thinking?: boolean
+  /**
+   * Việc backend ĐANG làm, lấy từ sự kiện mới nhất.
+   *
+   * Ba chấm nói "đang nghĩ" nhưng không nói nghĩ gì, và lượt lập kế hoạch có
+   * thể kéo 20–120 giây. Ba chấm im lặng suốt hai phút đọc lên như đã treo.
+   *
+   * Backend PHÁT sẵn chuỗi này từ giây đầu — PLANNING → PLANNED → VALIDATING →
+   * VALIDATED → EXECUTING — nhưng workspace chưa bao giờ dùng tới.
+   */
+  stage?: string | null
 }) {
   const end = useRef<HTMLDivElement>(null)
 
@@ -92,16 +103,23 @@ export function ConversationStream({
               >
                 P
               </span>
-              {/* Ba chấm lệch pha — nói "đang nghĩ" mà không hứa một khoảng
-                  thời gian cụ thể như thanh tiến độ vẫn làm. */}
-              <span className="mt-[7px] flex items-center gap-1" aria-hidden>
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="think-dot h-[5px] w-[5px] rounded-full"
-                    style={{ backgroundColor: 'var(--text-muted)', animationDelay: `${i * 160}ms` }}
-                  />
-                ))}
+              {/* Câu VIỆC ĐANG LÀM đứng trước ba chấm khi có.
+                  Ba chấm giữ lại chứ không thay: chúng nói "vẫn đang chạy"
+                  giữa hai lần đổi giai đoạn, mà một giai đoạn có thể đứng yên
+                  cả phút. Chỉ có chữ thì màn hình lại trông như đã dừng. */}
+              <span className="mt-[4px] flex items-center gap-2">
+                {stage && (
+                  <span className="text-[14.5px] leading-[1.6] text-[var(--text-secondary)]">{stage}</span>
+                )}
+                <span className="flex items-center gap-1" aria-hidden>
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="think-dot h-[5px] w-[5px] rounded-full"
+                      style={{ backgroundColor: 'var(--text-muted)', animationDelay: `${i * 160}ms` }}
+                    />
+                  ))}
+                </span>
               </span>
             </li>
           )}

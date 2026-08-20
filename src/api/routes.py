@@ -4256,10 +4256,26 @@ async def decide_demo_payment(
         )
 
     amount = f"{quote.amount:,.0f}".replace(",", ".")
-    response = DemoWorkflowResponse(
-        workflow_id=workflow_id,
-        status="SUCCESS",
-        summary=f"Đã thanh toán {amount} {quote.currency}. Chỗ đỗ xe của bạn đã được xác nhận.",
+    summary = f"Đã thanh toán {amount} {quote.currency}. Chỗ đỗ xe của bạn đã được xác nhận."
+
+    # Response này phải mang THEO các bước, không chỉ một câu tóm tắt.
+    #
+    # Bản trước dựng `DemoWorkflowResponse(workflow_id, status, summary)` trần.
+    # `status="SUCCESS"` là trạng thái kết thúc nên giao diện NGỪNG poll ngay —
+    # và bản trần ấy là thứ cuối cùng nó thấy. Người dùng vừa trả tiền xong mở
+    # trang chi tiết và không có bước nào cả: không biết chỗ đỗ nào, xe nào,
+    # lịch tham quan ra sao.
+    #
+    # Tệ hơn: nó còn được ghi vào `job["response"]`, nên mọi lượt poll sau đó
+    # cũng trả bản rỗng cho tới khi tiến trình khởi động lại.
+    #
+    # Dựng lại từ database như đường duyệt lịch tham quan vẫn làm, rồi chỉ ĐÈ
+    # câu tóm tắt — số tiền và mã đặt chỗ là thứ chỉ chỗ này biết.
+    view = await _public_view_from_db(workflow_id)
+    response = (
+        view.model_copy(update={"status": "SUCCESS", "summary": summary})
+        if view is not None
+        else DemoWorkflowResponse(workflow_id=workflow_id, status="SUCCESS", summary=summary)
     )
     if job is not None:
         _append_job_event(job, "FINISHED")

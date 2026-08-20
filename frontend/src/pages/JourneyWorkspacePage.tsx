@@ -721,6 +721,19 @@ export function JourneyWorkspacePage() {
    * nhịp poll, vì đếm nhịp là một protocol ngầm sẽ sai ngay khi đổi tốc độ mô
    * hình.
    */
+  /**
+   * Việc backend ĐANG làm — lấy từ sự kiện mới nhất, không tự đặt tên.
+   *
+   * Backend phát sẵn chuỗi giai đoạn từ giây đầu (PLANNING → PLANNED →
+   * VALIDATING → VALIDATED → EXECUTING), nhưng workspace chưa bao giờ đọc tới:
+   * nó chỉ vẽ ba chấm. Mà lượt lập kế hoạch đo được 20–120 giây, nên người
+   * dùng nhìn ba chấm im lặng cả phút và kết luận là treo.
+   *
+   * Đọc từ `events` chứ không dịch lại `status`: câu chữ thuộc về backend, và
+   * một bảng thứ hai ở đây là một chỗ nữa để hai bên nói khác nhau.
+   */
+  const stageLine = live?.events?.length ? (live.events[live.events.length - 1].message ?? null) : null
+
   const thinking =
     mode === 'journey' &&
     !!live &&
@@ -854,7 +867,7 @@ export function JourneyWorkspacePage() {
                 lệch khỏi tiêu đề — đo được 296 so với 422. Cùng cột thì cùng
                 trục, ở cả hai chế độ. */}
             {mode === 'journey' && (
-              <ConversationStream turns={turns} thinking={thinking} />
+              <ConversationStream turns={turns} thinking={thinking} stage={stageLine} />
             )}
 
             <CommandRail
