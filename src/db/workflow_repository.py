@@ -956,6 +956,49 @@ class WorkflowRepository:
             )
         return {str(row["workflow_id"]): row["tool"] for row in rows}
 
+    async def append_events(self, workflow_id: str, events: list[dict]) -> None:
+        """Ghi dòng thời gian giai đoạn — CHỈ THÊM, không sửa, không xoá.
+
+        Một sự kiện đã xảy ra thì không đổi được; ghi đè nó là viết lại lịch sử.
+        `ON CONFLICT DO NOTHING` dựa vào ràng buộc `(workflow_id, sequence)`, nên
+        gọi lại với cùng danh sách là no-op — quan trọng vì hàm này chạy ở mọi
+        điểm dừng, và một workflow đi qua nhiều điểm dừng.
+        """
+        if not events:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO workflow_events
+                    (workflow_id, sequence, stage, message, task_id, task_status)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (workflow_id, sequence) DO NOTHING
+                """,
+                [
+                    (
+                        _uuid(workflow_id),
+                        int(event["sequence"]),
+                        str(event["stage"]),
+                        str(event.get("message") or ""),
+                        event.get("task_id"),
+                        event.get("task_status"),
+                    )
+                    for event in events
+                ],
+            )
+
+    async def get_events(self, workflow_id: str) -> list[dict]:
+        """Dòng thời gian đã ghim, theo đúng thứ tự xảy ra."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT sequence, stage, message, task_id, task_status
+                FROM workflow_events WHERE workflow_id = $1 ORDER BY sequence
+                """,
+                _uuid(workflow_id),
+            )
+        return [dict(row) for row in rows]
+
     async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
         """Persist repair hints của một workflow.
 
