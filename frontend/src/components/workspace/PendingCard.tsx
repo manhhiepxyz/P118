@@ -22,6 +22,10 @@ interface Props {
  * Nút ở đây và câu gõ dưới kia đi qua ĐÚNG MỘT `resolve()`. Chúng không phải
  * hai đường; chúng là hai cách chạm vào cùng một action.
  */
+/** Một kiểu dáng duy nhất cho mọi control — hai chuỗi class là hai chỗ lệch. */
+const CONTROL =
+  'mt-2 h-11 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)]'
+
 export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
   // Một ô nhập cho MỖI field backend đang chờ.
   //
@@ -95,13 +99,39 @@ export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
               >
                 {field.label}
               </label>
-              <input
-                id={index === 0 ? 'pending-field' : `pending-field-${field.key}`}
-                value={draft[field.key] ?? ''}
-                onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}
-                placeholder={field.placeholder}
-                className="mt-2 h-11 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)]"
-              />
+              {/* Control theo ĐÚNG kiểu của ô, không phải ô text cho mọi thứ.
+                  Khu đỗ xe là enum hai giá trị, ngày là ngày — để người dùng gõ
+                  tự do rồi từ chối ở lượt sau là bắt họ đi một vòng gọi model
+                  chỉ để biết mình gõ sai. */}
+              {field.kind === 'select' && field.options?.length ? (
+                <select
+                  id={index === 0 ? 'pending-field' : `pending-field-${field.key}`}
+                  value={draft[field.key] ?? ''}
+                  onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}
+                  className={CONTROL}
+                >
+                  <option value="">Chọn {field.label.toLowerCase()}…</option>
+                  {field.options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id={index === 0 ? 'pending-field' : `pending-field-${field.key}`}
+                  type={field.kind === 'date' ? 'date' : field.kind === 'time' ? 'time' : field.kind === 'number' ? 'number' : 'text'}
+                  min={field.kind === 'date' ? field.minDate : field.min}
+                  max={field.max}
+                  value={draft[field.key] ?? ''}
+                  onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}
+                  placeholder={field.placeholder}
+                  className={CONTROL}
+                />
+              )}
+              {field.hint && (
+                <p className="mt-1.5 text-[12.5px] text-[var(--text-muted)]">{field.hint}</p>
+              )}
             </div>
           ))}
           <button
