@@ -165,3 +165,20 @@ def test_every_shortcut_checks_the_payment_gate(func: str) -> None:
     """
     source = inspect.getsource(getattr(demo_service, func))
     assert "_refuse_unapproved_payment(" in source, f"{func} không kiểm cổng thanh toán"
+
+
+def test_the_viewing_resume_never_runs_an_unapproved_fee() -> None:
+    """Đường resume sau duyệt lịch cũng dùng `Executor` trần.
+
+    Plan dựng lại từ `workflow_tasks` giữ MỌI task, kể cả `pay_fee`, nên về mặt
+    code nó thừa sức gọi Payment API không qua cổng duyệt.
+
+    Đo trên dữ liệu thật thì chưa từng xảy ra — mọi workflow đã trả tiền đều có
+    bản ghi duyệt, và yêu cầu duyệt luôn được tạo TRƯỚC khi lịch được duyệt
+    (5/5). Nhưng "chưa từng xảy ra" không phải một bảo đảm, và cơ chế giữ cho
+    nó không xảy ra thì không nằm ở đâu cả.
+    """
+    source = inspect.getsource(demo_service._materialize_and_run_remaining)
+
+    assert 'task.tool == "pay_fee"' in source, "không tách bước thanh toán khỏi plan chạy ở đây"
+    assert "plan_without(" in source, "không dùng bộ tách plan dùng chung"

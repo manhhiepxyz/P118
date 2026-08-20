@@ -1386,6 +1386,31 @@ async def _materialize_and_run_remaining(
         seed_statuses[pending.task_id] = TaskStatus.SUCCESS
         seed_results[pending.task_id] = result
 
+        # `pay_fee` KHÔNG chạy ở đây, và đó phải là một bảo đảm CẤU TRÚC.
+        #
+        # Đường này dùng `Executor` trần — không có `PaymentApprovalBoundary`.
+        # Plan dựng lại từ `workflow_tasks` giữ MỌI task, kể cả `pay_fee`, nên
+        # về mặt code nó thừa sức gọi Payment API mà không qua cổng duyệt.
+        #
+        # Đo trên dữ liệu thật thì chưa từng xảy ra: mọi workflow đã trả tiền
+        # đều có bản ghi duyệt, và yêu cầu duyệt luôn được tạo TRƯỚC khi lịch
+        # được duyệt (5/5) — tức `PaymentApprovalBoundary` đã kịp tách `pay_fee`
+        # ra từ lượt chạy đầu. Nhưng tôi không tìm được cơ chế nào BẢO ĐẢM điều
+        # đó, và "chưa từng xảy ra" không phải một bảo đảm.
+        #
+        # Tách hẳn ra khỏi plan chạy ở đây. Thanh toán đi đường riêng của nó:
+        # `/payment-decision` → `resume_payment_after_approval`, nơi có báo giá
+        # authoritative và khoá idempotency.
+        unpaid = {
+            task.task_id
+            for task in plan.tasks
+            if task.tool == "pay_fee" and seed_statuses.get(task.task_id) is not TaskStatus.SUCCESS
+        }
+        if unpaid:
+            trimmed = plan_without(plan, unpaid)
+            if trimmed is not None:
+                plan = trimmed
+
         final_workflow_id, task_results = await executor.execute(
             plan,
             workflow_id,
