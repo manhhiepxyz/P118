@@ -260,6 +260,22 @@ export function JourneyWorkspacePage() {
    */
   const pendingSince = useRef<number | null>(null)
 
+  /**
+   * Các chặng TẠM, vẽ trong lúc Planner còn đang chạy.
+   *
+   * Chặng thật dựng từ `live.plan`, mà plan chưa tồn tại suốt 20–120 giây lập
+   * kế hoạch. Trong cửa sổ đó canvas trống trơn: người dùng bấm Thực hiện rồi
+   * nhìn một khoảng trắng, và chỉ thấy hành trình khi mọi thứ gần xong.
+   *
+   * Nhưng ta BIẾT họ vừa chọn dịch vụ nào. Vẽ đúng những dịch vụ ấy ở trạng
+   * thái `proposed` — "đã nhận, chưa chạy" — rồi để plan thật thay thế khi tới.
+   *
+   * Cố ý KHÔNG đoán số bước: một dịch vụ có thể nở thành nhiều task (đăng ký
+   * xe + đặt chỗ + trả phí). Vẽ nhiều hơn sự thật rồi rút lại còn tệ hơn vẽ
+   * ít. Mỗi dịch vụ đúng một chặng tạm, và nhãn lấy nguyên tên dịch vụ.
+   */
+  const provisional = useRef<string[]>([])
+
   function say(from: ChatTurn['from'], text: string) {
     turnId.current += 1
     setTurns((current) => [...current, { id: `t${turnId.current}`, from, text }])
@@ -629,6 +645,27 @@ export function JourneyWorkspacePage() {
         return
       }
 
+      // Yêu cầu trước CÒN ĐANG CHẠY thì câu này không phải yêu cầu mới.
+      //
+      // Luật "không có việc nào đang chờ → đây là yêu cầu mới" đúng khi yêu
+      // cầu trước đã xong. Nhưng lúc nó đang lập kế hoạch thì cũng không có gì
+      // đang chờ — mà cửa sổ ấy dài 20–120 giây, đúng lúc người dùng gõ thêm.
+      //
+      // Đo được, ba workflow liên tiếp trong cùng một session:
+      //
+      //   03:54:03  "Đặt lịch tham quan Vinhomes Hải Vân Bay…"  → PLANNING
+      //   03:54:16  "cả 2"          ← 13 giây sau, thành workflow MỚI
+      //
+      // Goal của workflow thứ hai đúng là chuỗi "cả 2", nên hệ thống hỏi lại
+      // sáu ô từ đầu. Người dùng đọc thành "gõ một câu là nó quên hết".
+      //
+      // Nói thẳng là đang bận, và GIỮ LẠI câu vừa gõ để họ không phải gõ lại.
+      if (snapshot && (snapshot.status === 'PENDING' || snapshot.status === 'RUNNING')) {
+        setDraft(text)
+        say('agent', 'Mình đang xử lý yêu cầu trước đó. Chờ mình một chút rồi gửi tiếp nhé.')
+        return
+      }
+
       setFault(null)
       said.current = new Set()
       pendingSince.current = null
@@ -677,6 +714,10 @@ export function JourneyWorkspacePage() {
     setFault(null)
     say('user', goal)
 
+    // Giữ lại tên dịch vụ TRƯỚC khi xoá chip — đây là thứ duy nhất vẽ được
+    // trong lúc Planner còn chạy.
+    provisional.current = picked.length > 0 ? [...picked] : [goal.slice(0, 60)]
+
     setLeaving(true)
     window.setTimeout(async () => {
       setMode('journey')
@@ -702,8 +743,31 @@ export function JourneyWorkspacePage() {
 
   // Dữ liệu THẬT khi đã có workflow; dữ liệu mẫu chỉ còn là chỗ dựa lúc chưa
   // gọi được backend, để canvas không bao giờ là một khung trắng không lời.
+
   const journey = live ? journeyFromWorkflow(live) : null
-  const steps = journey?.steps ?? []
+  const planning = !!live && (journey?.steps.length ?? 0) === 0 && provisional.current.length > 0
+  const shownJourney =
+    planning && journey
+      ? {
+          ...journey,
+          steps: provisional.current.map((name, index) => ({
+            id: `provisional-${index}`,
+            title: name,
+            state: 'proposed' as const,
+            summary: 'Đã nhận yêu cầu, đang chuẩn bị các bước.',
+            timestamp: null,
+            details: [],
+            actions: [],
+            waitingOn: null,
+            x: index * 380,
+            y: 0,
+            lane: 'main',
+          })),
+          edges: [],
+        }
+      : journey
+
+  const steps = shownJourney?.steps ?? []
   const selected = steps.find((step) => step.id === selectedId) ?? null
   const done = steps.filter((step) => step.state === 'success').length
   const needsYou = steps.filter((step) => step.state === 'waiting_user').length
@@ -712,7 +776,7 @@ export function JourneyWorkspacePage() {
   // `goalText` từng đứng trước — nghĩa là thanh tiêu đề và cả cột phải hiển thị
   // nguyên văn tin nhắn vừa gửi, lặp lại đúng thứ đang nằm trong hội thoại ngay
   // bên dưới. Câu càng dài thì hai chỗ đó càng vô dụng.
-  const title = journey?.title || 'Đang chuẩn bị…'
+  const title = shownJourney?.title || 'Đang chuẩn bị…'
 
   /**
    * P-118 đang nghĩ: workflow còn chạy, hoặc câu trả lời đang được soạn.
