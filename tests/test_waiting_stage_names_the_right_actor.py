@@ -27,18 +27,60 @@ def test_the_two_waits_do_not_share_a_sentence() -> None:
     assert "đơn vị" in viewing and "thanh toán" not in viewing
 
 
-def test_the_response_accepts_the_viewing_stage() -> None:
-    """Thiếu giá trị trong Literal thì Pydantic từ chối CẢ response.
+def _models_with_a_stage_literal() -> list[tuple[str, frozenset[str]]]:
+    """MỌI model có trường `stage` dạng Literal — tự tìm, không liệt kê tay.
+
+    Có HAI cái: `DemoWorkflowResponse` và `DemoWorkflowEvent`. Bản vá đầu chỉ
+    thêm giá trị mới vào cái thứ nhất, và mọi GET workflow chứa sự kiện ấy trả
+    HTTP 500. Suite xanh 1850 test vì không test nào dựng một
+    `DemoWorkflowEvent` với giá trị mới.
+
+    Liệt kê tay là lặp lại đúng lỗi đó ở tầng test: thêm model thứ ba thì danh
+    sách tay lại thiếu, và lại im lặng.
+    """
+    import typing
+
+    from src.models import schemas
+
+    found = []
+    for name in dir(schemas):
+        model = getattr(schemas, name)
+        fields = getattr(model, "model_fields", None)
+        if not isinstance(fields, dict) or "stage" not in fields:
+            continue
+        values: set[str] = set()
+        for arg in typing.get_args(fields["stage"].annotation):
+            values.update(v for v in typing.get_args(arg) if isinstance(v, str))
+            if isinstance(arg, str):
+                values.add(arg)
+        if values:
+            found.append((name, frozenset(values)))
+    return found
+
+
+def test_more_than_one_model_declares_stage() -> None:
+    """Lá chắn cho chính hàm tìm ở trên: tìm trượt thì mọi test dưới xanh rỗng."""
+    assert len(_models_with_a_stage_literal()) >= 2
+
+
+def test_every_stage_model_accepts_the_viewing_stage() -> None:
+    """Thiếu giá trị ở BẤT KỲ model nào thì Pydantic từ chối cả response.
 
     Phát ra một giai đoạn mà schema không biết là đổi một câu chữ sai thành
-    một request hỏng — tệ hơn hẳn thứ định sửa.
+    một endpoint trả 500 — tệ hơn hẳn thứ định sửa.
     """
-    response = DemoWorkflowResponse(
-        workflow_id="w",
-        status="WAITING_APPROVAL",
-        stage="WAITING_VIEWING_APPROVAL",
-    )
-    assert response.stage == "WAITING_VIEWING_APPROVAL"
+    for name, values in _models_with_a_stage_literal():
+        assert "WAITING_VIEWING_APPROVAL" in values, f"{name}.stage không nhận WAITING_VIEWING_APPROVAL"
+
+
+def test_every_public_stage_message_is_a_valid_stage_everywhere() -> None:
+    """Câu chữ và kiểu phải khớp nhau ở mọi model.
+
+    Thêm một câu cho giai đoạn mà model từ chối là dựng sẵn một quả 500.
+    """
+    for name, values in _models_with_a_stage_literal():
+        unknown = sorted(set(_STAGE_MESSAGES) - values)
+        assert not unknown, f"{name}.stage không nhận: {unknown}"
 
 
 def test_the_graph_emits_the_viewing_stage_for_a_viewing_interruption() -> None:

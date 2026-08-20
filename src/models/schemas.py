@@ -169,6 +169,14 @@ class DemoWorkflowEvent(BaseModel):
         "RESIDENT_CHECKING",
         "RESIDENT_VERIFIED",
         "WAITING_APPROVAL",
+        # Phải có ở CẢ HAI Literal `stage`.
+        #
+        # Bản vá đầu chỉ thêm vào `DemoWorkflowResponse.stage`, còn đây thì
+        # quên — và mọi GET workflow có sự kiện này trả HTTP 500. Suite xanh
+        # 1850 test vì không test nào dựng một `DemoWorkflowEvent` với giá trị
+        # mới. Đổi một câu chữ sai thành một endpoint hỏng, đúng thứ comment ở
+        # `DemoWorkflowResponse` cảnh báo mà tôi vẫn sập.
+        "WAITING_VIEWING_APPROVAL",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",

@@ -1268,7 +1268,13 @@ async def _run_demo_job(
         if response.status == "NEEDS_INFORMATION":
             terminal_stage = "NEEDS_INFORMATION"
         elif response.status == "WAITING_APPROVAL":
-            terminal_stage = "WAITING_APPROVAL"
+            # Cùng một `status`, HAI loại chờ. Suy giai đoạn từ status thôi thì
+            # lịch tham quan cũng phát ra "Đang chờ bạn xác nhận thanh toán" —
+            # và vì đây là sự kiện CUỐI, đó đúng là câu giao diện hiển thị.
+            #
+            # `viewing_approval` chỉ có mặt ở nhánh chờ đơn vị, nên nó phân
+            # biệt được mà không cần thêm trạng thái mới.
+            terminal_stage = "WAITING_VIEWING_APPROVAL" if response.viewing_approval else "WAITING_APPROVAL"
         elif response.status == "VALIDATION_ERROR":
             terminal_stage = "VALIDATION_FAILED"
         elif response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
@@ -3462,8 +3468,10 @@ def _waiting_viewing_approval_view(
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status="WAITING_APPROVAL",
-        stage="WAITING_APPROVAL",
-        message="Đang chờ đơn vị xác nhận lịch tham quan.",
+        # Câu chữ đã đúng từ trước, nhưng `stage` thì vẫn là mã của nhánh thanh
+        # toán — và `stage` mới là thứ mọi tầng khác đọc để quyết định câu.
+        stage="WAITING_VIEWING_APPROVAL",
+        message=_STAGE_MESSAGES["WAITING_VIEWING_APPROVAL"],
         viewing_approval=DemoViewingApproval(**pending),
         # PHẢI đặt ở cả đường dựng-lại-từ-DB này, không chỉ ở đường đầu tiên.
         #
