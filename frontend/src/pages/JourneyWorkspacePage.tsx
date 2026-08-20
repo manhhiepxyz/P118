@@ -233,14 +233,23 @@ function provisionalCanvas(tools: string[]) {
       summary: 'Đang xác định các bước cần thực hiện.',
       ...place(0),
     },
-    ...tools.map((tool) => ({
-      ...base,
-      id: `provisional-${tool}`,
-      title: toolLabel(tool),
-      state: 'proposed' as const,
-      summary: 'Chưa bắt đầu.',
-      ...place(depthOf(tool)),
-    })),
+    ...tools.map((tool) => {
+      const parent = expectedDependency(tool)
+      return {
+        ...base,
+        id: `provisional-${tool}`,
+        title: toolLabel(tool),
+        state: 'proposed' as const,
+        summary: 'Chưa bắt đầu.',
+        // Khung tạm cũng phải nói "chờ bước nào".
+        //
+        // Bỏ trống ở đây thì mục "Cần xong trước" chỉ hiện được ở chặng thật —
+        // tức là đúng lúc người dùng tò mò nhất (kế hoạch vừa hiện, chưa chạy
+        // gì) lại là lúc inspector im lặng.
+        blockedBy: parent && tools.includes(parent) ? [toolLabel(parent)] : ['Lập kế hoạch'],
+        ...place(depthOf(tool)),
+      }
+    }),
   ]
 
   const edges = tools.map((tool) => {

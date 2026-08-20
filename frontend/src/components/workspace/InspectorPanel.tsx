@@ -22,7 +22,16 @@ export function InspectorPanel({ step }: Props) {
   const view = STEP_STATE[step.state]
 
   return (
-    <div key={step.id} className="rise flex h-full flex-col overflow-hidden" style={{ color: view.token }}>
+    <div
+      key={step.id}
+      /* Neo cho kiểm thử, cùng quy ước với `data-journey-step`. Không có nó thì
+         không phân biệt được "inspector mở mà mục rỗng" với "inspector không
+         mở" — hai chuyện cần hai cách sửa khác hẳn nhau. */
+      data-inspector={step.id}
+      data-inspector-blocked={(step.blockedBy ?? []).join('|')}
+      className="rise flex h-full flex-col overflow-hidden"
+      style={{ color: view.token }}
+    >
       {/* Khối trạng thái: nền nhuốm sắc của chặng, viền dưới phát sáng. */}
       {/* Đầu panel: một dải trạng thái 2px ở mép trái nối tiếp thị giác với
           dải trên node vừa chọn, cộng nền nhuốm rất nhạt. Không gradient phát
