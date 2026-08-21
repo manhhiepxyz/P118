@@ -180,6 +180,53 @@ def _unknown_zone(text: str | None) -> str | None:
     return None
 
 
+def _amends_a_previous_request(goal: str | None) -> bool:
+    """Câu này có NÊU một giá trị cụ thể để sửa yêu cầu trước không.
+
+    Bấm Dừng khi chưa gửi đi đâu cả thì yêu cầu đó phải sửa được — đổi khu, đổi
+    ngày — rồi chạy lại. Nhưng Planner cố ý KHÔNG thấy lượt đã huỷ, vì thấy nó
+    nghĩa là một câu cụt ("ok", "ừ") cũng dựng lại được việc người dùng vừa chủ
+    động dừng. Bấm Dừng mà không dừng được gì là lỗi nặng hơn.
+
+    Cổng này giải quyết cả hai: chỉ mở ký ức đã huỷ khi câu mới mang một giá
+    trị RÚT RA ĐƯỢC bằng chính các parser deterministic đang dùng cho form.
+    "ok" không có giá trị nào nên không mở được cửa; "đổi sang khu B" thì có.
+
+    Đo được trên chuỗi thật của người dùng: sau khi Dừng, "tôi muốn đỗi chỗ đỗ
+    xe sang khu B" → "mình cần biết thêm mục tiêu cụ thể của bạn", lặp lại y
+    nguyên qua ba lượt trả lời. Họ đã nói rõ khu B ngay từ câu đầu.
+    """
+    text = (goal or "").strip()
+    if not text:
+        return False
+    if _extract_parking_zone(text) or _unknown_zone(text):
+        return True
+    if _extract_plate_number(text) or _extract_vehicle_type(text):
+        return True
+    if find_project_id(text) or resolve_project_id(text):
+        return True
+    # Ngày/giờ viết theo mọi kiểu người Việt hay dùng.
+    return bool(re.search(r"\b\d{1,2}\s*[/-]\s*\d{1,2}|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b", text))
+
+
+def _recall_for_planner(recalled: list[dict[str, Any]] | None, goal: str | None) -> list[dict[str, Any]] | None:
+    """Ký ức Planner được phép thấy.
+
+    Lượt đã huỷ CHỈ đi kèm khi câu mới thật sự sửa một giá trị — xem
+    `_amends_a_previous_request`. Khi đi kèm, nó mang nhãn nói rõ là việc đó đã
+    dừng và CHƯA chạy, để Planner lập lại kế hoạch thay vì tưởng đã xong.
+    """
+    turns = recalled or []
+    if not _amends_a_previous_request(goal):
+        return [turn for turn in turns if not turn.get("_da_huy")] or None
+    ket_qua: list[dict[str, Any]] = []
+    for turn in turns:
+        if turn.get("_da_huy"):
+            turn = {**turn, "da_huy_chua_thuc_hien": True}
+        ket_qua.append(turn)
+    return ket_qua or None
+
+
 def _unknown_zone_message(zone: str) -> str:
     return (
         f"Bãi xe chỉ có Khu A và Khu B, không có Khu {zone}. "
@@ -1294,7 +1341,7 @@ async def _run_demo_job(
             # trong đó là lời mời dựng lại nó từ bất kỳ câu nói cụt nào — tức
             # bấm Dừng không dừng được gì. Tầng trả lời thì nhận đủ, vì nó cần
             # biết ĐANG NÓI CHUYỆN GÌ.
-            recalled=[turn for turn in (job.get("recalled") or []) if not turn.get("_da_huy")] or None,
+            recalled=_recall_for_planner(job.get("recalled"), goal),
             user_answers=job.get("user_answers") or {},
             approve_mock_payment=approve_mock_payment,
             resident_url=service_urls["resident"],

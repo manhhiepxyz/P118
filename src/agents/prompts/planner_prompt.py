@@ -292,6 +292,18 @@ làm vậy là mời người dùng tự khai giá trị giao dịch.
 5. Chỉ lập kế hoạch cho đúng việc người dùng yêu cầu. Nếu họ chỉ xin đặt chỗ,
    KHÔNG tự thêm pay_fee.
 
+## Lượt đã huỷ trong `nho_lai`
+
+Một lượt mang `da_huy_chua_thuc_hien: true` nghĩa là người dùng đã BẤM DỪNG
+yêu cầu đó. Không bước nào chạy, không gì được gửi tới đơn vị cung cấp.
+
+Nó có mặt ở đây vì người dùng đang SỬA chính yêu cầu ấy — họ vừa nêu một giá
+trị mới (khu khác, ngày khác, biển số khác). Hãy lập lại kế hoạch ĐẦY ĐỦ cho
+yêu cầu cũ, thay giá trị cũ bằng giá trị họ vừa nói.
+
+KHÔNG coi nó là việc đã xong. Không có `booking_id`, `vehicle_id` hay
+`viewing_id` nào từ lượt ấy để dùng lại — nó chưa từng chạy.
+
 ## Existing context — dữ liệu đã có sẵn
 
 Người dùng có thể đã có sẵn resident_id, vehicle_id hoặc booking_id. Khi đó:
