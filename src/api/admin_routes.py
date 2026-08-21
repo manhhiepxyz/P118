@@ -18,12 +18,12 @@ from pydantic import BaseModel, ConfigDict
 
 from src.api.deps import require_roles
 from src.api.schemas import AdminResidentLinkRequest, AdminResidentLinkResponse, LinkRequestDecision
+from src.common.enums import WorkflowStatus
 from src.config import get_settings
 from src.db.link_request_repository import decide_request, list_requests
 from src.db.resident_link_repository import VerificationStatus, upsert_link
 from src.db.user_repository import UserRepository
 from src.orchestration.runtime_provider import acquire_repository
-from src.common.enums import WorkflowStatus
 
 
 class AdminUserRoleUpdateRequest(BaseModel):
@@ -56,49 +56,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 _NOT_FOUND = "Không tìm thấy dữ liệu phù hợp."
 
 
-@router.get(
-    "/metrics",
-    response_model=AdminMetrics,
-    summary="Dashboard metrics",
-    dependencies=[Depends(require_roles(["admin"]))],
-)
-async def get_dashboard_metrics() -> AdminMetrics:
-    repository = await acquire_repository()
-    pool = repository._pool
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT 
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE status = 'RUNNING') as running,
-                COUNT(*) FILTER (WHERE status = 'SUCCESS') as success,
-                COUNT(*) FILTER (WHERE status = 'FAILED') as failed,
-                COUNT(*) FILTER (WHERE status = 'CANCELLED') as cancelled,
-                COUNT(*) FILTER (WHERE status = 'WAITING_APPROVAL') as waiting_approval,
-                -- AWAITING_USER is essentially a PENDING workflow waiting for user input
-                COUNT(*) FILTER (WHERE status = 'PENDING' AND workflow_id IN (SELECT workflow_id FROM workflow_clarifications WHERE resolved_at IS NULL)) as awaiting_user,
-                COALESCE(SUM(total_tokens), 0) as llm_tokens,
-                COALESCE(SUM(total_cost), 0.0) as total_cost,
-                COALESCE(AVG(latency_ms), 0.0) as avg_latency_ms
-            FROM workflows
-            """
-        )
-        llm_calls_row = await conn.fetchrow("SELECT COUNT(*) as calls FROM llm_usage")
-        llm_calls = llm_calls_row["calls"] if llm_calls_row else 0
 
-    return AdminMetrics(
-        total=row["total"] or 0,
-        running=row["running"] or 0,
-        success=row["success"] or 0,
-        failed=row["failed"] or 0,
-        cancelled=row["cancelled"] or 0,
-        waiting_approval=row["waiting_approval"] or 0,
-        awaiting_user=row["awaiting_user"] or 0,
-        llm_tokens=row["llm_tokens"] or 0,
-        llm_calls=llm_calls,
-        total_cost=float(row["total_cost"] or 0.0),
-        avg_latency_ms=float(row["avg_latency_ms"] or 0.0),
-    )
 
 
 @router.post(
@@ -249,64 +207,39 @@ async def system_metrics(
     """
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
-    try:
-        row = await pool.fetchrow(
-            """
-            SELECT
-                (SELECT SUM(total_tokens) FROM llm_usage)                       AS total_llm_tokens,
-                (SELECT COUNT(*) FROM llm_usage)                                AS total_llm_calls,
-                count(*)                                                        AS total,
-                count(*) FILTER (WHERE status IN ('PENDING', 'RUNNING'))        AS running,
-                count(*) FILTER (WHERE status = 'WAITING_APPROVAL')             AS waiting,
-                -- Đúng 6 giá trị của `WorkflowStatus`, không hơn.
-                -- Bản đầu còn lọc 'EXECUTION_ERROR'/'PLANNING_ERROR' —
-                -- những cái đó là `ErrorCode`, không phải trạng thái workflow,
-                -- nên chúng không bao giờ khớp và ô "Thất bại" thiếu số một
-                -- cách âm thầm. Một bộ lọc sai tên trạng thái không báo lỗi;
-                -- nó chỉ đếm ra 0.
-                count(*) FILTER (WHERE status = 'FAILED')                       AS failed,
-                count(*) FILTER (WHERE status = 'SUCCESS')                      AS success,
-                count(*) FILTER (WHERE status = 'CANCELLED')                    AS cancelled,
-                -- CHỜ NGƯỜI DÙNG và MỒ CÔI là hai chuyện khác hẳn nhau.
-                --
-                -- Bản đầu gộp chúng vào một ô "Kẹt quá 5 phút" đếm mọi
-                -- PENDING/RUNNING không nhúc nhích. Đo ra: cả 17 workflow nó
-                -- đếm đều đang chờ người dùng bổ sung thông tin — tức hệ thống
-                -- đang hoạt động ĐÚNG. Ô đó báo động giả 100%, và một chỉ số
-                -- vận hành báo động giả thì tệ hơn không có: người trực học
-                -- cách phớt lờ nó, rồi phớt lờ luôn lần nó nói thật.
-                --
-                -- `awaiting_user` dùng chính điều kiện mà sweeper dùng để THA:
-                -- có clarification chưa giải quyết. Hai chỗ phải cùng một định
-                -- nghĩa, nếu không màn hình sẽ mâu thuẫn với hành vi hệ thống.
-                count(*) FILTER (
-                    WHERE status IN ('PENDING', 'RUNNING')
-                      AND EXISTS (
-                          SELECT 1 FROM workflow_clarifications c
-                          WHERE c.workflow_id = workflows.workflow_id
-                            AND c.resolved_at IS NULL
-                      )
-                )                                                               AS awaiting_user,
-                -- MỒ CÔI: quá hạn TTL của sweeper mà sweeper vẫn chưa dọn.
-                -- Khác 0 nghĩa là vòng quét đang không chạy — đó mới là thứ
-                -- người vận hành cần biết, và nó nói về HỆ THỐNG chứ không
-                -- phải về người dùng.
-                count(*) FILTER (
-                    WHERE status IN ('PENDING', 'RUNNING')
-                      AND NOT EXISTS (
-                          SELECT 1 FROM workflow_clarifications c
-                          WHERE c.workflow_id = workflows.workflow_id
-                            AND c.resolved_at IS NULL
-                      )
-                      AND updated_at < NOW() - make_interval(secs => $1)
-                )                                                               AS orphaned
-            FROM workflows
-            WHERE archived_at IS NULL
-            """,
-            float(get_settings().zombie_running_ttl_hours) * 3600.0,
-        )
-    finally:
-        await pool.close()
+    row = await pool.fetchrow(
+        """
+        SELECT
+            (SELECT SUM(total_tokens) FROM llm_usage)                       AS total_llm_tokens,
+            (SELECT COUNT(*) FROM llm_usage)                                AS total_llm_calls,
+            count(*)                                                        AS total,
+            count(*) FILTER (WHERE status IN ('PENDING', 'RUNNING'))        AS running,
+            count(*) FILTER (WHERE status = 'WAITING_APPROVAL')             AS waiting,
+            count(*) FILTER (WHERE status = 'FAILED')                       AS failed,
+            count(*) FILTER (WHERE status = 'SUCCESS')                      AS success,
+            count(*) FILTER (WHERE status = 'CANCELLED')                    AS cancelled,
+            count(*) FILTER (
+                WHERE status IN ('PENDING', 'RUNNING')
+                  AND EXISTS (
+                      SELECT 1 FROM workflow_clarifications c
+                      WHERE c.workflow_id = workflows.workflow_id
+                        AND c.resolved_at IS NULL
+                  )
+            )                                                               AS awaiting_user,
+            count(*) FILTER (
+                WHERE status IN ('PENDING', 'RUNNING')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM workflow_clarifications c
+                      WHERE c.workflow_id = workflows.workflow_id
+                        AND c.resolved_at IS NULL
+                  )
+                  AND updated_at < NOW() - make_interval(secs => $1)
+            )                                                               AS orphaned
+        FROM workflows
+        WHERE archived_at IS NULL
+        """,
+        float(get_settings().zombie_running_ttl_hours) * 3600.0,
+    )
 
     return {
         "total": row["total"],
@@ -360,12 +293,34 @@ async def update_user_status(
 @router.get("/workflows/history", summary="Lịch sử luồng hoạt động (nguyên gốc) cho quản lý")
 async def get_workflows_history(
     page: int = 1,
-    limit: int = 50,
+    limit: int = 20,
     search_user: str | None = None,
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     _admin: dict = Depends(require_roles("admin"))
 ):
+    from datetime import datetime, timezone
+
+    def _parse_dt(s: str | None):
+        """Parse ISO 8601 string → Python datetime (timezone-aware)."""
+        if not s:
+            return None
+        try:
+            # Python 3.11+ handles Z natively; earlier versions need replace
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
     repository = await acquire_repository()
-    return await repository.list_all_workflows_history(page=page, limit=limit, search_user=search_user)
+    return await repository.list_all_workflows_history(
+        page=page,
+        limit=limit,
+        search_user=search_user,
+        status=status,
+        date_from=_parse_dt(date_from),
+        date_to=_parse_dt(date_to),
+    )
 
 @router.post("/workflows/{workflow_id}/retry", summary="Yêu cầu chạy lại workflow bị kẹt")
 async def retry_workflow(

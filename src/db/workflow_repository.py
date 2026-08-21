@@ -1302,41 +1302,80 @@ class WorkflowRepository:
             record["parent_workflow_id"] = str(record["parent_workflow_id"])
         return record
 
-    async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
+    async def list_all_workflows_history(
+        self,
+        page: int = 1,
+        limit: int = 20,
+        search_user: str | None = None,
+        status: str | None = None,
+        date_from=None,
+        date_to=None,
+    ) -> dict:
         """Lấy danh sách tất cả các luồng hoạt động cho Admin.
 
-        Đã bỏ cơ chế ẩn danh theo yêu cầu để hỗ trợ quản lý. Trả về `goal` gốc,
-        `owner_username`, và `input_data` của task bị lỗi.
-        Hỗ trợ lọc theo `search_user`.
+        Hỗ trợ lọc theo:
+        - `search_user`: ILIKE filter trên username.
+        - `status`: trạng thái luồng (SUCCESS, FAILED, RUNNING, ...).
+        - `date_from` / `date_to`: khoảng thời gian theo `updated_at`,
+          truyền vào dưới dạng Python `datetime` (timezone-aware).
         """
         offset = (page - 1) * limit
-        async with self._pool.acquire() as conn:
-            if search_user:
-                total_query = """
-                    SELECT COUNT(*) 
-                    FROM workflows w
-                    LEFT JOIN users u ON w.owner_user_id = u.id
-                    WHERE u.username ILIKE '%' || $1 || '%'
-                """
-                total = await conn.fetchval(total_query, search_user)
-            else:
-                total = await conn.fetchval("SELECT COUNT(*) FROM workflows")
 
-            rows_query = """
-                SELECT 
-                    w.workflow_id, 
-                    w.goal, 
-                    w.status, 
+        # Build WHERE conditions dynamically
+        conditions: list[str] = []
+        params: list = []
+        p = 0
+
+        if search_user:
+            p += 1
+            conditions.append(f"u.username ILIKE '%' || ${p} || '%'")
+            params.append(search_user)
+
+        if status:
+            p += 1
+            conditions.append(f"w.status = ${p}")
+            params.append(status.upper())
+
+        if date_from:
+            p += 1
+            conditions.append(f"w.updated_at >= ${p}")
+            params.append(date_from)
+
+        if date_to:
+            p += 1
+            conditions.append(f"w.updated_at <= ${p}")
+            params.append(date_to)
+
+        where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        # params for LIMIT/OFFSET come AFTER filter params
+        limit_p  = p + 1
+        offset_p = p + 2
+
+        async with self._pool.acquire() as conn:
+            total_query = f"""
+                SELECT COUNT(*)
+                FROM workflows w
+                LEFT JOIN users u ON w.owner_user_id = u.id
+                {where_clause}
+            """
+            total = await conn.fetchval(total_query, *params)
+
+            rows_query = f"""
+                SELECT
+                    w.workflow_id,
+                    w.goal,
+                    w.status,
                     w.error_code,
-                    w.created_at, 
+                    w.created_at,
                     w.updated_at,
                     w.assistant_answer,
                     u.username as owner_username,
                     (
                         SELECT COALESCE(json_agg(t.tool), '[]'::json)
                         FROM (
-                            SELECT tool FROM workflow_tasks wt 
-                            WHERE wt.workflow_id = w.workflow_id 
+                            SELECT tool FROM workflow_tasks wt
+                            WHERE wt.workflow_id = w.workflow_id
                             ORDER BY wt.id
                         ) t
                     ) as tools,
@@ -1348,11 +1387,11 @@ class WorkflowRepository:
                     ) as failed_task
                 FROM workflows w
                 LEFT JOIN users u ON w.owner_user_id = u.id
-                WHERE ($3::text IS NULL OR u.username ILIKE '%' || $3 || '%')
-                ORDER BY w.created_at DESC
-                LIMIT $1 OFFSET $2
+                {where_clause}
+                ORDER BY w.updated_at DESC
+                LIMIT ${limit_p} OFFSET ${offset_p}
             """
-            rows = await conn.fetch(rows_query, limit, offset, search_user)
+            rows = await conn.fetch(rows_query, *params, limit, offset)
 
         items = []
         for r in rows:

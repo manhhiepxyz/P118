@@ -725,8 +725,11 @@ export interface AdminWorkflowHistoryItem {
 
 export async function adminWorkflowsHistory(
   page = 1,
-  limit = 50,
-  search_user?: string
+  limit = 20,
+  search_user?: string,
+  status?: string,
+  date_from?: string,
+  date_to?: string,
 ): Promise<{
   items: AdminWorkflowHistoryItem[];
   total: number;
@@ -737,9 +740,10 @@ export async function adminWorkflowsHistory(
     page: page.toString(),
     limit: limit.toString(),
   });
-  if (search_user) {
-    query.append("search_user", search_user);
-  }
+  if (search_user) query.append("search_user", search_user);
+  if (status)      query.append("status", status);
+  if (date_from)   query.append("date_from", date_from);
+  if (date_to)     query.append("date_to", date_to);
   return request<{
     items: AdminWorkflowHistoryItem[];
     total: number;

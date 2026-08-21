@@ -3,7 +3,6 @@ import { Link, useLocation } from 'react-router-dom'
 import {
   CalendarCheck,
   LifeBuoy,
-  ShieldCheck,
   Moon,
   Route as RouteIcon,
   Sun,
@@ -11,7 +10,6 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
-import { useAuth } from '../../lib/auth'
 import { useTheme } from '../../lib/useTheme'
 
 // `/apartment-link` cố ý KHÔNG có ở đây: nội dung của nó đã nằm trong Hồ sơ.
