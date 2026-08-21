@@ -13,6 +13,7 @@ API đang chạy. Nó không bao giờ là nguồn dữ liệu để resume.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -69,17 +70,89 @@ def _uuid(workflow_id: str) -> UUID:
     return UUID(workflow_id)
 
 
+_TERMINAL_TASK_STATUSES = ("SUCCESS", "FAILED", "CANCELLED", "SKIPPED")
+
+# Trạng thái workflow còn HỢP LỆ để mở một ngữ cảnh chờ duyệt thanh toán mới.
+#
+# Không phải "khác CANCELLED" (luật cũ của `update_workflow_status`): một
+# workflow đã SUCCESS hay FAILED cũng không còn gì để chờ duyệt — ghim một
+# approval AWAITING cho nó là dựng lại đúng nửa trạng thái đang bị cấm, chỉ
+# khác chiều: workflow nói "đã xong", approval nói "còn đang chờ".
+_WORKFLOW_STATUSES_ALLOWING_APPROVAL = ("PENDING", "RUNNING", "WAITING_APPROVAL")
+
+
 async def save_pending_approval(
     pool: asyncpg.Pool,
     *,
     workflow_id: str,
     task_id: str,
     quote: PaymentQuote,
-) -> None:
-    """Ghi ngữ cảnh chờ duyệt. Chạy lại cùng workflow không tạo bản thứ hai."""
+) -> bool:
+    """CHỖ DUY NHẤT chuyển đồng thời `payment_approvals` → AWAITING,
+    `pay_fee` → WAITING_APPROVAL, và workflow → WAITING_APPROVAL.
+
+    Không nơi nào khác được phép ghi ba thứ này — kể cả một phần của chúng —
+    ngoài transaction dưới đây. Trước đây `PaymentApprovalBoundary.execute` tự
+    ghi `pay_fee` → WAITING_APPROVAL SỚM, trước khi hàm này chạy; một lần
+    `save_pending_approval` lỗi SAU lần ghi sớm đó để lại đúng nửa trạng thái
+    bị cấm — `pay_fee` WAITING_APPROVAL mồ côi, không có dòng approval nào cả,
+    workflow có thể vẫn RUNNING. Lần ghi sớm ấy đã bị bỏ; giờ `pay_fee` chỉ rời
+    PENDING đúng một lần, ở đây, cùng lúc với hai thứ kia.
+
+    Trả `True` nếu approval đang AWAITING (mới tạo hoặc gọi lại idempotent) và
+    `pay_fee`/workflow đã ở WAITING_APPROVAL sau lệnh này. Trả `False` mà
+    KHÔNG GHI GÌ CẢ khi:
+
+      - `pay_fee` không tồn tại, hoặc đã ở trạng thái TERMINAL
+        (SUCCESS/FAILED/CANCELLED/SKIPPED) — ghim một khoản chờ duyệt cho một
+        bước đã xong hay đã huỷ là tạo ra chính nửa trạng thái bị cấm, chỉ khác
+        chiều: có approval mà bước nó chờ thì không còn chờ gì nữa;
+      - approval của workflow này đã được QUYẾT ĐỊNH từ trước
+        (APPROVED/REJECTED) — không mở lại một quyết định đã chốt;
+      - workflow đã archive, hoặc đã ở trạng thái KẾT THÚC
+        (SUCCESS/FAILED/CANCELLED) — cùng lý do với task terminal ở trên, chỉ
+        khác cấp: workflow nói "đã xong", một approval AWAITING nói ngược lại;
+      - `task_id` không phải một bước `pay_fee` — ghim ngữ cảnh chờ TIỀN cho
+        một bước không phải thanh toán không có nghĩa gì, và một `task_id`
+        trùng tình cờ giữa hai plan khác nhau không được lấy làm approval.
+    """
     async with pool.acquire() as conn, conn.transaction():
-        await _lock_workflow_row(conn, workflow_id)
-        await conn.execute(
+        # Khoá VÀ đọc trạng thái workflow TRƯỚC khi đụng bất cứ gì khác — cùng
+        # transaction, cùng connection, nên không có khoảng hở giữa lúc đọc và
+        # lúc ghi cho một quyết định khác (huỷ, archive) chen vào giữa.
+        workflow_row = await conn.fetchrow(
+            "SELECT status, archived_at FROM workflows WHERE workflow_id = $1 FOR UPDATE",
+            _uuid(workflow_id),
+        )
+        if (
+            workflow_row is None
+            or workflow_row["archived_at"] is not None
+            or str(workflow_row["status"]) not in _WORKFLOW_STATUSES_ALLOWING_APPROVAL
+        ):
+            return False
+
+        # Khoá VÀ đọc trạng thái + tool của task TRƯỚC khi viết bất cứ gì.
+        # `task_id` ở bảng `payment_approvals` không có FK tới `workflow_tasks`
+        # — thiếu bước này, INSERT phía dưới sẽ thành công lặng lẽ cho một
+        # `task_id` không tồn tại, không phải `pay_fee`, hoặc hồi sinh ngữ cảnh
+        # chờ duyệt cho một bước đã SUCCESS/CANCELLED thật.
+        task_row = await conn.fetchrow(
+            """
+            SELECT status, tool FROM workflow_tasks
+             WHERE workflow_id = $1 AND task_id = $2
+             FOR UPDATE
+            """,
+            _uuid(workflow_id),
+            task_id,
+        )
+        if task_row is None or str(task_row["tool"]) != "pay_fee" or str(task_row["status"]) in _TERMINAL_TASK_STATUSES:
+            return False
+
+        # `RETURNING` là cách duy nhất phân biệt "vừa ghi AWAITING" với "đụng
+        # một dòng đã APPROVED/REJECTED và WHERE chặn lại": cả hai đều là
+        # UPDATE 0-hoặc-1-row hợp lệ về mặt SQL, chỉ khác ở có row trả về hay
+        # không.
+        approval_row = await conn.fetchrow(
             """
             INSERT INTO payment_approvals (workflow_id, task_id, booking_id, amount, currency, status)
             VALUES ($1, $2, $3, $4, $5, 'AWAITING')
@@ -89,6 +162,7 @@ async def save_pending_approval(
                     amount = EXCLUDED.amount,
                     currency = EXCLUDED.currency
             WHERE payment_approvals.status = 'AWAITING'
+            RETURNING workflow_id
             """,
             _uuid(workflow_id),
             task_id,
@@ -96,6 +170,38 @@ async def save_pending_approval(
             quote.amount,
             quote.currency,
         )
+        if approval_row is None:
+            # Approval đã APPROVED/REJECTED từ trước — task/workflow GIỮ
+            # NGUYÊN, không đụng gì thêm.
+            return False
+
+        # `pay_fee`: PENDING → WAITING_APPROVAL. Guard theo trạng thái là lớp
+        # phòng thủ THỨ HAI (lớp thứ nhất là `task_row` phía trên, trong CÙNG
+        # transaction nên không có khoảng hở để trạng thái đổi ở giữa).
+        await conn.execute(
+            """
+            UPDATE workflow_tasks
+               SET status = 'WAITING_APPROVAL', updated_at = NOW()
+             WHERE workflow_id = $1 AND task_id = $2
+               AND status NOT IN ('SUCCESS', 'FAILED', 'CANCELLED', 'SKIPPED')
+            """,
+            _uuid(workflow_id),
+            task_id,
+        )
+        # Cùng luật với `WorkflowRepository.update_workflow_status`: không đụng
+        # workflow đã bị archive, và không kéo một workflow đã CANCELLED quay
+        # lại chạy.
+        await conn.execute(
+            """
+            UPDATE workflows
+               SET status = 'WAITING_APPROVAL', updated_at = NOW()
+             WHERE workflow_id = $1
+               AND archived_at IS NULL
+               AND status <> 'CANCELLED'
+            """,
+            _uuid(workflow_id),
+        )
+        return True
 
 
 async def get_pending_approval(pool: asyncpg.Pool, workflow_id: str) -> PendingApproval | None:
@@ -171,6 +277,96 @@ async def quote_from_database(pool: asyncpg.Pool, booking_id: str) -> PaymentQuo
     if booking is None:
         return None
     return PaymentQuote(booking_id=booking.booking_id, amount=booking.amount, currency=booking.currency)
+
+
+# Field InputRef của `pay_fee` phải trỏ TỚI, ánh xạ field nguồn → field đích.
+# `book_parking` chỉ trả đúng ba field này cho `pay_fee` (xem
+# `TOOL_CONTRACTS["book_parking"].outputs` trong `tool_contract.py`) — InputRef
+# lệch tên field ở đây là plan đã bị sửa tay hoặc hỏng, không phải chuyện vặt.
+_PAY_FEE_EXPECTED_SOURCE_FIELDS = {
+    "booking_id": "booking_id",
+    "amount": "amount",
+    "currency": "currency",
+}
+
+
+def _as_json_object(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw or {}
+
+
+async def quote_from_persisted_book_parking(
+    pool: asyncpg.Pool, workflow_id: str, pay_fee_task_id: str
+) -> PaymentQuote | None:
+    """Báo giá dựng lại KHÔNG cần `task_results` từ RAM — theo ĐÚNG provenance.
+
+    Dùng khi `quote_from_results` không có gì để đọc — RAM trống sau restart,
+    hoặc caller (`_ensure_payment_card` gọi từ đường "tour duyệt sau") không hề
+    truyền `task_results`.
+
+    KHÔNG chọn "một `book_parking` SUCCESS bất kỳ" của workflow: một workflow
+    có thể có NHIỀU bước `book_parking` (ví dụ plan sửa-và-chạy-lại giữ bước cũ
+    thay vì xoá). Chọn nhầm cái không phải nguồn của CHÍNH `pay_fee` này là gửi
+    hoá đơn của một chỗ đỗ khác — tiền đúng bằng số, sai bằng khoản.
+
+    Đường lần vết ĐÚNG: đọc `input_data` (còn nguyên InputRef, CHƯA resolve)
+    của chính task `payment_task_id`, xác nhận nó thật sự là `pay_fee`, rồi:
+
+      1. Cả ba field `booking_id`/`amount`/`currency` phải là InputRef (dict
+         `{"from_task", "field"}`) — không phải literal đã bị sửa tay.
+      2. Cả ba InputRef phải trỏ CÙNG một `from_task` — trộn hai nguồn nghĩa
+         là booking_id của bước này với amount của bước khác.
+      3. `field` của mỗi InputRef phải khớp tên field nguồn `book_parking`
+         thật sự trả ra (`_PAY_FEE_EXPECTED_SOURCE_FIELDS`).
+      4. Task nguồn (`from_task`) phải tồn tại, đúng tool `book_parking`, và
+         đã SUCCESS.
+
+    Sai bất kỳ điều nào ở trên: trả `None`, KHÔNG đoán sang task khác.
+
+    `booking_id` lấy từ `result_data` của ĐÚNG task nguồn đã xác minh.
+    amount/currency vẫn tra lại `parking_bookings` — AUTHORITATIVE, không tin
+    số trong `result_data` hay trong InputRef.
+    """
+    async with pool.acquire() as conn:
+        pay_row = await conn.fetchrow(
+            "SELECT tool, input_data FROM workflow_tasks WHERE workflow_id = $1 AND task_id = $2",
+            _uuid(workflow_id),
+            pay_fee_task_id,
+        )
+        if pay_row is None or str(pay_row["tool"]) != "pay_fee":
+            return None
+
+        input_data = _as_json_object(pay_row["input_data"])
+        refs: dict[str, dict[str, Any]] = {}
+        for field in _PAY_FEE_EXPECTED_SOURCE_FIELDS:
+            ref = input_data.get(field)
+            if not (isinstance(ref, dict) and {"from_task", "field"} <= set(ref)):
+                return None
+            refs[field] = ref
+
+        from_tasks = {ref["from_task"] for ref in refs.values()}
+        if len(from_tasks) != 1:
+            return None
+        source_task_id = next(iter(from_tasks))
+
+        if any(refs[field]["field"] != expected for field, expected in _PAY_FEE_EXPECTED_SOURCE_FIELDS.items()):
+            return None
+
+        source_row = await conn.fetchrow(
+            "SELECT tool, status, result_data FROM workflow_tasks WHERE workflow_id = $1 AND task_id = $2",
+            _uuid(workflow_id),
+            source_task_id,
+        )
+        if source_row is None or str(source_row["tool"]) != "book_parking" or str(source_row["status"]) != "SUCCESS":
+            return None
+
+        result_data = _as_json_object(source_row["result_data"])
+        booking_id = result_data.get("booking_id")
+
+    if not booking_id:
+        return None
+    return await quote_from_database(pool, booking_id)
 
 
 def payment_task_id(plan: TaskPlan) -> str | None:

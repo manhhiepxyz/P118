@@ -41,6 +41,7 @@ from src.orchestration.payment_approval import (
     persist_full_plan,
     plan_without,
     quote_from_database,
+    quote_from_persisted_book_parking,
     quote_from_results,
     record_decision,
     save_pending_approval,
@@ -456,10 +457,15 @@ class PaymentApprovalBoundary:
             if any(not result.success for result in partial_results.values()):
                 return resolved_workflow_id, partial_results
 
-        if self._repository is not None and resolved_workflow_id is not None:
-            for task_id in sorted(payment_task_ids):
-                await self._repository.update_task_status(resolved_workflow_id, task_id, TaskStatus.WAITING_APPROVAL)
-
+        # `pay_fee` KHÔNG đổi trạng thái ở đây. `save_pending_approval`
+        # (`payment_approval.py`) là CHỖ DUY NHẤT được phép chuyển nó sang
+        # WAITING_APPROVAL — cùng transaction với dòng `payment_approvals` và
+        # với trạng thái workflow. Một lần ghi sớm, đứng ngoài transaction đó,
+        # để lại đúng nửa trạng thái bị cấm nếu `save_pending_approval` lỗi
+        # SAU nó: `pay_fee` WAITING_APPROVAL mồ côi, không dòng approval nào,
+        # workflow có thể vẫn RUNNING. Caller (mọi nơi bắt
+        # `PaymentApprovalRequiredError`) luôn gọi `persist_pending_approval`
+        # ngay sau đây — đó là nơi DUY NHẤT trạng thái được chuyển.
         raise PaymentApprovalRequiredError(
             "Mock payment approval is required.",
             workflow_id=resolved_workflow_id,
@@ -612,23 +618,41 @@ async def persist_pending_approval(
     task_results: dict[str, StandardResult],
     plan: TaskPlan | None,
 ) -> PaymentQuote | None:
-    """Ghi ngữ cảnh chờ duyệt + đặt workflow về WAITING_APPROVAL.
+    """Ghi ngữ cảnh chờ duyệt; đặt `pay_fee` và workflow về WAITING_APPROVAL.
 
-    Gọi ngay sau khi `PaymentApprovalRequiredError` được ném. Từ thời điểm này
-    trở đi, mọi thứ cần cho resume đã nằm trong PostgreSQL: restart backend
-    không làm mất chỗ đỗ đã giữ.
+    Gọi ngay sau khi `PaymentApprovalRequiredError` được ném — HOẶC khi
+    `_ensure_payment_card` phát hiện `pay_fee` còn PENDING mà chưa có thẻ nào
+    ghim (đường "tour duyệt sau", không có `task_results` nào để đọc). Từ thời
+    điểm hàm này ghi xong, mọi thứ cần cho resume đã nằm trong PostgreSQL:
+    restart backend không làm mất chỗ đỗ đã giữ.
+
+    Báo giá thử ĐỌC TỪ KẾT QUẢ vừa chạy trước (`task_results` trong RAM, còn
+    mới nhất); rỗng thì đọc lại từ chính `book_parking` đã persist —
+    KHÔNG bao giờ trả None chỉ vì caller quên truyền `task_results`.
     """
     quote = quote_from_results(task_results)
     task_id = payment_task_id(plan) if plan is not None else None
-    if quote is None or task_id is None:
+    if task_id is None:
         return None
 
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
-        await save_pending_approval(pool, workflow_id=workflow_id, task_id=task_id, quote=quote)
-        # Workflow KHÔNG được SUCCESS: prefix xong không có nghĩa là xong việc.
-        await repository.update_workflow_status(workflow_id, WorkflowStatus.WAITING_APPROVAL)
+        if quote is None:
+            quote = await quote_from_persisted_book_parking(pool, workflow_id, task_id)
+        if quote is None:
+            return None
+        # Approval row + trạng thái `pay_fee` + trạng thái workflow: cả ba ghi
+        # trong CÙNG một transaction bên trong `save_pending_approval`. Không
+        # còn lệnh `update_workflow_status` riêng ở đây — tách nó ra khỏi
+        # transaction kia là đúng chỗ để lại nửa trạng thái.
+        #
+        # `save_pending_approval` trả False mà KHÔNG ghi gì khi `pay_fee`
+        # không tồn tại/đã terminal, hoặc approval đã được quyết định từ
+        # trước — cả hai đều nghĩa là không có thẻ nào được ghim ở lượt này.
+        created = await save_pending_approval(pool, workflow_id=workflow_id, task_id=task_id, quote=quote)
+        if not created:
+            return None
     finally:
         await pool.close()
     return quote

@@ -52,6 +52,43 @@ async def _seed(pool) -> str:
     return str(wid)
 
 
+async def _seed_for_payment(pool) -> str:
+    """Dàn dựng RIÊNG cho `test_a_new_payment_approval_cannot_be_inserted_mid_amendment`.
+
+    `_seed()` dựng workflow CANCELLED + task `book_parking` — hợp lệ cho các
+    test khoá dịch vụ ở trên (chúng đi qua `record_service_decision`, không hề
+    kiểm workflow/tool). Nó KHÔNG còn hợp lệ để gọi `save_pending_approval`:
+    contract production (P0-1/P1) giờ đòi workflow còn ACTIVE
+    (PENDING/RUNNING/WAITING_APPROVAL, chưa archive) và đúng task `pay_fee` —
+    thiếu một trong hai, `save_pending_approval` trả `False` NGAY, trước khi
+    chạm tới đoạn ghi mà test này đang đo race. Test đó cần dữ liệu khác test
+    này; tách hẳn ra một hàm riêng thay vì đổi `_seed()` và kéo theo 5 test
+    khác lệch dữ liệu.
+    """
+    wid = uuid.uuid4()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (id, username, password_hash) VALUES ($1,$2,'x') ON CONFLICT DO NOTHING",
+            OWNER,
+            f"nguoi-{OWNER.hex[:8]}",
+        )
+        await conn.execute(
+            "INSERT INTO workflows (workflow_id, goal, status, owner_user_id) VALUES ($1,'x','RUNNING',$2)",
+            wid,
+            OWNER,
+        )
+        # PENDING, không WAITING_APPROVAL: đây là trạng thái `pay_fee` mang
+        # thật trước khi `save_pending_approval` chạy lần đầu trên đường
+        # production (`PaymentApprovalBoundary` → prefix SUCCESS → pay_fee vẫn
+        # PENDING cho tới khi approval được ghim).
+        await conn.execute(
+            "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, input_data) "
+            "VALUES ($1,'T1','pay_fee','PENDING','{}'::jsonb)",
+            wid,
+        )
+    return str(wid)
+
+
 async def _version(pool, workflow_id: str) -> str:
     rows = await pool.fetch(
         "SELECT task_id, tool, depends_on, status, input_data, provider_submission_status, "
@@ -359,7 +396,7 @@ async def test_a_new_payment_approval_cannot_be_inserted_mid_amendment(client, d
     """
     from src.orchestration.payment_approval import save_pending_approval
 
-    workflow_id = await _seed(db_pool)
+    workflow_id = await _seed_for_payment(db_pool)
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO residents (resident_id, full_name, apartment_code, residential_area) "
