@@ -149,6 +149,44 @@ def _extract_parking_zone(text: str) -> str | None:
     return f"ZONE_{match.group(1).upper()}" if match else None
 
 
+# "khu D", "zone C", "khu 3" — người dùng NÊU TÊN một khu, và nó không phải
+# A hay B. Khác hẳn "chưa nói khu nào".
+_ZONE_MENTION = re.compile(r"\b(?:zone|khu)[ _-]*([a-z0-9])\b", re.IGNORECASE)
+
+
+def _unknown_zone(text: str | None) -> str | None:
+    """Ký tự của khu được nhắc tên nhưng không có thật. None nếu không có.
+
+    `_extract_parking_zone` trả `None` cho CẢ HAI trường hợp — không nhắc khu
+    nào, và nhắc một khu không tồn tại. Gộp hai thứ đó làm một tạo ra vòng lặp
+    chết, y như đã xảy ra với tên dự án:
+
+        Bạn:    khu D
+        P-118:  Mình cần thêm thông tin: khu vực đỗ xe (Khu A hoặc Khu B)
+        Bạn:    đúng đổi qua khu D
+        P-118:  Bạn muốn đổi sang Khu D đúng không? Mình cần xác nhận lại...
+
+    Người dùng ĐÃ trả lời, và được hỏi lại đúng câu vừa hỏi. Không có gì họ gõ
+    thêm thoát ra được, vì hệ thống không bao giờ nói ra điều nó biết rõ: bãi
+    xe chỉ có hai khu.
+
+    Trả về đúng MỘT ký tự đã kiểm, không phải chuỗi người dùng gõ — câu trả lời
+    ghép từ nó vẫn không có đường nào cho văn bản tự do lọt ra.
+    """
+    for match in _ZONE_MENTION.finditer(text or ""):
+        token = match.group(1).upper()
+        if token not in {"A", "B"}:
+            return token
+    return None
+
+
+def _unknown_zone_message(zone: str) -> str:
+    return (
+        f"Bãi xe chỉ có Khu A và Khu B, không có Khu {zone}. "
+        "Bạn chọn giúp mình một trong hai khu đó nhé."
+    )
+
+
 def _extract_plate_number(text: str) -> str | None:
     """Chuẩn hoá biển số. `None` nếu không tìm thấy biển hợp lệ.
 
@@ -428,9 +466,18 @@ def _extract_structured_follow_up_answers(
     return answers, unresolved
 
 
-def _follow_up_validation_message(unresolved: list[str]) -> str:
-    """Trả hướng dẫn deterministic, không echo câu trả lời không hợp lệ."""
+def _follow_up_validation_message(unresolved: list[str], said: str | None = None) -> str:
+    """Trả hướng dẫn deterministic, không echo câu trả lời không hợp lệ.
+
+    `said` là những gì người dùng VỪA gõ. Nó không bao giờ được ghép nguyên vào
+    câu trả lời — chỉ dùng để phân biệt "chưa nói" với "nói một thứ không tồn
+    tại", hai tình huống cần hai câu khác nhau.
+    """
     if unresolved:
+        if unresolved[0] == "parking_zone":
+            zone = _unknown_zone(said)
+            if zone is not None:
+                return _unknown_zone_message(zone)
         message = _FOLLOW_UP_VALIDATION_MESSAGES.get(unresolved[0])
         if message is not None:
             return message
@@ -3066,10 +3113,19 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             plan=plan_view,
         )
     if state.get("planner_status") == "NEEDS_INFORMATION":
+        missing = list(state.get("missing_fields") or [])
+        question = state.get("question")
+        # Khách ĐÃ nêu một khu, chỉ là khu đó không có. Câu hỏi mặc định của
+        # Planner nói "mình cần thêm thông tin" — đọc lên thành "bạn chưa nói
+        # gì cả", nên họ gõ lại đúng câu vừa gõ và vòng lặp khép lại.
+        if "parking_zone" in missing:
+            zone = _unknown_zone(state.get("goal"))
+            if zone is not None:
+                question = _unknown_zone_message(zone)
         return DemoWorkflowResponse(
             status="NEEDS_INFORMATION",
-            question=state.get("question"),
-            missing_fields=list(state.get("missing_fields") or []),
+            question=question,
+            missing_fields=missing,
             plan=plan_view,
         )
     if state.get("clarification_error"):
@@ -3756,7 +3812,9 @@ async def continue_demo_workflow(
                 "Biểu mẫu gửi lên có mục không nằm trong câu hỏi, nên mình chưa nhận được. "
                 "Bạn tải lại trang rồi trả lời giúp mình nhé."
                 if unexpected
-                else _follow_up_validation_message(unresolved)
+                else _follow_up_validation_message(
+                    unresolved, " ".join(str(v) for v in (request.fields or {}).values())
+                )
             )
             raise HTTPException(status_code=422, detail=detail)
         if not answers:
@@ -3765,7 +3823,10 @@ async def continue_demo_workflow(
                 sorted(missing_fields),
                 sorted((request.fields or {}).keys()),
             )
-            raise HTTPException(status_code=422, detail=_follow_up_validation_message(unresolved))
+            raise HTTPException(
+                status_code=422,
+                detail=_follow_up_validation_message(unresolved, request.message),
+            )
 
         # Người dùng ĐÃ gửi tên dự án nhưng nó không khớp danh mục → phải nói
         # ra. Bỏ qua im lặng còn tệ hơn 422: workflow đi tiếp thiếu dự án, rồi
