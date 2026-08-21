@@ -983,6 +983,9 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         if plan is None or not plan.tasks:
             raise ResumeError("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy tiếp.")
 
+        # Trạng thái THẬT của từng bước, đọc một lần để dùng cho cả hai vòng dưới.
+        statuses_now = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
+
         refused = {row["task_id"] for row in rows if row["status"] in {"REJECTED", "EXPIRED"}}
         for task_id in refused:
             await repository.update_task_status(workflow_id, task_id, TaskStatus.CANCELLED)
@@ -995,9 +998,29 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
 
         # Bước được duyệt phải rời khỏi WAITING_APPROVAL, nếu không `_seed_completed`
         # đọc nó là "chưa xong" mà Executor lại bỏ qua vì trạng thái không phải PENDING.
+        #
+        # NHƯNG chỉ những bước CHƯA chạy. Từ khi hai hàng đợi gộp làm một,
+        # `pending_for_workflow` trả về cả dòng của lịch tham quan — và lịch
+        # tham quan được duyệt ở đường RIÊNG, chạy xong từ trước. Đẩy nó về
+        # PENDING là xoá mất kết quả đã có:
+        #
+        #   duyệt lịch      T1 SUCCESS, lịch đã đặt thật ở hệ thống tour
+        #   duyệt dịch vụ   vòng này set T1 → PENDING, `_seed_completed` không
+        #                   còn thấy nó xong, cổng tham quan ghim lại
+        #                   → T1 nằm vĩnh viễn ở WAITING_APPROVAL
+        #
+        # Đo được trên hai yêu cầu thật: mọi bước SUCCESS, mọi phê duyệt
+        # APPROVED, `pay_fee` đã trả tiền, mà `workflows.status` vẫn RUNNING và
+        # Lịch sử hiện "Đang chạy 4/5 bước" mãi mãi. Trang chi tiết lại báo
+        # hoàn tất vì nó đọc bản cache trong RAM — hai màn hình nói hai chuyện
+        # về cùng một việc, và cái đúng là cái xấu hơn.
         for row in rows:
-            if row["status"] == "APPROVED":
-                await repository.update_task_status(workflow_id, row["task_id"], TaskStatus.PENDING)
+            if row["status"] != "APPROVED":
+                continue
+            hien_tai = statuses_now.get(row["task_id"])
+            if hien_tai in _TERMINAL_TASK_STATUSES:
+                continue
+            await repository.update_task_status(workflow_id, row["task_id"], TaskStatus.PENDING)
 
         connectors = build_connectors(workflow_id=workflow_id, **urls)
         repair_manager = RepairManager()
