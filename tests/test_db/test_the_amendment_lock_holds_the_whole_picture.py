@@ -128,7 +128,7 @@ async def test_an_approval_cannot_flip_while_the_amendment_holds_the_lock(client
 
 
 @pytest.mark.asyncio
-async def test_a_writer_that_forgets_the_workflow_lock_is_still_held_back(client, db_pool):
+async def test_a_writer_that_forgets_the_workflow_lock_is_still_held_back(client, db_pool, monkeypatch):
     """Khoá hàng đợi là lớp phòng thủ THỨ HAI, và nó phải tự đứng được.
 
     `record_service_decision` giờ cũng khoá `workflows`, nên nó bị chặn dù các
@@ -137,6 +137,18 @@ async def test_a_writer_that_forgets_the_workflow_lock_is_still_held_back(client
 
     Ở đây mô phỏng đúng thứ lớp thứ hai sinh ra để chặn: một người ghi QUÊN
     khoá workflow — một script vận hành, một `psql`, hay một tầng viết sau này.
+
+    `writer` xưa chỉ `sleep(0.05)` rồi đoán amendment đã vào critical section.
+    Dưới tải, event loop có thể lịch `writer` trước khi `SELECT ... FOR UPDATE`
+    trên `workflows` thật sự chạy xong — assertion `order` flake theo tải máy,
+    không theo đúng-sai của khoá.
+
+    Seam dùng để đồng bộ: `_append_revision_locked` — lời gọi CUỐI CÙNG bên
+    trong transaction của `lock_workflow_for_amendment`, chạy SAU khi cả ba
+    `SELECT ... FOR UPDATE` (workflows, workflow_tasks, hai hàng đợi duyệt) đã
+    hoàn tất. Set event ở đây rồi gọi tiếp implementation thật — không bỏ qua
+    SQL hay transaction nào, chỉ chèn một tín hiệu quan sát được sau khi khoá
+    workflows chắc chắn đã giữ.
     """
     from src.orchestration.service_approval import save_pending_service_approvals
 
@@ -149,6 +161,33 @@ async def test_a_writer_that_forgets_the_workflow_lock_is_still_held_back(client
     repository = PostgreSQLWorkflowStateRepository(db_pool)
     expected = await _version(db_pool, workflow_id)
     order: list[str] = []
+
+    lock_held = asyncio.Event()
+    # `PostgreSQLWorkflowStateRepository.lock_workflow_for_amendment` chỉ uỷ
+    # quyền cho `self.workflows` (một `WorkflowRepository`) — `lock_workflow_
+    # for_amendment` và `_append_revision_locked` thật nằm ở đó, không phải
+    # trên `PostgreSQLWorkflowStateRepository`.
+    #
+    # Truy cập qua CLASS: descriptor `staticmethod` trả thẳng hàm gốc (không
+    # phải bound method), nên đây đã là callable thật, không cần `.__func__`.
+    from src.db.workflow_repository import WorkflowRepository
+
+    original_append_revision_locked = WorkflowRepository._append_revision_locked
+
+    async def _append_revision_locked_and_signal(conn, workflow_uuid, *, plan_version_before, payload):
+        # Tới đây `workflows`, `workflow_tasks` và cả hai hàng đợi duyệt đã bị
+        # `FOR UPDATE` trong CÙNG transaction — khoá workflows chắc chắn đang
+        # giữ. Set event RỒI mới chạy INSERT thật, không thay thế nó.
+        lock_held.set()
+        return await original_append_revision_locked(
+            conn, workflow_uuid, plan_version_before=plan_version_before, payload=payload
+        )
+
+    monkeypatch.setattr(
+        WorkflowRepository,
+        "_append_revision_locked",
+        staticmethod(_append_revision_locked_and_signal),
+    )
 
     async def amendment():
         await repository.lock_workflow_for_amendment(
@@ -166,7 +205,7 @@ async def test_a_writer_that_forgets_the_workflow_lock_is_still_held_back(client
         order.append("amendment")
 
     async def careless_writer():
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(lock_held.wait(), timeout=10)
         # KHÔNG khoá `workflows` — đúng thứ lớp phòng thủ thứ hai phải bắt.
         await db_pool.execute(
             "UPDATE service_approvals SET status='APPROVED', decided_at=NOW() WHERE workflow_id=$1::uuid",
