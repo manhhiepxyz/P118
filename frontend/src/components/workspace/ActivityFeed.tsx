@@ -31,6 +31,10 @@ const STATE_OF: Record<string, ActivityEvent['state']> = {
   EXECUTION_FAILED: 'failed',
   WAITING_APPROVAL: 'pending',
   WAITING_VIEWING_APPROVAL: 'pending',
+  // Chờ đơn vị duyệt một dịch vụ ngoài lịch tham quan. Thiếu dòng này thì giai
+  // đoạn rơi về `undefined` và dòng hoạt động không có trạng thái nào — một
+  // việc đang chờ trông y hệt một việc không rõ ra sao.
+  WAITING_SERVICE_APPROVAL: 'pending',
   NEEDS_INFORMATION: 'pending',
 }
 

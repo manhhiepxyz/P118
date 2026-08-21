@@ -17,12 +17,13 @@ from src.agents.validator import TaskPlanValidator
 from src.api.deps import get_current_user
 from src.api.small_talk import SmallTalk, SpeechType, answer_capability_question, classify
 from src.common.enums import ErrorCode, WorkflowStatus
-from src.common.failure_messages import repair_question, task_failure_message
+from src.common.failure_messages import ZONE_LABELS, repair_question, task_failure_message
 from src.common.failures import classify_failure, failure_for_code
 from src.common.tool_contract import TOOL_CONTRACTS
 from src.common.projects import PROJECTS, find_project_id, project_name, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
 from src.config import get_settings
+from src.db.capacity_repository import CapacityRepository
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.session_repository import create_session, get_session
 from src.models.schemas import (
@@ -62,6 +63,7 @@ from src.orchestration.demo_service import (
 from src.orchestration.payment_approval import quote_from_results
 from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
 from src.orchestration.runtime_provider import acquire_repository
+from src.orchestration.service_approval import SERVICE_LABELS, gated_tasks, pending_for_workflow
 from src.orchestration.sweeper import sweep_zombie_workflows
 from src.services.llm import get_llm, structured_output_method
 from src.utils.display import goal_to_title
@@ -664,6 +666,7 @@ _STAGE_MESSAGES = {
     "RESIDENT_VERIFIED": "Đã xác nhận tài khoản cư dân.",
     "WAITING_APPROVAL": "Đang chờ bạn xác nhận thanh toán.",
     "WAITING_VIEWING_APPROVAL": "Đang chờ đơn vị xác nhận lịch tham quan.",
+    "WAITING_SERVICE_APPROVAL": "Đang chờ đơn vị cung cấp dịch vụ xác nhận.",
     "EXECUTING": "Đang thực hiện yêu cầu.",
     "TASK_RUNNING": "Đang thực hiện một bước trong yêu cầu.",
     "TASK_SUCCESS": "Đã hoàn thành một bước trong yêu cầu.",
@@ -1304,22 +1307,7 @@ async def _run_demo_job(
             await _persist_repair_hints(workflow_id, repair_hints)
 
         response = _demo_response(state, approve_mock_payment)
-        terminal_stage = "FINISHED"
-        if response.status == "NEEDS_INFORMATION":
-            terminal_stage = "NEEDS_INFORMATION"
-        elif response.status == "WAITING_APPROVAL":
-            # Cùng một `status`, HAI loại chờ. Suy giai đoạn từ status thôi thì
-            # lịch tham quan cũng phát ra "Đang chờ bạn xác nhận thanh toán" —
-            # và vì đây là sự kiện CUỐI, đó đúng là câu giao diện hiển thị.
-            #
-            # `viewing_approval` chỉ có mặt ở nhánh chờ đơn vị, nên nó phân
-            # biệt được mà không cần thêm trạng thái mới.
-            terminal_stage = "WAITING_VIEWING_APPROVAL" if response.viewing_approval else "WAITING_APPROVAL"
-        elif response.status == "VALIDATION_ERROR":
-            terminal_stage = "VALIDATION_FAILED"
-        elif response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
-            terminal_stage = "EXECUTION_FAILED"
-        _append_job_event(job, terminal_stage)
+        _append_job_event(job, _terminal_stage_for(response))
         await _persist_events(workflow_id, job)
         job["message"] = response.summary or response.question or job["message"]
         # `_demo_response()` dựng view model từ AgentState nên không biết
@@ -1635,6 +1623,253 @@ _DEFAULT_BASELINE: dict[str, str] = {
     "CHAT": "Mình đã trả lời bạn ở trên.",
 }
 
+# Câu nền RIÊNG cho nhánh khách vừa HỎI (`stage == "QUESTION"`).
+#
+# `_DEFAULT_BASELINE["CHAT"]` được viết cho small-talk, nơi câu trả lời ĐÃ nằm
+# sẵn phía trên. Nhánh câu hỏi cũng mang `status="CHAT"` nhưng câu trả lời chưa
+# được viết — nên khi Response Agent bị guard loại, người dùng nhận đúng một
+# lời khẳng định sai: "Mình đã trả lời bạn ở trên." cho một câu chưa ai đáp.
+#
+# Đo được trên stack thật, tài khoản đã xác minh căn hộ, hỏi "ngày nào còn
+# trống chỗ đỗ xe": `response_state = FALLBACK`, và log ghi
+# "response agent bị loại (nêu một con số không có trong dữ liệu)".
+#
+# Câu mới thừa nhận là chưa trả lời được, và nói một việc làm được ngay.
+_QUESTION_BASELINE = (
+    "Mình chưa tra được thông tin này. Bạn hỏi lại cụ thể hơn giúp mình nhé "
+    "— ví dụ khu vực và ngày bạn cần."
+)
+
+
+# Từ khoá nhận ra khách đang hỏi về CHỖ ĐỖ XE, và đang hỏi về TÌNH TRẠNG TRỐNG.
+#
+# Phải khớp CẢ HAI nhóm. Chỉ "đỗ xe" thì "phí gửi xe bao nhiêu" cũng kích hoạt
+# tra cứu, và câu trả lời về giá bị nhét thêm một bảng chỗ trống không ai hỏi.
+# Chỉ "còn trống" thì câu hỏi về lịch tham quan cũng dính.
+# Tên khu nằm trong nhóm này vì trong hệ thống chỉ BÃI ĐỖ XE mới chia Khu A /
+# Khu B. Thiếu chúng thì đúng câu đã bịa ra dữ liệu — "khu B còn trống ngày
+# nào?" — lại không kích hoạt tra cứu, vì nó không chứa chữ "xe" nào cả.
+_PARKING_TERMS = (
+    "đỗ xe",
+    "đậu xe",
+    "gửi xe",
+    "bãi xe",
+    "chỗ đỗ",
+    "chỗ đậu",
+    "chỗ để xe",
+    "khu a",
+    "khu b",
+    "zone_a",
+    "zone_b",
+)
+_AVAILABILITY_TERMS = (
+    "còn trống",
+    "còn chỗ",
+    "trống",
+    "hết chỗ",
+    "kín chỗ",
+    "còn không",
+    "ngày nào",
+    "hôm nào",
+    "khi nào",
+    "còn slot",
+)
+
+# Cửa sổ tra cứu. Hai tuần đủ để trả lời "ngày nào còn trống" mà không biến câu
+# trả lời thành một bảng lịch — và đủ ngắn để danh sách ngày còn đọc được.
+_AVAILABILITY_DAYS = 14
+
+
+def _asks_parking_availability(goal: str) -> bool:
+    """Khách có đang hỏi chỗ đỗ xe còn trống hay không. Thuần TẤT ĐỊNH.
+
+    Cố ý không để model tự quyết: đây là thứ mở một truy vấn database, và một
+    lượt gọi mô hình nữa để phân loại vừa tốn tiền vừa thêm một chỗ có thể sai.
+    """
+    lowered = (goal or "").casefold()
+    return any(term in lowered for term in _PARKING_TERMS) and any(
+        term in lowered for term in _AVAILABILITY_TERMS
+    )
+
+
+async def _facts_for(
+    workflow_id: str,
+    *,
+    goal: str,
+    response: DemoWorkflowResponse,
+) -> dict[str, Any] | None:
+    """Mọi dữ kiện backend tra được cho tình huống này. MỘT chỗ gom.
+
+    Có hai nguồn hôm nay, và cả hai đều tồn tại vì cùng một lý do: `steps` chỉ
+    kể được những gì ĐÃ CHẠY. Khách hỏi chỗ trống thì chưa có bước nào; khách
+    chờ đơn vị duyệt thì các bước đều đang đứng yên và câu duy nhất chúng nói
+    là "đang chờ". Cả hai lần, model được giao một tình huống mà không có dữ
+    liệu về chính tình huống ấy.
+
+    Gom vào một hàm để nguồn thứ ba không mọc thành một đường riêng nữa.
+    """
+    facts: dict[str, Any] = {}
+
+    availability = await _parking_availability_facts(goal)
+    if availability:
+        facts.update(availability)
+
+    if response.approval_actor == "PROVIDER":
+        # Đúng những dữ kiện ĐƠN VỊ đang nhìn để quyết định — `approval_details`
+        # đã bỏ định danh nội bộ trước khi ghim hàng đợi, nên đây không phải
+        # thông tin mới lộ ra.
+        #
+        # Thiếu chúng, biển số và ngày mà khách vừa gõ trở thành "con số không
+        # có trong dữ liệu": `view.goal` cố ý không phải nguồn có thẩm quyền, và
+        # các bước đang chờ thì không mang giá trị nào. Đo được 4/4 lượt bị loại
+        # đúng vì lý do này, cho một câu chỉ nhắc lại biển số khách vừa khai.
+        pending = await _load_pending_services(workflow_id)
+        if pending:
+            facts["dang_cho_don_vi_duyet"] = [
+                {"dich_vu": row.get("service_label") or row.get("tool"), **_as_facts(row.get("details"))}
+                for row in pending
+            ]
+
+    return facts or None
+
+
+def _as_facts(details: Any) -> dict[str, Any]:
+    """`details` của một hồ sơ duyệt, ở dạng dict. Chuỗi JSON cũng nhận."""
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            return {}
+    return dict(details) if isinstance(details, dict) else {}
+
+
+async def _parking_availability_facts(goal: str) -> dict[str, Any] | None:
+    """Chỗ đỗ xe còn trống, đọc thẳng từ database. None nếu không áp dụng/lỗi.
+
+    Trả None khi hỏng thay vì raise: đây là dữ liệu làm câu trả lời tốt hơn,
+    không phải điều kiện để workflow chạy. Hỏng thì model thiếu dữ liệu, guard
+    loại câu đoán, và người dùng nhận `_QUESTION_BASELINE` — vẫn thành thật.
+    """
+    if not _asks_parking_availability(goal):
+        return None
+
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await CapacityRepository(pool).availability(date.today(), _AVAILABILITY_DAYS)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("tra cứu chỗ đỗ xe thất bại (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+    by_zone: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        # Nhãn khách đọc được, KHÔNG phải `ZONE_A` — `_SNAKE_CASE` trong guard
+        # sẽ loại thẳng câu nào chép lại mã khu, và nó loại đúng.
+        label = ZONE_LABELS.get(row["parking_zone"], row["parking_zone"])
+        if row["remaining"] > 0:
+            by_zone.setdefault(label, []).append(
+                {"ngay": row["booking_date"], "so_cho_con_lai": row["remaining"]}
+            )
+        else:
+            by_zone.setdefault(label, [])
+
+    return {
+        "cho_do_xe_con_trong": {
+            "tu_ngay": date.today().isoformat(),
+            "trong_vong_ngay": _AVAILABILITY_DAYS,
+            # Khu đã kín đi kèm danh sách RỖNG, không bị bỏ khỏi payload: một
+            # khu vắng mặt đọc là "không biết", còn danh sách rỗng đọc là "hết
+            # chỗ" — và đó chính là điều cần nói với khách.
+            "theo_khu": [{"khu": khu, "cac_ngay_con_cho": ngay} for khu, ngay in sorted(by_zone.items())],
+        }
+    }
+
+
+def _terminal_stage_for(response: DemoWorkflowResponse) -> str:
+    """Sự kiện CUỐI của một lượt chạy — một luật, mọi đường dùng chung.
+
+    Đây là dòng cuối cùng trên dải hoạt động, nên nó chính là câu người dùng
+    đọc để biết việc của mình đang ra sao.
+
+    `WAITING_APPROVAL` mang BA tình huống và chúng phải nói ba câu khác nhau:
+    chờ đơn vị tour, chờ đơn vị dịch vụ, chờ chính khách trả tiền. Suy từ
+    `status` thôi thì người đặt lịch xem nhà được bảo đi xác nhận thanh toán,
+    và họ đi tìm một nút không tồn tại.
+
+    Viết bản thứ hai của luật này là cách chắc chắn để một đường nói sai: đường
+    sửa-rồi-chạy-lại từng KHÔNG phát sự kiện nào cả, nên dải hoạt động đứng im
+    ở "chờ đơn vị xác nhận lịch tham quan" trong khi bước đỗ xe đã được mở lại
+    với ngày mới.
+    """
+    if response.status == "NEEDS_INFORMATION":
+        return "NEEDS_INFORMATION"
+    if response.status == "WAITING_APPROVAL":
+        # `viewing_approval` chỉ có mặt ở nhánh chờ đơn vị tour, nên nó phân
+        # biệt được mà không cần thêm trạng thái mới.
+        if response.viewing_approval:
+            return "WAITING_VIEWING_APPROVAL"
+        if response.approval_actor == "PROVIDER":
+            return "WAITING_SERVICE_APPROVAL"
+        return "WAITING_APPROVAL"
+    if response.status == "VALIDATION_ERROR":
+        return "VALIDATION_FAILED"
+    if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
+        return "EXECUTION_FAILED"
+    return "FINISHED"
+
+
+def answer_key(status: str, approval_actor: str | None = None) -> str:
+    """Câu trả lời đang mô tả TÌNH HUỐNG nào — một luật, dùng ở mọi nơi.
+
+    `status` một mình là chưa đủ. `WAITING_APPROVAL` mang HAI tình huống khác
+    hẳn nhau, và chúng nối tiếp nhau trong CÙNG một workflow:
+
+        đơn vị duyệt dịch vụ   → approval_actor = PROVIDER
+        khách xác nhận tiền    → approval_actor = USER
+
+    Khoá theo `status` thôi thì khi việc chờ đổi tay, `claim_assistant_response`
+    thấy khoá không đổi nên KHÔNG giành quyền sinh — câu cũ ở lại nguyên vẹn.
+    Đo được: duyệt xong cả hai bước, `pay_fee` đã sang WAITING_APPROVAL với
+    báo giá 100.000 VND, mà khách vẫn đọc "đang chờ đơn vị cung cấp dịch vụ
+    xác nhận" — một câu đã hết đúng từ lúc họ được duyệt.
+
+    Định dạng `"TRẠNG_THÁI"` hoặc `"TRẠNG_THÁI:AI_ĐANG_ĐỢI"`. Phần trước dấu
+    hai chấm luôn là trạng thái, nên `_key_status` tách lại được — xem chỗ
+    dùng nó trong `_assistant_fields`.
+    """
+    if status == "WAITING_APPROVAL" and approval_actor:
+        return f"{status}:{approval_actor}"
+    return status
+
+
+def _key_status(key: str | None) -> str | None:
+    """Phần TRẠNG THÁI của một khoá câu trả lời."""
+    return key.split(":", 1)[0] if key else key
+
+
+def request_fresh_answer(workflow_id: str, *, job: dict[str, Any] | None = None) -> None:
+    """Tình huống vừa đổi — xin một câu mới cho tình huống MỚI. Không chặn.
+
+    Mọi đường QUYẾT ĐỊNH đều phải gọi hàm này: duyệt thanh toán, duyệt dịch vụ,
+    duyệt lịch tham quan, huỷ. Trước đây chỉ đường thanh toán làm, và nó làm
+    inline — nên hai đường duyệt kia lặng lẽ không có, và khách đọc lại câu của
+    tình huống trước. Một hàm để chỗ thiếu hiện ra trong diff.
+
+    KHÔNG bọc trong `if job is not None`: sau một lần restart `_DEMO_JOBS`
+    trống, nên đúng những workflow sống sót qua restart lại là những workflow
+    không bao giờ có câu cho trạng thái cuối. `_attach_answer` tự dựng lại
+    trạng thái công khai từ database khi không có cache.
+    """
+    _keep_demo_task(
+        asyncio.create_task(
+            _attach_answer(job if job is not None else {}, workflow_id, goal=(job or {}).get("goal") or "")
+        )
+    )
+
 
 def _viewing_facts(approval: DemoViewingApproval | None) -> dict[str, Any] | None:
     """Dữ kiện lịch tham quan cho Response Agent — CHỈ trường thật sự áp dụng.
@@ -1674,6 +1909,9 @@ def _reply_view(
     # Cuộc trò chuyện ĐANG diễn ra. Thiếu nó thì phần ngữ cảnh hội thoại bỏ
     # trống — an toàn hơn là ghép nhầm một việc người dùng làm hôm khác.
     session_id: str | None = None,
+    # Dữ liệu backend vừa tra để đáp đúng câu khách hỏi. Xem
+    # `_parking_availability_facts`.
+    facts: dict[str, Any] | None = None,
 ) -> ReplyView:
     """View model cho Response Agent, dựng TỪ response công khai.
 
@@ -1697,7 +1935,10 @@ def _reply_view(
         # người dùng bổ sung thông tin nhận câu "Yêu cầu đã hoàn tất.". Vừa sai,
         # vừa đúng loại sai nguy hiểm nhất: khẳng định đã xong khi chưa xong.
         baseline_message=(
-            response.summary or response.question or response.message or _DEFAULT_BASELINE[response.status]
+            response.summary
+            or response.question
+            or response.message
+            or (_QUESTION_BASELINE if response.stage == "QUESTION" else _DEFAULT_BASELINE[response.status])
         ),
         steps=[{"title": task.title, "status": task.status, "message": task.message} for task in response.tasks],
         missing_fields=[MISSING_FIELD_LABELS.get(f, f) for f in response.missing_fields],
@@ -1730,6 +1971,7 @@ def _reply_view(
         # Chỉ những trường KHÁCH ĐÃ THẤY trên thẻ chờ. Không có task_id, không
         # có project_id — model không cần chúng và chúng là định danh nội bộ.
         viewing=_viewing_facts(response.viewing_approval),
+        facts=facts,
     )
 
 
@@ -1756,7 +1998,8 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             current = await _public_view_from_db(workflow_id)
             if current is None:
                 return
-        for_status = current.status
+        # Khoá gồm cả NGƯỜI đang được chờ: xem `answer_key`.
+        for_status = answer_key(current.status, current.approval_actor)
 
         if not await _claim_answer_safely(workflow_id, for_status):
             # Trạng thái này đã có câu trả lời, hoặc một tiến trình khác đang
@@ -1765,12 +2008,15 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             return
 
         capabilities = await _capability_names_safely(job.get("owner_user_id"))
+        # Tra dữ liệu TRƯỚC khi gọi model — MỘT chỗ gom mọi nguồn dữ kiện.
+        facts = await _facts_for(workflow_id, goal=goal, response=current)
         spoken = await _speak(
             current,
             goal=goal,
             capabilities=capabilities,
             recalled=job.get("recalled"),
             session_id=job.get("session_id"),
+            facts=facts,
         )
         if spoken.answer is None:
             # `_speak` không dựng được client (thiếu key chẳng hạn). Dùng CHÍNH
@@ -1843,7 +2089,7 @@ async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) 
     nó nghĩa là nói với họ rằng vẫn đang chờ, trong khi tiền đã thu xong.
     """
     stored = await _load_answer_safely(workflow_id)
-    if stored.get("for_status") != response.status:
+    if stored.get("for_status") != answer_key(response.status, response.approval_actor):
         return response
     return response.model_copy(
         update={
@@ -1892,12 +2138,20 @@ def _root_failure_code(record: dict[str, Any]) -> str | None:
 
 
 async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
-    """Dựng một view công khai TỐI THIỂU từ database, đủ cho lớp trả lời.
+    """Dựng view công khai từ database, cho lớp trả lời khi `_DEMO_JOBS` trống.
 
-    Dùng khi `_DEMO_JOBS` không có gì — sau restart chẳng hạn. Không dựng lại
-    toàn bộ (event, plan): Response Agent chỉ cần trạng thái, các bước và câu
-    deterministic, và mỗi field thừa là một field nữa phải kiểm xem có rò gì
-    không.
+    Đây là đường mọi workflow đi sau restart, sau F5, và sau MỌI lần duyệt —
+    các route quyết định xoá cache rồi xin câu mới, nên chúng đến đây.
+
+    "Tối giản" từng là chủ ý ở đây, và nó sai: một view thiếu không làm câu trả
+    lời ngắn đi, nó làm câu trả lời SAI. Bỏ báo giá và `approval_actor` đi thì
+    tầng viết câu nhìn thấy các bước đều SUCCESS và kết luận việc đã xong — đo
+    được ngay sau khi đơn vị duyệt xong, guard phải loại câu với lý do "khẳng
+    định đã hoàn tất trong khi chưa hoàn tất".
+
+    Vì vậy nhánh chờ-quyết-định gọi CHÍNH hai builder mà đường polling gọi.
+    Hai đường dựng lại cùng một sự thật thì phải dùng chung một hàm; nếu không
+    chúng sẽ kể hai câu chuyện khác nhau về cùng một workflow.
     """
     try:
         record = await read_demo_workflow(workflow_id)
@@ -1907,15 +2161,29 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     if record is None:
         return None
 
-    database_status = record["workflow"]["status"]
-    status = (
-        "SUCCESS"
-        if database_status == "SUCCESS"
-        else (
-            "CANCELLED" if database_status == "CANCELLED" else ("FAILED" if database_status == "FAILED" else "RUNNING")
-        )
-    )
+    status = public_status_from_db(record["workflow"]["status"])
     plan = _plan_from_job_or_record(None, record)
+
+    # Đang chờ ai đó quyết → dùng CHÍNH hai builder mà đường polling dùng.
+    #
+    # Trước đây nhánh này tự dựng một view tối giản, và cái thiếu không vô hại:
+    # không có báo giá, không có `approval_actor`, nên tầng viết câu trả lời
+    # nhìn thấy hai bước SUCCESS và kết luận việc đã xong. Đo được sau khi đơn
+    # vị duyệt: "response agent bị loại (khẳng định đã hoàn tất trong khi chưa
+    # hoàn tất)" — model không bịa, nó được cho xem một bức tranh thiếu.
+    #
+    # Thứ tự khớp đường polling: thanh toán, rồi tham quan, rồi dịch vụ.
+    events = await _read_events(workflow_id)
+    pending_payment = await _load_pending_payment(workflow_id)
+    if pending_payment is not None:
+        return _waiting_approval_view(
+            workflow_id, plan=plan, record=record, pending=pending_payment, events=events
+        )
+    pending_services = await _load_pending_services(workflow_id)
+    if pending_services:
+        return _waiting_service_view(
+            workflow_id, plan=plan, record=record, pending=pending_services, events=events
+        )
     tasks = _polling_task_views(plan, record)
     # `error_code` phải đi cùng status.
     #
@@ -1963,7 +2231,7 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
         persisted=True,
         # Dòng thời gian đọc từ `workflow_events`, không phải từ RAM — đây là
         # đường mọi yêu cầu cũ trong Lịch sử đi qua.
-        events=await _read_events(workflow_id),
+        events=events,
         # Gửi mã GỐC kể cả khi sổ hạ tầng không biết nó — giấu mã đi thì giao
         # diện không còn gì để phân biệt hai kiểu hỏng khác hẳn nhau.
         error_code=failure.code if failure else root_code,
@@ -2081,7 +2349,7 @@ async def _load_answer_safely(workflow_id: str) -> dict[str, Any]:
 async def _refresh_answer_from_db(job: dict[str, Any], workflow_id: str, current: DemoWorkflowResponse) -> None:
     """Lấy câu đã ghi cho ĐÚNG trạng thái hiện tại vào cache."""
     stored = await _load_answer_safely(workflow_id)
-    if stored.get("for_status") != current.status or not stored.get("answer"):
+    if stored.get("for_status") != answer_key(current.status, current.approval_actor) or not stored.get("answer"):
         return
     if job.get("response") is current:
         job["response"] = current.model_copy(
@@ -2142,6 +2410,7 @@ async def _speak(
     capabilities: list[str],
     recalled: list[dict[str, Any]] | None = None,
     session_id: str | None = None,
+    facts: dict[str, Any] | None = None,
 ) -> DemoWorkflowResponse:
     """Gắn câu trả lời tự nhiên vào response. Không bao giờ raise.
 
@@ -2190,7 +2459,14 @@ async def _speak(
             get_llm(callbacks=[usage_logger], fast=True),
             structured_output_method=structured_output_method(),
         )
-        view = _reply_view(response, goal=goal, capabilities=capabilities, recalled=recalled, session_id=session_id)
+        view = _reply_view(
+            response,
+            goal=goal,
+            capabilities=capabilities,
+            recalled=recalled,
+            session_id=session_id,
+            facts=facts,
+        )
         reply = await agent.reply(view)
         # `ResponseAgent.reply()` fail-closed về baseline khi provider lỗi hoặc
         # output bị guard loại. Thử đúng MỘT lần nữa: model không tất định và
@@ -2870,6 +3146,27 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             approval_actor="PROVIDER",
             plan=plan_view,
         )
+    if policy_error == "SERVICE_APPROVAL_REQUIRED":
+        # Chờ ĐƠN VỊ nhận việc — không phải lỗi, và không có khoản tiền nào để
+        # khách bấm xác nhận. Không có nhánh này thì mọi yêu cầu dịch vụ rơi
+        # xuống `EXECUTION_ERROR` bên dưới: hàng đợi duyệt đầy hồ sơ AWAITING
+        # trong khi khách được báo là yêu cầu đã hỏng.
+        labels = [SERVICE_LABELS.get(tool, tool) for tool in gated_tasks(plan).values()] if plan else []
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            workflow_id=state.get("workflow_id"),
+            summary=(
+                "Mình đã gửi yêu cầu tới đơn vị cung cấp dịch vụ ("
+                + ", ".join(labels)
+                + "). Đơn vị đang xác nhận, bạn chờ chút nhé."
+                if labels
+                else "Mình đã gửi yêu cầu tới đơn vị cung cấp dịch vụ. Đơn vị đang xác nhận, bạn chờ chút nhé."
+            ),
+            # ĐƠN VỊ quyết, không phải khách. Giao diện đọc trường này để KHÔNG
+            # dựng nút xác nhận thanh toán.
+            approval_actor="PROVIDER",
+            plan=plan_view,
+        )
     if policy_error is not None:
         return DemoWorkflowResponse(status="EXECUTION_ERROR", plan=plan_view)
     if state.get("execution_error"):
@@ -3542,6 +3839,27 @@ async def continue_demo_workflow(
                     await pool.close()
             view = await _public_view_from_db(workflow_id)
             if view is not None:
+                # Sửa xong mà KHÔNG nói gì thì với người dùng là "chẳng có gì
+                # đổi cả" — và họ đúng, vì màn hình đúng là không đổi.
+                #
+                # Đo được trên yêu cầu thật của người dùng (workflow 75a5ccc9):
+                # họ đổi ngày lúc 04:13:08, bước đỗ xe được mở lại đúng với ngày
+                # mới, VÀ:
+                #
+                #   sự kiện cuối     WAITING_VIEWING_APPROVAL lúc 04:11:44
+                #   câu trả lời      đóng dấu FAILED, viết lúc 04:12:19
+                #
+                # Câu cũ đóng dấu `FAILED` trong khi workflow đã sang
+                # `WAITING_APPROVAL`, nên bộ lọc chống-câu-cũ giấu nó đi và
+                # response trả `answer = None`. Giao diện giữ nguyên bong bóng
+                # cuối nó từng nhận — đúng câu báo lỗi vừa được sửa xong.
+                #
+                # Đây là CÙNG một thiếu sót đã vá cho các đường duyệt, ở đường
+                # thứ năm mà bộ kiểm cấu trúc lúc đó không đụng tới.
+                if job is not None:
+                    _append_job_event(job, _terminal_stage_for(view))
+                    await _persist_events(workflow_id, job)
+                request_fresh_answer(workflow_id, job=job)
                 return await _with_stored_answer(view, workflow_id)
 
     # CONSUME atomic ngay trước khi tạo child. Đây là điểm duy nhất quyết định
@@ -3645,6 +3963,90 @@ async def continue_demo_workflow(
         message=_STAGE_MESSAGES["PLANNING"],
         session_id=session_id,
         parent_workflow_id=parent_workflow_id,
+    )
+
+
+def public_status_from_db(database_status: str | None) -> str:
+    """Trạng thái công khai suy từ cột `workflows.status`. MỘT luật, hai đường dùng.
+
+    Trước đây luật này được viết HAI lần — trong `_public_view_from_db` và trong
+    đường polling — bằng cùng một chuỗi if/elif, và cả hai bản đều đánh rơi
+    `WAITING_APPROVAL`: mọi thứ không phải SUCCESS/FAILED/CANCELLED đều thành
+    `RUNNING`. Hệ quả là một yêu cầu đang chờ đơn vị duyệt, sau khi
+    `_DEMO_JOBS` mất (restart, hoặc mở lại từ Lịch sử), được báo là "đang chạy"
+    và giao diện poll vô hạn.
+
+    Hai bản sao của một luật thì không bao giờ hỏng cùng lúc — chúng hỏng LỆCH
+    nhau, và cái lệch đó chỉ hiện ra ở đúng những đường ít ai đi.
+    """
+    if database_status in {"SUCCESS", "CANCELLED", "FAILED", "WAITING_APPROVAL"}:
+        return database_status
+    return "RUNNING"
+
+
+async def _load_pending_services(workflow_id: str) -> list[dict[str, Any]]:
+    """Các bước đang chờ ĐƠN VỊ duyệt, đọc từ PostgreSQL.
+
+    Song song `_load_pending_payment` và `_load_pending_viewing`. Thiếu hàm thứ
+    ba này, đường dựng lại từ database có nhánh cho hai loại chờ và không có
+    nhánh cho loại thứ ba — nên yêu cầu chờ đơn vị duyệt là loại DUY NHẤT
+    không sống sót qua restart.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await pending_for_workflow(pool, workflow_id)
+        return [row for row in rows if row.get("status") == "AWAITING"]
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load pending services failed (%s)", type(exc).__name__)
+        return []
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+def _waiting_service_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    pending: list[dict[str, Any]],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow đang chờ ĐƠN VỊ duyệt dịch vụ.
+
+    Cùng khuôn với `_waiting_approval_view`: một chỗ duy nhất dựng view này để
+    đường RAM và đường restart không lệch nhau.
+
+    `approval_actor="PROVIDER"` là thứ giao diện đọc để KHÔNG dựng nút xác nhận
+    thanh toán — khách không quyết được gì ở đây, và một cái nút không bấm được
+    còn tệ hơn không có nút.
+    """
+    waiting = {row["task_id"] for row in pending}
+    tasks = _polling_task_views(plan, record, show_waiting=True)
+    for task in tasks:
+        if task.task_id in waiting:
+            task.status = "WAITING_APPROVAL"
+            task.message = "Đang chờ đơn vị cung cấp dịch vụ xác nhận."
+
+    labels = [row.get("service_label") or row.get("tool") for row in pending]
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_SERVICE_APPROVAL",
+        message=_STAGE_MESSAGES["WAITING_SERVICE_APPROVAL"],
+        summary=(
+            "Mình đã gửi yêu cầu tới đơn vị cung cấp dịch vụ ("
+            + ", ".join(str(label) for label in labels)
+            + "). Đơn vị đang xác nhận, bạn chờ chút nhé."
+        ),
+        approval_actor="PROVIDER",
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
     )
 
 
@@ -4123,6 +4525,27 @@ async def _demo_workflow_status(
             workflow_id,
         )
 
+    # Loại chờ THỨ BA. Hai nhánh trên có từ trước; nhánh này thì không, nên yêu
+    # cầu chờ đơn vị duyệt dịch vụ là loại DUY NHẤT không sống sót qua restart:
+    # `workflows.status` đọc ra WAITING_APPROVAL nhưng không có view nào dựng
+    # được báo cáo cho nó, và giao diện quay lại màn "đang chạy".
+    #
+    # Đặt SAU thanh toán và tham quan để khớp thứ tự của đường chạy thật: khi cả
+    # hai cùng tồn tại, `policy_error` mang mã của boundary dừng TRƯỚC, và
+    # `_demo_response` hiển thị thẻ thanh toán. Hai đường phải nói cùng một thứ.
+    pending_services = await _load_pending_services(workflow_id)
+    if pending_services:
+        return await _with_stored_answer(
+            _waiting_service_view(
+                workflow_id,
+                plan=_plan_from_job_or_record(job, record),
+                record=record,
+                pending=pending_services,
+                events=_public_events(job) or await _read_events(workflow_id),
+            ),
+            workflow_id,
+        )
+
     if job is not None and isinstance(job.get("response"), DemoWorkflowResponse):
         response = job["response"]
         # Cache chưa có câu trả lời (ví dụ tiến trình này vừa khởi động lại và
@@ -4218,14 +4641,7 @@ async def _demo_workflow_status(
     task_views = _polling_task_views(plan, record)
     stage = job["stage"] if job is not None else None
     message = job["message"] if job is not None else None
-    if database_status == "SUCCESS":
-        status = "SUCCESS"
-    elif database_status == "CANCELLED":
-        status = "CANCELLED"
-    elif database_status == "FAILED":
-        status = "FAILED"
-    else:
-        status = "RUNNING"
+    status = public_status_from_db(database_status)
 
     if stage is None:
         # `_DEMO_JOBS` trống KHÔNG có nghĩa là yêu cầu đã xong.
@@ -4613,7 +5029,7 @@ async def cancel_demo_workflow(
     answer_job["cancel_requested"] = True
     if job is not None:
         _append_job_event(job, "FINISHED")
-    _keep_demo_task(asyncio.create_task(_attach_answer(answer_job, workflow_id, goal=answer_job.get("goal") or "")))
+    request_fresh_answer(workflow_id, job=answer_job)
     return response
 
 
@@ -4760,11 +5176,7 @@ async def decide_demo_payment(
     #
     # Response trả NGAY cho người vừa bấm nút; câu trả lời tới ở lượt poll kế
     # tiếp, cùng đường với background job.
-    _keep_demo_task(
-        asyncio.create_task(
-            _attach_answer(job if job is not None else {}, workflow_id, goal=(job or {}).get("goal") or "")
-        )
-    )
+    request_fresh_answer(workflow_id, job=job)
     return response
 
 
@@ -4853,14 +5265,19 @@ def _assistant_fields(row: Any) -> dict[str, Any]:
     # P-118 nói trong hội thoại đều bị loại — đo được: 4 workflow liên tiếp có
     # `assistant_answer` đầy đủ mà danh sách trả về `answer=None`, và người
     # dùng nhìn một khung chat chỉ có lời của chính mình.
-    if row.get("assistant_for_status") == "CHAT":
+    if _key_status(row.get("assistant_for_status")) == "CHAT":
         raw_chat = row.get("assistant_suggestions")
         return {
             "answer": row.get("assistant_answer"),
             "suggestions": json.loads(raw_chat) if isinstance(raw_chat, str) else list(raw_chat or []),
             "response_state": row.get("assistant_response_state"),
         }
-    if row.get("assistant_for_status") != row.get("status"):
+    # So phần TRẠNG THÁI, không so cả khoá: dòng trong danh sách không mang
+    # `approval_actor`, và nó không cần mang. Câu đã ghi luôn là câu MỚI NHẤT —
+    # khi việc chờ đổi tay, `answer_key` đổi theo nên `claim_assistant_response`
+    # giành quyền sinh và ghi đè. Việc còn lại ở đây chỉ là chặn câu của một
+    # trạng thái KHÁC hẳn (viết lúc chờ duyệt, workflow đã SUCCESS).
+    if _key_status(row.get("assistant_for_status")) != row.get("status"):
         return {"answer": None, "suggestions": [], "response_state": None}
     raw = row.get("assistant_suggestions")
     return {

@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 
-from src.common.enums import TaskStatus
+from src.common.enums import TaskStatus, WorkflowStatus
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import TaskPlan
@@ -215,6 +215,14 @@ class ServiceApprovalBoundary:
                 for task_id, tool in gated.items()
             ],
         )
+        # Trạng thái của CHÍNH workflow, không chỉ của từng bước.
+        #
+        # Đường duyệt thanh toán và đường duyệt lịch tham quan đều tự đặt dòng
+        # này; đường dịch vụ thì không, nên `workflows.status` nằm lại `PENDING`
+        # trong khi hàng đợi đã đầy hồ sơ AWAITING. Lịch sử đọc `PENDING` thành
+        # "Đang chuẩn bị" cho một việc thật ra đang chờ đơn vị — và sweeper dọn
+        # workflow mồ côi thì `PENDING` là đúng thứ nó tìm.
+        await self._repository.update_workflow_status(workflow_id, WorkflowStatus.WAITING_APPROVAL)
 
     async def _applicant_from_record(self, workflow_id: str) -> dict[str, Any]:
         """Người yêu cầu, đọc từ bảng `users` qua chủ sở hữu workflow.
@@ -247,7 +255,29 @@ async def save_pending_service_approvals(
     rows: list[dict[str, Any]],
     applicant: dict[str, Any] | None = None,
 ) -> None:
-    """Ghim hàng đợi. Idempotent: chạy lại không tạo bản sao, không đè quyết định."""
+    """Ghim hàng đợi. Một bước được ghim LẠI nghĩa là nó cần một quyết định MỚI.
+
+    `DO NOTHING` là sai ở đây, và nó làm treo hẳn luồng sửa lỗi. Chuỗi đo được
+    trên stack thật:
+
+      1. đặt chỗ Khu B ngày 05/10 → đơn vị duyệt → BOOKING_ALREADY_EXISTS
+      2. P-118 hỏi "muốn đặt ngày khác thì cho mình biết ngày"
+      3. khách trả lời 12/10 → `rerun_with_answers` vá kế hoạch, chạy lại
+      4. cổng dịch vụ ghim lại `book_parking` → xung đột khoá chính →
+         `DO NOTHING`, dòng cũ giữ nguyên `APPROVED`
+
+    Kết quả: bước nằm `WAITING_APPROVAL`, hàng đợi đơn vị KHÔNG có gì để duyệt,
+    và workflow đứng im vĩnh viễn. Câu trả lời của khách được nhận rồi rơi vào
+    hư không.
+
+    Mở lại là ĐÚNG chứ không chỉ tiện: đơn vị đã đồng ý cho ngày 05/10, họ chưa
+    đồng ý cho ngày 12/10. Dùng lại quyết định cũ cho tham số mới là ký thay
+    người khác.
+
+    An toàn với bước đã xong: `execute()` loại khỏi `gated` mọi task đã được
+    seed SUCCESS, nên hàm này không bao giờ được gọi cho một việc đã chạy. Và
+    đường resume dựng cổng với `approved=True` nên nó không đi qua đây.
+    """
     if not rows:
         return
     applicant = applicant or {}
@@ -258,7 +288,16 @@ async def save_pending_service_approvals(
                 (workflow_id, task_id, tool, service_label, details,
                  applicant_user_id, applicant_name, applicant_phone)
             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
-            ON CONFLICT (workflow_id, task_id) DO NOTHING
+            ON CONFLICT (workflow_id, task_id) DO UPDATE SET
+                status = 'AWAITING',
+                -- Dữ kiện phải theo lần chạy MỚI. Giữ bản cũ nghĩa là đơn vị
+                -- đọc ngày 05/10 rồi bấm duyệt cho một yêu cầu ngày 12/10.
+                details = EXCLUDED.details,
+                service_label = EXCLUDED.service_label,
+                decided_by = NULL,
+                decided_at = NULL,
+                reject_reason = NULL,
+                created_at = NOW()
             """,
             [
                 (

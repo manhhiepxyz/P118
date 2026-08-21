@@ -143,6 +143,17 @@ class ReplyView(BaseModel):
     # khách gõ), nên số trong đây được coi là có thẩm quyền — xem
     # `_numbers_in_view`.
     viewing: dict[str, Any] | None = None
+    # Dữ liệu BACKEND vừa tra trong database để đáp đúng câu khách hỏi.
+    #
+    # `steps` chỉ có khi một kế hoạch đã CHẠY. Câu hỏi thuần tuý ("ngày nào còn
+    # trống chỗ đỗ xe") không sinh kế hoạch nào, nên trước đây view tới đây
+    # rỗng hoàn toàn: model được giao một câu hỏi dữ liệu mà không có dữ liệu.
+    # Nó buộc phải đoán, và guard chỉ quyết định lời đoán ấy có hiện ra hay
+    # không — trúng guard thì khách đọc câu nền, lọt guard thì khách đọc số bịa.
+    #
+    # Số trong đây do backend đọc thẳng từ database nên CÓ THẨM QUYỀN, y như
+    # `viewing` và báo giá — xem `_numbers_in_view`.
+    facts: dict[str, Any] | None = None
 
 
 class _StructuredLLM(Protocol):
@@ -227,10 +238,29 @@ _UNPAID_MARKERS: tuple[str, ...] = (
 
 # Con số, ngày, giờ, tỉ lệ — mọi thứ model có thể bịa ra và nghe như dữ liệu.
 #
-# Bản trước chỉ bắt `\d[\d.,]{2,}`, nên "12/09" và "10:30" lọt qua: dấu `/`
+# Bản đầu chỉ bắt `\d[\d.,]{2,}`, nên "12/09" và "10:30" lọt qua: dấu `/`
 # và `:` không nằm trong lớp ký tự, còn "12" thì quá ngắn. Một ngày bịa nghe
 # thuyết phục y hệt một số tiền bịa.
-_NUMBER = re.compile(r"\d+(?:[.,/:\-]\d+)+|\d{3,}")
+#
+# Bản thứ hai (`\d+(?:[.,/:\-]\d+)+|\d{3,}`) vẫn để lọt MỌI số một-hai chữ số
+# đứng riêng — vì nó đòi dấu phân cách nằm SÁT giữa hai chữ số. Đo được trên
+# stack thật: "Khu B hiện còn trống vào các ngày 25, 27 và 30 tháng 8" khớp
+# ĐÚNG KHÔNG con số nào (`findall` trả `[]`), nên một câu bịa hoàn toàn về chỗ
+# trống đi thẳng tới người dùng với `response_state = READY`. Dấu phẩy ở đây có
+# khoảng trắng theo sau nên không nối "25" với "27", và cả ba số đều dưới ba
+# chữ số.
+#
+# Giờ bắt mọi cụm chữ số. Đổi lại, phần đối chiếu phải rộng tương ứng: xem
+# `_number_keys` — "25/09" trong dữ liệu cũng cho phép model viết "ngày 25
+# tháng 9", vì đó là cùng một sự thật diễn đạt khác đi.
+_NUMBER = re.compile(r"\d+(?:[.,/:\-]\d+)*")
+
+# Tên sản phẩm có chữ số trong đó. Model tự xưng "P-118" ở nhiều câu, và với
+# `_NUMBER` mới thì "118" trở thành một con số phải chứng minh nguồn gốc —
+# không có nguồn nào cả, nên mọi câu tự giới thiệu sẽ bị loại. Gỡ tên ra trước
+# khi soi số, thay vì thêm "118" vào danh sách hợp lệ: thêm vào danh sách là
+# cho phép model dùng "118" ở bất kỳ đâu, kể cả "còn 118 chỗ trống".
+_PRODUCT_NAME = re.compile(r"P\s*-\s*118", re.IGNORECASE)
 
 # Cụm neo phải có mặt khi `ReplyView.next_step` được đặt. Đúng tên mục trên
 # thanh bên, để người dùng tìm thấy thứ mình được bảo đi tìm.
@@ -367,9 +397,20 @@ def _reject_reason(reply: AgentReply, view: ReplyView) -> str | None:
     # Con số phải đến từ dữ liệu, không phải từ model. Chỉ chấp nhận những số
     # đã có mặt trong view — số tiền, số bước, ngày giờ đã hiển thị.
     allowed_numbers = _numbers_in_view(view)
-    for found in _NUMBER.findall(text):
-        if _normalise_number(found) not in allowed_numbers:
-            return "nêu một con số không có trong dữ liệu"
+    for found in _NUMBER.findall(_PRODUCT_NAME.sub(" ", text)):
+        whole, parts = _number_keys(found)
+        if whole in allowed_numbers:
+            continue
+        # Cả cụm không khớp thì xét từng phần: dữ liệu ghi "25/09" mà model
+        # viết "ngày 25 tháng 9" là cùng một sự thật, chỉ khác cách đọc. Đòi
+        # khớp nguyên cụm sẽ loại đúng những câu tự nhiên nhất — và mỗi lần
+        # loại là một lần người dùng nhận câu nền thay cho câu trả lời.
+        #
+        # Vẫn chặt: từng phần đều phải có nguồn. Một ngày bịa hoàn toàn không
+        # có phần nào khớp, nên nó không đi qua được đường này.
+        if parts and all(part in allowed_numbers for part in parts):
+            continue
+        return "nêu một con số không có trong dữ liệu"
 
     for marker in _REASONING_MARKERS:
         if marker in lowered:
@@ -402,6 +443,16 @@ def _normalise_number(raw: str) -> str:
     return re.sub(r"[.,/:\-\s]", "", raw)
 
 
+def _number_keys(raw: str) -> tuple[str, list[str]]:
+    """Cụm số → (dạng chuẩn của cả cụm, các phần rời đã bỏ số 0 đứng đầu).
+
+    "25/09" → ("2509", ["25", "9"]). Bỏ số 0 đầu là cần thiết: dữ liệu viết
+    "09" còn người viết câu đọc là "tháng 9", và hai chuỗi đó không bằng nhau.
+    """
+    parts = [part.lstrip("0") or "0" for part in re.findall(r"\d+", raw)]
+    return _normalise_number(raw), parts
+
+
 def _grounded_suggestions(suggestions: list[str], view: ReplyView) -> list[str]:
     """Chỉ giữ gợi ý khớp CHÍNH XÁC một dịch vụ server-side đang mở.
 
@@ -421,6 +472,22 @@ def _grounded_suggestions(suggestions: list[str], view: ReplyView) -> list[str]:
 
 def _normalise_label(value: str) -> str:
     return " ".join((value or "").split()).casefold()
+
+
+def _flatten_facts(facts: Any) -> str:
+    """Mọi giá trị trong `facts`, ở dạng phẳng, để quét số.
+
+    `facts` là dict lồng (khu → danh sách ngày → số chỗ). Chỉ `str(facts)` cũng
+    đủ vì quét bằng regex, nhưng đi đệ quy thì không phụ thuộc vào cách `dict`
+    tự in ra — và không kéo theo tên khoá vào nguồn số.
+    """
+    if facts is None:
+        return ""
+    if isinstance(facts, dict):
+        return " ".join(_flatten_facts(v) for v in facts.values())
+    if isinstance(facts, (list, tuple)):
+        return " ".join(_flatten_facts(v) for v in facts)
+    return str(facts)
 
 
 def _numbers_in_view(view: ReplyView) -> set[str]:
@@ -462,10 +529,19 @@ def _numbers_in_view(view: ReplyView) -> set[str]:
             # lượt gọi liên tiếp bị loại vì "nêu một con số không có trong dữ
             # liệu", và người dùng nhận câu mặc định.
             " ".join(turn.get("p118_dap", "") for turn in view.recent_turns),
+            # Dữ liệu backend vừa tra để đáp câu hỏi. Đọc thẳng từ database nên
+            # có thẩm quyền y như báo giá — và thiếu dòng này thì việc tra cứu
+            # tự vô hiệu hoá chính nó: model nhận đúng số chỗ trống rồi bị guard
+            # loại vì "nêu một con số không có trong dữ liệu".
+            _flatten_facts(view.facts),
             view.today or "",
         ]
     )
-    numbers = {_normalise_number(n) for n in _NUMBER.findall(source)}
+    numbers: set[str] = set()
+    for found in _NUMBER.findall(_PRODUCT_NAME.sub(" ", source)):
+        whole, parts = _number_keys(found)
+        numbers.add(whole)
+        numbers.update(parts)
     # Số bước là dữ liệu thật và hay được nhắc ("cả 3 bước đã xong").
     numbers.add(str(len(view.steps)))
     numbers |= _vietnamese_date_forms(source)

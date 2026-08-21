@@ -391,6 +391,18 @@ class ViewingApprovalBoundary:
         seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         viewing_task_ids = {task.task_id for task in plan.tasks if task.tool == "schedule_property_viewing"}
+        # Bước ĐÃ chạy xong không được ghim lại. Cổng dịch vụ có đúng dòng này;
+        # cổng tham quan thì không, và hệ quả đo được:
+        #
+        #   duyệt lịch  → T1 SUCCESS, lịch VIEW-001 có thật trong hệ thống tour
+        #   duyệt tiếp  → lượt resume dựng lại cổng ở trạng thái chặn và ghim
+        #                 T1 về WAITING_APPROVAL lần nữa
+        #
+        # Bước đã xong quay ngược về "đang chờ duyệt": màn hình nói lịch chưa
+        # được xác nhận trong khi nó đã đặt xong, và `_final_status` đọc nó là
+        # còn-chờ nên workflow không bao giờ tới SUCCESS kể cả sau khi trả tiền.
+        already_done = {tid for tid, status in (seed_statuses or {}).items() if status is TaskStatus.SUCCESS}
+        viewing_task_ids -= already_done
         if not viewing_task_ids or self._viewing_approved:
             return await self._boundary.execute(
                 plan,

@@ -30,6 +30,7 @@ Ranh giới HITL:
 
 from __future__ import annotations
 
+import json
 import logging
 
 from datetime import date
@@ -37,6 +38,7 @@ from datetime import date
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, get_args
 
+from langchain_core.exceptions import OutputParserException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from src.agents.prompts.planner_prompt import (
@@ -331,12 +333,30 @@ class _InconsistentResponseError(PlannerError):
         self.kind = kind
 
 
+# Lỗi nghĩa là "model trả nội dung dùng không được" — hỏi lại một lần thì sửa
+# được. KHÁC hẳn auth/rate-limit/network: những thứ đó hỏi lại cũng vô ích.
+#
+#   ValidationError      output đúng JSON nhưng sai schema
+#   OutputParserException LangChain không parse nổi output
+#   JSONDecodeError      output không phải JSON hợp lệ
+#
+# Hai loại sau từng KHÔNG có trong danh sách, và hậu quả đo được trên stack
+# thật: 1/18 yêu cầu nhiều dịch vụ chết hẳn với "Planner không gọi được LLM
+# (OutputParserException)" — đúng loại lỗi mà vòng corrective retry được viết
+# ra để xử lý, lại bị đối xử như một lỗi xác thực và bỏ cuộc ngay.
+_REPAIRABLE_LLM_ERRORS: tuple[type[BaseException], ...] = (
+    ValidationError,
+    OutputParserException,
+    json.JSONDecodeError,
+)
+
+
 def _is_repairable_llm_error(exc: BaseException) -> bool:
     """Lỗi từ `ainvoke` có phải loại sửa được bằng cách hỏi lại không.
 
-    Chỉ `ValidationError` mới sửa được: nó nghĩa là model trả nội dung không
-    khớp schema. Auth, rate limit, network và configuration KHÔNG bao giờ là
-    `ValidationError`, nên tự động rơi vào nhánh không retry.
+    Danh sách ở `_REPAIRABLE_LLM_ERRORS`. Auth, rate limit, network và
+    configuration không thuộc loại nào trong đó, nên tự động rơi vào nhánh
+    không retry — mặc định vẫn là fail-fast.
 
     LangChain có thể bọc lỗi parse trong exception riêng, nên dò cả chuỗi
     `__cause__`/`__context__` thay vì chỉ kiểm tra lớp ngoài cùng.
@@ -345,7 +365,7 @@ def _is_repairable_llm_error(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, ValidationError):
+        if isinstance(current, _REPAIRABLE_LLM_ERRORS):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -642,7 +662,15 @@ class Planner:
                 response = await self._structured_llm.ainvoke(messages)
             except Exception as exc:  # noqa: BLE001 — mọi lỗi LLM đều quy về một loại
                 if _is_repairable_llm_error(exc) and not is_last_attempt:
-                    # Model trả nội dung không khớp schema — hỏi lại một lần.
+                    # Model trả nội dung dùng không được — hỏi lại một lần.
+                    #
+                    # GHI LẠI dù lần hỏi lại này thường thành công: một lượt
+                    # retry im lặng nghĩa là không ai biết tần suất model trả
+                    # output hỏng, và cũng không có cách nào chứng minh vòng
+                    # retry đang thật sự chạy. `warning` chứ không `info`: log
+                    # ứng dụng lọc dưới mức đó, và một dòng không đọc được thì
+                    # bằng không có.
+                    logger.warning("planner hỏi lại sau output không dùng được (%s)", type(exc).__name__)
                     messages = self._with_correction(messages, "SCHEMA_MISMATCH")
                     continue
                 # Auth, rate limit, network, configuration: hỏi lại cũng vô ích.

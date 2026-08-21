@@ -688,6 +688,23 @@ class WorkflowRepository:
         Contract (shared_contracts.md): task_data dùng key "id" cho task_id
         ({"id", "tool", "depends_on", "input", "status"}). Chấp nhận "task_id"
         như alias để tương thích ngược với code/test cũ.
+
+        Ghi lại một task ĐÃ CÓ thì CẬP NHẬT input, trừ khi bước đó đã kết thúc.
+
+        `DO NOTHING` giữ nguyên input cũ, và điều đó phá đúng luồng sửa lỗi:
+        khách đổi ngày đặt chỗ, `rerun_with_answers` vá kế hoạch trong bộ nhớ,
+        nhưng `workflow_tasks.input_data` vẫn mang ngày cũ. Đo được sau khi
+        khách trả lời 12/10:
+
+            T2 book_parking {"booking_date": "2026-10-05", ...}
+
+        Dòng đó là thứ màn hình duyệt và trang chi tiết đọc, nên đơn vị được
+        hỏi duyệt cho một ngày khách đã bỏ, và khách nhìn thấy ngày mình vừa
+        thay vẫn còn nguyên.
+
+        `WHERE` bảo vệ bước đã xong: input của một việc đã chạy là bản ghi lịch
+        sử, không phải dự định — ghi đè nó là làm sai audit trail. Trạng thái
+        thì KHÔNG bao giờ bị đụng tới ở đây.
         """
         task_id = task_data.get("id") or task_data["task_id"]
         status = task_data.get("status") or "PENDING"
@@ -698,7 +715,11 @@ class WorkflowRepository:
                 INSERT INTO workflow_tasks
                     (workflow_id, task_id, tool, status, depends_on, input_data)
                 VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (workflow_id, task_id) DO NOTHING
+                ON CONFLICT (workflow_id, task_id) DO UPDATE SET
+                    input_data = EXCLUDED.input_data,
+                    depends_on = EXCLUDED.depends_on,
+                    updated_at = NOW()
+                WHERE workflow_tasks.status NOT IN ('SUCCESS', 'CANCELLED', 'SKIPPED')
                 """,
                 _uuid(workflow_id),
                 task_id,

@@ -380,3 +380,31 @@ def test_the_queue_reports_its_true_size() -> None:
     source = route.read_text(encoding="utf-8")
     assert '"total"' in source, "response không nói tổng số, chỉ nói số đang hiện"
     assert "limit: int = 200" in source, "giới hạn cũ cắt mất phần MỚI NHẤT của hàng đợi"
+
+
+@pytest.mark.asyncio
+async def test_the_workflow_itself_is_marked_as_waiting_not_pending(db_pool):
+    """Trạng thái của WORKFLOW, không chỉ của từng bước.
+
+    Đường duyệt thanh toán và đường duyệt lịch tham quan đều tự đặt
+    `workflows.status = WAITING_APPROVAL`. Đường dịch vụ thì không, nên dòng
+    workflow nằm lại `PENDING` trong khi `service_approvals` đã đầy hồ sơ
+    AWAITING. Hai hệ quả đo được:
+
+      - Lịch sử đọc `PENDING` thành "Đang chuẩn bị" cho một việc đang chờ đơn vị.
+      - `sweep_zombie_workflows` đi tìm đúng những dòng `PENDING` không tiến
+        triển — nghĩa là nó có thể dọn mất một yêu cầu đang chờ duyệt thật.
+    """
+    from src.common.enums import WorkflowStatus
+
+    repository = PostgreSQLWorkflowStateRepository(db_pool)
+    workflow_id = await _seed_workflow(db_pool)
+    boundary = ServiceApprovalBoundary(_Runtime(), approved=False, repository=repository)
+
+    with pytest.raises(ServiceApprovalRequiredError):
+        await boundary.execute(_plan("book_parking"), workflow_id)
+
+    status = await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id = $1::uuid", workflow_id)
+    assert status == WorkflowStatus.WAITING_APPROVAL.value, (
+        f"workflow nằm ở {status!r} trong khi hàng đợi duyệt đã được ghim"
+    )

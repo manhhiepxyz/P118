@@ -71,12 +71,37 @@ ON CONFLICT (apartment_code, residential_area) DO UPDATE
 -- Service layer dùng ON CONFLICT DO NOTHING khi tạo tour_capacity per-date.
 -- =============================================================
 
+-- MỌI dự án trong danh mục phải có khung giờ tham quan.
+--
+-- Trước đây chỉ hai khu có slot, trong khi `src/common/projects.py` chào bán
+-- BẢY dự án — nên 6/7 dự án nhận được yêu cầu, vào hàng đợi, được đơn vị bấm
+-- duyệt, rồi mới hỏng ở bước cuối với `TOUR_SLOT_NOT_OFFERED`. Người dùng mất
+-- cả lượt chờ duyệt để nhận một lời từ chối lẽ ra phải nói ngay từ đầu, và cả
+-- workflow bị đánh FAILED kéo theo các bước không liên quan.
+--
+-- 'Vinhomes Smart City' KHÔNG nằm trong danh mục — giữ lại cho dữ liệu cũ,
+-- nhưng nó không phải thứ bán ra.
+--
+-- `tests/test_db/test_every_project_can_be_visited.py` chặn việc thêm một dự
+-- án vào danh mục mà quên khung giờ.
 INSERT INTO tour_slot_config (residential_area, tour_slot, capacity)
 VALUES
-    ('Vinhomes Ocean Park', 'MORNING',   3),
-    ('Vinhomes Ocean Park', 'AFTERNOON', 3),
-    ('Vinhomes Smart City', 'MORNING',   3),
-    ('Vinhomes Smart City', 'AFTERNOON', 3)
+    ('Vinhomes Sài Gòn Park',        'MORNING',   3),
+    ('Vinhomes Sài Gòn Park',        'AFTERNOON', 3),
+    ('Vinhomes Global Gate Hạ Long', 'MORNING',   3),
+    ('Vinhomes Global Gate Hạ Long', 'AFTERNOON', 3),
+    ('Vinhomes Hải Vân Bay',         'MORNING',   3),
+    ('Vinhomes Hải Vân Bay',         'AFTERNOON', 3),
+    ('Vinhomes Pearl Bay',           'MORNING',   3),
+    ('Vinhomes Pearl Bay',           'AFTERNOON', 3),
+    ('Vinhomes Green Paradise',      'MORNING',   3),
+    ('Vinhomes Green Paradise',      'AFTERNOON', 3),
+    ('Vinhomes Golden City',         'MORNING',   3),
+    ('Vinhomes Golden City',         'AFTERNOON', 3),
+    ('Vinhomes Ocean Park',          'MORNING',   3),
+    ('Vinhomes Ocean Park',          'AFTERNOON', 3),
+    ('Vinhomes Smart City',          'MORNING',   3),
+    ('Vinhomes Smart City',          'AFTERNOON', 3)
 ON CONFLICT (residential_area, tour_slot) DO UPDATE
     SET capacity = EXCLUDED.capacity;
 

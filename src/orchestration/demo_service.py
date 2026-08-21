@@ -1811,6 +1811,46 @@ async def _materialize_and_run_remaining(
             if trimmed is not None:
                 plan = trimmed
 
+        # Bước còn CHỜ ĐƠN VỊ duyệt cũng không được chạy ở đây — cùng lý do và
+        # cùng cách xử lý như `pay_fee` ngay trên.
+        #
+        # Đơn vị tour vừa duyệt LỊCH THAM QUAN. Điều đó không nói gì về việc
+        # đăng ký xe hay giữ chỗ đỗ, vốn nằm ở hàng đợi của đơn vị khác. Chạy
+        # chúng ở đây là để một quyết định của đơn vị này mở cửa cho đơn vị kia
+        # — đúng thứ `resume_after_service_decision` đã chặn bằng một dòng
+        # guard, mà đường này thì chưa có.
+        #
+        # Đo được trên yêu cầu thật, database vừa dọn sạch nên biển số
+        # 99B-81888 chưa từng tồn tại:
+        #
+        #   04:35:20.594  duyệt lịch tham quan (T1)
+        #   04:35:20.689  BOOK-001 được tạo  ← book_parking CHẠY, chưa ai duyệt
+        #   04:35:26.441  duyệt giữ chỗ đỗ (T3)
+        #   04:35:26.490  T3 FAILED — BOOKING_ALREADY_EXISTS
+        #
+        # Bước đỗ xe chạy HAI lần và lần thứ hai va vào chính chỗ nó vừa đặt.
+        # Người dùng đọc "Xe này đã có chỗ đỗ ngày 22/08 rồi" cho một biển số
+        # vừa đăng ký lần đầu — một câu không thể đúng, và không có cách nào
+        # thoát ra.
+        awaiting = {
+            row["task_id"]
+            for row in await pending_for_workflow(pool, workflow_id)
+            if row.get("status") == "AWAITING"
+        }
+        if awaiting:
+            trimmed = plan_without(plan, awaiting)
+            if trimmed is None:
+                # Không còn gì chạy được ở lượt này: lịch đã materialize xong,
+                # phần còn lại chờ đơn vị kia. KHÔNG phải lỗi.
+                await repository.update_workflow_status(workflow_id, WorkflowStatus.WAITING_APPROVAL)
+                return {
+                    "workflow_id": workflow_id,
+                    "status": WorkflowStatus.WAITING_APPROVAL.value,
+                    "viewing_result": result,
+                    "task_results": {},
+                }
+            plan = trimmed
+
         final_workflow_id, task_results = await executor.execute(
             plan,
             workflow_id,

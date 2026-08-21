@@ -163,7 +163,7 @@ async def decide_service_approval(
     # Response đang cache trong `_DEMO_JOBS` được dựng lúc còn chờ duyệt. Không
     # bỏ đi thì mọi lượt poll sau vẫn trả "đang chờ" dù database đã đổi, và
     # giao diện mắc kẹt vĩnh viễn ở màn chờ.
-    from src.api.routes import _DEMO_JOBS
+    from src.api.routes import _DEMO_JOBS, request_fresh_answer
 
     job = _DEMO_JOBS.get(workflow_id)
     if job is not None:
@@ -184,5 +184,10 @@ async def decide_service_approval(
         )
     except ResumeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # Tình huống vừa đổi tay. Không xin câu mới thì khách vừa được duyệt xong
+    # vẫn đọc "đang chờ đơn vị cung cấp dịch vụ xác nhận" — trong khi bước tiếp
+    # theo đã là xác nhận thanh toán của chính họ.
+    request_fresh_answer(workflow_id, job=job)
 
     return {"workflow_id": workflow_id, "task_id": task_id, "decision": body.decision, **outcome}

@@ -80,6 +80,9 @@ Giọng của bạn:
 - Riêng khi đang thiếu thông tin: hỏi trực tiếp trong 1–2 câu, nhóm các trường
   liên quan cho dễ đọc. Không thêm câu xác nhận tiếp nhận hoặc lời hứa chung chung.
 - Nếu có lỗi, giải thích bằng ngôn ngữ đời thường và nói họ nên làm gì.
+- Khi dữ liệu có `du_lieu_tra_cuu`: đó là thứ hệ thống VỪA ĐỌC ĐƯỢC để đáp đúng
+  câu khách vừa hỏi. Trả lời thẳng bằng chính nó, nêu con số cụ thể. Nếu nó cho
+  thấy không còn chỗ nào, nói đúng như vậy — đừng đưa ra một ngày khác cho có.
 - Khi dữ liệu có `viec_ban_can_lam_de_dung_duoc`: BẮT BUỘC nói lại việc đó
   trong câu trả lời, giữ nguyên tên mục trong dấu ngoặc kép để khách tìm đúng
   chỗ. Nói khách "chưa đủ điều kiện" mà không nói cách để đủ điều kiện là bỏ
@@ -124,6 +127,13 @@ def build_response_user_message(view: ReplyView) -> str:
         "hom_nay": view.today,
         # Có mặt thì câu trả lời BẮT BUỘC nhắc tới — guard sẽ loại nếu thiếu.
         "viec_ban_can_lam_de_dung_duoc": view.next_step,
+        # Dữ liệu backend vừa ĐỌC TỪ DATABASE để đáp đúng câu khách hỏi.
+        #
+        # Đặt trên `cac_buoc` vì với một câu hỏi thuần tuý thì `cac_buoc` rỗng —
+        # đây là toàn bộ sự thật mà model có. Không có nó, model đoán, và đo
+        # được nó đoán ra "khu B còn trống ngày 25, 27 và 30 tháng 8" cho một
+        # bãi xe nó chưa từng nhìn thấy.
+        "du_lieu_tra_cuu": view.facts,
         "cac_buoc": view.steps,
         "thong_tin_con_thieu": view.missing_fields,
         # Lần trước người dùng chọn gì cho đúng những field này. Dùng để HỎI

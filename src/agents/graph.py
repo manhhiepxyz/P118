@@ -436,9 +436,17 @@ def build_planner_graph(
         except PlannerError as exc:
             # `PlannerError` được thiết kế để message luôn an toàn: chỉ mô tả
             # chung và tên loại exception, không echo goal/context/LLM output.
+            #
+            # GHI LẠI, mức `warning`. Không có dòng này thì mọi lần lập kế hoạch
+            # hỏng đều vô hình: người dùng đọc "Mình chưa thể tạo kế hoạch từ
+            # yêu cầu này", còn log không có gì cả — và một lỗi không tất định
+            # thì không đo được nếu không ghi. Message của `PlannerError` an
+            # toàn theo thiết kế, nên ghi nguyên văn là được.
+            logger.warning("planner thất bại: %s", exc)
             return {"planning_error": str(exc), "plan_validated": False}
         except Exception as exc:  # noqa: BLE001 — lỗi ngoài dự kiến
             # Exception khác chưa chắc an toàn — chỉ giữ tên loại.
+            logger.warning("planner lỗi ngoài dự kiến (%s)", type(exc).__name__)
             return {
                 "planning_error": f"Planner lỗi không mong đợi ({type(exc).__name__}).",
                 "plan_validated": False,
@@ -573,6 +581,15 @@ def build_planner_graph(
                 await emit("WAITING_APPROVAL")
             elif exc.code == "VIEWING_APPROVAL_REQUIRED":
                 await emit("WAITING_VIEWING_APPROVAL")
+            elif exc.code == "SERVICE_APPROVAL_REQUIRED":
+                # Thiếu nhánh này, `ServiceApprovalBoundary` — cổng NGOÀI CÙNG,
+                # áp cho MỌI dịch vụ — rơi xuống `else` và mọi yêu cầu dịch vụ
+                # đều được ghi là thất bại. Tái hiện được 2/2 lần: hàng đợi
+                # duyệt có đủ hồ sơ AWAITING, các bước nằm WAITING_APPROVAL,
+                # mà `workflows.status = FAILED`, `error_code =
+                # UNKNOWN_EXTERNAL_ERROR`, và khách đọc "Yêu cầu đã dừng lại
+                # giữa chừng."
+                await emit("WAITING_SERVICE_APPROVAL")
             else:
                 await emit("EXECUTION_FAILED")
             update: dict = {"policy_error": exc.code}

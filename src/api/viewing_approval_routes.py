@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from src.api.deps import require_roles
-from src.api.routes import _DEMO_JOBS
+from src.api.routes import _DEMO_JOBS, request_fresh_answer
 from src.config import get_settings
 from src.orchestration.demo_service import reject_viewing, resume_viewing_after_approval
 from src.orchestration.viewing_approval import expire_stale_viewing_approvals
@@ -137,6 +137,7 @@ async def decide_viewing_approval(
             await reject_viewing(workflow_id, body.reject_reason, decided_by=reviewer["username"])
         except Exception as exc:  # noqa: BLE001 - lỗi map ra HTTP bên dưới
             raise _to_http(exc) from exc
+        request_fresh_answer(workflow_id, job=job)
         return {
             "workflow_id": workflow_id,
             "decision": "reject",
@@ -182,6 +183,9 @@ async def decide_viewing_approval(
             break
 
     logger.info("viewing approved workflow=%s reviewer=%s", workflow_id, reviewer["username"])
+    # Tình huống vừa đổi: lịch đã được duyệt. Câu cũ nói "đơn vị tour đang xác
+    # nhận" và nó hết đúng ngay tại đây.
+    request_fresh_answer(workflow_id, job=job)
     return {
         "workflow_id": workflow_id,
         "decision": "approve",

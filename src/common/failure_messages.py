@@ -109,7 +109,7 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
 
 
 # Nhãn công khai của khu đỗ xe. Người dùng không bao giờ nhìn thấy "ZONE_A".
-_ZONE_LABELS = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}
+ZONE_LABELS = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}
 
 # Giá trị chuẩn của contract ↔ cách người Việt thật sự nói ra nó.
 #
@@ -169,7 +169,7 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
             return f"Xe tham quan đã hết chỗ{when}. Bạn chọn ngày khác giúp mình nhé."
         if task_tool == "book_parking":
             zone = str(inputs.get("parking_zone") or "")
-            label = _ZONE_LABELS.get(zone, "Khu vực bạn chọn")
+            label = ZONE_LABELS.get(zone, "Khu vực bạn chọn")
             date = _text(inputs.get("booking_date"))
             when = f" ngày {date}" if date else ""
             alternative = _OTHER_ZONE.get(zone)

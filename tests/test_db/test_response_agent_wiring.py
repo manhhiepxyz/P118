@@ -9,6 +9,7 @@ workflow, số tiền, hay kết quả từng bước.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 
@@ -213,25 +214,46 @@ def test_every_public_status_has_a_baseline_sentence():
     assert declared <= set(_DEFAULT_BASELINE), declared - set(_DEFAULT_BASELINE)
 
 
-def test_the_payment_decision_path_also_asks_for_a_spoken_answer():
-    """Duyệt thanh toán là điểm dừng người dùng chú ý nhất — đừng im lặng ở đó.
+def test_every_decision_path_asks_for_a_spoken_answer():
+    """MỌI đường quyết định, không chỉ đường thanh toán.
 
-    Đường này KHÔNG đi qua `_run_demo_job`, nên nó từng không sinh câu trả lời
-    nào: `answer` vắng mặt và giao diện lặng lẽ rơi về câu ghép cứng. Bug chỉ lộ
-    ra khi so `answer` với `summary` trên một workflow đã thanh toán xong.
+    Các đường này KHÔNG đi qua `_run_demo_job`, nên không có gì tự sinh câu trả
+    lời cho tình huống MỚI. Bản trước chỉ kiểm đường thanh toán — và đúng thứ
+    nó không kiểm là thứ bị quên: duyệt dịch vụ và duyệt lịch tham quan đều im
+    lặng, nên khách vừa được duyệt xong vẫn đọc câu của lúc còn đang chờ.
 
-    Đây là guard CẤU TRÚC, yếu hơn một phép kiểm hành vi: nó chỉ khẳng định
-    handler có gọi `_attach_answer`. Bằng chứng hành vi nằm ở browser E2E (mục
-    6h) và ở `scripts`/probe chạy trên stack thật. Guard này tồn tại vì dựng
-    một lần duyệt thanh toán đầy đủ trong test ASGI đòi cả một workflow đỗ xe
-    thật, và cái giá đó không đáng cho một dòng bị quên.
+    Đo được: duyệt cả hai bước → `pay_fee` sang WAITING_APPROVAL với báo giá
+    100.000 VND, mà `answer` vẫn là "đang chờ đơn vị cung cấp dịch vụ xác nhận".
+
+    Guard CẤU TRÚC, yếu hơn một phép kiểm hành vi: nó chỉ khẳng định handler có
+    gọi `request_fresh_answer`. Nó tồn tại vì dựng một lần duyệt đầy đủ trong
+    test ASGI đòi cả một workflow đỗ xe thật, và cái giá đó không đáng cho một
+    dòng bị quên. Bằng chứng hành vi nằm ở probe chạy trên stack thật.
     """
     import inspect
 
-    from src.api.routes import decide_demo_payment
+    from src.api.routes import cancel_demo_workflow, continue_demo_workflow, decide_demo_payment
+    from src.api.service_approval_routes import decide_service_approval
+    from src.api.viewing_approval_routes import decide_viewing_approval
 
-    body = inspect.getsource(decide_demo_payment)
-    assert "_attach_answer" in body, "đường duyệt thanh toán không sinh câu trả lời"
+    # `continue` là đường NGƯỜI DÙNG đi nhiều nhất — mỗi lần họ sửa một ô rồi
+    # gửi lại. Bản trước của test này chỉ liệt kê các đường DUYỆT, nên nó bỏ
+    # sót đúng đường ấy: người dùng đổi ngày, bước hỏng được mở lại đúng với
+    # ngày mới, và màn hình không đổi một chữ nào. Họ báo "chẳng có thay đổi
+    # gì" — và họ đúng.
+    duong_quyet_dinh = {
+        "duyệt thanh toán": decide_demo_payment,
+        "duyệt dịch vụ": decide_service_approval,
+        "duyệt lịch tham quan": decide_viewing_approval,
+        "huỷ yêu cầu": cancel_demo_workflow,
+        "sửa rồi chạy lại": continue_demo_workflow,
+    }
+    thieu = [
+        ten
+        for ten, handler in duong_quyet_dinh.items()
+        if "request_fresh_answer" not in inspect.getsource(handler)
+    ]
+    assert not thieu, f"{thieu} không xin câu trả lời mới — khách sẽ đọc lại câu của tình huống trước"
 
 
 @pytest.mark.asyncio
@@ -272,3 +294,258 @@ def test_the_response_layer_is_tracked_as_its_own_usage_stage():
 
     body = inspect.getsource(_speak)
     assert 'stage="respond"' in body, "lớp trả lời không có stage usage riêng"
+
+
+# ---------------------------------------------------------------------------
+# Nhánh khách vừa HỎI: câu nền phải nói thật, và dữ liệu phải được tra
+# ---------------------------------------------------------------------------
+
+
+def test_the_question_branch_does_not_claim_it_already_answered():
+    """`status="CHAT"` mang HAI nghĩa, và câu nền của chúng phải khác nhau.
+
+    Small-talk trả CHAT khi câu trả lời ĐÃ nằm sẵn phía trên. Nhánh câu hỏi
+    cũng trả CHAT — để frontend dừng poll — nhưng câu trả lời chưa được viết.
+    Dùng chung câu nền nghĩa là khi guard loại câu của model, khách đọc đúng
+    một lời khẳng định sai: "Mình đã trả lời bạn ở trên." cho một câu chưa ai
+    đáp. Đo được trên stack thật, `response_state = FALLBACK`.
+    """
+    from src.api.routes import _QUESTION_BASELINE, _reply_view
+    from src.models.schemas import DemoWorkflowResponse
+
+    asked = _reply_view(
+        DemoWorkflowResponse(status="CHAT", stage="QUESTION"),
+        goal="ngày nào còn trống chỗ đỗ xe",
+        capabilities=[],
+    )
+    answered = _reply_view(
+        DemoWorkflowResponse(status="CHAT", stage="CHAT"),
+        goal="cảm ơn bạn nhé",
+        capabilities=[],
+    )
+
+    assert asked.baseline_message == _QUESTION_BASELINE
+    assert "đã trả lời bạn ở trên" not in asked.baseline_message
+    # Small-talk KHÔNG được đổi: ở đó câu trả lời thật sự nằm phía trên.
+    assert answered.baseline_message == "Mình đã trả lời bạn ở trên."
+
+
+@pytest.mark.parametrize(
+    ("goal", "expected"),
+    [
+        ("ngày nào còn trống chỗ đỗ xe", True),
+        ("khu B còn chỗ không?", True),
+        # Đúng câu đã bịa ra "ngày 25, 27 và 30 tháng 8" trên stack thật. Nó
+        # không chứa chữ "xe" nào — chỉ tên khu.
+        ("khu B còn trống ngày nào?", True),
+        ("bãi xe hôm nào hết chỗ vậy", True),
+        # Hỏi GIÁ, không hỏi chỗ trống. Nhét thêm bảng chỗ trống vào câu trả
+        # lời về phí là trả lời một câu không ai hỏi.
+        ("phí gửi xe ô tô một tháng khoảng bao nhiêu", False),
+        # "còn trống" nhưng không nói gì tới xe.
+        ("lịch tham quan ngày nào còn trống", False),
+        ("đặt chỗ đỗ xe khu A ngày 2026-09-01", False),
+        ("xin chào", False),
+        ("", False),
+    ],
+)
+def test_only_a_real_availability_question_opens_a_database_query(goal: str, expected: bool):
+    """Nhận diện TẤT ĐỊNH, không hỏi model.
+
+    Đây là thứ mở một truy vấn database; thêm một lượt gọi mô hình để phân loại
+    vừa tốn tiền vừa thêm một chỗ có thể sai.
+    """
+    from src.api.routes import _asks_parking_availability
+
+    assert _asks_parking_availability(goal) is expected
+
+
+@pytest.mark.asyncio
+async def test_the_lookup_matches_what_booking_will_actually_allow(db_pool):
+    """Cách đếm chỗ trống PHẢI trùng khít với đường cưỡng chế.
+
+    Lệch một chút thôi là hệ thống nói còn chỗ rồi từ chối ngay sau đó — tệ hơn
+    hẳn việc không trả lời được.
+    """
+    from datetime import date, timedelta
+
+    from src.db.capacity_repository import CapacityRepository, NoAvailabilityError
+
+    repo = CapacityRepository(db_pool)
+    when = date.today() + timedelta(days=3)
+
+    # `zone_capacity_config` là bảng CẤU HÌNH, không nằm trong `clean_tables`.
+    # Sửa xong mà không trả lại thì test này bẻ gãy
+    # `test_zone_b_has_room_for_a_demo` ở file khác — đo được đúng như vậy.
+    original = await db_pool.fetchval(
+        "SELECT capacity FROM zone_capacity_config WHERE parking_zone = 'ZONE_B'"
+    )
+    await db_pool.execute("UPDATE zone_capacity_config SET capacity = 1 WHERE parking_zone = 'ZONE_B'")
+    await db_pool.execute(
+        "INSERT INTO residents (resident_id, full_name, apartment_code, residential_area) "
+        "VALUES ('RES-AV', 'Khách tra chỗ trống', 'AV-01', 'Khu A') ON CONFLICT DO NOTHING"
+    )
+    for n in (1, 2):
+        await db_pool.execute(
+            "INSERT INTO vehicles (vehicle_id, resident_id, plate_number, vehicle_type) "
+            "VALUES ($1, 'RES-AV', $2, 'car') ON CONFLICT DO NOTHING",
+            f"VEH-AV-{n}",
+            f"51A-0000{n}",
+        )
+
+    try:
+        before = next(r for r in await repo.availability(when, 1) if r["parking_zone"] == "ZONE_B")
+        assert before["remaining"] == 1
+
+        await repo.check_and_reserve_capacity(
+            "ZONE_B", when.isoformat(), "BK-AV-1", "VEH-AV-1", 100000
+        )
+
+        after = next(r for r in await repo.availability(when, 1) if r["parking_zone"] == "ZONE_B")
+        assert after["remaining"] == 0
+
+        # Và lời hứa "hết chỗ" phải đúng: lượt đặt tiếp theo bị từ chối thật.
+        with pytest.raises(NoAvailabilityError):
+            await repo.check_and_reserve_capacity(
+                "ZONE_B", when.isoformat(), "BK-AV-2", "VEH-AV-2", 100000
+            )
+    finally:
+        await db_pool.execute(
+            "UPDATE zone_capacity_config SET capacity = $1 WHERE parking_zone = 'ZONE_B'", original
+        )
+
+
+# ---------------------------------------------------------------------------
+# Một câu trả lời mô tả một TÌNH HUỐNG, không phải một trạng thái
+# ---------------------------------------------------------------------------
+
+
+def test_the_two_kinds_of_waiting_are_not_the_same_situation():
+    """`WAITING_APPROVAL` mang hai tình huống, và chúng NỐI TIẾP nhau.
+
+    Đơn vị duyệt xong thì tới lượt khách xác nhận tiền — cùng workflow, cùng
+    `status`, hai câu hoàn toàn khác nhau. Khoá chỉ theo `status` thì
+    `claim_assistant_response` thấy khoá không đổi nên không giành quyền sinh,
+    và câu cũ ở lại. Đo được: duyệt xong, `pay_fee` đã sang WAITING_APPROVAL với
+    báo giá 100.000 VND, mà khách vẫn đọc "đang chờ đơn vị cung cấp dịch vụ
+    xác nhận".
+    """
+    from src.api.routes import answer_key
+
+    assert answer_key("WAITING_APPROVAL", "PROVIDER") != answer_key("WAITING_APPROVAL", "USER")
+    # Trạng thái không mơ hồ thì khoá vẫn đúng bằng trạng thái — không đổi
+    # nghĩa dữ liệu đã ghi của mọi workflow cũ.
+    assert answer_key("SUCCESS") == "SUCCESS"
+    assert answer_key("CHAT") == "CHAT"
+    assert answer_key("WAITING_APPROVAL") == "WAITING_APPROVAL"
+
+
+def test_a_list_row_still_shows_the_answer_it_has():
+    """Dòng trong danh sách chỉ có `status`, không có `approval_actor`.
+
+    So nguyên khoá ở đây sẽ giấu MỌI câu của nhánh chờ duyệt — đúng lớp lỗi mà
+    bộ lọc này từng gây ra với `CHAT`.
+    """
+    from src.api.routes import _assistant_fields
+
+    row = {
+        "status": "WAITING_APPROVAL",
+        "assistant_for_status": "WAITING_APPROVAL:PROVIDER",
+        "assistant_answer": "Đơn vị đang xác nhận giúp bạn nhé.",
+        "assistant_suggestions": [],
+        "assistant_response_state": "READY",
+    }
+    assert _assistant_fields(row)["answer"] == "Đơn vị đang xác nhận giúp bạn nhé."
+
+    # Nhưng câu của một trạng thái KHÁC HẲN thì vẫn phải bị chặn.
+    stale = {**row, "status": "SUCCESS"}
+    assert _assistant_fields(stale)["answer"] is None
+
+
+@pytest.mark.parametrize(
+    ("database_status", "expected"),
+    [
+        ("SUCCESS", "SUCCESS"),
+        ("FAILED", "FAILED"),
+        ("CANCELLED", "CANCELLED"),
+        # Từng bị gộp vào RUNNING ở CẢ HAI bản sao của luật này.
+        ("WAITING_APPROVAL", "WAITING_APPROVAL"),
+        ("PENDING", "RUNNING"),
+        ("RUNNING", "RUNNING"),
+        (None, "RUNNING"),
+    ],
+)
+def test_the_database_status_is_translated_by_exactly_one_rule(database_status, expected):
+    from src.api.routes import public_status_from_db
+
+    assert public_status_from_db(database_status) == expected
+
+
+def test_the_status_rule_is_not_written_a_second_time():
+    """Hai bản sao của một luật không hỏng cùng lúc — chúng hỏng LỆCH nhau.
+
+    Luật này từng được viết hai lần bằng cùng một chuỗi if/elif, và cả hai bản
+    đều đánh rơi `WAITING_APPROVAL`. Guard bắt bản sao thứ hai xuất hiện lại.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path("src/api/routes.py").read_text(encoding="utf-8")
+    # Chuỗi so sánh trực tiếp cột trạng thái database — dấu hiệu của một bản
+    # dịch viết tay thay vì gọi `public_status_from_db`.
+    inline = re.findall(r'database_status\s*==\s*"(?:SUCCESS|FAILED|CANCELLED)"', source)
+    assert not inline, (
+        f"{len(inline)} chỗ tự dịch `database_status` — dùng `public_status_from_db()` thay vì viết lại luật"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_answer_is_rewritten_when_the_waiting_changes_hands(client, db_pool, monkeypatch):
+    """Kiểm HÀNH VI, không chỉ cấu trúc.
+
+    Test cấu trúc ở trên không bắt được đột biến quan trọng nhất: gỡ
+    `approval_actor` khỏi khoá lúc GHI thì cả bộ vẫn xanh, trong khi đó chính
+    là con đường sinh ra lỗi. Chỗ duy nhất bắt được là chạy đúng đường ghi rồi
+    đọc lại `workflows.assistant_for_status`.
+
+    Nhận `client` để lifespan đăng ký repository provider — `_attach_answer`
+    ghi qua provider đó, không qua `db_pool` trực tiếp.
+    """
+    from src.api import routes
+    from src.models.schemas import DemoWorkflowResponse
+
+    workflow_id = str(uuid.uuid4())
+    await db_pool.execute(
+        "INSERT INTO workflows (workflow_id, goal, status) VALUES ($1::uuid, 'kiểm khoá', 'WAITING_APPROVAL')",
+        workflow_id,
+    )
+
+    async def _run(actor: str, answer: str) -> None:
+        monkeypatch.setattr(routes, "ResponseAgent", _FakeAgent(AgentReply(answer=answer, suggestions=[])))
+        job = {
+            "response": DemoWorkflowResponse(
+                workflow_id=workflow_id, status="WAITING_APPROVAL", approval_actor=actor
+            ),
+            "goal": "kiểm khoá",
+        }
+        await routes._attach_answer(job, workflow_id, goal="kiểm khoá")
+
+    await _run("PROVIDER", "Đơn vị đang xác nhận giúp bạn nhé.")
+    first = await db_pool.fetchrow(
+        "SELECT assistant_for_status, assistant_answer FROM workflows WHERE workflow_id = $1::uuid",
+        workflow_id,
+    )
+    assert first["assistant_for_status"] == "WAITING_APPROVAL:PROVIDER"
+
+    # Đơn vị duyệt xong → tới lượt khách xác nhận tiền. CÙNG `status`, khác
+    # tình huống. Không đổi khoá thì `claim_assistant_response` không giành
+    # được quyền sinh và câu cũ ở lại nguyên vẹn.
+    await _run("USER", "Bạn xác nhận khoản 100.000 VND giúp mình nhé.")
+    second = await db_pool.fetchrow(
+        "SELECT assistant_for_status, assistant_answer FROM workflows WHERE workflow_id = $1::uuid",
+        workflow_id,
+    )
+    assert second["assistant_for_status"] == "WAITING_APPROVAL:USER"
+    assert second["assistant_answer"] != first["assistant_answer"], (
+        "câu của lượt chờ trước còn nguyên sau khi việc chờ đã đổi tay"
+    )
