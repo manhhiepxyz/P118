@@ -8,6 +8,7 @@ import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 import { ResultSummary } from '../components/workspace/ResultSummary'
 import { StepList } from '../components/workspace/StepList'
 import { journeyFromWorkflow } from '../lib/liveJourney'
+import { AmendPanel } from '../components/AmendPanel'
 import { describeFailure, describeWorkflowFailure } from '../lib/status'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import {
@@ -488,6 +489,11 @@ export function WorkflowPage() {
                       {retryError}
                     </p>
                   )}
+                  {/* Sửa một ô rồi chạy lại — không phải nói lại bằng lời.
+                      Yêu cầu đã dừng/hỏng vẫn còn nguyên kế hoạch đã lưu, nên
+                      đổi khu hay đổi ngày là sửa đúng một ô, không phải khai
+                      lại từ đầu. Xem `AmendPanel`. */}
+                  <AmendPanel workflowId={workflowId} onAmended={() => { void load() }} />
                   <p className="mb-2 text-[13.5px] text-[var(--text-secondary)]">
                     Hoặc nói cho mình biết muốn đổi gì — mình chạy lại phần còn thiếu.
                   </p>

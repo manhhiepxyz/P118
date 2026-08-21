@@ -18,7 +18,7 @@ class _SuccessConnector(Connector):
     def tool_names(self):
         return ["book_parking"]
 
-    async def execute(self, tool_name, input_data):
+    async def execute(self, tool_name, input_data, *, context=None):
         return StandardResult.ok({"booking_id": "BOOK-001"})
 
 

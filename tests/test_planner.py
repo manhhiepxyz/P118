@@ -231,34 +231,22 @@ def _property_search_plan() -> TaskPlan:
 
 
 @pytest.mark.asyncio
-async def test_planner_accepts_property_search_without_adding_transaction() -> None:
+async def test_a_property_search_plan_is_refused_even_when_the_model_returns_it() -> None:
+    """Quyết định sản phẩm: tìm kiếm / listing là chức năng marketplace.
+
+    Hợp đồng CŨ ở đây là "READY, đúng 1 task search_properties". Nó đã đổi, và
+    ràng buộc phải nằm ở CODE chứ không ở prompt: đã quan sát trên model thật —
+    nó tự thêm một tool mà prompt đã dặn không dùng.
+
+    Provider và connector vẫn còn (`AllowedTool` giữ đủ 10 tool); thứ bị đóng là
+    đường tới nó từ Agent.
+    """
     goal = "Tìm căn hộ thuê tại Vinhomes Ocean Park dưới 20 triệu."
     llm = FakeLLM(PlannerResponse(status="READY", plan=_property_search_plan()))
 
-    result = await Planner(llm).plan(goal)
-
-    assert result.status == "READY"
-    assert result.plan is not None
-    assert [task.tool for task in result.plan.tasks] == ["search_properties"]
-    assert all(task.tool not in {"rent_property", "pay_deposit"} for task in result.plan.tasks)
-
-
-@pytest.mark.asyncio
-async def test_property_search_missing_fields_use_deterministic_question() -> None:
-    llm = FakeLLM(
-        PlannerResponse(
-            status="NEEDS_INFORMATION",
-            plan=None,
-            missing_fields=["residential_area", "max_price"],
-        )
-    )
-
-    result = await Planner(llm).plan("Tìm căn hộ để thuê.")
-
-    assert result.status == "NEEDS_INFORMATION"
-    assert result.question == (
-        "Mình cần thêm thông tin để lập kế hoạch: tên khu đô thị và ngân sách tối đa. Bạn bổ sung giúp mình nhé?"
-    )
+    with pytest.raises(PlannerError) as raised:
+        await Planner(llm).plan(goal)
+    assert "search_properties" in str(raised.value)
 
 
 def test_full_goal_states_every_value_the_plan_uses() -> None:
@@ -497,7 +485,7 @@ def test_booking_question_uses_plain_language_not_internal_format() -> None:
 async def test_question_is_generated_deterministically_from_missing_fields() -> None:
     """Cùng missing_fields luôn ra cùng câu hỏi, ghép từ nhãn cố định."""
     llm = FakeLLM(
-        PlannerResponse(
+        PlannerResponse.model_construct(
             status="NEEDS_INFORMATION",
             plan=None,
             missing_fields=["booking_date", "parking_zone"],
@@ -534,7 +522,7 @@ async def test_llm_cannot_inject_text_into_the_public_question() -> None:
 async def test_unsupported_goal_produces_safe_confirmation_question() -> None:
     """Goal ngoài phạm vi -> hỏi xác nhận, KHÔNG lập kế hoạch một phần."""
     llm = FakeLLM(
-        PlannerResponse(
+        PlannerResponse.model_construct(
             status="NEEDS_INFORMATION",
             plan=None,
             missing_fields=[UNSUPPORTED_GOAL_FIELD],
@@ -574,7 +562,9 @@ def test_unsupported_goal_question_takes_precedence() -> None:
 )
 @pytest.mark.asyncio
 async def test_reject_missing_field_outside_allowlist(bad_field: str) -> None:
-    llm = FakeLLM(PlannerResponse(status="NEEDS_INFORMATION", plan=None, missing_fields=[bad_field]))
+    llm = FakeLLM(
+        PlannerResponse.model_construct(status="NEEDS_INFORMATION", plan=None, missing_fields=[bad_field], reasoning="")
+    )
     planner = Planner(llm)
 
     with pytest.raises(PlannerError) as exc_info:
@@ -590,7 +580,7 @@ async def test_reject_missing_field_outside_allowlist(bad_field: str) -> None:
 @pytest.mark.asyncio
 async def test_missing_fields_are_deduplicated_in_order() -> None:
     llm = FakeLLM(
-        PlannerResponse(
+        PlannerResponse.model_construct(
             status="NEEDS_INFORMATION",
             plan=None,
             missing_fields=["booking_date", "parking_zone", "booking_date"],
@@ -669,7 +659,9 @@ async def test_inconsistent_missing_field_then_valid_succeeds_in_two_calls() -> 
     """Vi phạm do Planner tự phát hiện (field ngoài allowlist) cũng được sửa."""
     llm = SequencedFakeLLM(
         [
-            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["khong_ton_tai"]),
+            PlannerResponse.model_construct(
+                status="NEEDS_INFORMATION", plan=None, missing_fields=["khong_ton_tai"], reasoning=""
+            ),
             PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["booking_date"]),
         ]
     )
@@ -687,8 +679,12 @@ async def test_invalid_twice_raises_planner_error_after_exactly_two_calls() -> N
     """Sai cả hai lần -> PlannerError, KHÔNG retry lần ba."""
     llm = SequencedFakeLLM(
         [
-            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["khong_ton_tai"]),
-            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["van_sai"]),
+            PlannerResponse.model_construct(
+                status="NEEDS_INFORMATION", plan=None, missing_fields=["khong_ton_tai"], reasoning=""
+            ),
+            PlannerResponse.model_construct(
+                status="NEEDS_INFORMATION", plan=None, missing_fields=["van_sai"], reasoning=""
+            ),
         ]
     )
     planner = Planner(llm)
@@ -766,7 +762,9 @@ async def test_corrective_message_leaks_nothing() -> None:
 
     llm = SequencedFakeLLM(
         [
-            PlannerResponse(status="NEEDS_INFORMATION", missing_fields=[leaky_field]),
+            PlannerResponse.model_construct(
+                status="NEEDS_INFORMATION", plan=None, missing_fields=[leaky_field], reasoning=""
+            ),
             PlannerResponse(status="NEEDS_INFORMATION", missing_fields=["booking_date"]),
         ]
     )
@@ -870,8 +868,13 @@ async def test_standalone_payment_with_only_booking_id_asks_for_quote() -> None:
 def test_payment_quote_question_does_not_ask_user_for_an_amount() -> None:
     question = build_question((PAYMENT_QUOTE_REQUIRED_FIELD,))
 
-    assert "chưa lấy được thông tin phí" in question
-    assert "kiểm tra lại mã đặt chỗ" in question
+    assert "chưa lấy được báo phí" in question
+    # Câu này KHÔNG được đòi người dùng bất cứ thứ gì: `booking_id` là dữ liệu
+    # có thẩm quyền do `book_parking` sinh ra, người dùng không thấy và không
+    # tra được. Bản cũ khoá cụm "kiểm tra lại mã đặt chỗ" — nó khoá đúng cái
+    # hành vi sai.
+    assert "mã đặt chỗ" not in question
+    assert "thử lại sau" in question
     # Không mời người dùng tự nhập số tiền.
     for inviting in ("bổ sung giúp mình", "số tiền", "loại tiền tệ"):
         assert inviting not in question

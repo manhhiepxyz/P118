@@ -37,7 +37,10 @@ class FakePlanner:
         self._error = error
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def plan(self, goal: str, existing_context: dict[str, Any] | None = None,
+    async def plan(
+        self,
+        goal: str,
+        existing_context: dict[str, Any] | None = None,
         # Ký ức hội thoại. Fake PHẢI nhận tham số này, kể cả khi không dùng:
         # graph gọi `plan(..., recalled=...)`, và một fake thiếu tham số sẽ ném
         # TypeError — vốn bị `except Exception` trong `plan_node` nuốt và biến
@@ -214,6 +217,22 @@ def _success_results() -> dict[str, StandardResult]:
 # ---------------------------------------------------------------------------
 # 1. Happy path: READY → validate → execute
 # ---------------------------------------------------------------------------
+
+
+class _RawPlannerResult:
+    """Result duck-typed, cố tình BỎ QUA `PlannerResult.__post_init__`.
+
+    `PlannerResult` đã chặn field lạ và không cho truyền `question` tự do, nên
+    dùng nó thì không kiểm được lớp phòng thủ của Graph. Class này mô phỏng một
+    Planner khác (hoặc bản refactor tương lai) trả về dữ liệu chưa được lọc.
+    """
+
+    def __init__(self, missing_fields: tuple[str, ...], question: str | None = None) -> None:
+        self.status = "NEEDS_INFORMATION"
+        self.plan = None
+        self.missing_fields = missing_fields
+        self.question = question
+        self.is_ready = False
 
 
 @pytest.mark.asyncio
@@ -880,7 +899,7 @@ _INTERNAL_FIELDS = ("resident_id", "vehicle_id", "booking_id", "amount", "curren
 
 @pytest.mark.asyncio
 async def test_planner_branch_translates_vehicle_id_into_user_answerable_fields() -> None:
-    planner = FakePlanner(PlannerResult(status="NEEDS_INFORMATION", missing_fields=("vehicle_id",)))
+    planner = FakePlanner(_RawPlannerResult(missing_fields=("vehicle_id",)))
     boundary = FakeExecutionBoundary()
 
     graph = build_planner_graph(planner, boundary)
@@ -897,7 +916,12 @@ async def test_planner_branch_translates_vehicle_id_into_user_answerable_fields(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ["resident_id", "booking_id", "amount", "currency"])
 async def test_planner_branch_never_asks_user_for_system_owned_field(field: str) -> None:
-    planner = FakePlanner(PlannerResult(status="NEEDS_INFORMATION", missing_fields=(field,)))
+    # `PlannerResult` giờ TỪ CHỐI những field này ngay ở constructor (xem
+    # `PUBLIC_MISSING_FIELDS`), nên một `PlannerResult` không còn mang được
+    # chúng. Lớp phòng thủ của Graph vẫn cần thiết cho thứ ĐI VÒNG qua nó — một
+    # planner khác, hay một bản refactor tương lai — nên test dùng đúng hình
+    # dạng ấy.
+    planner = FakePlanner(_RawPlannerResult(missing_fields=(field,)))
     boundary = FakeExecutionBoundary()
 
     graph = build_planner_graph(planner, boundary)
@@ -915,22 +939,6 @@ async def test_planner_branch_never_asks_user_for_system_owned_field(field: str)
     # Bất biến chung cho MỌI field: tên field nội bộ không bao giờ lọt ra câu chữ.
     assert field not in state["clarification_error"]
     assert boundary.calls == []
-
-
-class _RawPlannerResult:
-    """Result duck-typed, cố tình BỎ QUA `PlannerResult.__post_init__`.
-
-    `PlannerResult` đã chặn field lạ và không cho truyền `question` tự do, nên
-    dùng nó thì không kiểm được lớp phòng thủ của Graph. Class này mô phỏng một
-    Planner khác (hoặc bản refactor tương lai) trả về dữ liệu chưa được lọc.
-    """
-
-    def __init__(self, missing_fields: tuple[str, ...], question: str | None = None) -> None:
-        self.status = "NEEDS_INFORMATION"
-        self.plan = None
-        self.missing_fields = missing_fields
-        self.question = question
-        self.is_ready = False
 
 
 @pytest.mark.asyncio
@@ -962,7 +970,10 @@ async def test_graph_rebuilds_question_instead_of_forwarding_planner_question() 
     plate_number + vehicle_type, câu hỏi cũ trở thành sai, nên không được
     chuyển tiếp nguyên văn.
     """
-    original = PlannerResult(status="NEEDS_INFORMATION", missing_fields=("vehicle_id",))
+    # `PlannerResult` không mang được `vehicle_id` nữa — `_clean_missing_fields`
+    # hạ cấp nó trước khi tới đây. Dùng result duck-typed để kiểm lớp phòng thủ
+    # của Graph cho thứ đi vòng qua biên ấy.
+    original = _RawPlannerResult(missing_fields=("vehicle_id",), question="Mình cần biết phương tiện muốn dùng.")
     planner = FakePlanner(original)
     boundary = FakeExecutionBoundary()
 

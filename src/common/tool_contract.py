@@ -1,4 +1,7 @@
-"""Nguồn sự thật DUY NHẤT cho contract của 9 tool nội bộ.
+"""Nguồn sự thật DUY NHẤT cho contract của 10 tool provider.
+
+Mười tool là tập PROVIDER — mọi thứ hệ thống có connector phục vụ. Agent chỉ
+lập kế hoạch được với 8 trong số đó; xem `src/common/agent_tool_policy.py`.
 
 Trước file này, luật của một tool nằm rải ở ba nơi và không nơi nào biết nơi
 kia: `TaskPlanValidator` giữ required field + vài enum, Connector giữ danh sách

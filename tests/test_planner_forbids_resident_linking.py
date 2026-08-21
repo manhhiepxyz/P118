@@ -51,7 +51,9 @@ class _ScriptedLLM:
 def _resp(status, plan=None, missing=()):
     from src.agents.planner import _PlannerResponse
 
-    return _PlannerResponse(status=status, plan=plan, missing_fields=list(missing))
+    # `model_construct` bỏ qua validation: đây là helper MÔ PHỎNG cái model trả
+    # về, và điểm của test là những giá trị mà schema phải từ chối.
+    return _PlannerResponse.model_construct(status=status, plan=plan, missing_fields=list(missing), reasoning="")
 
 
 def _plan_with_register_resident() -> TaskPlan:
@@ -175,10 +177,15 @@ def test_the_planner_tool_space_excludes_resident_linking() -> None:
 
     provider_tools = set(typing.get_args(AllowedTool))
 
-    assert "register_resident" in provider_tools, "contract provider không được thu hẹp"
-    assert "register_resident" not in PLANNER_ALLOWED_TOOLS
-    assert PLANNER_ALLOWED_TOOLS == provider_tools - {"register_resident"}
-    assert len(PLANNER_ALLOWED_TOOLS) == 9
+    # Hai tool bị loại, vì hai lý do khác nhau:
+    #   `register_resident`   — onboarding xảy ra NGOÀI Agent (đường admin/provider)
+    #   `search_properties`   — tìm kiếm / listing là chức năng marketplace
+    # Cả hai vẫn nằm trong contract provider; chỉ đường TỚI chúng bị đóng.
+    outside_the_agent = {"register_resident", "search_properties"}
+    assert outside_the_agent <= provider_tools, "contract provider không được thu hẹp"
+    assert not (outside_the_agent & PLANNER_ALLOWED_TOOLS)
+    assert PLANNER_ALLOWED_TOOLS == provider_tools - outside_the_agent
+    assert len(PLANNER_ALLOWED_TOOLS) == 8
 
 
 def test_linking_fields_are_not_askable_by_the_planner() -> None:

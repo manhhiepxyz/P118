@@ -28,7 +28,7 @@ Thứ tự Executor gọi repository trong một task:
   5. update_workflow_status(SUCCESS|FAILED)  – kết thúc workflow
 """
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from src.common.enums import TaskStatus, WorkflowStatus
 from src.common.results import StandardResult
@@ -94,6 +94,20 @@ class WorkflowStateRepository(Protocol):
           1. update_task_status(RUNNING)         – trước khi gọi Connector
           2. update_task_status(SUCCESS|FAILED)  – sau khi Connector trả kết quả
         """
+        ...
+
+    async def prepare_submission(self, workflow_id: str, task_id: str, *, candidate_key: str | None) -> Any:
+        """Cấp phép gửi MỘT lần, hoặc từ chối. Ghi `SUBMITTING` trong cùng transaction.
+
+        Nằm trong Protocol chứ không phải một tiện ích tuỳ chọn: Executor gọi nó
+        NGAY TRƯỚC mỗi lời gọi connector và từ chối gửi khi không có phép. Một
+        repository thiếu method này sẽ làm mọi lần gửi bị chặn — đúng hướng
+        fail-closed, nhưng nó là lỗi lắp ráp và phải lộ ra ở đây.
+        """
+        ...
+
+    async def record_submission_outcome(self, workflow_id: str, task_id: str, tool: str, result: Any) -> None:
+        """Ghi kết luận sau MỘT lời gọi connector. Trạng thái cuối không bị viết đè."""
         ...
 
     async def save_task_result(

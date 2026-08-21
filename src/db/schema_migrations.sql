@@ -901,7 +901,28 @@ BEGIN
             NEW.reject_reason, NEW.decided_by,
             COALESCE(NEW.created_at, NOW()), NEW.decided_at
         )
-        ON CONFLICT (workflow_id, task_id) DO NOTHING;
+        -- GHIM LẠI nghĩa là cần một quyết định MỚI — không phải "đã có rồi, thôi".
+        --
+        -- `DO NOTHING` ở đây là bản sao còn sót của luật cũ; luật mới đã được
+        -- sửa ở `save_pending_service_approvals` cho các dịch vụ khác, nhưng
+        -- lịch tham quan đi qua view này nên nó giữ nguyên hành vi cũ. Một luật,
+        -- hai bản cài đặt — và bản cũ mới là bản người dùng chạm vào.
+        --
+        -- Đo được trên 09430928, sau khi đổi ngày tham quan bằng lời:
+        --
+        --     workflow_tasks.T1   WAITING_APPROVAL   viewing_date 2026-09-30
+        --     service_approvals   EXPIRED            viewing_date 2026-09-10
+        --
+        -- Bước chờ một quyết định, hồ sơ thì đã hết hạn và mang ngày CŨ. Không
+        -- ai được hỏi, không gì tới đơn vị tour, và yêu cầu treo vĩnh viễn.
+        ON CONFLICT (workflow_id, task_id) DO UPDATE SET
+            status        = COALESCE(EXCLUDED.status, 'AWAITING'),
+            details       = EXCLUDED.details,
+            decided_by    = NULL,
+            decided_at    = NULL,
+            reject_reason = NULL,
+            created_at    = NOW()
+        WHERE service_approvals.status IN ('AWAITING', 'EXPIRED');
         RETURN NEW;
     END IF;
 
@@ -941,6 +962,112 @@ BEGIN
         ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_cost NUMERIC(10, 4) NOT NULL DEFAULT 0.0;
         ALTER TABLE workflows ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
+    END IF;
+END
+$$;
+
+
+-- 2026-08 — workflow_tasks: bằng chứng gửi provider
+--
+-- Ba cột, và thứ tự các bước ở đây có nghĩa. Cột được thêm KHÔNG default trước,
+-- rồi backfill row cũ thành `UNKNOWN`, rồi mới đặt default `NOT_SUBMITTED` cho
+-- row mới.
+--
+-- Thêm thẳng với `DEFAULT 'NOT_SUBMITTED'` sẽ backfill mọi row cũ thành "chưa
+-- gửi" — một khẳng định không ai kiểm được, và nó nghiêng đúng về phía nguy
+-- hiểm: lần chạy sau sẽ gửi lại một việc có thể đã được provider ghi nhận.
+-- Dữ liệu không có bằng chứng phải là `UNKNOWN`.
+DO $$
+BEGIN
+    IF to_regclass('workflow_tasks') IS NOT NULL THEN
+        ALTER TABLE workflow_tasks
+            ADD COLUMN IF NOT EXISTS provider_submission_status VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS external_request_id        VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS provider_idempotency_key   VARCHAR(160);
+
+        -- Idempotent: chạy lại chỉ chạm những row còn NULL.
+        UPDATE workflow_tasks SET provider_submission_status = 'UNKNOWN'
+         WHERE provider_submission_status IS NULL;
+
+        ALTER TABLE workflow_tasks
+            ALTER COLUMN provider_submission_status SET DEFAULT 'NOT_SUBMITTED';
+        -- `SET NOT NULL` vốn CHẠY LẶP ĐƯỢC: gọi lại trên cột đã NOT NULL không
+        -- lỗi. Nên một `EXCEPTION WHEN others` quanh nó không bảo vệ gì — nó chỉ
+        -- che một lỗi thật. Và lỗi thật ở đúng bước này nghĩa là deployment đi
+        -- tiếp với một cột còn cho phép NULL, tức mọi hàng rào dựng trên cột ấy
+        -- im lặng biến mất. Hỏng thì migration phải dừng.
+        ALTER TABLE workflow_tasks
+            ALTER COLUMN provider_submission_status SET NOT NULL;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'ck_workflow_tasks_submission_status'
+        ) THEN
+            ALTER TABLE workflow_tasks
+                ADD CONSTRAINT ck_workflow_tasks_submission_status
+                CHECK (provider_submission_status IN (
+                    'NOT_SUBMITTED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN'
+                ));
+        END IF;
+    END IF;
+END
+$$;
+
+-- 2026-08 — workflow_plan_revisions cho database đã tồn tại.
+-- Thân bảng + trigger append-only nằm ở `schema.sql`; khối này chỉ tạo lại cho
+-- database cũ chưa có bảng, và gắn lại trigger nếu bảng có mà trigger thì không.
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL AND to_regclass('workflow_plan_revisions') IS NULL THEN
+        CREATE TABLE workflow_plan_revisions (
+            revision_id         BIGSERIAL   PRIMARY KEY,
+            workflow_id         UUID        NOT NULL REFERENCES workflows(workflow_id),
+            revision_number     INTEGER     NOT NULL CHECK (revision_number > 0),
+            requester_user_id   UUID,
+            plan_version_before VARCHAR(32) NOT NULL,
+            plan_version_after  VARCHAR(32) NOT NULL,
+            accepted_patch      JSONB       NOT NULL,
+            targets             JSONB       NOT NULL,
+            consequence         VARCHAR(40) NOT NULL,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_plan_revisions_order UNIQUE (workflow_id, revision_number)
+        );
+        CREATE INDEX idx_plan_revisions_by_workflow
+            ON workflow_plan_revisions(workflow_id, revision_number);
+    END IF;
+END
+$$;
+
+-- Ràng buộc thứ tự cho database ĐÃ CÓ bảng.
+--
+-- Khối `CREATE TABLE` ở trên chỉ chạy khi bảng chưa tồn tại, nên một database
+-- có bảng mà thiếu ràng buộc sẽ không bao giờ được vá. Phát hiện khi chạy
+-- mutation "bỏ unique revision order": test đỏ đúng như mong đợi, nhưng sau khi
+-- khôi phục file thì migration KHÔNG dựng lại được ràng buộc — chính là lỗ hổng
+-- mà migration sinh ra để bịt.
+DO $$
+BEGIN
+    IF to_regclass('workflow_plan_revisions') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_plan_revisions_order')
+    THEN
+        ALTER TABLE workflow_plan_revisions
+            ADD CONSTRAINT uq_plan_revisions_order UNIQUE (workflow_id, revision_number);
+    END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION workflow_plan_revisions_append_only() RETURNS trigger AS $fn$
+BEGIN
+    RAISE EXCEPTION 'workflow_plan_revisions chi duoc GHI THEM; % bi tu choi', TG_OP;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+    IF to_regclass('workflow_plan_revisions') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS workflow_plan_revisions_no_update ON workflow_plan_revisions;
+        CREATE TRIGGER workflow_plan_revisions_no_update
+            BEFORE UPDATE OR DELETE ON workflow_plan_revisions
+            FOR EACH ROW EXECUTE FUNCTION workflow_plan_revisions_append_only();
     END IF;
 END
 $$;

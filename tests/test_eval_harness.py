@@ -109,7 +109,10 @@ class _FakePlanner:
     def __init__(self, results: dict[str, PlannerResult]) -> None:
         self.results = results
 
-    async def plan(self, goal: str, existing_context: dict[str, Any],
+    async def plan(
+        self,
+        goal: str,
+        existing_context: dict[str, Any],
         # Ký ức hội thoại. Fake PHẢI nhận tham số này, kể cả khi không dùng:
         # graph gọi `plan(..., recalled=...)`, và một fake thiếu tham số sẽ ném
         # TypeError — vốn bị `except Exception` trong `plan_node` nuốt và biến
@@ -557,7 +560,9 @@ async def test_report_metadata_git_mocked(golden_path: Path, tmp_path: Path, mon
 async def test_evaluate_planner_status_accuracy_only(golden_path: Path) -> None:
     """Kể cả score thấp, status accuracy vẫn được tính đúng."""
     results = {
-        "Tìm căn hộ cho thuê": PlannerResult(status="NEEDS_INFORMATION", missing_fields=("transaction_type",)),
+        # "Tìm căn hộ cho thuê" giờ nằm NGOÀI phạm vi Agent — Planner trả
+        # `supported_goal` thiếu, không hỏi field của một dịch vụ đã loại.
+        "Tìm căn hộ cho thuê": PlannerResult(status="NEEDS_INFORMATION", missing_fields=("supported_goal",)),
         "Đặt lịch xem nhà": PlannerResult(status="NEEDS_INFORMATION", missing_fields=("project_id",)),
         "Đặt chỗ đỗ xe": PlannerResult(
             status="NEEDS_INFORMATION", missing_fields=("plate_number", "vehicle_type", "parking_zone")

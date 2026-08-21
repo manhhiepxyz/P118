@@ -748,8 +748,16 @@ async def test_payment_connector_sends_idempotency_key_as_a_header_not_in_body(m
     }
     mock_httpx_client.post_mock.return_value = mock_response
 
-    connector = PaymentConnector(client=mock_httpx_client, idempotency_key="wf:abc:task:T3")
-    await connector.execute("pay_fee", {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"})
+    # Khoá đến TỪ context của lần gọi, không từ state constructor: connector
+    # được dựng một lần cho cả workflow và dùng chung cho mọi task.
+    from src.connectors.base import ProviderCallContext
+
+    connector = PaymentConnector(client=mock_httpx_client)
+    await connector.execute(
+        "pay_fee",
+        {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"},
+        context=ProviderCallContext(idempotency_key="wf:abc:task:T3"),
+    )
 
     _, kwargs = mock_httpx_client.post_mock.call_args
     assert kwargs["headers"] == {"Idempotency-Key": "wf:abc:task:T3"}

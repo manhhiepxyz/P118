@@ -5,6 +5,8 @@ from collections import deque
 from datetime import date, time, timedelta
 
 from src.common.projects import project_name, resolve_project_id
+from src.common.schedule_policy import MAX_HORIZON_DAYS as _MAX_HORIZON_DAYS
+from src.common.schedule_policy import TIME_INPUTS as _TIME_INPUTS
 from src.common.task_plan import InputRef, TaskPlan
 from src.common.tool_contract import (
     TOOL_CONTRACTS,
@@ -61,20 +63,9 @@ class TaskPlanValidator:
         "book_shuttle": frozenset({"viewing_id", "tour_date", "passenger_count"}),
     }
 
-    # Xa nhất được đặt trước. Trị số rộng rãi là cố ý; điều quan trọng là CÓ
-    # một trần, để ngày vô lý bị từ chối lúc lập kế hoạch chứ không phải lúc ai
-    # đó đọc báo cáo.
-    # Vì sao 5 năm chứ không phải 1–2 năm:
-    #
-    # Yêu cầu thật là chặn ngày VÔ LÝ (2050, 2199) — những ngày mà mọi lớp kiểm cũ
-    # đều cho qua vì chúng không nằm trong quá khứ. 5 năm làm được đúng việc đó.
-    #
-    # Nói thẳng phần chủ quan: bộ test hiện dùng 48 ngày cố định năm 2030 làm "ngày
-    # an toàn trong tương lai". Trần 2 năm sẽ đúng hơn về nghiệp vụ nhưng buộc phải
-    # sửa 48 chỗ ở 19 file, và rút ngắn tuổi thọ của chính bộ test đó từ ~4 năm
-    # xuống ~1 năm. Em chọn trần rộng và ghi lại đánh đổi này thay vì âm thầm siết
-    # luật nghiệp vụ cho vừa fixture. Muốn chặt hơn thì đổi con số ở ba chỗ dưới.
-    MAX_HORIZON_DAYS: int = 1825
+    # Trần thời gian là CHÍNH SÁCH dùng chung; định nghĩa nằm ở
+    # `src/common/schedule_policy.py`. Xem lý do chọn 5 năm ở đó.
+    MAX_HORIZON_DAYS: int = _MAX_HORIZON_DAYS
 
     DATE_INPUTS: dict[str, str] = {
         "schedule_property_viewing": "viewing_date",
@@ -84,13 +75,8 @@ class TaskPlanValidator:
         "book_shuttle": "tour_date",
     }
 
-    TIME_INPUTS: dict[str, tuple[str, time, time]] = {
-        "schedule_property_viewing": ("viewing_time", time(8, 0), time(17, 30)),
-        "create_maintenance_request": ("preferred_time", time(8, 0), time(18, 0)),
-        "schedule_move": ("move_time", time(7, 0), time(20, 0)),
-        # Giờ hẹn liên hệ nằm trong giờ làm việc của bộ phận tư vấn.
-        "register_property_interest": ("preferred_contact_time", time(8, 0), time(18, 0)),
-    }
+    # Khung giờ mở cửa: cùng nguồn với bộ đọc giá trị người dùng gõ.
+    TIME_INPUTS: dict[str, tuple[str, time, time]] = _TIME_INPUTS
 
     ENUM_INPUTS: dict[tuple[str, str], frozenset[str]] = {
         ("register_vehicle", "vehicle_type"): frozenset({"car", "motorcycle"}),

@@ -38,6 +38,21 @@ class _Repository:
     async def update_task_status(self, workflow_id, task_id, status):
         self.task_status[task_id] = status
 
+    async def prepare_submission(self, workflow_id, task_id, *, candidate_key):
+        """Cấp phép gửi. Fake này chỉ cần cho phép — nhưng nó phải TỒN TẠI.
+
+        Executor gọi primitive này ngay trước mỗi lời gọi connector và từ chối
+        gửi khi không có phép. Một repository thiếu nó sẽ chặn mọi lần gửi;
+        luật thật được kiểm ở `tests/test_db/test_a_submission_is_never_sent_blind.py`
+        trên PostgreSQL, còn ở đây chỉ cần hợp đồng có mặt.
+        """
+        from src.db.workflow_repository import SubmissionPermit
+
+        return SubmissionPermit(allowed=True, effective_key=candidate_key)
+
+    async def record_submission_outcome(self, workflow_id, task_id, tool, result) -> None:
+        return None
+
     async def save_task_result(self, workflow_id, task_id, result):
         return None
 
@@ -70,7 +85,7 @@ class _Connector:
     def is_retry_safe(self, tool_name: str) -> bool:
         return self._retry_safe
 
-    async def execute(self, tool_name, input_data):
+    async def execute(self, tool_name, input_data, *, context=None):
         self.calls += 1
         return self._results[min(self.calls - 1, len(self._results) - 1)]
 
@@ -259,10 +274,12 @@ def test_real_connectors_declare_the_expected_retry_matrix() -> None:
         (TransportConnector(base_url=url), "book_parking"),
         (ResidentServicesConnector(base_url=url), "create_maintenance_request"),
         (ResidentServicesConnector(base_url=url), "schedule_move"),
-        (PaymentConnector(base_url=url), "pay_fee"),
     ]
     for connector, tool in unsafe:
         assert connector.is_retry_safe(tool) is False, f"{type(connector).__name__}.{tool}"
 
     # Chỉ khi lần gọi này thực sự mang khoá idempotency.
-    assert PaymentConnector(base_url=url, idempotency_key="wf:1:task:T3").is_retry_safe("pay_fee") is True
+    # `is_retry_safe` giờ là NĂNG LỰC của tool, không phải state connector:
+    # `pay_fee` gửi được khoá idempotency. Việc lần gọi NÀY có khoá hay không
+    # do Executor trả lời, vì chỉ nó cầm permit từ `prepare_submission`.
+    assert PaymentConnector(base_url=url).is_retry_safe("pay_fee") is True

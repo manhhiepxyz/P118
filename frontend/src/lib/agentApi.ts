@@ -535,6 +535,48 @@ export async function cancelWorkflow(
   );
 }
 
+/** Một ô có thể sửa của yêu cầu đã dừng, kèm giá trị đang lưu. */
+export interface AmendableField {
+  name: string;
+  label: string;
+  value: string | number | boolean | null;
+}
+
+export interface AmendableInfo {
+  can_amend: boolean;
+  reason: string | null;
+  fields: AmendableField[];
+}
+
+/**
+ * Yêu cầu này có sửa được không, và sửa được những ô nào.
+ *
+ * Gọi TRƯỚC khi mở biểu mẫu. Dựng form rồi mới báo không dùng được là cách tệ
+ * nhất: người dùng điền xong mới bị từ chối.
+ */
+export async function getAmendable(workflowId: string): Promise<AmendableInfo> {
+  return request<AmendableInfo>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/amendable`,
+  );
+}
+
+/**
+ * Sửa vài ô rồi chạy lại CHÍNH yêu cầu đó.
+ *
+ * Khác `continueWorkflow`: đường này không đi qua Planner. Giá trị cũ đọc từ
+ * kế hoạch đã lưu — một kế hoạch đã qua Validator — nên không ô nào bị hỏi lại.
+ * Bước đã thành công giữ nguyên kết quả; chỉ phần chưa xong chạy lại.
+ */
+export async function amendWorkflow(
+  workflowId: string,
+  fields: Record<string, string | number | boolean>,
+): Promise<AgentWorkflowResponse> {
+  return request<AgentWorkflowResponse>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/amend`,
+    { method: "POST", body: { fields } },
+  );
+}
+
 /**
  * Xoá một yêu cầu ĐÃ KẾT THÚC khỏi danh sách.
  *

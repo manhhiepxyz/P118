@@ -98,7 +98,7 @@ class _FakeTour:
         self.fail_with: ErrorCode | None = None
         self.last_input: dict | None = None
 
-    async def execute(self, tool_name: str, input_data: dict) -> StandardResult:
+    async def execute(self, tool_name: str, input_data: dict, *, context=None) -> StandardResult:
         self.last_input = input_data
         if self.fail_with is not None:
             return StandardResult.fail(error_code=self.fail_with, message="hết chỗ")
@@ -214,9 +214,7 @@ async def _register_customer(client) -> dict:
 
 
 async def _make_provider(repo) -> dict:
-    user = await repo.users.create_user(
-        _unique("provider"), hash_password("matkhau123"), role="provider"
-    )
+    user = await repo.users.create_user(_unique("provider"), hash_password("matkhau123"), role="provider")
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
@@ -302,9 +300,7 @@ async def test_customer_cannot_list_or_decide(viewing_env, viewing_client):
     customer = await _register_customer(viewing_client)
     workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
 
-    listed = await viewing_client.get(
-        "/api/v1/viewing-approvals", headers=_headers(customer)
-    )
+    listed = await viewing_client.get("/api/v1/viewing-approvals", headers=_headers(customer))
     assert listed.status_code == 403
 
     decided = await _decide(viewing_client, customer, workflow_id, "approve")
@@ -342,9 +338,7 @@ async def test_provider_lists_awaiting_with_applicant_pii(viewing_env, viewing_c
 
 
 @pytest.mark.asyncio
-async def test_approve_materializes_and_resumes_with_driver_details(
-    viewing_env, viewing_client
-):
+async def test_approve_materializes_and_resumes_with_driver_details(viewing_env, viewing_client):
     customer = await _register_customer(viewing_client)
     provider = await _make_provider(viewing_env.repo)
     workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
@@ -415,9 +409,7 @@ async def test_approve_materializes_and_resumes_with_driver_details(
         # poll — mà workflow đã xong còn câu khách đọc vẫn là câu của lúc chờ.
         # Đo được đúng như vậy trong database trước khi sửa:
         #   status = SUCCESS, assistant_for_status = WAITING_APPROVAL
-        assert wf["assistant_for_status"] == "SUCCESS", (
-            "câu trả lời vẫn thuộc về trạng thái cũ khi workflow đã SUCCESS"
-        )
+        assert wf["assistant_for_status"] == "SUCCESS", "câu trả lời vẫn thuộc về trạng thái cũ khi workflow đã SUCCESS"
         assert "đang xác nhận" not in (wf["assistant_answer"] or "")
 
 
@@ -454,17 +446,11 @@ async def test_materialize_failure_fails_workflow(viewing_env, viewing_client):
 
     # Decision đã khoá nhưng workflow phải FAILED — không để treo mãi.
     async with viewing_env.repo._pool.acquire() as conn:  # noqa: SLF001
-        row = await conn.fetchrow(
-            "SELECT status FROM viewing_approvals WHERE workflow_id = $1", workflow_id
-        )
+        row = await conn.fetchrow("SELECT status FROM viewing_approvals WHERE workflow_id = $1", workflow_id)
         assert row["status"] == "APPROVED"
-        wf = await conn.fetchrow(
-            "SELECT status FROM workflows WHERE workflow_id = $1", workflow_id
-        )
+        wf = await conn.fetchrow("SELECT status FROM workflows WHERE workflow_id = $1", workflow_id)
         assert wf["status"] == "FAILED"
-        tasks = await conn.fetch(
-            "SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id
-        )
+        tasks = await conn.fetch("SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id)
         assert {t["status"] for t in tasks} == {"FAILED"}
 
 
@@ -491,9 +477,7 @@ async def test_reject_fails_chain_and_records_reason(viewing_env, viewing_client
     provider = await _make_provider(viewing_env.repo)
     workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
 
-    res = await _decide(
-        viewing_client, provider, workflow_id, "reject", reason="Lịch đã kín giờ tuần này"
-    )
+    res = await _decide(viewing_client, provider, workflow_id, "reject", reason="Lịch đã kín giờ tuần này")
 
     assert res.status_code == 200, res.text
     assert res.json()["status"] == "REJECTED"
@@ -506,13 +490,9 @@ async def test_reject_fails_chain_and_records_reason(viewing_env, viewing_client
         assert row["status"] == "REJECTED"
         assert row["reject_reason"] == "Lịch đã kín giờ tuần này"
         assert row["decided_by"] == provider["username"]
-        wf = await conn.fetchrow(
-            "SELECT status FROM workflows WHERE workflow_id = $1", workflow_id
-        )
+        wf = await conn.fetchrow("SELECT status FROM workflows WHERE workflow_id = $1", workflow_id)
         assert wf["status"] == "FAILED"
-        tasks = await conn.fetch(
-            "SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id
-        )
+        tasks = await conn.fetch("SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id)
         # Viewing + shuttle phụ thuộc đều FAILED — không giữ "chỗ đỗ" nào.
         assert {t["status"] for t in tasks} == {"FAILED"}
 

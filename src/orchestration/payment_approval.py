@@ -77,7 +77,8 @@ async def save_pending_approval(
     quote: PaymentQuote,
 ) -> None:
     """Ghi ngữ cảnh chờ duyệt. Chạy lại cùng workflow không tạo bản thứ hai."""
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock_workflow_row(conn, workflow_id)
         await conn.execute(
             """
             INSERT INTO payment_approvals (workflow_id, task_id, booking_id, amount, currency, status)
@@ -110,13 +111,31 @@ async def get_pending_approval(pool: asyncpg.Pool, workflow_id: str) -> PendingA
     )
 
 
+# Thứ tự khoá dùng chung cho MỌI người ghi hàng đợi duyệt.
+#
+# `lock_workflow_for_amendment` khoá `workflows` trước, rồi `workflow_tasks`,
+# rồi các dòng duyệt. `SELECT ... FOR UPDATE` khoá được dòng ĐANG CÓ, nhưng
+# không khoá được dòng CHƯA tồn tại — nên một lượt ghim hàng đợi MỚI vẫn chèn
+# được ngay giữa lúc amendment đang dùng snapshot, và bản vá commit dựa trên
+# một hàng đợi đã khác.
+#
+# Vì vậy người ghi cũng khoá `workflows` TRƯỚC, cùng thứ tự. Cùng thứ tự là
+# điều kiện để chúng xếp hàng thay vì ôm nhau chết.
+async def _lock_workflow_row(conn: Any, workflow_id: str) -> None:
+    await conn.fetchrow(
+        "SELECT workflow_id FROM workflows WHERE workflow_id = $1 FOR UPDATE",
+        workflow_id if isinstance(workflow_id, UUID) else UUID(str(workflow_id)),
+    )
+
+
 async def record_decision(pool: asyncpg.Pool, workflow_id: str, decision: str) -> bool:
     """Ghi quyết định. Trả False nếu workflow không còn ở trạng thái chờ.
 
     `WHERE status = 'AWAITING'` là khoá chống hai lệnh duyệt đồng thời: chỉ một
     lệnh đổi được trạng thái, lệnh còn lại thấy 0 row và biết mình đến sau.
     """
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock_workflow_row(conn, workflow_id)
         result = await conn.execute(
             """
             UPDATE payment_approvals
