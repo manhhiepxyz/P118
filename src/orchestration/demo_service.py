@@ -1938,6 +1938,24 @@ async def _materialize_and_run_remaining(
             for task in plan.tasks
             if task.tool == "pay_fee" and seed_statuses.get(task.task_id) is not TaskStatus.SUCCESS
         }
+        # Giữ bản CÒN `pay_fee` để cuối hàm còn biết phải ghim thẻ thanh toán nào.
+        #
+        # `_ensure_payment_card` tìm bước thanh toán BẰNG plan nó nhận. Đưa cho
+        # nó bản đã cắt thì `payment_task_id()` trả None và nó lặng lẽ không làm
+        # gì — không lỗi, không log, không thẻ.
+        #
+        # Đo được trên V+P khi đơn vị tour là người quyết SAU CÙNG:
+        #     T1..T4 SUCCESS · T5 pay_fee PENDING
+        #     payment_approvals  0 dòng
+        #     workflows.status   WAITING_APPROVAL
+        # Chỗ đỗ đã giữ thật, tiền chưa thu, và người dùng không có nút nào để
+        # bấm. Workflow đứng đó vĩnh viễn.
+        #
+        # Thứ tự hai đơn vị quyết định KHÔNG được serialize ở đâu cả: đổi lại
+        # thứ tự (tour duyệt trước) thì `resume_after_service_decision` chạy sau
+        # cùng, `PaymentApprovalBoundary` ghim thẻ đúng, và mọi thứ chạy. Cùng
+        # một yêu cầu, hai kết cục, khác nhau ở chỗ ai bấm duyệt trước.
+        plan_with_payment = plan
         if unpaid:
             trimmed = plan_without(plan, unpaid)
             if trimmed is not None:
@@ -1996,7 +2014,7 @@ async def _materialize_and_run_remaining(
         statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
         final_status = _final_status(statuses)
         if final_status is WorkflowStatus.WAITING_APPROVAL:
-            await _ensure_payment_card(repository, workflow_id, plan)
+            await _ensure_payment_card(repository, workflow_id, plan_with_payment, task_results)
 
         # Lỗi SỬA ĐƯỢC thì câu chốt phải là câu hỏi lại, không phải cáo phó.
         #
