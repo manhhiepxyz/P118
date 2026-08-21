@@ -3,7 +3,6 @@ import { Link, useLocation } from 'react-router-dom'
 import {
   CalendarCheck,
   LifeBuoy,
-  ShieldCheck,
   Moon,
   Route as RouteIcon,
   Sun,
@@ -11,7 +10,6 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
-import { useAuth } from '../../lib/auth'
 import { useTheme } from '../../lib/useTheme'
 
 // `/apartment-link` cố ý KHÔNG có ở đây: nội dung của nó đã nằm trong Hồ sơ.
@@ -24,33 +22,7 @@ const NAV: { to: string; label: string; Icon: LucideIcon }[] = [
   { to: '/support', label: 'Hỗ trợ', Icon: LifeBuoy },
 ]
 
-/**
- * Mục CHỈ dành cho admin.
- *
- * Tách khỏi `NAV` để không bao giờ render nhầm cho khách hàng. Đây thuần tuý là
- * điều hướng — quyền vẫn do `require_roles("admin")` phía backend quyết định;
- * ẩn một link không bảo vệ được gì, và hiện nhầm cũng không mở được cửa nào.
- *
- * Thiếu mục này thì admin đăng nhập vào `/admin`, bấm đi bất kỳ đâu là mất
- * luôn lối về — trừ khi gõ tay URL. Đó là một nửa lý do "admin chẳng khác gì
- * acc user".
- */
-const ADMIN_NAV: { to: string; label: string; Icon: LucideIcon }[] = [
-  { to: '/admin', label: 'Quản trị', Icon: ShieldCheck },
-  /*
-   * KHÔNG thêm "Duyệt hồ sơ" vào đây.
-   *
-   * Admin và provider là hai vai riêng: admin quản trị P-118, provider là đơn
-   * vị xác thực bên thứ 3 (xem `scripts/create_provider.py` — "provider không
-   * quản trị hệ thống, chỉ duyệt các verification_records"). Provider đăng
-   * nhập cùng trang `/login`, rồi `HomeRedirect` đẩy thẳng sang `/review`.
-   *
-   * `require_roles("provider", "admin")` phía backend vẫn cho admin duyệt —
-   * giữ nguyên làm đường phá kính, để một triển khai chưa có tài khoản
-   * provider không rơi vào cảnh không ai duyệt được gì. Nhưng đường phá kính
-   * thì không đặt lên thanh điều hướng.
-   */
-]
+
 
 /**
  * Ghi vị trí con trỏ vào `--mx`/`--my` của sân khấu, để nền phản ứng theo tay.
@@ -128,8 +100,7 @@ function useStagePointer() {
  */
 export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const { theme, toggle } = useTheme()
-  const { user } = useAuth()
-  const items = user?.role === 'admin' ? [...NAV, ...ADMIN_NAV] : NAV
+  const items = NAV
   const { pathname } = useLocation()
   const stage = useStagePointer()
 

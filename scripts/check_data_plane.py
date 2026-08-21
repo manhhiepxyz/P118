@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+
 def _app_port() -> str:
     """Cổng host của backend, phân giải ĐÚNG như docker compose phân giải.
 

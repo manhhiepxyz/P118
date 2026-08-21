@@ -931,3 +931,16 @@ DROP TRIGGER IF EXISTS viewing_approvals_write_trg ON viewing_approvals;
 CREATE TRIGGER viewing_approvals_write_trg
     INSTEAD OF INSERT OR UPDATE ON viewing_approvals
     FOR EACH ROW EXECUTE FUNCTION viewing_approvals_write();
+
+-- =============================================================
+-- 2026-08 — Observability Metrics
+-- =============================================================
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_cost NUMERIC(10, 4) NOT NULL DEFAULT 0.0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
+    END IF;
+END
+$$;

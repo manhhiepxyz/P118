@@ -12,7 +12,7 @@ chưa được hoàn.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -46,7 +46,7 @@ async def _seed_failed_with_hint(pool, *, age_hours: float, resolved_clarificati
                 VALUES ($1, 'đăng ký xe và đặt chỗ đỗ', '["parking_zone"]'::jsonb, 'Khu A đã hết chỗ.', $2)
                 """,
                 uuid.UUID(workflow_id),
-                datetime.now(timezone.utc) if resolved_clarification else None,
+                datetime.now(UTC) if resolved_clarification else None,
             )
     return workflow_id
 

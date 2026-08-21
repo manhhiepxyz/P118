@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -154,6 +155,10 @@ class Workflow(Base):
     created_at: Mapped[str] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
     updated_at: Mapped[str] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
     archived_at: Mapped[str] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total_cost: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, server_default="0.0")
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=True)
 
     tasks: Mapped[list[WorkflowTask]] = relationship("WorkflowTask", back_populates="workflow")
 

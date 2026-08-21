@@ -7,15 +7,18 @@ sau khi LangGraph hoàn tất.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import httpx
 
-from src.agents.graph import build_planner_graph
+from src.agents.graph import _apply_user_answers, build_planner_graph
 from src.agents.planner import Planner
+from src.agents.validator import TaskPlanValidator
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
+from src.common.failure_messages import repair_question
 from src.common.policy import PolicyInterruptionError
 from src.common.projects import project_name as resolve_project_name
 from src.common.results import StandardResult
@@ -24,15 +27,11 @@ from src.connectors.payment import PaymentConnector
 from src.connectors.tour import TourConnector
 from src.db.parking_payment_repository import payment_idempotency_key
 from src.executor.executor import Executor
-from src.common.failure_messages import repair_question
-from src.agents.graph import _apply_user_answers
-from src.agents.validator import TaskPlanValidator
-from src.orchestration.repair import RepairManager, repair_missing_fields
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
+from src.orchestration.boundary import ValidatedExecutionBoundary
 from src.orchestration.deps import build_connectors, build_execution_boundary
 from src.orchestration.final_answer import compose as compose_final_answer
-from src.orchestration.boundary import ValidatedExecutionBoundary
 from src.orchestration.payment_approval import (
     APPROVED,
     AWAITING,
@@ -47,6 +46,7 @@ from src.orchestration.payment_approval import (
     record_decision,
     save_pending_approval,
 )
+from src.orchestration.repair import RepairManager, repair_missing_fields
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import (
     ServiceApprovalBoundary,
@@ -54,10 +54,18 @@ from src.orchestration.service_approval import (
     record_service_decision,
 )
 from src.orchestration.viewing_approval import (
-    expire_pending_viewing_approval as _expire_pending_viewing,
-    AWAITING as VIEWING_AWAITING,
     APPROVED as VIEWING_APPROVED,
+)
+from src.orchestration.viewing_approval import (
+    expire_pending_viewing_approval as _expire_pending_viewing,
+)
+from src.orchestration.viewing_approval import (
+    AWAITING as VIEWING_AWAITING,
+)
+from src.orchestration.viewing_approval import (
     REJECTED as VIEWING_REJECTED,
+)
+from src.orchestration.viewing_approval import (
     PendingViewingApproval,
     ViewingApprovalBoundary,
     ViewingApprovalRequiredError,
@@ -69,6 +77,13 @@ from src.orchestration.viewing_approval import (
     wants_shuttle_in_plan,
 )
 from src.services.llm import get_llm, structured_output_method
+
+
+# Năm chỗ trong file này gọi `logger.warning(...)` mà chưa bao giờ có `logger`.
+# Cả năm đều nằm trong nhánh `except`, nên chúng chỉ chạy khi đã có lỗi — và
+# lúc đó `NameError` thay thế luôn lỗi thật, xoá mất dòng duy nhất giải thích
+# chuyện gì vừa xảy ra. `ruff` bắt được (F821) trên cả hai nhánh trước khi gộp.
+logger = logging.getLogger(__name__)
 
 
 class _ExecutionBoundary(Protocol):

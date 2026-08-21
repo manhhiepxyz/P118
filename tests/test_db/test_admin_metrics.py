@@ -87,7 +87,11 @@ async def test_metrics_never_leak_what_residents_asked_for(client, db_pool):
         await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {admin_token}"})
     ).json()
 
-    assert all(isinstance(v, int) for v in body.values()), body
+    # SỐ, không phải chữ. `total_cost` và `avg_latency_ms` là float (tiền và
+    # mili-giây trung bình không tròn được); phần còn lại là số đếm nguyên.
+    # Điều test này canh là KHÔNG có chuỗi nào lọt vào — chuỗi mới là chỗ nội
+    # dung yêu cầu của cư dân có thể đi nhờ ra ngoài.
+    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in body.values()), body
     for leaked in ("goal", "owner_user_id", "username", "workflow_id", "items"):
         assert leaked not in body, f"số liệu vận hành mang theo {leaked!r}"
 

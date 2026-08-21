@@ -11,14 +11,28 @@ CCCD, không so khuôn mặt.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict
 
 from src.api.deps import require_roles
 from src.api.schemas import AdminResidentLinkRequest, AdminResidentLinkResponse, LinkRequestDecision
 from src.config import get_settings
 from src.db.link_request_repository import decide_request, list_requests
 from src.db.resident_link_repository import VerificationStatus, upsert_link
+from src.db.user_repository import UserRepository
 from src.orchestration.runtime_provider import acquire_repository
+from src.common.enums import WorkflowStatus
+
+
+class AdminUserRoleUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["customer", "admin", "provider"]
+
+class AdminUserStatusUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    is_archived: bool
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -180,6 +194,15 @@ async def system_metrics(
         row = await pool.fetchrow(
             """
             SELECT
+                (SELECT SUM(total_tokens) FROM llm_usage)                       AS total_llm_tokens,
+                (SELECT COUNT(*) FROM llm_usage)                                AS total_llm_calls,
+                -- Chi phí và độ trễ đọc từ cột trên chính `workflows` (nhánh
+                -- observability thêm vào). Gộp vào ĐÂY thay vì dựng endpoint
+                -- `/metrics` thứ hai: hai handler cùng đường dẫn thì FastAPI
+                -- chỉ dùng cái đăng ký trước, và cái còn lại thành code chết
+                -- mà không ai biết — kể cả khi nó là bản đã được sửa.
+                COALESCE(SUM(total_cost), 0.0)                                  AS total_cost,
+                COALESCE(AVG(latency_ms), 0.0)                                  AS avg_latency_ms,
                 count(*)                                                        AS total,
                 count(*) FILTER (WHERE status IN ('PENDING', 'RUNNING'))        AS running,
                 count(*) FILTER (WHERE status = 'WAITING_APPROVAL')             AS waiting,
@@ -242,4 +265,64 @@ async def system_metrics(
         "cancelled": row["cancelled"],
         "awaiting_user": row["awaiting_user"],
         "orphaned": row["orphaned"],
+        "llm_tokens": row["total_llm_tokens"] or 0,
+        "llm_calls": row["total_llm_calls"] or 0,
+        "total_cost": float(row["total_cost"] or 0.0),
+        "avg_latency_ms": float(row["avg_latency_ms"] or 0.0),
     }
+
+@router.get("/users", summary="Danh sách tất cả người dùng (ẩn danh bớt thông tin nhạy cảm)")
+async def get_all_users(_admin: dict = Depends(require_roles("admin"))):
+    repository = await acquire_repository()
+    pool = repository._pool
+    user_repo = UserRepository(pool)
+    users = await user_repo.list_all_users()
+    return {"items": users}
+
+@router.patch("/users/{user_id}/role", summary="Cập nhật quyền người dùng")
+async def update_user_role(
+    user_id: str,
+    request: AdminUserRoleUpdateRequest,
+    _admin: dict = Depends(require_roles("admin"))
+):
+    repository = await acquire_repository()
+    pool = repository._pool
+    user_repo = UserRepository(pool)
+    user = await user_repo.update_role(user_id, request.role)
+    if not user:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    return user
+
+@router.patch("/users/{user_id}/status", summary="Khóa/Mở khóa người dùng")
+async def update_user_status(
+    user_id: str,
+    request: AdminUserStatusUpdateRequest,
+    _admin: dict = Depends(require_roles("admin"))
+):
+    repository = await acquire_repository()
+    pool = repository._pool
+    user_repo = UserRepository(pool)
+    user = await user_repo.update_status(user_id, request.is_archived)
+    if not user:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    return user
+
+@router.get("/workflows/history", summary="Lịch sử luồng hoạt động (nguyên gốc) cho quản lý")
+async def get_workflows_history(
+    page: int = 1,
+    limit: int = 50,
+    search_user: str | None = None,
+    _admin: dict = Depends(require_roles("admin"))
+):
+    repository = await acquire_repository()
+    return await repository.list_all_workflows_history(page=page, limit=limit, search_user=search_user)
+
+@router.post("/workflows/{workflow_id}/retry", summary="Yêu cầu chạy lại workflow bị kẹt")
+async def retry_workflow(
+    workflow_id: str,
+    _admin: dict = Depends(require_roles("admin"))
+):
+    repository = await acquire_repository()
+    # Chuyển trạng thái về PENDING để worker/sweeper có thể pick up lại.
+    await repository.update_workflow_status(workflow_id, WorkflowStatus.PENDING)
+    return {"message": f"Đã đánh dấu luồng {workflow_id} thành PENDING để chạy lại."}

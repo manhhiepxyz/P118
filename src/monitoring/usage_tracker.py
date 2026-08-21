@@ -161,11 +161,26 @@ def _extract_usage(response: Any) -> dict[str, Any]:
     }
 
 
+def _calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Mock pricing calculation based on model name."""
+    prompt_rate = 0.0000001
+    completion_rate = 0.0000002
+    if "gpt-4" in model.lower() or "claude-3-opus" in model.lower():
+        prompt_rate = 0.000005
+        completion_rate = 0.000015
+    elif "claude-3-5-sonnet" in model.lower():
+        prompt_rate = 0.000003
+        completion_rate = 0.000015
+    return (prompt_tokens * prompt_rate) + (completion_tokens * completion_rate)
+
+
 async def _insert_rows(pool: Any, rows: list[dict[str, Any]]) -> None:
-    """INSERT nhiều row trong một transaction."""
+    """INSERT nhiều row trong một transaction và cộng dồn metrics vào workflows."""
     async with pool.acquire() as conn:
         async with conn.transaction():
+            workflow_updates = {}
             for row in rows:
+                workflow_id = row.get("workflow_id")
                 await conn.execute(
                     """
                     INSERT INTO llm_usage (
@@ -174,7 +189,7 @@ async def _insert_rows(pool: Any, rows: list[dict[str, Any]]) -> None:
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     """,
-                    row.get("workflow_id"),
+                    workflow_id,
                     row.get("run_id"),
                     row.get("stage"),
                     row.get("provider"),
@@ -184,3 +199,31 @@ async def _insert_rows(pool: Any, rows: list[dict[str, Any]]) -> None:
                     row.get("total_tokens"),
                     row.get("latency_ms"),
                 )
+
+                if workflow_id:
+                    cost = _calculate_cost(
+                        str(row.get("model", "")),
+                        int(row.get("prompt_tokens") or 0),
+                        int(row.get("completion_tokens") or 0),
+                    )
+                    if workflow_id not in workflow_updates:
+                        workflow_updates[workflow_id] = {"tokens": 0, "cost": 0.0, "latency": 0}
+                    workflow_updates[workflow_id]["tokens"] += int(row.get("total_tokens") or 0)
+                    workflow_updates[workflow_id]["cost"] += cost
+                    workflow_updates[workflow_id]["latency"] += int(row.get("latency_ms") or 0)
+
+            for wf_id, updates in workflow_updates.items():
+                await conn.execute(
+                    """
+                    UPDATE workflows 
+                    SET total_tokens = total_tokens + $1,
+                        total_cost = total_cost + $2,
+                        latency_ms = COALESCE(latency_ms, 0) + $3
+                    WHERE workflow_id = $4
+                    """,
+                    updates["tokens"],
+                    updates["cost"],
+                    updates["latency"],
+                    wf_id,
+                )
+

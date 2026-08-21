@@ -15,7 +15,6 @@ import inspect
 
 from src.agents import graph as graph_module
 from src.api.routes import _STAGE_MESSAGES
-from src.models.schemas import DemoWorkflowResponse
 
 
 def test_the_two_waits_do_not_share_a_sentence() -> None:
