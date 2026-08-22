@@ -19,7 +19,12 @@ import uuid
 
 import pytest
 
-from src.api.routes import _amend_target, _amendable_values, _changes_from_text
+from src.api.routes import (
+    _amend_target,
+    _amendable_values,
+    _changes_from_text,
+    _planning_goal_after_an_early_cancel,
+)
 from src.orchestration.service_approval import save_pending_service_approvals
 
 
@@ -151,3 +156,59 @@ async def test_the_change_lands_on_the_most_recent_stopped_request(client, db_po
     newest = await _seed(db_pool, session_id=session_id, owner_user_id=user_id, viewing_date="2026-08-29")
     record = await _amend_target(session_id, owner_user_id=user_id)
     assert str(record["workflow"]["workflow_id"]) == newest
+
+
+@pytest.mark.asyncio
+async def test_an_early_cancel_keeps_the_original_request_when_the_user_changes_one_field(client, db_pool):
+    """Huỷ trong lúc PLANNING chưa có task vẫn phải giữ phần dữ liệu đã nói."""
+    user_id, session_id = await _a_user(db_pool)
+    original = (
+        "Đặt lịch tham quan Vinhomes Hải Vân Bay ngày 2026-09-03 lúc 10:30. "
+        "Đăng ký phương tiện và chỗ đỗ xe bắt đầu từ ngày 2026-09-05 "
+        "Xe máy biển số 09A-99303 chỗ đỗ Khu A"
+    )
+    wid = uuid.uuid4()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO workflows (workflow_id, goal, status, session_id, owner_user_id) "
+            "VALUES ($1,$2,'CANCELLED',$3,$4)",
+            wid,
+            original,
+            session_id,
+            uuid.UUID(user_id),
+        )
+
+    current = "tôi muốn đổi chỗ đỗ xe qua khu B"
+    planning_goal = await _planning_goal_after_an_early_cancel(
+        current,
+        session_id=session_id,
+        user={"id": user_id},
+    )
+
+    assert original in planning_goal
+    assert current in planning_goal
+    assert "09A-99303" in planning_goal
+    assert "2026-09-05" in planning_goal
+
+
+@pytest.mark.asyncio
+async def test_a_vague_message_never_resurrects_an_early_cancel(client, db_pool):
+    user_id, session_id = await _a_user(db_pool)
+    wid = uuid.uuid4()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO workflows (workflow_id, goal, status, session_id, owner_user_id) "
+            "VALUES ($1,'đăng ký xe và chỗ đỗ','CANCELLED',$2,$3)",
+            wid,
+            session_id,
+            uuid.UUID(user_id),
+        )
+
+    assert (
+        await _planning_goal_after_an_early_cancel(
+            "ok",
+            session_id=session_id,
+            user={"id": user_id},
+        )
+        == "ok"
+    )

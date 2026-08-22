@@ -1,307 +1,333 @@
-import React, { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
+
 import {
-  adminWorkflowsHistory,
-  adminRetryWorkflow,
-  type AdminWorkflowHistoryItem,
+  adminRequestDetail,
+  adminRequests,
+  type AdminDecisionStatus,
+  type AdminRequestDetail,
+  type AdminRequestListItem,
+  type AdminWaitingFor,
 } from "../lib/agentApi";
 import { useToast } from "../lib/toast";
-import {
-  Activity,
-  RotateCcw,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  Search,
-  Eye,
-  ChevronUp
-} from "lucide-react";
+import { AlertTriangle, Clock, Eye, Search, X } from "lucide-react";
 
-const ERROR_CODE_MAP: Record<string, string> = {
-  MISSING_INFORMATION: "Thiếu thông tin bắt buộc",
-  INVALID_INPUT: "Dữ liệu không hợp lệ",
-  RESIDENT_NOT_FOUND: "Không tìm thấy cư dân",
-  RESIDENT_ALREADY_EXISTS: "Cư dân đã tồn tại",
-  VEHICLE_NOT_FOUND: "Không tìm thấy xe",
-  VEHICLE_ALREADY_EXISTS: "Xe đã được đăng ký",
-  BOOKING_NOT_FOUND: "Không tìm thấy lượt đặt",
-  BOOKING_ALREADY_EXISTS: "Lượt đặt đã tồn tại",
-  PAYMENT_NOT_FOUND: "Không tìm thấy giao dịch",
-  NO_AVAILABILITY: "Hết chỗ/Không khả dụng",
-  PAYMENT_FAILED: "Thanh toán thất bại",
-  PROJECT_NOT_FOUND: "Không tìm thấy dự án",
-  VIEWING_ALREADY_BOOKED: "Lịch xem nhà đã được đặt",
-  INTEREST_ALREADY_EXISTS: "Đã đăng ký quan tâm",
-  SHUTTLE_ALREADY_BOOKED: "Xe đưa đón đã được đặt",
-  VIEWING_NOT_FOUND: "Không tìm thấy lịch xem nhà",
-  SERVICE_TIMEOUT: "Hết thời gian chờ dịch vụ (Timeout)",
-  SERVICE_UNAVAILABLE: "Dịch vụ hiện không khả dụng",
-  INTERNAL_SERVICE_ERROR: "Lỗi hệ thống nội bộ",
-  UNKNOWN_EXTERNAL_ERROR: "Lỗi không xác định từ hệ thống ngoài",
-  INVALID_TASK_PLAN: "Kế hoạch luồng không hợp lệ",
-  UNKNOWN_TOOL: "Công cụ không được hỗ trợ",
-  DEPENDENCY_ERROR: "Lỗi phụ thuộc (Dependency Error)",
-  APPROVAL_REQUIRED: "Cần xác nhận từ người dùng",
-  ACTION_DENIED: "Hành động bị từ chối",
-  EXECUTION_ERROR: "Lỗi thực thi (Execution Error)",
+/**
+ * Màn GIÁM SÁT của admin. Chỉ đọc.
+ *
+ * Không có Duyệt, Từ chối, Retry, Chạy tiếp, Xác nhận thanh toán, và không có
+ * link tới `/review`. Quyền duyệt thuộc về ĐƠN VỊ CUNG CẤP; admin ở đây để
+ * biết hệ thống đang có việc gì và kẹt ở đâu.
+ *
+ * Trang này từng gọi `/admin/workflows/history` (trả `goal` thô và
+ * `failed_task.input` — nội dung người dùng gõ, chưa qua lọc) và có một nút
+ * Retry gọi `POST /admin/workflows/{id}/retry`, endpoint đặt thẳng
+ * `workflows.status = PENDING` không điều kiện. Cả hai endpoint đã bị xoá.
+ *
+ * Nhãn dịch vụ và trạng thái bước do BACKEND trả về, đã là tiếng Việt. Trang
+ * này cố ý KHÔNG giữ bảng tra tool → tên: một bảng thứ hai là một bảng sẽ lệch,
+ * và lệch theo hướng phơi tên hàm nội bộ ra màn hình.
+ */
+
+const TRANG_THAI_LUONG: Record<string, string> = {
+  PENDING: "Đang chuẩn bị",
+  RUNNING: "Đang chạy",
+  WAITING_APPROVAL: "Đang chờ",
+  SUCCESS: "Hoàn tất",
+  FAILED: "Không thành công",
+  CANCELLED: "Đã huỷ",
 };
 
-const TOOL_MAP: Record<string, string> = {
-  register_resident: "Đăng ký thông tin cư dân",
-  register_vehicle: "Đăng ký xe",
-  book_parking: "Đặt chỗ đỗ xe",
-  pay_fee: "Thanh toán phí",
-  search_properties: "Tìm kiếm bất động sản",
-  schedule_property_viewing: "Đặt lịch xem nhà",
-  create_maintenance_request: "Tạo yêu cầu bảo trì",
-  schedule_move: "Đặt lịch chuyển nhà",
-  register_property_interest: "Đăng ký quan tâm BĐS",
-  book_shuttle: "Đặt xe đưa đón",
+const DANG_CHO: Record<AdminWaitingFor, string> = {
+  PROVIDER: "Chờ đơn vị cung cấp",
+  CUSTOMER_PAYMENT: "Chờ khách xác nhận thanh toán",
+  NONE: "Không chờ ai",
 };
+
+const QUYET_DINH: Record<AdminDecisionStatus, string> = {
+  AWAITING: "Chưa quyết định",
+  APPROVED: "Đã duyệt",
+  REJECTED: "Đã từ chối",
+  NONE: "Không cần duyệt",
+};
+
+const MAU_QUYET_DINH: Record<AdminDecisionStatus, string> = {
+  AWAITING: "bg-amber-100 text-amber-800",
+  APPROVED: "bg-emerald-100 text-emerald-800",
+  REJECTED: "bg-rose-100 text-rose-800",
+  NONE: "bg-gray-100 text-gray-600",
+};
+
+function nhan(value: string | null | undefined, bang: Record<string, string>): string {
+  if (!value) return "—";
+  return bang[value] ?? value;
+}
+
+function thoiDiem(value: string | null): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("vi-VN");
+}
+
+function Chip({ text, tone }: { text: string; tone: string }) {
+  return (
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>{text}</span>
+  );
+}
 
 export function AdminWorkflowsPage() {
-  const [workflows, setWorkflows] = useState<AdminWorkflowHistoryItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(1);
-  const [searchUser, setSearchUser] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  const limit = 50;
   const toast = useToast();
+  const [items, setItems] = useState<AdminRequestListItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [detail, setDetail] = useState<AdminRequestDetail | null>(null);
+  const limit = 20;
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(searchUser);
-      setPage(1); // Reset page on search
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [searchUser]);
+    const t = setTimeout(() => {
+      setDebounced(search);
+      setPage(1);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [search]);
 
-  const fetchWorkflows = async () => {
+  useEffect(() => {
+    let huy = false;
     setLoading(true);
+    adminRequests(page, limit, debounced || undefined)
+      .then((data) => {
+        if (huy) return;
+        setItems(data.items);
+        setTotal(data.total);
+      })
+      .catch(() => {
+        if (!huy) toast.push("error", "Không tải được danh sách yêu cầu.");
+      })
+      .finally(() => {
+        if (!huy) setLoading(false);
+      });
+    return () => {
+      huy = true;
+    };
+  }, [page, debounced, toast]);
+
+  const soTrang = useMemo(() => Math.max(1, Math.ceil(total / limit)), [total]);
+
+  async function moChiTiet(workflowId: string) {
     try {
-      const data = await adminWorkflowsHistory(page, limit, debouncedSearch);
-      setWorkflows(data.items);
-    } catch (error: any) {
-      toast.push("error", error.message || "Lỗi khi tải lịch sử luồng");
-    } finally {
-      setLoading(false);
+      setDetail(await adminRequestDetail(workflowId));
+    } catch {
+      toast.push("error", "Không mở được chi tiết yêu cầu.");
     }
-  };
-
-  useEffect(() => {
-    fetchWorkflows();
-  }, [page, debouncedSearch]);
-
-  const handleRetry = async (workflowId: string) => {
-    try {
-      await adminRetryWorkflow(workflowId);
-      toast.push("success", "Đã gửi yêu cầu chạy lại");
-      fetchWorkflows();
-    } catch (error: any) {
-      toast.push("error", error.message || "Lỗi khi yêu cầu chạy lại");
-    }
-  };
-
-  const toggleRow = (id: string) => {
-    setExpandedRow(expandedRow === id ? null : id);
-  };
+  }
 
   return (
-    <div className="p-8 max-w-[1400px] mx-auto min-h-full">
-      <div className="flex items-center justify-between gap-4 mb-8">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center justify-center w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-500 shadow-inner">
-            <Activity className="w-6 h-6" strokeWidth={2} />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-[var(--text-primary)]">Lịch sử Luồng hệ thống</h1>
-            <p className="text-sm text-[var(--text-secondary)] mt-1">Giám sát và kiểm tra chi tiết các chuỗi xử lý nghiệp vụ</p>
-          </div>
-        </div>
-        
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-secondary)]" />
-          <input
-            type="text"
-            placeholder="Tìm theo người dùng..."
-            value={searchUser}
-            onChange={(e) => setSearchUser(e.target.value)}
-            className="pl-10 pr-4 py-2.5 bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--border-light)] rounded-xl text-sm focus:outline-none focus:border-[var(--primary)] transition-all w-72 shadow-sm hover:shadow-md"
-          />
-        </div>
-      </div>
+    <div className="space-y-5 p-6">
+      <header>
+        <h1 className="text-xl font-semibold text-gray-900">Yêu cầu trong hệ thống</h1>
+        <p className="mt-1 text-sm text-gray-500">
+          Màn hình theo dõi. Quyết định duyệt hay từ chối thuộc về đơn vị cung cấp dịch vụ.
+        </p>
+      </header>
 
-      <div className="bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--border-light)] rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="bg-[var(--surface-hover)] border-b border-[var(--border-light)]">
-                <th className="p-4 font-medium text-[var(--text-secondary)] w-24">ID</th>
-                <th className="p-4 font-medium text-[var(--text-secondary)] w-32">Người dùng</th>
-                <th className="p-4 font-medium text-[var(--text-secondary)] w-48">Các bước</th>
-                <th className="p-4 font-medium text-[var(--text-secondary)] w-32">Trạng thái</th>
-                <th className="p-4 font-medium text-[var(--text-secondary)] w-48">Cập nhật</th>
-                <th className="p-4 font-medium text-[var(--text-secondary)] text-right w-40">Thao tác</th>
+      <label className="relative block max-w-sm">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+        <span className="sr-only">Tìm theo tài khoản</span>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Tìm theo tài khoản…"
+          className="h-10 w-full rounded-xl border border-gray-300 bg-white pl-9 pr-3 text-sm outline-none focus:border-teal-600"
+        />
+      </label>
+
+      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th className="px-4 py-3">Tài khoản</th>
+              <th className="px-4 py-3">Yêu cầu</th>
+              <th className="px-4 py-3">Dịch vụ</th>
+              <th className="px-4 py-3">Trạng thái</th>
+              <th className="px-4 py-3">Đang chờ</th>
+              <th className="px-4 py-3">Đơn vị</th>
+              <th className="px-4 py-3">Cập nhật</th>
+              <th className="px-4 py-3" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {loading && (
+              <tr>
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                  Đang tải…
+                </td>
               </tr>
-            </thead>
-            <tbody className="relative">
-              {loading && workflows.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="p-8 text-center text-[var(--text-secondary)]">Đang tải...</td>
-                </tr>
-              )}
-              {workflows.map((wf) => (
-                <React.Fragment key={wf.workflow_id}>
-                  <tr className={`border-b border-[var(--border-light)] hover:bg-[var(--surface-hover)] transition-colors ${expandedRow === wf.workflow_id ? 'bg-[var(--surface-hover)]' : ''}`}>
-                    <td className="p-4 align-middle">
-                      <div className="text-sm font-medium text-[var(--text-secondary)]" title={wf.workflow_id}>
-                        {wf.workflow_id.slice(0, 8)}...
-                      </div>
-                    </td>
-                    <td className="p-4 align-middle">
-                      <div className="text-sm font-medium text-[var(--primary)] bg-[var(--primary)]/10 px-2 py-1 rounded-md inline-block">
-                        @{wf.owner_username || "unknown"}
-                      </div>
-                    </td>
-                    <td className="p-4 align-middle">
-                      <div className="flex flex-wrap gap-1">
-                        {wf.tools && wf.tools.length > 0 ? (
-                          wf.tools.map((tool, idx) => (
-                            <span key={idx} className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded border border-gray-200">
-                              {TOOL_MAP[tool] || tool}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="text-xs text-[var(--text-secondary)] italic">Chưa xác định</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="p-4 align-middle">
-                      <span
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
-                          wf.status === "SUCCESS"
-                            ? "bg-green-500/10 text-green-500"
-                            : wf.status === "FAILED"
-                              ? "bg-red-500/10 text-red-500"
-                              : wf.status === "CANCELLED"
-                                ? "bg-gray-500/10 text-gray-500"
-                                : "bg-yellow-500/10 text-yellow-500"
-                        }`}
-                      >
-                        {wf.status === "SUCCESS" && <CheckCircle2 className="w-3.5 h-3.5" />}
-                        {wf.status === "FAILED" && <AlertTriangle className="w-3.5 h-3.5" />}
-                        {(wf.status === "PENDING" || wf.status === "RUNNING" || wf.status === "WAITING_APPROVAL") && (
-                          <Clock className="w-3.5 h-3.5" />
-                        )}
-                        {wf.status}
+            )}
+            {!loading && items.length === 0 && (
+              <tr>
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                  Chưa có yêu cầu nào.
+                </td>
+              </tr>
+            )}
+            {!loading &&
+              items.map((item) => (
+                <tr key={item.workflow_id} className="align-top hover:bg-gray-50">
+                  <td className="px-4 py-3 font-medium text-gray-900">
+                    {item.account.display_name ?? item.account.username ?? "—"}
+                  </td>
+                  <td className="max-w-xs px-4 py-3 text-gray-700">{item.goal ?? "—"}</td>
+                  <td className="px-4 py-3 text-gray-700">
+                    {item.service_names.length ? item.service_names.join(", ") : "—"}
+                  </td>
+                  <td className="px-4 py-3">{nhan(item.workflow_status, TRANG_THAI_LUONG)}</td>
+                  <td className="px-4 py-3">
+                    {item.waiting_for === "NONE" ? (
+                      <span className="text-gray-500">—</span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-amber-700">
+                        <Clock className="h-3.5 w-3.5" />
+                        {DANG_CHO[item.waiting_for]}
                       </span>
-                    </td>
-                    <td className="p-4 align-middle">
-                      <div className="text-sm text-[var(--text-secondary)] whitespace-nowrap">
-                        {new Date(wf.updated_at).toLocaleString("vi-VN")}
-                      </div>
-                    </td>
-                    <td className="p-4 align-middle text-right flex justify-end gap-2">
-                      <button
-                        onClick={() => toggleRow(wf.workflow_id)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-all shadow-sm"
-                      >
-                        {expandedRow === wf.workflow_id ? (
-                          <><ChevronUp className="w-4 h-4" /> Đóng</>
-                        ) : (
-                          <><Eye className="w-4 h-4" /> Chi tiết</>
-                        )}
-                      </button>
-                      {wf.status === "FAILED" && (
-                        <button
-                          onClick={() => handleRetry(wf.workflow_id)}
-                          title="Gửi tín hiệu chạy lại"
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-[var(--primary)] text-white hover:brightness-110 transition-all shadow-sm"
-                        >
-                          <RotateCcw className="w-4 h-4" /> Retry
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                  
-                  {expandedRow === wf.workflow_id && (
-                    <tr className="bg-gray-50/50 border-b border-[var(--border-light)]">
-                      <td colSpan={6} className="p-6">
-                        <div className="grid grid-cols-2 gap-6">
-                          <div>
-                            <h3 className="text-sm font-semibold text-gray-700 mb-2">Mục tiêu yêu cầu (Goal):</h3>
-                            <div className="text-sm text-gray-800 bg-white p-3 rounded-lg border border-gray-200">
-                              "{wf.goal}"
-                            </div>
-                            
-                            <h3 className="text-sm font-semibold text-gray-700 mb-2 mt-4">Tiến trình (Tools):</h3>
-                            <div className="flex flex-wrap gap-2 bg-white p-3 rounded-lg border border-gray-200">
-                              {wf.tools && wf.tools.length > 0 ? (
-                                wf.tools.map((tool, idx) => (
-                                  <span key={idx} className="px-2.5 py-1 bg-gray-100 text-gray-800 text-xs rounded-md border border-gray-200 font-medium">
-                                    {idx + 1}. {TOOL_MAP[tool] || tool}
-                                  </span>
-                                ))
-                              ) : (
-                                <span className="text-xs text-[var(--text-secondary)] italic">Luồng chưa gọi công cụ nào.</span>
-                              )}
-                            </div>
-
-                            {wf.assistant_answer && (
-                              <>
-                                <h3 className="text-sm font-semibold text-gray-700 mb-2 mt-4">Phản hồi của AI (Assistant):</h3>
-                                <div className="text-sm text-gray-800 bg-blue-50/50 p-3 rounded-lg border border-blue-100 leading-relaxed">
-                                  {wf.assistant_answer}
-                                </div>
-                              </>
-                            )}
-                          </div>
-                          
-                          <div>
-                            <h3 className="text-sm font-semibold text-gray-700 mb-2">Thông tin thực thi:</h3>
-                            <div className="bg-white p-4 rounded-lg border border-gray-200 text-sm">
-                              <div className="mb-2"><span className="font-medium">Mã luồng:</span> {wf.workflow_id}</div>
-                              <div className="mb-2"><span className="font-medium">Tạo lúc:</span> {new Date(wf.created_at).toLocaleString("vi-VN")}</div>
-                              <div className="mb-2"><span className="font-medium">Cập nhật lúc:</span> {new Date(wf.updated_at).toLocaleString("vi-VN")}</div>
-                            </div>
-
-                            {wf.status === "FAILED" && (
-                              <div className="mt-4">
-                                <h3 className="text-sm font-semibold text-red-700 mb-2">Nguyên nhân thất bại:</h3>
-                                <div className="bg-red-50 p-4 rounded-lg border border-red-100 text-sm">
-                                  {wf.failed_task ? (
-                                    <>
-                                      <div className="mb-2"><strong className="text-red-700">Nguyên nhân cụ thể:</strong> <span className="text-red-600 font-medium text-base">{wf.failed_task.message}</span></div>
-                                      <div className="mb-2"><strong className="text-red-700">Tại bước (Tool):</strong> <span className="text-red-600">{TOOL_MAP[wf.failed_task.tool] || wf.failed_task.tool}</span></div>
-                                      <div className="mb-3"><strong className="text-red-700">Phân loại lỗi (Mã):</strong> <span className="text-red-600">{wf.error_code ? (ERROR_CODE_MAP[wf.error_code] || wf.error_code) : "—"}</span></div>
-                                      {wf.failed_task.input && (
-                                        <div className="pt-2 border-t border-red-200/60">
-                                          <strong className="text-red-700 block mb-1">Dữ liệu đã cung cấp (Input):</strong>
-                                          <pre className="bg-white/60 p-2 rounded overflow-x-auto text-[11px] leading-relaxed text-red-900 border border-red-100 font-mono mt-1">
-                                            {typeof wf.failed_task.input === 'string' 
-                                              ? wf.failed_task.input 
-                                              : JSON.stringify(wf.failed_task.input, null, 2)}
-                                          </pre>
-                                        </div>
-                                      )}
-                                    </>
-                                  ) : (
-                                    <div className="mb-2"><strong className="text-red-700">Mã lỗi:</strong> <span className="text-red-600 font-medium">{wf.error_code ? (ERROR_CODE_MAP[wf.error_code] || wf.error_code) : "—"}</span></div>
-                                  )}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <Chip
+                      text={QUYET_DINH[item.provider_decision_status]}
+                      tone={MAU_QUYET_DINH[item.provider_decision_status]}
+                    />
+                  </td>
+                  <td className="px-4 py-3 text-gray-500">{thoiDiem(item.updated_at)}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={() => moChiTiet(item.workflow_id)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-100"
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      Xem
+                    </button>
+                  </td>
+                </tr>
               ))}
-            </tbody>
-          </table>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex items-center justify-between text-sm text-gray-600">
+        <span>
+          Trang {page}/{soTrang} · {total} yêu cầu
+        </span>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => p - 1)}
+            className="rounded-lg border border-gray-300 px-3 py-1.5 disabled:opacity-40"
+          >
+            Trước
+          </button>
+          <button
+            type="button"
+            disabled={page >= soTrang}
+            onClick={() => setPage((p) => p + 1)}
+            className="rounded-lg border border-gray-300 px-3 py-1.5 disabled:opacity-40"
+          >
+            Sau
+          </button>
         </div>
       </div>
+
+      {detail && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6">
+          <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Chi tiết yêu cầu</h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  {detail.account.display_name ?? detail.account.username ?? "—"} ·{" "}
+                  {nhan(detail.workflow_status, TRANG_THAI_LUONG)}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Đóng"
+                onClick={() => setDetail(null)}
+                className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <p className="mt-4 text-sm text-gray-800">{detail.goal ?? "—"}</p>
+
+            <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
+              <div>
+                <dt className="text-gray-500">Đang chờ</dt>
+                <dd className="text-gray-900">{DANG_CHO[detail.waiting_for]}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-500">Đơn vị cung cấp</dt>
+                <dd className="text-gray-900">{QUYET_DINH[detail.provider_decision_status]}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-500">Thanh toán</dt>
+                <dd className="text-gray-900">{QUYET_DINH[detail.payment_decision_status]}</dd>
+              </div>
+            </dl>
+
+            <h3 className="mt-6 text-sm font-semibold text-gray-900">Các bước</h3>
+            <ul className="mt-2 divide-y divide-gray-100 rounded-xl border border-gray-200">
+              {detail.steps.map((step) => (
+                <li key={step.task_id} className="px-4 py-3 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-medium text-gray-900">{step.service_name}</span>
+                    <span className="text-gray-500">{step.status ?? "—"}</span>
+                  </div>
+                  {step.decided_by && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      {step.decided_by.display_name} quyết định lúc {thoiDiem(step.decided_at)}
+                    </p>
+                  )}
+                  {step.reject_reason && (
+                    <p className="mt-1 text-xs text-rose-700">Lý do: {step.reject_reason}</p>
+                  )}
+                  {step.failure_summary && (
+                    <p className="mt-1 inline-flex items-start gap-1 text-xs text-amber-700">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {step.failure_summary}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+
+            {detail.payment && (
+              <p className="mt-4 text-sm text-gray-700">
+                Khoản thanh toán: {detail.payment.amount.toLocaleString("vi-VN")}{" "}
+                {detail.payment.currency} · {QUYET_DINH[detail.payment.status as AdminDecisionStatus] ?? detail.payment.status}
+              </p>
+            )}
+
+            {detail.history.length > 0 && (
+              <>
+                <h3 className="mt-6 text-sm font-semibold text-gray-900">Diễn biến</h3>
+                <ol className="mt-2 space-y-1 text-xs text-gray-600">
+                  {detail.history.map((event, index) => (
+                    <li key={`${event.stage}-${index}`}>
+                      {thoiDiem(event.at)} — {event.stage}
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+export default AdminWorkflowsPage;

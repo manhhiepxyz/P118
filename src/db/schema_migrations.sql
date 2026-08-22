@@ -1071,3 +1071,62 @@ BEGIN
     END IF;
 END
 $$;
+
+-- =============================================================
+-- 2026-08 — verification_materializations
+--
+-- Idempotent: `IF NOT EXISTS` + `ADD CONSTRAINT` bọc trong DO block, nên chạy
+-- lại trên database đã có bảng là no-op. KHÔNG DROP, KHÔNG TRUNCATE — bảng này
+-- mang trạng thái phục hồi, xoá nó nghĩa là mất đúng thứ nó sinh ra để giữ.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS verification_materializations (
+    record_id                 UUID PRIMARY KEY,
+    -- NULL cho tới khi đọc được provider. Xem ghi chú ở
+    -- `verification_recovery.py`: đoán 'apartment' là ghi một sự kiện
+    -- CHƯA BIẾT vào audit dưới dạng ĐÃ BIẾT.
+    record_type               VARCHAR(20),
+    requested_decision        VARCHAR(10)  NOT NULL,
+    provider_decision_status  VARCHAR(20)  NOT NULL DEFAULT 'UNKNOWN',
+    materialization_status    VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+    -- Khoá ổn định theo record_id. Cùng một hồ sơ, dù retry bao nhiêu lần và
+    -- từ tiến trình nào, luôn ra cùng một khoá.
+    idempotency_key           VARCHAR(120) NOT NULL,
+    -- Chỉ MÃ lỗi, không bao giờ message. Message của provider và của database
+    -- đều từng mang nguyên payload, và bảng này là thứ bị dump vào issue.
+    safe_error_code           VARCHAR(50),
+    attempt_count             INTEGER      NOT NULL DEFAULT 0,
+    created_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_verif_mat_idempotency UNIQUE (idempotency_key),
+    CONSTRAINT verif_mat_type_check
+        CHECK (record_type IS NULL OR record_type IN ('apartment', 'vehicle')),
+    CONSTRAINT verif_mat_decision_check
+        CHECK (requested_decision IN ('approve', 'reject')),
+    CONSTRAINT verif_mat_provider_check
+        CHECK (provider_decision_status IN ('UNKNOWN', 'PENDING', 'APPROVED', 'REJECTED')),
+    CONSTRAINT verif_mat_status_check
+        CHECK (materialization_status IN ('NOT_REQUIRED', 'PENDING', 'SUCCESS', 'FAILED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_verif_mat_unfinished
+    ON verification_materializations(materialization_status)
+    WHERE materialization_status IN ('PENDING', 'FAILED');
+
+-- `record_type` được phép NULL cho tới khi đọc được provider.
+--
+-- Bảng ra đời với `NOT NULL`, và hệ quả là caller phải điền một giá trị lúc
+-- CHƯA biết loại hồ sơ — thực tế nó điền 'apartment'. Một biên lai của hồ sơ
+-- XE bị ghi là căn hộ nếu tiến trình chết giữa lúc mở biên lai và lúc đọc
+-- provider. Đó là dữ liệu audit sai, và nó sai một cách im lặng.
+--
+-- Idempotent: chạy lại trên cột đã nullable là no-op.
+DO $$
+BEGIN
+    IF to_regclass('verification_materializations') IS NOT NULL THEN
+        ALTER TABLE verification_materializations ALTER COLUMN record_type DROP NOT NULL;
+        ALTER TABLE verification_materializations DROP CONSTRAINT IF EXISTS verif_mat_type_check;
+        ALTER TABLE verification_materializations
+            ADD CONSTRAINT verif_mat_type_check
+            CHECK (record_type IS NULL OR record_type IN ('apartment', 'vehicle'));
+    END IF;
+END $$;

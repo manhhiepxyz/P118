@@ -304,9 +304,51 @@ export interface VehicleClaim {
 
 export type VerificationClaim = ApartmentClaim | VehicleClaim
 
-export interface VerificationRecord {
+/** Đơn vị đã quyết định gì. KHÔNG phải kết luận "đã xong". */
+export type VerificationProviderStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'UNKNOWN'
+
+/** main app đã ghi xong kết quả chưa. */
+export type VerificationMaterializationStatus =
+  | 'NOT_STARTED'
+  | 'PENDING'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'NOT_REQUIRED'
+  | 'UNKNOWN'
+
+/**
+ * Trạng thái người dùng thực sự đang ở. Đây là field DUY NHẤT được phép dùng để
+ * kết luận "đã xác minh" — và chỉ khi nó bằng `VERIFIED`.
+ *
+ * `provider_status === 'APPROVED'` chỉ nói đơn vị đã ký. Quyền cư dân mở hay
+ * chưa còn phụ thuộc main app đã ghi xong chưa; hai chuyện ở hai hệ thống.
+ */
+export type VerificationEffectiveStatus =
+  | 'WAITING_PROVIDER'
+  | 'REJECTED'
+  | 'APPROVED_PROCESSING'
+  | 'APPROVED_NEEDS_RETRY'
+  | 'APPROVED_BLOCKED'
+  | 'VERIFIED'
+  | 'APPROVED_NEEDS_RECONCILIATION'
+  | 'NEEDS_RECONCILIATION'
+  | 'UNKNOWN'
+
+export type VerificationConsistencyStatus = 'CONSISTENT' | 'NEEDS_RECONCILIATION'
+
+/** Phần trạng thái mà cả ba vai đều nhận, và nhận giống nhau. */
+export interface VerificationStatusFields {
+  provider_status: VerificationProviderStatus
+  materialization_status: VerificationMaterializationStatus
+  effective_status: VerificationEffectiveStatus
+  display_status: string
+  consistency_status: VerificationConsistencyStatus
+}
+
+export interface VerificationRecord extends VerificationStatusFields {
   record_id: string
   record_type: VerificationRecordType
+  /** @deprecated Alias của `provider_status`. Không dùng để kết luận VERIFIED. */
   status: VerificationStatus
   /** UUID tài khoản người nộp đơn — do backend đặt từ JWT, browser không gửi. */
   applicant_user_id: string | null
@@ -320,6 +362,12 @@ export interface VerificationRecord {
   ownership_match?: boolean | null
   /** Chỉ khi duyệt thành công — xe thì kèm vehicle_id đã tạo. */
   materialized?: { vehicle_id?: string } | null
+  /**
+   * Được phép bấm Duyệt/Từ chối không. Backend tính, frontend KHÔNG tự suy:
+   * một hồ sơ đã quyết định hoặc đang lệch dữ liệu thì bấm lại chỉ nhận 409.
+   */
+  can_decide?: boolean
+  recovery_required?: boolean
 }
 
 /** Body duyệt/từ chối — từ chối bắt buộc lý do. */

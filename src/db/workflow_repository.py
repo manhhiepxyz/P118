@@ -1956,3 +1956,145 @@ class WorkflowRepository:
                 item["failed_task"] = json.loads(item["failed_task"])
             items.append(item)
         return {"items": items, "total": total, "page": page, "limit": limit}
+
+    # ------------------------------------------------------------------
+    # Giám sát của ADMIN — đọc, và chỉ đọc.
+    #
+    # Vì sao không dùng lại hàng đợi của provider: hai màn hình trả lời hai câu
+    # hỏi khác nhau. Provider hỏi "tôi phải quyết định việc gì" nên họ cần dữ
+    # kiện để quyết. Admin hỏi "hệ thống đang có việc gì, của ai, kẹt ở đâu" nên
+    # họ cần trạng thái và thời điểm.
+    #
+    # Dùng chung một nguồn nghĩa là sớm muộn màn giám sát mọc ra một nút Duyệt —
+    # nó đã có sẵn mọi thứ để bấm. Tách ở tầng SQL là cách rẻ nhất để cái nút ấy
+    # không bao giờ có dữ liệu mà mọc.
+    # ------------------------------------------------------------------
+
+    async def list_admin_requests(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 50,
+        search_user: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """Danh sách yêu cầu cho màn giám sát: ai, việc gì, đang ở đâu.
+
+        `approval_status` là câu trả lời cho "đang chờ AI", và nó không suy được
+        từ `workflows.status`: `WAITING_APPROVAL` mang hai tình huống khác hẳn
+        nhau — chờ ĐƠN VỊ nhận việc, và chờ CHÍNH KHÁCH xác nhận khoản tiền.
+        Gộp hai cái đó thành một dòng "đang chờ" là xoá mất thông tin duy nhất
+        khiến người giám sát biết phải gọi ai.
+        """
+        offset = max(0, (max(1, page) - 1) * limit)
+        async with self._pool.acquire() as conn:
+            total = await conn.fetchval(
+                """
+                SELECT count(*) FROM workflows w
+                LEFT JOIN users u ON u.id = w.owner_user_id
+                WHERE ($1::text IS NULL OR u.username ILIKE '%' || $1 || '%')
+                  AND ($2::text IS NULL OR w.status = $2)
+                """,
+                search_user,
+                status,
+            )
+            rows = await conn.fetch(
+                """
+                SELECT
+                    w.workflow_id,
+                    w.goal,
+                    w.status                AS workflow_status,
+                    w.error_code,
+                    w.created_at,
+                    w.updated_at,
+                    w.owner_user_id,
+                    u.username              AS owner_username,
+                    u.full_name             AS owner_full_name,
+                    (SELECT COALESCE(json_agg(t.tool ORDER BY t.id), '[]'::json)
+                       FROM workflow_tasks t WHERE t.workflow_id = w.workflow_id) AS tools,
+                    (SELECT count(*) FROM service_approvals sa
+                      WHERE sa.workflow_id = w.workflow_id AND sa.status = 'AWAITING') AS awaiting_provider,
+                    (SELECT count(*) FROM payment_approvals pa
+                      WHERE pa.workflow_id = w.workflow_id AND pa.status = 'AWAITING') AS awaiting_payment,
+                    -- LỊCH SỬ quyết định, không chỉ "còn chờ hay không".
+                    --
+                    -- Một workflow đã được đơn vị DUYỆT và một workflow chưa
+                    -- ai đụng tới đều có 0 dòng AWAITING. Chỉ đếm hàng chờ thì
+                    -- màn danh sách nói hai việc ấy giống hệt nhau, và người
+                    -- giám sát mất đúng thông tin họ cần: đơn vị đã quyết định
+                    -- gì rồi.
+                    (SELECT COALESCE(json_agg(DISTINCT sa.status), '[]'::json)
+                       FROM service_approvals sa WHERE sa.workflow_id = w.workflow_id) AS provider_decisions,
+                    (SELECT pa.status FROM payment_approvals pa
+                      WHERE pa.workflow_id = w.workflow_id LIMIT 1) AS payment_decision,
+                    (SELECT t.tool FROM workflow_tasks t
+                      WHERE t.workflow_id = w.workflow_id
+                        AND t.status NOT IN ('SUCCESS','FAILED','CANCELLED','SKIPPED')
+                      ORDER BY t.id LIMIT 1) AS current_tool,
+                    (SELECT t.error_message FROM workflow_tasks t
+                      WHERE t.workflow_id = w.workflow_id AND t.status = 'FAILED'
+                      ORDER BY t.id DESC LIMIT 1) AS failure_message
+                FROM workflows w
+                LEFT JOIN users u ON u.id = w.owner_user_id
+                WHERE ($1::text IS NULL OR u.username ILIKE '%' || $1 || '%')
+                  AND ($2::text IS NULL OR w.status = $2)
+                ORDER BY w.updated_at DESC NULLS LAST, w.created_at DESC
+                LIMIT $3 OFFSET $4
+                """,
+                search_user,
+                status,
+                limit,
+                offset,
+            )
+        return {"total": int(total or 0), "page": page, "limit": limit, "items": [dict(r) for r in rows]}
+
+    async def get_admin_request(self, workflow_id: str) -> dict[str, Any] | None:
+        """Chi tiết một yêu cầu: các bước, ai đã quyết định, lúc nào.
+
+        `decided_by`/`decided_at` đọc từ `service_approvals` — đó là chỗ DUY
+        NHẤT ghi lại ai đã ký. Suy nó từ `workflow_tasks.status` là suy ra một
+        cái tên không có trong dữ liệu.
+        """
+        wid = workflow_id if isinstance(workflow_id, UUID) else UUID(str(workflow_id))
+        async with self._pool.acquire() as conn:
+            head = await conn.fetchrow(
+                """
+                SELECT w.workflow_id, w.goal, w.status AS workflow_status, w.error_code,
+                       w.created_at, w.updated_at, w.owner_user_id,
+                       u.username AS owner_username, u.full_name AS owner_full_name
+                  FROM workflows w LEFT JOIN users u ON u.id = w.owner_user_id
+                 WHERE w.workflow_id = $1
+                """,
+                wid,
+            )
+            if head is None:
+                return None
+            steps = await conn.fetch(
+                """
+                SELECT t.task_id, t.tool, t.status, t.depends_on, t.error_code, t.error_message,
+                       t.provider_submission_status, t.created_at, t.updated_at,
+                       sa.status AS approval_status, sa.decided_by, sa.decided_at, sa.reject_reason
+                  FROM workflow_tasks t
+                  LEFT JOIN service_approvals sa
+                         ON sa.workflow_id = t.workflow_id AND sa.task_id = t.task_id
+                 WHERE t.workflow_id = $1
+                 ORDER BY t.id
+                """,
+                wid,
+            )
+            payment = await conn.fetchrow(
+                "SELECT task_id, status, amount, currency, created_at, decided_at "
+                "FROM payment_approvals WHERE workflow_id = $1",
+                wid,
+            )
+            events = await conn.fetch(
+                "SELECT stage, created_at FROM workflow_events WHERE workflow_id = $1 "
+                "ORDER BY sequence LIMIT 100",
+                wid,
+            )
+        return {
+            "workflow": dict(head),
+            "steps": [dict(r) for r in steps],
+            "payment": dict(payment) if payment else None,
+            "events": [dict(r) for r in events],
+        }

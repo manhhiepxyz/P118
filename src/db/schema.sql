@@ -736,3 +736,64 @@ $$;
 -- trước, và một sửa đổi ở đây im lặng không có tác dụng: đo được khi
 -- `ON CONFLICT ... DO UPDATE` viết ở file này, migration báo chạy xong, mà hàm
 -- trong database vẫn giữ `DO NOTHING`.
+
+-- =============================================================
+-- Biên lai MATERIALIZATION cho hồ sơ xác minh.
+--
+-- Quyết định của đơn vị nằm ở Ownership Provider; kết quả nghiệp vụ
+-- (liên kết cư dân, xe) nằm ở database này. Hai hệ thống, nối bằng HTTP,
+-- KHÔNG chung transaction — nên tồn tại một khe mà cả hai đều không mô tả:
+-- đơn vị đã ký, main app chưa ghi, và không ai biết.
+--
+-- Đo được trước khi có bảng này, ép lỗi đúng vào khe ấy:
+--
+--     provider           APPROVED
+--     user_resident_links 0 dòng
+--     lần đầu   http=500
+--     lần hai   http=409   (ALREADY_DECIDED)
+--
+-- Người dùng kẹt vĩnh viễn: duyệt lại chỉ đập vào provider, không chạy nốt
+-- phần còn thiếu.
+--
+-- Bảng này là BẰNG CHỨNG VẬN HÀNH của tiến trình nối hai hệ thống, KHÔNG phải
+-- bản sao nguồn sự thật. Nó cố ý không mang `claimed_data`, ảnh giấy tờ, họ
+-- tên, CCCD, token hay payload thô của provider — giữ chúng ở đây là tạo một
+-- bản sao thứ hai của đúng thứ nhạy cảm nhất, trong một bảng sinh ra để phục
+-- vụ retry.
+--
+-- KHÔNG có FK sang `verification_records`: Ownership Provider là một hệ thống
+-- LOGIC khác. Hôm nay nó tình cờ dùng chung một PostgreSQL; một FK sẽ biến sự
+-- trùng hợp ấy thành ràng buộc, và tách service ra sẽ vỡ.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS verification_materializations (
+    record_id                 UUID PRIMARY KEY,
+    -- NULL cho tới khi đọc được provider. Xem ghi chú ở
+    -- `verification_recovery.py`: đoán 'apartment' là ghi một sự kiện
+    -- CHƯA BIẾT vào audit dưới dạng ĐÃ BIẾT.
+    record_type               VARCHAR(20),
+    requested_decision        VARCHAR(10)  NOT NULL,
+    provider_decision_status  VARCHAR(20)  NOT NULL DEFAULT 'UNKNOWN',
+    materialization_status    VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+    -- Khoá ổn định theo record_id. Cùng một hồ sơ, dù retry bao nhiêu lần và
+    -- từ tiến trình nào, luôn ra cùng một khoá.
+    idempotency_key           VARCHAR(120) NOT NULL,
+    -- Chỉ MÃ lỗi, không bao giờ message. Message của provider và của database
+    -- đều từng mang nguyên payload, và bảng này là thứ bị dump vào issue.
+    safe_error_code           VARCHAR(50),
+    attempt_count             INTEGER      NOT NULL DEFAULT 0,
+    created_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_verif_mat_idempotency UNIQUE (idempotency_key),
+    CONSTRAINT verif_mat_type_check
+        CHECK (record_type IS NULL OR record_type IN ('apartment', 'vehicle')),
+    CONSTRAINT verif_mat_decision_check
+        CHECK (requested_decision IN ('approve', 'reject')),
+    CONSTRAINT verif_mat_provider_check
+        CHECK (provider_decision_status IN ('UNKNOWN', 'PENDING', 'APPROVED', 'REJECTED')),
+    CONSTRAINT verif_mat_status_check
+        CHECK (materialization_status IN ('NOT_REQUIRED', 'PENDING', 'SUCCESS', 'FAILED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_verif_mat_unfinished
+    ON verification_materializations(materialization_status)
+    WHERE materialization_status IN ('PENDING', 'FAILED');

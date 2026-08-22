@@ -192,13 +192,19 @@ export function ProviderReviewPage() {
         decision,
         ...(decision === 'reject' ? { reject_reason: reason } : {}),
       })
-      setDone(
-        decision === 'approve'
-          ? item.record_type === 'vehicle'
+      if (item.effective_status === 'VERIFIED') {
+        setDone(
+          item.record_type === 'vehicle'
             ? `Đã duyệt xe ${claimLabel(item)} — xe đã vào hệ thống.`
-            : `Đã duyệt căn hộ — dịch vụ cư dân đã mở.`
-          : 'Đã từ chối hồ sơ.',
-      )
+            : 'Đã duyệt căn hộ — dịch vụ cư dân đã mở.',
+        )
+      } else if (item.effective_status === 'REJECTED') {
+        setDone('Đã từ chối hồ sơ.')
+      } else {
+        // Quyết định ở provider và kết quả materialize là hai trạng thái khác
+        // nhau. Không nói "đã mở quyền" chỉ vì người duyệt vừa bấm Duyệt.
+        setDone(item.display_status)
+      }
       await load()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Không gửi được quyết định.')
@@ -395,26 +401,32 @@ export function ProviderReviewPage() {
                   )}
                 </div>
 
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => decideVerification(record, 'approve')}
-                    disabled={busy !== null}
-                    className="inline-flex items-center gap-2 rounded-xl bg-indigo-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
-                  >
-                    <BadgeCheck className="h-4 w-4" aria-hidden />
-                    {busy === record.record_id ? 'Đang xử lý…' : 'Duyệt'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setRejectTarget({ kind: 'verification', record, reason: '' })}
-                    disabled={busy !== null}
-                    className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:text-gray-200"
-                  >
-                    <ShieldX className="h-4 w-4" aria-hidden />
-                    Từ chối
-                  </button>
-                </div>
+                {record.can_decide === true ? (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => decideVerification(record, 'approve')}
+                      disabled={busy !== null}
+                      className="inline-flex items-center gap-2 rounded-xl bg-indigo-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
+                    >
+                      <BadgeCheck className="h-4 w-4" aria-hidden />
+                      {busy === record.record_id ? 'Đang xử lý…' : 'Duyệt'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRejectTarget({ kind: 'verification', record, reason: '' })}
+                      disabled={busy !== null}
+                      className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:text-gray-200"
+                    >
+                      <ShieldX className="h-4 w-4" aria-hidden />
+                      Từ chối
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                    {record.display_status}
+                  </p>
+                )}
               </div>
             </li>
           ))}

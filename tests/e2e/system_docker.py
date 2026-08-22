@@ -13,15 +13,29 @@ Không in API key, token, hay DSN.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8080"
+BASE = os.environ.get("P118_BASE", "http://127.0.0.1:8080")
 API = f"{BASE}/api/v1"
-DB = "p118_db"
+# Đích đọc từ môi trường; xem ghi chú cùng loại ở browser_acceptance.mjs.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Đích KHÔNG có mặc định. Xem `tests/e2e/db_guard.py`: harness này ghi thật và
+# gọi `docker compose --force-recreate`, nên một fallback im lặng về `p118_db`
+# là một lần ghi đè database demo mà không ai biết cho tới lúc mở demo.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from db_guard import (  # noqa: E402
+    UnsafeDatabaseError,
+    assert_ready_on_e2e_database,
+    compose_env,
+    require_e2e_database,
+)
+
+DB = require_e2e_database()
 PASSWORD = "MatKhauSystem!2030"
 STAMP = str(int(time.time()))[-9:]
 RESULTS: list[tuple[str, bool, str]] = []
@@ -267,16 +281,28 @@ def main() -> int:
     if state2.get("status") != "WAITING_APPROVAL":
         check("10. Restart container rồi resume", False, f"không tới chờ duyệt ({state2.get('status')})")
     else:
+        # `env=compose_env()` là bắt buộc, không phải trang trí: compose nội
+        # suy `${POSTGRES_DB:-p118_db}` từ môi trường của TIẾN TRÌNH GỌI. Thiếu
+        # nó thì container quay về `p118_db` ngay giữa lượt chạy, và mọi assert
+        # sau đó nói về một database khác. Đã xảy ra ba lần ở lượt trước.
         subprocess.run(
             ["docker", "compose", "restart", "backend"],
-            cwd="/private/tmp/P118-integration-hoanganh",
+            cwd=_REPO_ROOT,
+            env=compose_env(),
             capture_output=True,
             timeout=180,
         )
         for _ in range(60):
             try:
-                if urllib.request.urlopen(f"{BASE}/ready", timeout=5).status == 200:
+                probe = urllib.request.urlopen(f"{BASE}/ready", timeout=5)
+                if probe.status == 200:
+                    # Chốt LẠI đích sau mỗi lần khởi động lại. `/ready` xanh
+                    # một mình không đủ — nó cũng xanh khi container vừa quay
+                    # về `p118_db`, và mọi assert sau đó nói về database sai.
+                    assert_ready_on_e2e_database(json.loads(probe.read().decode()))
                     break
+            except UnsafeDatabaseError:
+                raise
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(2)
@@ -362,7 +388,7 @@ def main() -> int:
     # ---- 14. Không secret trong log --------------------------------------
     logs = subprocess.run(
         ["docker", "compose", "logs", "--tail", "800", "backend"],
-        cwd="/private/tmp/P118-integration-hoanganh",
+        cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=120,

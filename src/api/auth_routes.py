@@ -26,19 +26,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from src.api.auth import create_access_token, hash_password, verify_password
 from src.api.deps import get_current_user, get_user_repository
 from src.api.schemas import (
-    LinkRequestCreate,
-    LinkRequestView,
     LoginRequest,
     RegisterRequest,
     TokenResponse,
     UserResponse,
 )
 from src.config import get_settings
-from src.db.link_request_repository import (
-    LinkRequestConflictError,
-    create_request,
-    latest_request_for_user,
-)
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.user_repository import UserAlreadyExistsError
 from src.orchestration.runtime_provider import acquire_repository
@@ -167,81 +160,17 @@ async def me(user: dict = Depends(get_current_user)) -> UserResponse:
     )
 
 
-@router.post(
-    "/resident-link-requests",
-    status_code=201,
-    response_model=LinkRequestView,
-    summary="Gửi yêu cầu liên kết căn hộ",
-)
-async def create_resident_link_request(
-    request: LinkRequestCreate,
-    user: dict = Depends(get_current_user),
-) -> LinkRequestView:
-    """Khách hàng KHAI căn hộ của mình. Yêu cầu luôn bắt đầu ở PENDING.
-
-    Không có tham số nào cho trạng thái: quyền chỉ mở ở đường duyệt của admin.
-    Đây là ranh giới quan trọng nhất của endpoint này — nếu người dùng tự khẳng
-    định được mình sở hữu một căn hộ thì toàn bộ mô hình quyền cư dân chỉ còn
-    là một biểu mẫu.
-    """
-    repository = await acquire_repository()
-    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
-    try:
-        created = await create_request(
-            pool,
-            user["id"],
-            apartment_code=request.apartment_code.strip(),
-            residential_area=request.residential_area.strip(),
-            full_name=request.full_name.strip(),
-        )
-    except LinkRequestConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    finally:
-        await pool.close()
-
-    return LinkRequestView(
-        request_id=created.request_id,
-        apartment_code=created.apartment_code,
-        residential_area=created.residential_area,
-        status=created.status,
-        created_at=created.created_at.isoformat() if created.created_at else None,
-    )
-
-
-@router.get(
-    "/resident-link-requests/me",
-    response_model=LinkRequestView | None,
-    summary="Trạng thái yêu cầu liên kết căn hộ của chính mình",
-)
-async def my_resident_link_request(user: dict = Depends(get_current_user)) -> LinkRequestView | None:
-    """Chỉ trả yêu cầu của CHÍNH tài khoản đang đăng nhập.
-
-    Không nhận `user_id` trên đường dẫn hay query: nhận nghĩa là mở một endpoint
-    đọc hồ sơ người khác, và mọi cách chặn sau đó chỉ là vá.
-    """
-    repository = await acquire_repository()
-    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
-    try:
-        found = await latest_request_for_user(pool, user["id"])
-    finally:
-        await pool.close()
-
-    if found is None:
-        return None
-    return LinkRequestView(
-        request_id=found.request_id,
-        apartment_code=found.apartment_code,
-        residential_area=found.residential_area,
-        status=found.status,
-        created_at=found.created_at.isoformat() if found.created_at else None,
-        decided_at=found.decided_at.isoformat() if found.decided_at else None,
-    )
-
-
-# ===========================================================================
-# /users — profile tự khai (Phase D). Router riêng vì PATCH /users/me nằm
-# NGOÀI prefix /auth (UI gọi thẳng /api/v1/users/me).
-# ===========================================================================
+# ĐÃ XOÁ: hai route nộp/xem yêu cầu liên kết căn hộ theo đường cũ.
+#
+#     POST /auth/resident-link-requests
+#     GET  /auth/resident-link-requests/me
+#
+# Đóng một đầu thôi thì không đủ: hồ sơ vẫn nộp được vào một hàng đợi không còn
+# ai duyệt, và người dùng chờ một quyết định không bao giờ tới. Cả hai đầu —
+# chỗ nộp và chỗ duyệt — cùng đóng.
+#
+# Đường canonical: `POST /verification-records` (kèm ảnh chứng minh) và
+# `GET /verification-records/my`. Xem ghi chú dài ở `admin_routes.py`.
 
 users_router = APIRouter(prefix="/users", tags=["users"])
 

@@ -356,6 +356,16 @@ class PostgreSQLWorkflowStateRepository:
     async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
         return await self.workflows.list_all_workflows_history(page=page, limit=limit, search_user=search_user)
 
+    async def list_admin_requests(
+        self, *, page: int = 1, limit: int = 50, search_user: str | None = None, status: str | None = None
+    ) -> dict:
+        return await self.workflows.list_admin_requests(
+            page=page, limit=limit, search_user=search_user, status=status
+        )
+
+    async def get_admin_request(self, workflow_id: str) -> dict | None:
+        return await self.workflows.get_admin_request(workflow_id)
+
     async def append_events(self, workflow_id: str, events: list[dict]) -> None:
         """Ghim dòng thời gian giai đoạn."""
         await self.workflows.append_events(workflow_id, events)

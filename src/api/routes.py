@@ -3359,6 +3359,16 @@ async def start_demo_workflow(
     if amended is not None:
         return amended
 
+    # Nếu người dùng Dừng khi Planner chưa kịp lưu task, nhánh vá kế hoạch ở
+    # trên chưa có dữ liệu có cấu trúc để làm việc. Giữ nguyên câu public trong
+    # shell, nhưng đưa cả yêu cầu vừa dừng vào input Planner để phần còn lại
+    # (biển số, loại xe, ngày...) không bị hỏi lại từ đầu.
+    planning_goal = await _planning_goal_after_an_early_cancel(
+        request.goal,
+        session_id=session_id,
+        user=user,
+    )
+
     # Hạn ngạch chỉ áp cho lane DỊCH VỤ — small-talk đã return ở trên.
     await _enforce_daily_quota(user)
 
@@ -3435,7 +3445,7 @@ async def start_demo_workflow(
     task = asyncio.create_task(
         _run_demo_job(
             workflow_id,
-            request.goal,
+            planning_goal,
             # Không pre-approve. Mọi thanh toán đi qua /payment-decision.
             False,
             {
@@ -5071,6 +5081,40 @@ async def _amend_from_conversation(
     # nói ngược nhau về cùng một lượt.
     said = amend_summary(described)
     return view.model_copy(update={"message": said, "answer": said, "suggestions": [], "session_id": session_id})
+
+
+async def _planning_goal_after_an_early_cancel(
+    goal: str,
+    *,
+    session_id: str,
+    user: dict[str, Any],
+) -> str:
+    """Giữ ngữ cảnh khi người dùng sửa một yêu cầu bị huỷ trước khi có plan.
+
+    Nhánh sửa bình thường đọc giá trị từ ``workflow_tasks.input_data``. Nhưng
+    người dùng có thể bấm Dừng trong lúc Planner còn chạy; khi ấy workflow đã
+    được lưu mà chưa có ``task_plan`` hay task nào. Chỉ gửi câu ngắn như
+    "đổi sang Khu B" cho Planner sẽ biến nó thành một yêu cầu mới thiếu biển
+    số, loại xe và ngày đặt chỗ.
+
+    Chỉ nối lại yêu cầu gốc khi đủ cả ba điều kiện an toàn: câu mới nói rõ ý
+    sửa, mang một giá trị canonical có thể nhận ra, và target gần nhất trong
+    chính session/chính owner chưa có task để vá. Câu mơ hồ vẫn bắt đầu luồng
+    bình thường; workflow đã có plan vẫn đi qua ``amend_and_rerun``.
+
+    Giá trị trả về chỉ dùng làm input Planner. Shell PostgreSQL và hội thoại
+    vẫn lưu nguyên ``goal`` mới, nên UI không giả rằng người dùng đã gõ lại cả
+    yêu cầu cũ.
+    """
+    if not wants_to_amend(goal) or not _amends_a_previous_request(goal):
+        return goal
+    record = await _amend_target(session_id, owner_user_id=str(user["id"]))
+    if record is None or _amendable_values(record):
+        return goal
+    previous = str((record.get("workflow") or {}).get("goal") or "").strip()
+    if not previous:
+        return goal
+    return f"{previous}\nYêu cầu sửa đổi mới nhất của người dùng: {goal}"
 
 
 @router.get("/workflows/demo/{workflow_id}/amendable", summary="Các ô sửa được của một yêu cầu")

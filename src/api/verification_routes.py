@@ -6,7 +6,7 @@ sở hữu:
 
   - `POST /api/v1/verification-records` — khách hàng gửi đơn kèm ảnh giấy tờ.
   - `GET  /api/v1/verification-records/my` — đơn của chính mình.
-  - `GET  /api/v1/verification-records` — danh sách cho người duyệt (provider/admin).
+  - `GET  /api/v1/verification-records` — danh sách cho người duyệt (CHỈ provider).
   - `POST /api/v1/verification-records/{record_id}/decide` — duyệt/từ chối; khi
     duyệt, main app MATERIALIZE kết quả vào hệ thống thật.
 
@@ -36,6 +36,8 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.api.deps import get_current_user, require_roles
@@ -45,7 +47,18 @@ from src.connectors.ownership import OwnershipConnector, OwnershipProviderError
 from src.connectors.transport import TransportConnector
 from src.db.link_request_repository import materialize_resident_link
 from src.db.resident_link_repository import get_verified_identity
+from src.db.verification_receipt_repository import (
+    ReceiptSnapshot,
+    VerificationReceipts,
+    VerificationRecoveryUnavailableError,
+)
 from src.orchestration.runtime_provider import acquire_repository
+from src.orchestration.verification_recovery import (
+    DecisionConflictError,
+    ProviderStateUnknownError,
+    run_decision,
+)
+from src.orchestration.verification_views import enrich, provider_view
 
 logger = logging.getLogger(__name__)
 
@@ -156,12 +169,42 @@ async def create_verification_record(
         raise
 
     logger.info("verification record created type=%s record=%s", record_type, record_id)
+    # CHƯA enrich — xem ghi chú backlog ở cuối module.
     return {"item": data}
 
 
 # ---------------------------------------------------------------------------
 # Khách hàng: theo dõi đơn của mình
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Đường DUY NHẤT từ record của provider tới response công khai.
+#
+# Ba endpoint (customer/provider/admin) đi qua đây, nên không endpoint nào tự
+# viết bảng trạng thái riêng — và không endpoint nào lệch khỏi hai cái kia mà
+# suite vẫn xanh.
+#
+# `status` của provider KHÔNG còn được trả thẳng ra như kết luận: `APPROVED` chỉ
+# nói đơn vị đã ký, không nói quyền đã mở. Ghép nó với biên lai materialization
+# là việc của `enrich()`.
+# ---------------------------------------------------------------------------
+_RECEIPT_UNAVAILABLE = "Hệ thống chưa đọc được tiến trình xác minh. Vui lòng thử lại sau."
+
+
+async def _enrich_records(records: list[dict], *, kind: str, accounts: dict | None = None) -> list[dict]:
+    """Tra biên lai theo LÔ đúng một lượt rồi dựng view theo vai.
+
+    Fail-closed: biên lai không đọc được thì KHÔNG trả danh sách một phần và
+    KHÔNG rơi về "chỉ dùng provider status" — bản rút gọn ấy sẽ hiện `APPROVED`
+    như đã hoàn tất, đúng thứ cả tầng này sinh ra để chặn.
+    """
+    if not records:
+        return []
+    repository = await acquire_repository()
+    receipts = VerificationReceipts(repository._pool)  # noqa: SLF001 - pool dùng chung của runtime
+    snapshots = await receipts.snapshot_for([str(r.get("record_id")) for r in records])
+    return enrich(records, snapshots, kind=kind, accounts=accounts)
 
 
 @router.get("/my", summary="Danh sách đơn xác thực của chính mình")
@@ -174,11 +217,19 @@ async def my_verification_records(
         items = await connector.list_records(applicant_user_id=user["id"])
     except OwnershipProviderError as exc:
         raise _to_http(exc) from exc
-    return {"items": items}
+    try:
+        return {"items": await _enrich_records(items, kind="customer")}
+    except VerificationRecoveryUnavailableError:
+        raise HTTPException(status_code=503, detail=_RECEIPT_UNAVAILABLE) from None
 
 
 # ---------------------------------------------------------------------------
-# Provider/admin: danh sách + quyết định
+# ĐƠN VỊ CUNG CẤP: danh sách + quyết định
+#
+# Admin KHÔNG nằm ở đây. Quyền duyệt là quyền nhân danh một đơn vị nhận việc;
+# admin của hệ thống không phải đơn vị ấy. Cho họ ký nghĩa là một quyết định
+# thương mại mang chữ ký của người không chịu trách nhiệm thực hiện — và trong
+# log thì nó trông y hệt một quyết định thật.
 # ---------------------------------------------------------------------------
 
 
@@ -186,7 +237,7 @@ async def my_verification_records(
 async def list_verification_records(
     record_type: str | None = None,
     status: str | None = None,
-    _reviewer: dict = Depends(require_roles("provider", "admin")),
+    _reviewer: dict = Depends(require_roles("provider")),
     connector: OwnershipConnector = Depends(_ownership_connector),
 ) -> dict:
     if status is not None and status not in {"PENDING", "APPROVED", "REJECTED"}:
@@ -194,15 +245,21 @@ async def list_verification_records(
     try:
         items = await connector.list_records(record_type=record_type, status=status)
     except OwnershipProviderError as exc:
+        # Provider chết và biên lai chết là HAI sự cố khác nhau, giữ hai lối xử
+        # lý riêng — gộp vào một `except` là mất khả năng nói cho người vận hành
+        # biết phải đi xem hệ thống nào.
         raise _to_http(exc) from exc
-    return {"items": items}
+    try:
+        return {"items": await _enrich_records(items, kind="provider")}
+    except VerificationRecoveryUnavailableError:
+        raise HTTPException(status_code=503, detail=_RECEIPT_UNAVAILABLE) from None
 
 
 @router.post("/{record_id}/decide", summary="Duyệt hoặc từ chối một hồ sơ xác thực")
 async def decide_verification_record(
     record_id: str,
     body: _DecideBody,
-    reviewer: dict = Depends(require_roles("provider", "admin")),
+    reviewer: dict = Depends(require_roles("provider")),
     ownership: OwnershipConnector = Depends(_ownership_connector),
     transport: TransportConnector = Depends(_transport_connector),
 ) -> dict:
@@ -221,27 +278,80 @@ async def decide_verification_record(
     """
     await _reject_self_review(record_id, reviewer, ownership)
 
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    receipts = VerificationReceipts(pool)
+
+    async def _materialize(record: dict) -> dict | None:
+        return await _materialize_approved(record, pool, transport)
+
     try:
-        record = await ownership.decide_record(
-            record_id,
-            decision=body.decision,
-            reject_reason=body.reject_reason,
+        outcome = await run_decision(
+            record_id=record_id,
+            requested_decision=body.decision,
             decided_by=reviewer["username"],
+            reject_reason=body.reject_reason,
+            ownership=ownership,
+            receipts=receipts,
+            materialize=_materialize,
         )
+    except DecisionConflictError as conflict:
+        # Quyết định đi ngược một trạng thái đã chốt. KHÔNG đổi gì.
+        raise HTTPException(status_code=409, detail="Hồ sơ này đã được quyết định trước đó.") from conflict
+    except VerificationRecoveryUnavailableError:
+        # Không ghi nhận được tiến trình. KHÔNG phải lỗi của người dùng, và
+        # KHÔNG được báo thành công: nếu chưa ghi được trạng thái nào thì không
+        # có gì chứng minh việc đã xảy ra.
+        #
+        # Route bắt lỗi DOMAIN, không bắt `asyncpg.PostgresError` hay
+        # `ConnectionError`: bắt exception của thư viện là buộc route phải đổi
+        # khi thư viện đổi, và cách sửa nhanh nhất lúc ấy luôn là
+        # `except Exception` — rồi nó nuốt cả những lỗi không được nuốt.
+        raise HTTPException(
+            status_code=503,
+            detail="Hệ thống chưa thể ghi nhận tiến trình xác minh. Vui lòng thử lại sau.",
+        ) from None
+    except ProviderStateUnknownError as unknown:
+        # Không đọc được, hoặc provider ở trạng thái mình chưa hiểu. Fail-closed:
+        # thà từ chối còn hơn materialize dựa trên một phỏng đoán.
+        raise HTTPException(
+            status_code=503, detail="Chưa xác định được trạng thái hồ sơ, vui lòng thử lại sau."
+        ) from unknown
     except OwnershipProviderError as exc:
         raise _to_http(exc) from exc
+    finally:
+        await pool.close()
 
-    if record["status"] == "APPROVED":
-        repository = await acquire_repository()
-        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
-        try:
-            materialized = await _materialize_approved(record, pool, transport)
-        finally:
-            await pool.close()
-        if materialized is not None:
-            record["materialized"] = materialized
+    # Dựng view từ CHÍNH kết quả lượt này, không đi đọc lại biên lai.
+    #
+    # Đọc lại là mở thêm một chỗ hỏng: nếu database biên lai vừa chết đúng lúc
+    # đó, một quyết định ĐÃ thành công sẽ trả 503 — và người duyệt tin là chưa
+    # ký. `Outcome` đã mang đúng hai thứ mapper cần. GET sau đó vẫn đọc biên lai
+    # authoritative như thường.
+    snapshot = ReceiptSnapshot(
+        receipt_exists=True,
+        materialization_status=outcome.materialization_status,
+        safe_error_code=outcome.safe_error_code,
+    )
+    item = provider_view(outcome.record, snapshot)
+    if outcome.finished:
+        return {"item": item}
 
-    return {"item": record}
+    # Đơn vị ĐÃ ký, main app chưa ghi xong. Đây không phải thành công, và cũng
+    # không phải một request mất hoàn toàn — quyết định đã persist và biên lai
+    # đã ghi, nên nó là việc đang chờ hoàn tất. 202, không phải 200 và không
+    # phải 500.
+    #
+    # Tuyệt đối không nói "đã xác minh": quyền chưa mở.
+    return JSONResponse(
+        status_code=202,
+        content=jsonable_encoder(
+            {
+                "item": item,
+                "message": "Hồ sơ đã được duyệt, hệ thống đang hoàn tất cập nhật. Bạn thử lại sau ít phút nhé.",
+            }
+        ),
+    )
 
 
 async def _materialize_approved(
@@ -436,3 +546,21 @@ def _materialize_error_message(result) -> str:
     if result.error_code == ErrorCode.SERVICE_UNAVAILABLE:
         return "Dịch vụ đăng ký xe đang tạm ngừng, vui lòng thử lại sau."
     return "Đăng ký xe thất bại khi hoàn tất duyệt. Vui lòng thử lại."
+
+
+# ---------------------------------------------------------------------------
+# BACKLOG: `POST /verification-records` vẫn trả record THÔ.
+#
+# Client khai kiểu enriched, nên type nói một đằng runtime một nẻo. Nhưng chỗ
+# này không sửa được bằng một dòng `customer_view(...)`: response tạo đơn đang
+# phục vụ hai việc cùng lúc — xác nhận cho khách, VÀ trả lại `ownership_match`
+# cùng `proof_image_urls` mà khách vừa tải lên để màn hình hiển thị lại.
+#
+# Contract customer view cố ý không có hai trường ấy. Nên hợp nhất chúng là một
+# quyết định về sản phẩm ("khách có được xem lại giấy tờ mình vừa gửi không"),
+# không phải một cú refactor. Đo được: đổi thẳng làm đỏ
+# `test_create_apartment_pending_via_multipart` ở ba assertion khác nhau.
+#
+# Rủi ro còn lại đã giới hạn: đây là đường TẠO đơn, luôn trả PENDING, nên nó
+# không thể nói sai về "đã xác minh" — khác hẳn hai đường GET và POST decide.
+# ---------------------------------------------------------------------------
