@@ -990,6 +990,22 @@ def _plan_view(plan: TaskPlan | None) -> list[DemoPlanTask]:
 
 
 def _plan_from_job_or_record(job: dict[str, Any] | None, record: dict[str, Any] | None) -> TaskPlan | None:
+    # Một repair tạo task mới (`T5R2`) và giữ `T5` CANCELLED trong database để
+    # làm dấu vết kiểm toán. `workflows.task_plan` là snapshot ghi-một-lần nên
+    # chỉ biết T5; dùng nó cho trang Lịch sử sẽ hiện "Đặt chỗ đã huỷ" cạnh một
+    # payment PAID, dù T5R2 đã SUCCESS.
+    #
+    # Khi có attempt mới, view công khai dựng kế hoạch từ các dòng task SỐNG và
+    # thay vị trí logic của task gốc bằng attempt mới nhất. Dòng cũ KHÔNG bị xoá
+    # hay sửa — chỉ không được dùng làm kết quả hiện hành trên giao diện.
+    if record is not None:
+        rows = list(record.get("tasks") or [])
+        current_rows = _current_attempt_rows(rows)
+        if len(current_rows) != len(rows):
+            from src.orchestration.demo_service import _plan_from_task_rows
+
+            goal = (record.get("workflow") or {}).get("goal") or ""
+            return _plan_from_task_rows(goal, current_rows)
     if job is not None and isinstance(job.get("plan"), TaskPlan):
         return job["plan"]
     if record is None:
@@ -1003,6 +1019,44 @@ def _plan_from_job_or_record(job: dict[str, Any] | None, record: dict[str, Any] 
         return TaskPlan.model_validate(raw)
     except ValueError:
         return None
+
+
+_REPAIR_ATTEMPT_ID = re.compile(r"^(?P<base>.+)R(?P<number>[2-9][0-9]*)$")
+
+
+def _current_attempt_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Giữ đúng một attempt hiện hành cho mỗi bước logic trong public view.
+
+    Chỉ coi ``T5R2`` là attempt của ``T5`` khi dòng gốc ``T5`` thực sự tồn tại.
+    Nhờ vậy một task id hợp lệ tình cờ chứa chữ ``R`` không bị gộp theo regex.
+    Vị trí của bước gốc được giữ nguyên để thứ tự hành trình không đổi; chỉ row
+    dùng để trình bày trạng thái/kết quả được thay bằng attempt mới nhất.
+    """
+    ids = {str(row.get("task_id")) for row in rows}
+    latest: dict[str, tuple[int, dict[str, Any]]] = {}
+    attempt_to_base: dict[str, str] = {}
+    for row in rows:
+        task_id = str(row.get("task_id"))
+        match = _REPAIR_ATTEMPT_ID.fullmatch(task_id)
+        if match is None or match.group("base") not in ids:
+            continue
+        base = match.group("base")
+        number = int(match.group("number"))
+        attempt_to_base[task_id] = base
+        if base not in latest or number > latest[base][0]:
+            latest[base] = (number, row)
+
+    if not latest:
+        return rows
+
+    current: list[dict[str, Any]] = []
+    for row in rows:
+        task_id = str(row.get("task_id"))
+        if task_id in latest:
+            current.append(latest[task_id][1])
+        elif task_id not in attempt_to_base:
+            current.append(row)
+    return current
 
 
 def _task_view_time(row: dict[str, Any]) -> str | None:
@@ -2180,6 +2234,10 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
         status=status,
         message=_DEFAULT_BASELINE.get(status),
         summary=summary,
+        # Workspace dựng tiêu đề và bộ đếm từ plan. Nhánh đọc DB là đường sau
+        # payment decision, F5 và mở từ Lịch sử; bỏ plan ở đây khiến workflow
+        # SUCCESS vẫn hiện "Đang chuẩn bị… · 0/0" dù tasks đã đầy đủ.
+        plan=_plan_view(plan),
         tasks=tasks,
         persisted=True,
         # Dòng thời gian đọc từ `workflow_events`, không phải từ RAM — đây là

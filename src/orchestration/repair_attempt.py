@@ -224,6 +224,45 @@ async def open_new_attempts(
         input_cu[task.task_id] = _persisted_input(row)
         thay_the.append(SupersededTask(old_task_id=task.task_id, new_task_id=moi, tool=task.tool))
 
+    # Một yêu cầu mới không thể phụ thuộc vào một quyết định đã chết.
+    #
+    # Ca đo được: provider từ chối CẢ register_vehicle (T2) và book_parking
+    # (T5). Khách đổi Khu A → Khu B nên vòng trên mở T5R2, nhưng T5R2 vẫn trỏ
+    # vào T2 CANCELLED. Đơn vị duyệt Khu B xong thì Executor dừng ngay với
+    # DEPENDENCY_ERROR — đúng một workflow gồm hai đơn, nhưng chỉ một đơn được
+    # đưa lại vào hàng đợi.
+    #
+    # Không tự hồi sinh mọi dependency FAILED: chỉ dependency có quyết định
+    # REJECTED/EXPIRED authoritative mới được cấp danh tính mới, và nó vẫn phải
+    # qua một approval MỚI trước khi connector được gọi. Như vậy cascade không
+    # nới quyền provider và không biến lỗi hạ tầng thành side effect ngầm.
+    tasks_by_id = {task.task_id: task for task in plan.tasks}
+    queue = list(doi_ten)
+    while queue:
+        current = tasks_by_id.get(queue.pop(0))
+        if current is None:
+            continue
+        for dependency_id in current.depends_on:
+            if dependency_id in doi_ten or dependency_id not in tu_choi:
+                continue
+            dependency_row = rows.get(dependency_id)
+            dependency = tasks_by_id.get(dependency_id)
+            if dependency_row is None or dependency is None:
+                continue
+            if dependency_row.get("status") not in {"FAILED", "CANCELLED", "SKIPPED"}:
+                continue
+            moi = _allocate_task_id(dependency_id, taken)
+            if moi is None:
+                logger.warning("khong cap duoc danh tinh moi cho dependency bi tu choi")
+                return plan, []
+            taken.add(moi)
+            doi_ten[dependency_id] = moi
+            input_cu[dependency_id] = _persisted_input(dependency_row)
+            thay_the.append(SupersededTask(old_task_id=dependency_id, new_task_id=moi, tool=dependency.tool))
+            # Dependency của dependency cũng có thể đã bị từ chối trong cùng
+            # bundle; duyệt theo chuỗi thay vì chỉ sửa đúng một tầng.
+            queue.append(dependency_id)
+
     if not doi_ten:
         return plan, []
 

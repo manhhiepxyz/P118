@@ -77,6 +77,15 @@ _CHANGE_VERB = re.compile(
     re.IGNORECASE,
 )
 
+# Hai cách người dùng thực tế dùng để NÓI LẠI một thay đổi trong chuỗi
+# đăng ký xe + chỗ đỗ. Không mở rộng thành ``lại`` hay ``chỉ muốn`` đơn lẻ:
+# chúng cũng xuất hiện trong yêu cầu mới. Điều kiện đủ vẫn nằm ở caller — phải
+# có workflow cùng session đang sửa được và parser phải rút ra một giá trị mới.
+_PARKING_RESTATEMENT = re.compile(
+    r"\b(?:đăng\s*ký\s+lại|chỉ\s+muốn\s+đăng\s*ký\s+phương\s+tiện\s+và\s+chỗ\s+đỗ\s+xe)\b",
+    re.IGNORECASE,
+)
+
 # Câu xin BỎ, không phải xin sửa. Bắt riêng để không nuốt: "đổi" trong "đổi ý,
 # thôi không đặt nữa" là đổi ý chứ không phải đổi giá trị một ô.
 _CANCEL_WORD = re.compile(r"\b(?:huỷ|hủy|bỏ|thôi|dừng|cancel)\b", re.IGNORECASE)
@@ -96,7 +105,7 @@ def wants_to_amend(text: str | None) -> bool:
         return False
     if _CANCEL_WORD.search(said):
         return False
-    return bool(_CHANGE_VERB.search(said))
+    return bool(_CHANGE_VERB.search(said) or _PARKING_RESTATEMENT.search(said))
 
 
 # --- Ngày nói tắt ------------------------------------------------------------

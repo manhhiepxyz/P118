@@ -85,6 +85,22 @@ class _SpyConnector:
 
     async def execute(self, tool: str, payload: dict, context=None) -> StandardResult:
         self.calls.append({"tool": tool, "input": dict(payload), "key": getattr(context, "idempotency_key", None)})
+        if tool == "register_vehicle":
+            vehicle_id = "VEH-RETRY"
+            await self._pool.execute(
+                "INSERT INTO vehicles (vehicle_id, resident_id, plate_number, vehicle_type) VALUES ($1,$2,$3,$4)",
+                vehicle_id,
+                payload.get("resident_id"),
+                payload.get("plate_number"),
+                payload.get("vehicle_type"),
+            )
+            return StandardResult.ok(
+                {
+                    "vehicle_id": vehicle_id,
+                    "plate_number": payload.get("plate_number"),
+                    "vehicle_type": payload.get("vehicle_type"),
+                }
+            )
         if tool == "book_parking":
             # Ghi chỗ đỗ THẬT xuống `parking_bookings`, y như Transport mock.
             # Báo giá lúc thanh toán được đọc lại từ chính bảng này (nguồn CÓ
@@ -225,6 +241,32 @@ async def _rows(pool, workflow_id) -> dict[str, dict]:
     return {r["task_id"]: dict(r) for r in rows}
 
 
+async def _both_vehicle_and_parking_are_rejected(pool, workflow_id: str) -> None:
+    """Biến seed thành đúng ca UI vừa tái hiện: cả hai đơn đều bị từ chối."""
+    async with pool.acquire() as conn, conn.transaction():
+        # Đăng ký xe chưa từng materialize: xoá dấu vết SUCCESS dựng bởi seed.
+        await conn.execute("DELETE FROM vehicles WHERE vehicle_id = 'VEH-1'")
+        await conn.execute(
+            "UPDATE workflow_tasks SET status='CANCELLED', result_data=NULL, error_code=NULL,"
+            " provider_submission_status='NOT_SUBMITTED'"
+            " WHERE workflow_id=$1::uuid AND task_id='T2'",
+            workflow_id,
+        )
+        await conn.execute(
+            "UPDATE service_approvals SET status='REJECTED', reject_code='NO_AVAILABILITY',"
+            " reject_reason='Khu A hết chỗ', decided_by='don_vi', decided_at=NOW()"
+            " WHERE workflow_id=$1::uuid AND task_id='T5'",
+            workflow_id,
+        )
+        await conn.execute(
+            "INSERT INTO service_approvals"
+            " (workflow_id,task_id,tool,service_label,details,status,reject_code,reject_reason,decided_by,decided_at)"
+            " VALUES ($1::uuid,'T2','register_vehicle','Đăng ký phương tiện','{}'::jsonb,'REJECTED',"
+            " 'OTHER','Không thể nhận đăng ký trong lượt này','don_vi',NOW())",
+            workflow_id,
+        )
+
+
 def _jsonb(value):
     return json.loads(value) if isinstance(value, str) else (value or {})
 
@@ -358,6 +400,40 @@ async def test_the_provider_must_approve_zone_b_on_its_own(client, db_pool, spy)
 
 
 @pytest.mark.asyncio
+async def test_repairing_parking_reopens_its_rejected_vehicle_dependency(client, db_pool, spy):
+    """Một attempt giữ chỗ mới không được trỏ vào đăng ký xe đã bị từ chối.
+
+    Đây vẫn là hai quyết định độc lập của provider: hệ thống mở hai approval
+    MỚI, không tự coi đăng ký xe là được duyệt và không gọi connector trước.
+    """
+    workflow_id = await _seed_zone_a_failed(db_pool)
+    await _both_vehicle_and_parking_are_rejected(db_pool, workflow_id)
+
+    outcome = await demo_service.rerun_with_answers(workflow_id, {"parking_zone": "ZONE_B"})
+
+    assert outcome["status"] == WorkflowStatus.WAITING_APPROVAL.value
+    assert not spy.calls, "gọi connector trước khi provider duyệt hai yêu cầu mới"
+    approvals = [row for row in await pending_for_workflow(db_pool, workflow_id) if row["status"] == "AWAITING"]
+    assert {row["tool"] for row in approvals} == {"register_vehicle", "book_parking"}, approvals
+    assert all(row["task_id"] not in {"T2", "T5"} for row in approvals), approvals
+
+    rows = await _rows(db_pool, workflow_id)
+    new_vehicle = next(row for task_id, row in rows.items() if task_id != "T2" and row["tool"] == "register_vehicle")
+    new_parking = next(row for task_id, row in rows.items() if task_id != "T5" and row["tool"] == "book_parking")
+    assert _jsonb(new_parking["depends_on"]) == [new_vehicle["task_id"]]
+
+    for approval in approvals:
+        assert await record_service_decision(db_pool, workflow_id, approval["task_id"], "APPROVED", decided_by="don_vi")
+    await demo_service.resume_after_service_decision(workflow_id)
+
+    assert len(spy.calls_to("register_vehicle")) == 1
+    assert len(spy.calls_to("book_parking")) == 1
+    rows = await _rows(db_pool, workflow_id)
+    assert rows[new_vehicle["task_id"]]["status"] == "SUCCESS"
+    assert rows[new_parking["task_id"]]["status"] == "SUCCESS"
+
+
+@pytest.mark.asyncio
 async def test_zone_b_is_booked_exactly_once_after_approval(client, db_pool, spy):
     """Sau khi đơn vị duyệt: gọi ĐÚNG một lần, ĐÚNG Khu B, không có Khu A."""
     workflow_id = await _seed_zone_a_failed(db_pool)
@@ -440,6 +516,96 @@ async def test_the_new_booking_is_what_payment_is_built_from(client, db_pool, sp
     )
     assert lai.status_code == 409, lai.text
     assert len(spy.calls_to("pay_fee")) == 1, "bấm hai lần thì trả tiền hai lần"
+
+
+@pytest.mark.asyncio
+async def test_history_shows_the_successful_replacement_not_the_cancelled_attempt(client, db_pool, spy):
+    """Trang Lịch sử phải trình bày KẾT QUẢ hiện hành của một bước đã sửa.
+
+    Khu A bị huỷ vẫn nằm trong PostgreSQL làm dấu vết kiểm toán. Nhưng sau khi
+    Khu B được duyệt, giữ chỗ và thanh toán thành công, danh sách bước công
+    khai phải hiện đúng một ``book_parking`` SUCCESS của Khu B — không được
+    lấy snapshot ban đầu rồi nói bước đặt chỗ đã bị huỷ cạnh một payment PAID.
+    """
+    from src.api.routes import _DEMO_JOBS
+
+    token = await _register_and_login(client, "khu_b_lich_su")
+    owner = await db_pool.fetchval("SELECT id FROM users WHERE username='khu_b_lich_su'")
+    workflow_id = await _seed_zone_a_failed(db_pool, owner_user_id=owner)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    await demo_service.rerun_with_answers(workflow_id, {"parking_zone": "ZONE_B"})
+    for task_id in [
+        row["task_id"] for row in await pending_for_workflow(db_pool, workflow_id) if row["status"] == "AWAITING"
+    ]:
+        await record_service_decision(db_pool, workflow_id, task_id, "APPROVED", decided_by="don_vi_do_xe")
+    await demo_service.resume_after_service_decision(workflow_id)
+    paid = await client.post(
+        f"/api/v1/workflows/demo/{workflow_id}/payment-decision",
+        json={"decision": "approve"},
+        headers=auth,
+    )
+    assert paid.status_code == 200, paid.text
+    assert paid.json()["plan"], "response SUCCESS làm workspace rơi về 'Đang chuẩn bị… · 0/0'"
+
+    # Mở từ Lịch sử sau reload/restart: không dựa vào response đang cache.
+    _DEMO_JOBS.clear()
+    history = await client.get(f"/api/v1/workflows/demo/{workflow_id}", headers=auth)
+
+    assert history.status_code == 200, history.text
+    assert history.json()["plan"], "mở lại từ Lịch sử mất toàn bộ sơ đồ tiến trình"
+    parking = [task for task in history.json()["tasks"] if task["tool"] == "book_parking"]
+    assert len(parking) == 1, parking
+    assert parking[0]["status"] == "SUCCESS", parking[0]
+    assert any(detail["label"] == "Khu vực" and detail["value"] == "Khu B" for detail in parking[0]["details"])
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "đăng ký lại vào khu B",
+        "tôi chỉ muốn đăng ký phương tiện và chỗ đỗ xe khu B",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_same_service_change_stays_in_the_same_workflow(client, db_pool, spy, monkeypatch, message: str):
+    """Câu sửa cùng dịch vụ không được tạo thêm một card trong Lịch sử."""
+    from src.api import routes
+
+    username = f"cung_workflow_{uuid.uuid4().hex[:8]}"
+    token = await _register_and_login(client, username)
+    owner = await db_pool.fetchval("SELECT id FROM users WHERE username=$1", username)
+    workflow_id = await _seed_zone_a_failed(db_pool, owner_user_id=owner)
+    session_id = await db_pool.fetchval(
+        "SELECT session_id::text FROM workflows WHERE workflow_id=$1::uuid", workflow_id
+    )
+
+    # Nếu intent lane bỏ lọt, /start sẽ schedule Planner. Chặn side effect đó;
+    # test chỉ đo quyết định định tuyến và số shell trong PostgreSQL.
+    async def _must_not_plan(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(routes, "_run_demo_job", _must_not_plan)
+    before = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM workflows WHERE session_id=$1 AND owner_user_id=$2",
+        session_id,
+        str(owner),
+    )
+
+    response = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={"goal": message, "session_id": session_id},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["workflow_id"] == workflow_id
+    after = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM workflows WHERE session_id=$1 AND owner_user_id=$2",
+        session_id,
+        str(owner),
+    )
+    assert after == before, "một câu sửa tạo thêm workflow/card Lịch sử"
 
 
 @pytest.mark.asyncio
