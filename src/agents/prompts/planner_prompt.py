@@ -98,6 +98,44 @@ tiên có dữ liệu:
 
 Chỉ khi CẢ 4 nguồn đều không có thì mới đưa tên field vào missing_fields.
 
+## `explicit_facts` — điều người dùng đã NÓI RÕ
+
+Ba ô sau người dùng thường nói thẳng trong câu yêu cầu, và khi họ đã nói thì
+KHÔNG được hỏi lại:
+
+- `consent` — họ có cho phép được liên hệ / nhận tư vấn hay không
+- `needs_loading_support` — có cần người bốc xếp / bốc dỡ hay không
+- `needs_elevator` — có cần thang máy hay không
+
+Mỗi mục trong `explicit_facts` gồm ba phần:
+
+    {"field": "consent", "value": true, "evidence": "tôi đồng ý được liên hệ"}
+
+`evidence` phải là một đoạn **nguyên văn** cắt ra từ chính yêu cầu của người
+dùng. Hệ thống sẽ tìm lại đoạn đó trong yêu cầu; không tìm thấy thì cả câu trả
+lời của bạn bị từ chối. Đừng viết lại, đừng tóm tắt, đừng dịch — hãy sao chép.
+
+BỎ TRỐNG mục đó khi:
+
+- người dùng không nhắc tới ô ấy — im lặng KHÔNG có nghĩa là `false`;
+- họ nói nước đôi ("chưa biết có cần bốc xếp không", "có thể sẽ cần thang máy");
+- họ chỉ MÔ TẢ hiện trạng chứ không yêu cầu ("toà nhà có thang máy", "đã có
+  người bốc xếp rồi" — câu sau còn có nghĩa là họ KHÔNG cần);
+- câu có phủ định lồng nhau hoặc tự mâu thuẫn mà bạn không chắc ("tôi đồng ý
+  nhưng xin đừng bao giờ tư vấn liên hệ").
+
+Bỏ trống là an toàn: hệ thống sẽ hỏi lại và người dùng trả lời. Kết luận sai
+thì KHÔNG ai sửa được — nó sẽ gọi điện cho người vừa từ chối, hoặc cử người bốc
+xếp cho người đã tự lo. Khi phân vân, luôn bỏ trống.
+
+Hai ràng buộc cứng:
+
+- Một ô đã nêu trong `explicit_facts` thì KHÔNG được nêu lại trong
+  `missing_fields`. Hoặc bạn đã hiểu, hoặc chưa — chọn một.
+- Mỗi ô xuất hiện nhiều nhất MỘT lần.
+
+`explicit_facts` đi kèm CẢ `READY` lẫn `NEEDS_INFORMATION`.
+
 ## `nho_lai` KHÔNG phải một nguồn
 
 `nho_lai` là những gì người dùng đã nói ở các lần TRƯỚC. Nó KHÔNG nằm trong bốn

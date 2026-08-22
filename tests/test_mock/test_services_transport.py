@@ -8,6 +8,9 @@ Provider giờ dùng PostgreSQL làm nguồn sự thật, nên deviation cũ kh�
 - book_parking vẫn check vehicle_id → 404 nếu thiếu.
 """
 
+import json
+import uuid
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -123,20 +126,19 @@ async def test_fail_injection_no_availability():
 
 
 @pytest.mark.asyncio
-async def test_book_parking_capacity_real(seed_resident, wire_provider_pool):
-    """Đầy sức chứa của một ngày → lần kế tiếp 409 NO_AVAILABILITY.
+async def test_an_approved_parking_request_is_not_overruled_by_seeded_capacity(seed_resident, wire_provider_pool):
+    """HTTP provider chỉ materialize quyết định đã được ký ở ``/review``.
 
-    Sức chứa được ĐẶT ngay trong test thay vì mượn số từ seed. Bản trước dựa
-    vào "ZONE_A có đúng 3 chỗ": một thay đổi cấu hình sản phẩm — khu A chuyển
-    sang kín để dựng kịch bản đổi khu — làm test đỏ dù cơ chế đếm không hề sai.
-    Test này nói về CƠ CHẾ đếm, nên nó phải tự nắm con số.
+    Capacity giả trong main DB không được trở thành người quyết định thứ hai:
+    provider vừa duyệt Khu B mà endpoint lại trả NO_AVAILABILITY là hai nguồn
+    sự thật mâu thuẫn cho cùng một yêu cầu.
     """
     day = "2026-12-11"
     async with wire_provider_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO parking_capacity (parking_zone, booking_date, capacity) "
-            "VALUES ('ZONE_B', $1, 3) "
-            "ON CONFLICT (parking_zone, booking_date) DO UPDATE SET capacity = 3",
+            "VALUES ('ZONE_B', $1, 0) "
+            "ON CONFLICT (parking_zone, booking_date) DO UPDATE SET capacity = 0",
             __import__("datetime").date.fromisoformat(day),
         )
         await conn.execute(
@@ -144,23 +146,58 @@ async def test_book_parking_capacity_real(seed_resident, wire_provider_pool):
             __import__("datetime").date.fromisoformat(day),
         )
 
-    async with AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://test") as ac:
-        for i in range(3):
-            vid = await _register_vehicle(ac, plate=f"51A-000{i + 1}")
-            r = await ac.post(
-                "/api/parking/bookings",
-                json={"vehicle_id": vid, "booking_date": day, "parking_zone": "ZONE_B"},
-            )
-            assert r.status_code == 201
+    workflow_id = str(uuid.uuid4())
+    task_id = "T-PARK"
+    async with wire_provider_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO workflows (workflow_id, goal, status) VALUES ($1::uuid,'Giữ chỗ','RUNNING')",
+            workflow_id,
+        )
+        await conn.execute(
+            "INSERT INTO workflow_tasks (workflow_id,task_id,tool,status,depends_on,input_data) "
+            "VALUES ($1::uuid,$2,'book_parking','PENDING','[]'::jsonb,$3::jsonb)",
+            workflow_id,
+            task_id,
+            json.dumps({"booking_date": day, "parking_zone": "ZONE_B"}),
+        )
+        await conn.execute(
+            "INSERT INTO service_approvals "
+            "(workflow_id,task_id,tool,service_label,details,status) "
+            "VALUES ($1::uuid,$2,'book_parking','Giữ chỗ',$3::jsonb,'APPROVED')",
+            workflow_id,
+            task_id,
+            json.dumps({"booking_date": day, "parking_zone": "ZONE_B"}),
+        )
 
-        fourth = await _register_vehicle(ac, plate="51A-9999")
+    async with AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://test") as ac:
+        vehicle = await _register_vehicle(ac, plate="51A-9999")
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": fourth, "booking_date": day, "parking_zone": "ZONE_B"},
+            json={"vehicle_id": vehicle, "booking_date": day, "parking_zone": "ZONE_B"},
+            headers={"X-P118-Workflow-ID": workflow_id, "X-P118-Task-ID": task_id},
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["data"]["parking_zone"] == "ZONE_B"
+
+
+@pytest.mark.asyncio
+async def test_headers_without_a_matching_approval_do_not_bypass_capacity(seed_resident, wire_provider_pool):
+    day = "2026-12-12"
+    async with wire_provider_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO parking_capacity (parking_zone, booking_date, capacity) VALUES ('ZONE_B',$1,0) "
+            "ON CONFLICT (parking_zone, booking_date) DO UPDATE SET capacity=0",
+            __import__("datetime").date.fromisoformat(day),
+        )
+    async with AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://test") as ac:
+        vehicle = await _register_vehicle(ac, plate="51A-9998")
+        response = await ac.post(
+            "/api/parking/bookings",
+            json={"vehicle_id": vehicle, "booking_date": day, "parking_zone": "ZONE_B"},
+            headers={"X-P118-Workflow-ID": str(uuid.uuid4()), "X-P118-Task-ID": "T-PARK"},
         )
     assert response.status_code == 409
-    body = response.json()
-    assert body["error_code"] == "NO_AVAILABILITY"
+    assert response.json()["error_code"] == "NO_AVAILABILITY"
 
 
 @pytest.mark.asyncio

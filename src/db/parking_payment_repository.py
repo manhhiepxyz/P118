@@ -328,12 +328,19 @@ async def create_booking(
     vehicle_id: str,
     parking_zone: str,
     booking_date: str,
+    availability_already_approved: bool = False,
 ) -> Booking:
-    """Tạo booking trong một transaction có kiểm capacity.
+    """Tạo booking trong một transaction; tuỳ biên gọi có kiểm capacity.
 
     `SELECT ... FOR UPDATE` trên row capacity giữ khoá tới hết transaction, nên
     hai request đồng thời cho cùng zone/ngày không thể cùng đọc được số chỗ còn
     trống rồi cùng ghi.
+
+    ``availability_already_approved`` chỉ dành cho HTTP mock provider được gọi
+    SAU hàng đợi ``/review``. Ở luồng đó đơn vị đã ký quyết định còn chỗ; đọc
+    thêm capacity seed trong main DB sẽ tạo người quyết định thứ hai có thể phủ
+    quyết chính chữ ký ấy. Repository mặc định vẫn kiểm capacity để giữ primitive
+    đặt chỗ an toàn cho caller không đi qua hàng đợi duyệt.
     """
     if parking_zone not in ZONE_PRICES:
         raise BookingError("INVALID_INPUT", "Unsupported parking zone")
@@ -345,28 +352,29 @@ async def create_booking(
         if vehicle is None:
             raise BookingError("VEHICLE_NOT_FOUND", "Vehicle not found")
 
-        await conn.execute(
-            """
-            INSERT INTO parking_capacity (parking_zone, booking_date, capacity)
-            VALUES ($1::varchar, $2, COALESCE(
-                (SELECT capacity FROM zone_capacity_config WHERE parking_zone = $1::varchar), 10))
-            ON CONFLICT (parking_zone, booking_date) DO NOTHING
-            """,
-            parking_zone,
-            booking_day,
-        )
-        capacity_row = await conn.fetchrow(
-            "SELECT capacity FROM parking_capacity WHERE parking_zone = $1 AND booking_date = $2 FOR UPDATE",
-            parking_zone,
-            booking_day,
-        )
-        booked = await conn.fetchval(
-            "SELECT COUNT(*) FROM parking_bookings WHERE parking_zone = $1 AND booking_date = $2",
-            parking_zone,
-            booking_day,
-        )
-        if capacity_row is not None and booked >= capacity_row["capacity"]:
-            raise BookingError("NO_AVAILABILITY", "Parking zone is full for that date")
+        if not availability_already_approved:
+            await conn.execute(
+                """
+                INSERT INTO parking_capacity (parking_zone, booking_date, capacity)
+                VALUES ($1::varchar, $2, COALESCE(
+                    (SELECT capacity FROM zone_capacity_config WHERE parking_zone = $1::varchar), 10))
+                ON CONFLICT (parking_zone, booking_date) DO NOTHING
+                """,
+                parking_zone,
+                booking_day,
+            )
+            capacity_row = await conn.fetchrow(
+                "SELECT capacity FROM parking_capacity WHERE parking_zone = $1 AND booking_date = $2 FOR UPDATE",
+                parking_zone,
+                booking_day,
+            )
+            booked = await conn.fetchval(
+                "SELECT COUNT(*) FROM parking_bookings WHERE parking_zone = $1 AND booking_date = $2",
+                parking_zone,
+                booking_day,
+            )
+            if capacity_row is not None and booked >= capacity_row["capacity"]:
+                raise BookingError("NO_AVAILABILITY", "Parking zone is full for that date")
 
         booking_id = await _next_id(conn, "BOOK")
         amount = ZONE_PRICES[parking_zone]

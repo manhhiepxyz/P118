@@ -265,6 +265,28 @@ class PostgreSQLWorkflowStateRepository:
     async def update_task_status(self, workflow_id: str, task_id: str, status: TaskStatus) -> None:
         await self.workflows.update_task_status(workflow_id, task_id, status.value)
 
+    async def service_approvals_for(self, workflow_id: str) -> list[dict]:
+        """Hàng đợi duyệt của một workflow — nguồn có thẩm quyền cho câu
+        "đơn vị đã quyết định gì".
+
+        Nằm ở repository chứ không gọi thẳng `pending_for_workflow(pool, ...)`:
+        tầng orchestration không được cầm pool, và một hàm có tên là chỗ duy
+        nhất để đổi khi hàng đợi đổi hình dạng.
+        """
+        from src.orchestration.service_approval import pending_for_workflow
+
+        return [dict(row) for row in await pending_for_workflow(self._pool, workflow_id)]
+
+    async def supersede_task_with_new_attempt(self, workflow_id: str, *, old_task_id: str, new_task: dict) -> None:
+        """Thay một bước bằng một lần thử mới — xem `WorkflowRepository`."""
+        return await self.workflows.supersede_task_with_new_attempt(
+            workflow_id, old_task_id=old_task_id, new_task=new_task
+        )
+
+    async def clear_repair_hints(self, workflow_id: str, task_ids: list[str] | None = None) -> int:
+        """Xoá dấu vết hỏng đã xử lý — xem `WorkflowRepository`."""
+        return await self.workflows.clear_repair_hints(workflow_id, task_ids)
+
     async def reopen_cancelled_tasks(self, workflow_id: str) -> int:
         """Mở lại các bước đã huỷ/hỏng để chạy lại — xem tầng repository."""
         return await self.workflows.reopen_cancelled_tasks(workflow_id)

@@ -452,6 +452,12 @@ export interface ServiceApprovalRecord {
   decided_by?: string | null
   decided_at?: string | null
   reject_reason?: string | null
+  /** Nguyên nhân canonical của lời từ chối. Backend đọc MÃ này để quyết định
+   *  hậu quả — `NO_AVAILABILITY` cho phép khách chọn lại khu/ngày, các mã còn
+   *  lại dừng hẳn bước đó. Câu chữ trong `reject_reason` chỉ để người đọc. */
+  reject_code?: 'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER' | null
+  /** Allowlist canonical do backend tính theo tool; UI không tự suy policy. */
+  allowed_reject_codes: Array<'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER'>
 }
 
 /** Body duyệt/từ chối lịch tham quan — từ chối bắt buộc lý do. */

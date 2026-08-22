@@ -63,6 +63,11 @@ class ProviderCallContext:
     """
 
     idempotency_key: str | None = None
+    # Định danh nội bộ của chính lần gọi. Mock provider dùng chúng để đối chiếu
+    # một quyết định availability đã được ký; connector không tự suy quyền từ
+    # input và provider không tin một cờ boolean do client gửi.
+    workflow_id: str | None = None
+    task_id: str | None = None
 
 
 class Connector(ABC):

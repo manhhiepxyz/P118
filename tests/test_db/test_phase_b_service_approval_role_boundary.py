@@ -110,7 +110,13 @@ async def test_a_provider_can_decide_a_service_approval_that_is_not_theirs(clien
 
     response = await client.post(
         f"/api/v1/service-approvals/{workflow_id}/{task_id}/decide",
-        json={"decision": "reject", "reject_reason": "Đơn vị đang bảo trì hệ thống"},
+        # Từ chối phải nêu NGUYÊN NHÂN canonical, không chỉ câu chữ: main app
+        # đọc mã để biết khách có sửa được hay không.
+        json={
+            "decision": "reject",
+            "reject_code": "SERVICE_UNAVAILABLE",
+            "reject_reason": "Đơn vị đang bảo trì hệ thống",
+        },
         headers={"Authorization": f"Bearer {token}"},
     )
 

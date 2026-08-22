@@ -344,6 +344,21 @@ PLANNER_FORBIDDEN_MISSING_FIELDS: frozenset[str] = frozenset({"full_name", "apar
 
 
 _CORRECTIVE_INSTRUCTIONS: dict[str, str] = {
+    "FACT_WITHOUT_EVIDENCE": (
+        "Trong explicit_facts, bạn nêu một kết luận mà phần 'evidence' không xuất hiện "
+        "nguyên văn trong yêu cầu của người dùng. Mỗi mục phải trích đúng một đoạn có "
+        "thật trong yêu cầu đó. Nếu không trích được, hãy BỎ mục ấy đi: người dùng chưa "
+        "nói rõ, và việc còn thiếu sẽ được hỏi lại."
+    ),
+    "CONTRADICTORY_FACT": (
+        "Trong explicit_facts, bạn đưa hai kết luận trái ngược nhau cho cùng một ô. Mỗi ô "
+        "chỉ được xuất hiện MỘT lần. Nếu yêu cầu của người dùng nói nước đôi về ô đó, hãy "
+        "bỏ nó khỏi explicit_facts để hệ thống hỏi lại."
+    ),
+    "FACT_AND_MISSING_CONFLICT": (
+        "Bạn vừa nêu một ô trong explicit_facts vừa nêu chính ô đó trong missing_fields. "
+        "Hai điều này loại trừ nhau: hoặc người dùng đã nói rõ, hoặc chưa. Chọn một."
+    ),
     "FORBIDDEN_PLANNER_TOOL": (
         "Kế hoạch của bạn chứa một bước đăng ký/liên kết hồ sơ cư dân. Việc đó "
         "nằm NGOÀI phạm vi của bạn và do bộ phận quản lý thực hiện. Nếu phần "
@@ -480,6 +495,47 @@ _JSON_MODE_INSTRUCTION = (
 )
 
 
+# Ba ô boolean mà người dùng có thể nói rõ ngay trong goal. Danh sách này là
+# `Literal` ở schema chứ không phải một lượt kiểm sau đó: một `_PlannerResponse`
+# mang `resident_id` phải KHÔNG DỰNG ĐƯỢC, để mọi đường dùng nó — kể cả đường
+# viết sau này — đều được chặn theo. Trust boundary bằng cấu trúc, không bằng
+# danh sách chặn.
+ExplicitFactField = Literal["consent", "needs_loading_support", "needs_elevator"]
+
+
+class _ExplicitFact(BaseModel):
+    """Một điều người dùng đã NÓI RÕ, kèm chỗ họ nói.
+
+    `evidence` là phần khiến cấu trúc này khác một dict tự do: model phải TRÍCH
+    DẪN được từ chính goal. Không trích được nghĩa là nó đang bịa, và code bắt
+    được điều đó mà không cần hiểu tiếng Việt.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: ExplicitFactField = Field(description="Tên ô. Chỉ ba giá trị này, không có ô nào khác.")
+    value: bool = Field(
+        strict=True,
+        description="true hoặc false. Phải là boolean thật, không phải chuỗi.",
+    )
+    evidence: str = Field(
+        min_length=1,
+        description="Đoạn NGUYÊN VĂN trong yêu cầu của người dùng chứng minh kết luận này.",
+    )
+
+    @field_validator("evidence")
+    @classmethod
+    def _evidence_must_carry_text(cls, raw: str) -> str:
+        """Khoảng trắng không phải một trích dẫn.
+
+        `min_length=1` cho " " đi qua, và một chuỗi trắng thì khớp với mọi goal
+        — tức là lớp kiểm trích dẫn bên dưới sẽ luôn xanh, và luôn vô nghĩa.
+        """
+        if not raw.strip():
+            raise ValueError("evidence rỗng.")
+        return raw
+
+
 class _PlannerResponse(BaseModel):
     """Schema structured output mà LLM phải điền.
 
@@ -506,6 +562,15 @@ class _PlannerResponse(BaseModel):
         description=(
             "Khi status=NEEDS_INFORMATION: tên các field còn thiếu, chỉ lấy từ danh sách "
             "cho phép. Phải rỗng khi status=READY."
+        ),
+    )
+    explicit_facts: list[_ExplicitFact] = Field(
+        default_factory=list,
+        description=(
+            "Những ô consent/needs_loading_support/needs_elevator mà người dùng đã NÓI RÕ "
+            "trong yêu cầu, kèm đoạn nguyên văn chứng minh. Bỏ trống nếu họ không nói, nói "
+            "nước đôi, hoặc chỉ nhắc tới chủ đề mà không yêu cầu. Không suy diễn từ việc "
+            "họ im lặng. Một ô đã nêu ở đây thì KHÔNG được nêu lại trong missing_fields."
         ),
     )
 
@@ -613,6 +678,23 @@ def build_question(missing_fields: tuple[str, ...]) -> str:
 
 
 @dataclass(frozen=True)
+class ExplicitFact:
+    """Một fact ĐÃ QUA KIỂM, sẵn sàng đi vào ngữ cảnh.
+
+    Kiểu riêng chứ không phải `dict`: một dict đi qua bốn tầng thì tầng thứ tư
+    không có cách nào biết nó đã được kiểm hay chưa. Object này chỉ ra đời từ
+    `Planner._accept_explicit_facts`, nên sự tồn tại của nó LÀ bằng chứng.
+
+    `evidence` KHÔNG được mang theo: nó là nguyên văn lời người dùng, và mọi
+    tầng dưới đây (state, clarification, log) đều không phải chỗ cho nó. Nó đã
+    làm xong việc của mình ở tầng kiểm.
+    """
+
+    field: ExplicitFactField
+    value: bool
+
+
+@dataclass(frozen=True)
 class PlannerResult:
     """Kết quả Planner trả cho caller.
 
@@ -635,6 +717,10 @@ class PlannerResult:
     status: PlannerStatus
     plan: TaskPlan | None = None
     missing_fields: tuple[str, ...] = field(default_factory=tuple)
+    # Đi kèm MỌI trạng thái, kể cả READY: người dùng có thể nói rõ cả ba ô và
+    # vẫn thiếu một thứ khác, hoặc không thiếu gì cả. Gắn fact vào riêng nhánh
+    # NEEDS_INFORMATION sẽ làm mất chúng đúng lúc kế hoạch chạy được.
+    explicit_facts: tuple[ExplicitFact, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         # `Literal` chỉ có tác dụng khi type-check tĩnh; dataclass không kiểm tra
@@ -973,6 +1059,65 @@ class Planner:
                     f"pay_fee dùng '{field_name}' không đến từ book_parking hay existing_context.",
                 )
 
+    @staticmethod
+    def _normalise_for_quote(text: str) -> str:
+        """Chuẩn hoá tối thiểu để so trích dẫn: thường hoá + gộp khoảng trắng.
+
+        CỐ Ý không bỏ dấu. `evidence` phải là một trích dẫn gần như nguyên văn;
+        một model viết lại câu không dấu thì nó đang diễn giải chứ không trích,
+        và đó chính là thứ lớp kiểm này tồn tại để bắt. Chỉ tha thứ hai khác
+        biệt vô hại: hoa/thường, và khoảng trắng thừa do xuống dòng.
+        """
+        return " ".join(text.casefold().split())
+
+    def _accept_explicit_facts(self, response: _PlannerResponse, goal: str) -> tuple[ExplicitFact, ...]:
+        """Nhận những fact CHỨNG MINH ĐƯỢC, từ chối cả response nếu có cái không.
+
+        Ba cửa, và cửa nào cũng ném `_InconsistentResponseError` — tức là đi vào
+        đúng vòng sửa một lần đã có sẵn, không dựng cơ chế thứ hai:
+
+          trích dẫn không có thật     model đang bịa một điều người dùng chưa nói
+          hai kết luận trái nhau      response tự mâu thuẫn với chính nó
+          vừa nhận vừa hỏi lại        cũng vậy, chỉ ở một trục khác
+
+        KHÔNG lặng lẽ bỏ mục hỏng rồi giữ phần còn lại: một response đã sai ở
+        một chỗ thì không có cơ sở nào để tin phần còn lại của nó, và bỏ im
+        lặng nghĩa là không ai đo được model sai bao nhiêu lần.
+
+        Từ chối là AN TOÀN theo đúng chiều cần thiết: mất một fact thì hệ thống
+        hỏi lại và người dùng gõ thêm vài chữ; nhận một fact bịa thì nó gọi điện
+        cho người vừa từ chối, và không màn hình nào nói ra điều đó.
+        """
+        if not response.explicit_facts:
+            return ()
+
+        goal_text = self._normalise_for_quote(goal)
+        ket_luan: dict[str, bool] = {}
+        for fact in response.explicit_facts:
+            trich = self._normalise_for_quote(fact.evidence)
+            if not trich or trich not in goal_text:
+                # Chỉ nêu TÊN Ô. `evidence` là nguyên văn lời người dùng, và
+                # message này đi vào log lẫn prompt sửa lỗi.
+                raise _InconsistentResponseError(
+                    "FACT_WITHOUT_EVIDENCE",
+                    f"Planner nêu kết luận không trích dẫn được cho ô: {fact.field}.",
+                )
+            if fact.field in ket_luan and ket_luan[fact.field] != fact.value:
+                raise _InconsistentResponseError(
+                    "CONTRADICTORY_FACT",
+                    f"Planner đưa hai kết luận trái nhau cho ô: {fact.field}.",
+                )
+            ket_luan[fact.field] = fact.value
+
+        trung = sorted(set(ket_luan) & set(response.missing_fields))
+        if trung:
+            raise _InconsistentResponseError(
+                "FACT_AND_MISSING_CONFLICT",
+                "Planner vừa kết luận vừa hỏi lại cùng một ô: " + ", ".join(trung) + ".",
+            )
+
+        return tuple(ExplicitFact(field=name, value=value) for name, value in ket_luan.items())
+
     def _to_result(
         self,
         response: Any,
@@ -983,6 +1128,11 @@ class Planner:
         """Kiểm tra tính nhất quán rồi chuyển sang kết quả public."""
         if not isinstance(response, _PlannerResponse):
             raise _InconsistentResponseError("SCHEMA_MISMATCH", "Planner nhận được kết quả sai schema từ LLM.")
+
+        # Kiểm fact TRƯỚC khi rẽ nhánh trạng thái: chúng đi kèm cả ba trạng
+        # thái, và một response bịa trích dẫn thì không được đi tiếp dù nó có
+        # kèm kế hoạch hợp lệ hay không.
+        facts = self._accept_explicit_facts(response, goal)
 
         if response.status == "READY":
             # `_PlannerResponse._enforce_exclusive_states` đã chặn hai trường hợp
@@ -1027,9 +1177,14 @@ class Planner:
             recalled_fields = self._fields_taken_from_recall(plan, recalled or [], existing_context, goal)
             if recalled_fields:
                 logger.info("planner: %d field lấy từ nho_lai → hỏi lại", len(recalled_fields))
-                return PlannerResult(status="NEEDS_INFORMATION", missing_fields=tuple(recalled_fields))
+                return PlannerResult(
+                    status="NEEDS_INFORMATION", missing_fields=tuple(recalled_fields), explicit_facts=facts
+                )
 
-            return PlannerResult(status="READY", plan=plan)
+            # Fact đi kèm kế hoạch, nhưng KHÔNG đụng vào nó. Kế hoạch đã qua
+            # Validator; một fact không được thêm, bớt hay sửa task nào. Nó chỉ
+            # là ngữ cảnh cho lượt sau.
+            return PlannerResult(status="READY", plan=plan, explicit_facts=facts)
 
         if response.status == "QUESTION":
             # Câu hỏi: không kế hoạch, không field thiếu, không câu chữ.
@@ -1044,7 +1199,7 @@ class Planner:
                     "QUESTION_WITH_PAYLOAD",
                     "Planner trả QUESTION nhưng vẫn kèm kế hoạch hoặc field thiếu.",
                 )
-            return PlannerResult(status="QUESTION")
+            return PlannerResult(status="QUESTION", explicit_facts=facts)
 
         # NEEDS_INFORMATION — cũng đã được validator chặn, giữ làm lớp phòng thủ.
         if response.plan is not None:
@@ -1083,7 +1238,7 @@ class Planner:
             )
 
         # `question` không truyền vào — `PlannerResult` tự dựng từ missing_fields.
-        return PlannerResult(status="NEEDS_INFORMATION", plan=None, missing_fields=cleaned)
+        return PlannerResult(status="NEEDS_INFORMATION", plan=None, missing_fields=cleaned, explicit_facts=facts)
 
     @staticmethod
     def _clean_missing_fields(raw_fields: list[str]) -> tuple[str, ...]:

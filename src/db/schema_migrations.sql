@@ -1130,3 +1130,31 @@ BEGIN
             CHECK (record_type IS NULL OR record_type IN ('apartment', 'vehicle'));
     END IF;
 END $$;
+
+-- 2026-08 — LÝ DO TỪ CHỐI phải có MÃ, không chỉ có câu chữ.
+--
+-- Đo được trên yêu cầu thật: đơn vị từ chối `book_parking` với câu "Khu B đã
+-- hết chỗ ngày 22/09/2028. Bạn chọn khu khác hoặc ngày khác giúp mình nhé."
+-- Câu ấy nói đúng thứ khách cần làm, và hệ thống không làm gì với nó: mọi
+-- REJECTED đều bị coi là kết thúc, nên workflow đứng WAITING_APPROVAL với
+-- `pay_fee` treo mãi và khách không có ô nào để sửa.
+--
+-- Không đọc câu chữ để quyết định. Một `LIKE '%hết chỗ%'` sẽ hỏng ngay lần đầu
+-- ai đó viết "không còn slot", và nó biến chính tả của người duyệt thành logic
+-- nghiệp vụ. Mã đóng thì máy đọc mã, người đọc câu.
+--
+-- NULL được phép: dòng có TRƯỚC cột này không có mã nào, và bịa một mã cho
+-- chúng là bịa ra một quyết định đơn vị chưa từng đưa ra.
+ALTER TABLE service_approvals ADD COLUMN IF NOT EXISTS reject_code VARCHAR(32);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'ck_service_approvals_reject_code'
+    ) THEN
+        ALTER TABLE service_approvals ADD CONSTRAINT ck_service_approvals_reject_code
+            CHECK (reject_code IS NULL OR reject_code IN (
+                'NO_AVAILABILITY', 'INVALID_REQUEST', 'SERVICE_UNAVAILABLE', 'OTHER'
+            ));
+    END IF;
+END $$;

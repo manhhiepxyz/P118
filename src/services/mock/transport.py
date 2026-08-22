@@ -18,8 +18,10 @@ sở hữu mà booking/payment dựa vào.
 
 from __future__ import annotations
 
+import json
+
 import asyncpg
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.db.parking_payment_repository import (
@@ -51,6 +53,41 @@ transport_app.add_middleware(
 )
 
 install_error_handler(transport_app)
+
+
+async def _parking_availability_was_approved(
+    pool: asyncpg.Pool,
+    *,
+    workflow_id: str | None,
+    task_id: str | None,
+    parking_zone: str,
+    booking_date: str,
+) -> bool:
+    """Đối chiếu chữ ký provider; không tin riêng header hay payload.
+
+    Caller trực tiếp vẫn đi qua capacity check. Chỉ đúng task ``book_parking``
+    có dòng APPROVED và details khớp zone/ngày mới được materialize mà không
+    để capacity seed phủ quyết lần hai.
+    """
+    if not workflow_id or not task_id:
+        return False
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT tool, status, details FROM service_approvals WHERE workflow_id::text=$1 AND task_id=$2",
+            workflow_id,
+            task_id,
+        )
+    if row is None or row["tool"] != "book_parking" or row["status"] != "APPROVED":
+        return False
+    details = row["details"]
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except json.JSONDecodeError:
+            return False
+    if not isinstance(details, dict):
+        return False
+    return details.get("parking_zone") == parking_zone and str(details.get("booking_date")) == booking_date
 
 
 @transport_app.post("/api/vehicles", status_code=201, summary="Đăng ký phương tiện")
@@ -90,6 +127,8 @@ async def get_vehicle_endpoint(
 async def book_parking(
     payload: schemas.BookParkingRequest,
     fail: str | None = None,
+    x_p118_workflow_id: str | None = Header(default=None),
+    x_p118_task_id: str | None = Header(default=None),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> schemas.ApiEnvelope:
     if fail:
@@ -99,11 +138,19 @@ async def book_parking(
     # báo giá do server quyết định theo zone. Client gửi giá là client tự định
     # giá dịch vụ.
     try:
+        availability_approved = await _parking_availability_was_approved(
+            pool,
+            workflow_id=x_p118_workflow_id,
+            task_id=x_p118_task_id,
+            parking_zone=payload.parking_zone.value,
+            booking_date=payload.booking_date.isoformat(),
+        )
         booking = await create_booking(
             pool,
             vehicle_id=payload.vehicle_id,
             parking_zone=payload.parking_zone.value,
             booking_date=payload.booking_date.isoformat(),
+            availability_already_approved=availability_approved,
         )
     except BookingError as exc:
         raise as_api_error(exc) from exc

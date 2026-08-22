@@ -1167,7 +1167,10 @@ async def _run_demo_job(
     # không tạo workflow nghiệp vụ cho lời chào.
     job["shell_persisted"] = await _ensure_workflow_shell(
         workflow_id,
-        goal=goal,
+        # `goal` có thể là prompt NỘI BỘ đã nối yêu cầu cũ để Planner không
+        # hỏi lại dữ kiện sau một lần dừng sớm. Nó không phải câu người dùng
+        # vừa gõ và không được ghi đè lên lịch sử công khai.
+        goal=job.get("goal") or goal,
         session_id=session_id or job.get("session_id"),
         parent_workflow_id=parent_workflow_id or job.get("parent_workflow_id"),
         owner_user_id=job.get("owner_user_id"),
@@ -1262,6 +1265,17 @@ async def _run_demo_job(
         if repair_hints:
             state["repair_hints"] = repair_hints
             await _persist_repair_hints(workflow_id, repair_hints)
+
+        # Điều người dùng đã NÓI RÕ trong goal, do Planner hiểu và code kiểm.
+        #
+        # `setdefault`: một câu trả lời người dùng đã gõ ở lượt trước LUÔN thắng
+        # điều họ nói lúc đầu. Ngược lại thì họ không đổi ý được — goal cũ sẽ
+        # ghi đè câu mới ở mọi lượt, mãi mãi.
+        explicit_facts = state.get("explicit_facts") or {}
+        if explicit_facts:
+            ngu_canh = job.setdefault("existing_context", {})
+            for name, value in explicit_facts.items():
+                ngu_canh.setdefault(name, value)
 
         response = _demo_response(state, approve_mock_payment)
         _append_job_event(job, _terminal_stage_for(response))
@@ -2757,10 +2771,27 @@ async def _load_parent_success_context(workflow_id: str) -> dict[str, Any]:
 def _build_repair_state_from_record(record: dict[str, Any]) -> dict[str, Any]:
     """Dựng state cần thiết cho `_demo_response` khi poll/continue từ DB.
 
-    Trả state với repair_hints generic + plan từ workflow.task_plan để
-    `_demo_response` có thể map error_code + task.tool → missing_fields.
+    Trả state với repair_hints generic + plan để `_demo_response` map
+    error_code + task.tool → missing_fields.
+
+    Kế hoạch dựng từ CÁC DÒNG TASK, không từ `workflows.task_plan`.
+    `task_plan` là snapshot GHI-MỘT-LẦN của lượt lập kế hoạch đầu tiên, nên nó
+    không bao giờ chứa những lần thử sinh ra sau đó. Đo được: đơn vị từ chối
+    Khu B (một lần thử mới, `T2R2`), hint ghi đúng, và `_demo_response` không
+    tìm thấy `T2R2` trong snapshot nên trả `missing_fields` RỖNG — màn hình mất
+    hẳn ô nhập khu ở đúng lần từ chối thứ hai.
+
+    Các dòng task là sự thật SỐNG: chúng có mọi lần thử, kèm input thật của
+    từng lần. Rơi về snapshot khi chưa có dòng nào để giữ đường cũ hoạt động.
     """
-    plan = _plan_from_job_or_record(None, record)
+    from src.orchestration.demo_service import _plan_from_task_rows
+
+    rows_for_plan = record.get("tasks") or []
+    plan = (
+        _plan_from_task_rows((record.get("workflow") or {}).get("goal") or "", rows_for_plan)
+        if rows_for_plan
+        else _plan_from_job_or_record(None, record)
+    )
     tasks = {row["task_id"]: row for row in record.get("tasks", [])}
     task_results: dict[str, Any] = {}
     for task_id, row in tasks.items():
@@ -2948,9 +2979,26 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                 # biết khu nào — họ sẽ trả lời "Khu A" lần nữa và lại hỏng.
                 code = getattr(first_hint.error_code, "value", first_hint.error_code)
                 question = repair_question(task.tool, str(code), dict(task.input))
+
+                # LÝ DO đứng trước, HƯỚNG DẪN đứng sau.
+                #
+                # Khi đơn vị từ chối vì hết chỗ, `hint.message` chính là câu họ
+                # viết cho khách — thứ duy nhất giải thích được "vì sao". Nó
+                # phải đi qua `question`, không phải qua `assistant_answer`:
+                # câu chốt kia do Response Agent sinh và được ghi đè ở lượt sinh
+                # tiếp theo. Đo được trên stack thật — lý do của đơn vị nằm đúng
+                # trong database, câu chốt bị thay bằng một bản tóm tắt của mô
+                # hình, và khách không bao giờ đọc được nó.
+                #
+                # `question` thì dựng lại từ hint ở MỌI lượt GET, nên nó sống
+                # sót qua poll, qua F5 và qua restart.
+                ly_do = (getattr(first_hint, "message", "") or "").strip()
+                huong_dan = question or _follow_up_validation_message(missing_fields)
+                if ly_do and ly_do not in huong_dan:
+                    huong_dan = f"{ly_do} {huong_dan}".strip()
                 return DemoWorkflowResponse(
                     status="NEEDS_INFORMATION",
-                    question=question or _follow_up_validation_message(missing_fields),
+                    question=huong_dan,
                     missing_fields=missing_fields,
                     plan=plan_view,
                 )
@@ -3530,6 +3578,12 @@ async def continue_demo_workflow(
     session_id = pending_session_id or workflow_id
     session = await _load_session(session_id, user_id=user["id"])
     account_state = (session or {}).get("account_state", "prospect")
+    # Ngữ cảnh đến TỪ POSTGRESQL, không từ việc đọc lại goal.
+    #
+    # Fact người dùng nói rõ đã được Planner hiểu và code kiểm ở lượt trước,
+    # rồi ghim vào chính dòng clarification này. Đọc lại goal ở đây sẽ dựng
+    # nguồn sự thật THỨ HAI cho cùng ba ô, và hai nguồn sẽ lệch nhau đúng vào
+    # lúc người dùng đổi ý.
     context = dict(pending_context)
     # Bơm kết quả SUCCESS của parent từ DB (nếu parent đã persist). Giúp child
     # không chạy lại các bước đã xong.

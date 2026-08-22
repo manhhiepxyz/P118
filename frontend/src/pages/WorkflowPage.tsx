@@ -139,6 +139,7 @@ export function WorkflowPage() {
    */
   const sessionId = data?.session_id ?? null
   const [sessionTurns, setSessionTurns] = useState<AgentWorkflowListItem[]>([])
+  const [pendingFollowUp, setPendingFollowUp] = useState<string | null>(null)
 
   useEffect(() => {
     if (!sessionId) {
@@ -261,22 +262,33 @@ export function WorkflowPage() {
    * cho cả hai. Nên chờ tới khi backend ngã ngũ — có bước, hoặc có câu trả lời.
    */
   async function handleFollowUp(message: string) {
-    const next = await startWorkflow(message, undefined, data?.session_id ?? null)
-    const id = next.workflow_id
-    if (!id) return
+    // Tin nhắn phải xuất hiện TRƯỚC round-trip tới Planner. Nếu đợi toàn bộ
+    // vòng poll xong mới reload session, người dùng nhìn textarea còn nguyên,
+    // nút đổi trạng thái nhưng hội thoại không có lời họ vừa gửi.
+    setPendingFollowUp(message)
+    try {
+      const next = await startWorkflow(message, undefined, data?.session_id ?? null)
+      const id = next.workflow_id
+      if (!id) throw new Error('Hệ thống chưa tạo được lượt trao đổi mới.')
 
-    for (let attempt = 0; attempt < FOLLOW_UP_MAX_POLLS; attempt += 1) {
-      const seen = await getWorkflow(id).catch(() => null)
-      if (seen && seen.plan.length > 0) {
-        navigate(`/workflow/${id}`)
-        return
+      for (let attempt = 0; attempt < FOLLOW_UP_MAX_POLLS; attempt += 1) {
+        const seen = await getWorkflow(id).catch(() => null)
+        if (seen && seen.plan.length > 0) {
+          setPendingFollowUp(null)
+          navigate(`/workflow/${id}`)
+          return
+        }
+        if (seen?.answer) break
+        await new Promise((resolve) => setTimeout(resolve, FOLLOW_UP_POLL_MS))
       }
-      if (seen?.answer) break
-      await new Promise((resolve) => setTimeout(resolve, FOLLOW_UP_POLL_MS))
-    }
 
-    // Câu hỏi (hoặc hết giờ chờ): ở lại, và kéo lượt mới vào hội thoại.
-    setSessionTurns(await listSessionWorkflows(sessionId ?? id).then((r) => r.workflows).catch(() => sessionTurns))
+      // Câu hỏi (hoặc hết giờ chờ): ở lại, và kéo lượt mới vào hội thoại.
+      setSessionTurns(await listSessionWorkflows(sessionId ?? id).then((r) => r.workflows).catch(() => sessionTurns))
+      setPendingFollowUp(null)
+    } catch (error) {
+      setPendingFollowUp(null)
+      throw error
+    }
   }
 
   async function handleClarification(message: string) {
@@ -495,9 +507,8 @@ export function WorkflowPage() {
                       lại từ đầu. Xem `AmendPanel`. */}
                   <AmendPanel workflowId={workflowId} onAmended={() => { void load() }} />
                   <p className="mb-2 text-[13.5px] text-[var(--text-secondary)]">
-                    Hoặc nói cho mình biết muốn đổi gì — mình chạy lại phần còn thiếu.
+                    Hoặc nói cho mình biết muốn đổi gì ở khung Trao đổi bên dưới.
                   </p>
-                  <ClarificationReply onSubmit={handleFollowUp} busy={running} onStop={handleCancel} />
                 </div>
               )}
             </section>
@@ -585,6 +596,17 @@ export function WorkflowPage() {
                   </div>
                 ))}
 
+                {/* Lượt vừa bấm Gửi xuất hiện ngay, không đợi Planner xong mới
+                    đọc lại session. `data-*` giúp browser E2E kiểm đúng hành vi
+                    thay vì bám vào màu hay class trình bày. */}
+                {pendingFollowUp && (
+                  <div className="flex justify-end" data-turn="user" data-pending-follow-up="true">
+                    <p className="max-w-[80%] whitespace-pre-line rounded-[var(--r-sm)] bg-[var(--surface-overlay)] px-4 py-3 text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                      {pendingFollowUp}
+                    </p>
+                  </div>
+                )}
+
                 {/* P-118 ĐANG SOẠN.
                     Không có dòng này, người dùng gửi câu mới rồi nhìn một khung
                     chỉ có lời của chính mình — không biết hệ thống đã nhận
@@ -593,7 +615,7 @@ export function WorkflowPage() {
 
                     Điều kiện là "chưa kết thúc VÀ chưa có câu trả lời": xong
                     rồi mà vẫn quay là nói dối theo hướng ngược lại. */}
-                {running && !data.answer && (
+                {((running && !data.answer) || pendingFollowUp) && (
                   <div className="flex items-center gap-3" data-turn="agent-pending">
                     <span
                       aria-hidden

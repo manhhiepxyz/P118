@@ -789,7 +789,12 @@ export async function listServiceApprovals(
 export async function decideServiceApproval(
   workflowId: string,
   taskId: string,
-  body: { decision: 'approve' | 'reject'; reject_reason?: string },
+  body: {
+    decision: 'approve' | 'reject'
+    reject_reason?: string
+    /** Nguyên nhân canonical — backend đọc mã này, không đọc câu chữ. */
+    reject_code?: 'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER'
+  },
 ): Promise<{ status?: string }> {
   return request<{ status?: string }>(
     `/service-approvals/${encodeURIComponent(workflowId)}/${encodeURIComponent(taskId)}/decide`,
@@ -891,6 +896,7 @@ export interface AdminRequestStep {
   decided_by: { username: string; display_name: string } | null;
   decided_at: string | null;
   reject_reason: string | null;
+  reject_code: 'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER' | null;
   provider_submission_status: string | null;
   failure_summary: string | null;
   updated_at: string | null;

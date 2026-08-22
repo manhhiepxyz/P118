@@ -30,6 +30,7 @@ from src.agents.nodes.example_node import analyze_node, respond_node
 from src.agents.planner import (
     PAYMENT_QUOTE_REQUIRED_FIELD,
     UNSUPPORTED_GOAL_FIELD,
+    ExplicitFact,
     Planner,
     PlannerError,
     build_question,
@@ -95,6 +96,21 @@ def _ensure_payment_is_offered(plan: Any) -> None:
                 },
             )
         )
+
+
+def _facts_as_context(facts: tuple) -> dict[str, bool]:
+    """`ExplicitFact` đã qua kiểm → dict để merge vào ngữ cảnh.
+
+    Chỉ nhận đúng kiểu `ExplicitFact`. Một dict thô đi tới đây nghĩa là có
+    đường nào đó vòng qua `Planner._accept_explicit_facts`, và chấp nhận nó sẽ
+    biến lớp kiểm kia thành tuỳ chọn.
+
+    Người gọi dùng `getattr(result, "explicit_facts", ())`: Graph là lớp phòng
+    thủ trước một Planner có thể là bản khác hoặc bản refactor sau này, và một
+    result không mang field ấy nghĩa là KHÔNG CÓ fact nào — mặc định an toàn.
+    Đổ vỡ ở đây sẽ biến một thiếu sót vô hại thành lỗi lập kế hoạch.
+    """
+    return {f.field: f.value for f in facts if isinstance(f, ExplicitFact)}
 
 
 def _inject_trusted_identity(plan: Any, existing_context: dict[str, Any]) -> None:
@@ -495,6 +511,10 @@ def build_planner_graph(
                 "plan": result.plan,
                 "missing_fields": (),
                 "plan_validated": False,
+                # Fact đi kèm cả READY. Nó KHÔNG đụng vào plan — plan đã qua
+                # Validator và là thứ duy nhất quyết định điều gì sẽ chạy. Fact
+                # chỉ là ngữ cảnh cho lượt sau của cùng hội thoại.
+                "explicit_facts": _facts_as_context(getattr(result, "explicit_facts", ())),
             }
 
         if result.status == "QUESTION":
@@ -510,6 +530,7 @@ def build_planner_graph(
                 "planner_status": "QUESTION",
                 "missing_fields": (),
                 "plan_validated": False,
+                "explicit_facts": _facts_as_context(getattr(result, "explicit_facts", ())),
             }
 
         # NEEDS_INFORMATION: không đưa `plan` vào state, tránh mọi khả năng một
@@ -522,6 +543,10 @@ def build_planner_graph(
             result.missing_fields,
             state.get("existing_context", {}),
         )
+        # Đây là nhánh mà fact quan trọng nhất: lượt sau sẽ chạy với ngữ cảnh
+        # được ghim từ đây, và thiếu chúng thì lượt ấy hỏi lại đúng điều người
+        # dùng đã nói trong câu đầu tiên.
+        update["explicit_facts"] = _facts_as_context(getattr(result, "explicit_facts", ()))
         if update.get("clarification_error"):
             await emit("VALIDATION_FAILED")
         else:

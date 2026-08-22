@@ -72,14 +72,11 @@ class TransportConnector(Connector):
         *,
         context: ProviderCallContext | None = None,
     ) -> StandardResult:
-        # Tool của connector này không mang khoá idempotency; `context` có mặt
-        # để hợp đồng đồng nhất, và bỏ qua ở đây là cố ý.
-        del context
         # Dispatch đến method phù hợp theo tool_name
         if tool_name == "register_vehicle":
             return await self._execute_register_vehicle(input_data)
         elif tool_name == "book_parking":
-            return await self._execute_book_parking(input_data)
+            return await self._execute_book_parking(input_data, context=context)
         else:
             # tool_name không thuộc danh sách → lỗi routing
             return StandardResult.fail(
@@ -153,6 +150,8 @@ class TransportConnector(Connector):
     async def _execute_book_parking(
         self,
         input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
     ) -> StandardResult:
         """Đặt chỗ đỗ xe → POST /api/parking/bookings.
 
@@ -174,10 +173,18 @@ class TransportConnector(Connector):
         try:
             async with self._get_client() as client:
                 # --- Gọi HTTP: payload nguyên vẹn từ TaskPlan ---
+                headers: dict[str, str] = {}
+                if context is not None and context.workflow_id and context.task_id:
+                    headers = {
+                        "X-P118-Workflow-ID": context.workflow_id,
+                        "X-P118-Task-ID": context.task_id,
+                    }
+                request_options: dict[str, Any] = {"json": input_data, "timeout": self.timeout}
+                if headers:
+                    request_options["headers"] = headers
                 response = await client.post(
                     f"{self.base_url}/api/parking/bookings",  # endpoint cố định
-                    json=input_data,
-                    timeout=self.timeout,
+                    **request_options,
                 )
 
                 if response.is_success:

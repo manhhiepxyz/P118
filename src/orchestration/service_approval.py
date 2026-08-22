@@ -70,6 +70,38 @@ SERVICE_LABELS: dict[str, str] = {
     "register_property_interest": "Đăng ký nhận tư vấn",
 }
 
+# Mã từ chối là policy theo TỪNG tool, không phải một danh sách chung cho mọi
+# hàng đợi. ``NO_AVAILABILITY`` chỉ hợp lệ khi tool có một ô thời gian/khu vực
+# mà khách thật sự có thể đổi. Gán mã ấy cho ``register_vehicle`` đã huỷ bước
+# tạo vehicle; lần giữ chỗ Khu B sau đó chết dependency trước khi gọi provider.
+REJECT_CODES: tuple[str, ...] = (
+    "NO_AVAILABILITY",
+    "INVALID_REQUEST",
+    "SERVICE_UNAVAILABLE",
+    "OTHER",
+)
+_AVAILABILITY_TOOLS: frozenset[str] = frozenset(
+    {
+        "schedule_property_viewing",
+        "book_parking",
+        "book_shuttle",
+        "create_maintenance_request",
+        "schedule_move",
+    }
+)
+
+
+def allowed_reject_codes(tool: str) -> tuple[str, ...]:
+    """Mã mà đơn vị được ký cho ``tool``.
+
+    Backend trả allowlist này cho UI và vẫn kiểm lại khi POST. UI chỉ là lớp
+    hướng dẫn; request tự chế không được mở lại mã sai nghiệp vụ.
+    """
+    if tool in _AVAILABILITY_TOOLS:
+        return REJECT_CODES
+    return tuple(code for code in REJECT_CODES if code != "NO_AVAILABILITY")
+
+
 # Dữ kiện KHÔNG đưa cho người duyệt: định danh nội bộ, không giúp họ quyết định
 # và là dữ liệu cá nhân không cần thiết cho việc duyệt.
 _HIDDEN_FIELDS = frozenset({"resident_id", "vehicle_id", "booking_id"})
@@ -160,9 +192,17 @@ class ServiceApprovalBoundary:
         seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         gated = gated_tasks(plan)
-        # Bước ĐÃ chạy xong ở lượt trước không cần duyệt lại — nếu không, mỗi
+        # Bước ĐÃ KẾT THÚC ở lượt trước không cần duyệt lại — nếu không, mỗi
         # lần chạy tiếp lại dựng một hàng đợi cho việc đã làm.
-        already = {tid for tid, status in (seed_statuses or {}).items() if status is TaskStatus.SUCCESS}
+        #
+        # `CANCELLED` cũng nằm ở đây, không chỉ `SUCCESS`. Một lần thử BỊ THAY
+        # THẾ (xem `repair_attempt.py`) vẫn có mặt trong kế hoạch dựng lại từ
+        # `workflow_tasks`, nhưng nó thuộc về quá khứ. Ghim nó vào hàng đợi
+        # nghĩa là bắt đơn vị duyệt một yêu cầu đã bị bỏ, và `_park` gọi
+        # `update_task_status` trên một dòng `CANCELLED` — lệnh đó khớp 0 dòng
+        # và ném `TaskNotFoundError` giữa lúc sửa lỗi.
+        ket_thuc = {TaskStatus.SUCCESS, TaskStatus.CANCELLED}
+        already = {tid for tid, status in (seed_statuses or {}).items() if status in ket_thuc}
         gated = {tid: tool for tid, tool in gated.items() if tid not in already}
 
         if not gated or self._approved:
@@ -346,6 +386,7 @@ async def record_service_decision(
     *,
     decided_by: str | None = None,
     reason: str | None = None,
+    reject_code: str | None = None,
 ) -> bool:
     """Chốt một quyết định. `False` nếu bước này đã được quyết trước đó.
 
@@ -359,7 +400,8 @@ async def record_service_decision(
             UPDATE service_approvals
                SET status = $3, decided_at = NOW(),
                    decided_by = COALESCE($4, decided_by),
-                   reject_reason = COALESCE($5, reject_reason)
+                   reject_reason = COALESCE($5, reject_reason),
+                   reject_code = COALESCE($6, reject_code)
              WHERE workflow_id = $1 AND task_id = $2 AND status = 'AWAITING'
             """,
             UUID(workflow_id),
@@ -367,6 +409,7 @@ async def record_service_decision(
             decision,
             decided_by,
             reason,
+            reject_code,
         )
     return result.endswith(" 1")
 
@@ -390,7 +433,7 @@ async def pending_for_workflow(pool: asyncpg.Pool, workflow_id: str) -> list[dic
     """Các bước của workflow này còn chờ đơn vị quyết."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT task_id, tool, service_label, details, status FROM service_approvals "
+            "SELECT task_id, tool, service_label, details, status, reject_code, reject_reason FROM service_approvals "
             "WHERE workflow_id = $1 ORDER BY task_id",
             UUID(workflow_id),
         )
@@ -426,7 +469,7 @@ async def list_by_status(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT workflow_id, task_id, tool, service_label, details, status,
+            SELECT workflow_id, task_id, tool, service_label, details, status, reject_code, reject_reason,
                    applicant_name, applicant_phone, created_at,
                    decided_by, decided_at, reject_reason
               FROM service_approvals

@@ -53,7 +53,38 @@ const TABS: { key: TabKey; label: string; icon: typeof Home }[] = [
  */
 type RejectTarget =
   | { kind: 'verification'; record: VerificationRecord; reason: string }
-  | { kind: 'service'; record: ServiceApprovalRecord; reason: string }
+  | { kind: 'service'; record: ServiceApprovalRecord; reason: string; code: RejectCode | null }
+
+/** Nguyên nhân canonical. Backend đọc MÃ này để quyết định hậu quả — hết chỗ
+ *  thì khách được hỏi lại khu/ngày, các lý do khác thì yêu cầu dừng hẳn.
+ *  Câu chữ chỉ để người đọc; không tầng nào phân tích nó. */
+const REJECT_CODES = [
+  ['NO_AVAILABILITY', 'Hết chỗ / không còn lịch trống'],
+  ['INVALID_REQUEST', 'Yêu cầu không hợp lệ'],
+  ['SERVICE_UNAVAILABLE', 'Dịch vụ đang tạm ngừng'],
+  ['OTHER', 'Lý do khác'],
+] as const
+
+type RejectCode = (typeof REJECT_CODES)[number][0]
+
+const REJECT_CODE_LABELS: Record<string, string> = Object.fromEntries(REJECT_CODES)
+
+function rejectCodesFor(record: ServiceApprovalRecord): ReadonlyArray<(typeof REJECT_CODES)[number]> {
+  const allowed = new Set(record.allowed_reject_codes ?? [])
+  return REJECT_CODES.filter(([code]) => allowed.has(code))
+}
+
+/** Gợi ý cho ô lý do, theo nguyên nhân đã chọn.
+ *  Không nhắc tên khu cụ thể: đơn vị đỗ xe, tour, bảo trì và chuyển nhà dùng
+ *  chung màn này, và một placeholder nói về "Khu A" là sai với bốn trong năm. */
+function reasonHint(code: RejectCode | null): string {
+  if (code === 'NO_AVAILABILITY') {
+    return 'Nêu rõ phần nào đã hết và gợi ý lựa chọn thay thế (khu khác, ngày khác, khung giờ khác)…'
+  }
+  if (code === 'INVALID_REQUEST') return 'Nêu thông tin nào chưa đúng để người yêu cầu sửa lại…'
+  if (code === 'SERVICE_UNAVAILABLE') return 'Nêu thời gian dự kiến hoạt động trở lại nếu biết…'
+  return 'Nêu lý do để người yêu cầu hiểu…'
+}
 
 function claimLabel(record: VerificationRecord): string {
   const c = record.claimed_data
@@ -227,15 +258,24 @@ export function ProviderReviewPage() {
     record: ServiceApprovalRecord,
     decision: 'approve' | 'reject',
     reason?: string,
+    code?: RejectCode,
   ) {
     if (busy) return
     setBusy(`service:${record.workflow_id}:${record.task_id}`)
     setError(null)
     setDone(null)
-    const body = { decision, ...(decision === 'reject' ? { reject_reason: reason } : {}) }
+    const body = {
+      decision,
+      ...(decision === 'reject' ? { reject_reason: reason, reject_code: code } : {}),
+    }
     try {
       if (record.tool === 'schedule_property_viewing') {
-        await decideViewingApproval(record.workflow_id, body)
+        // Hàng đợi THAM QUAN có route riêng và chưa nhận `reject_code` —
+        // không đổi hợp đồng của nó ở lượt này.
+        await decideViewingApproval(record.workflow_id, {
+          decision,
+          ...(decision === 'reject' ? { reject_reason: reason } : {}),
+        })
       } else {
         await decideServiceApproval(record.workflow_id, record.task_id, body)
       }
@@ -268,9 +308,12 @@ export function ProviderReviewPage() {
   async function confirmReject() {
     if (!rejectTarget || busy) return
     const reason = rejectTarget.reason.trim()
+    // Dịch vụ BẮT BUỘC có nguyên nhân canonical. Gửi thiếu thì backend trả 422
+    // — chặn ở đây để đơn vị biết ngay thay vì nhận một lỗi khó hiểu.
+    if (rejectTarget.kind === 'service' && !rejectTarget.code) return
     if (!reason) return
     if (rejectTarget.kind === 'service') {
-      await decideService(rejectTarget.record, 'reject', reason)
+      await decideService(rejectTarget.record, 'reject', reason, rejectTarget.code ?? undefined)
     } else {
       await decideVerification(rejectTarget.record, 'reject', reason)
     }
@@ -559,6 +602,11 @@ export function ProviderReviewPage() {
                         {record.decided_by ?? '—'}
                         {record.decided_at ? ` · ${record.decided_at.slice(0, 16).replace('T', ' ')}` : ''}
                       </p>
+                      {record.reject_code && (
+                        <p className="mt-1 text-xs font-medium text-gray-600 dark:text-gray-300">
+                          {REJECT_CODE_LABELS[record.reject_code] ?? record.reject_code}
+                        </p>
+                      )}
                       {record.reject_reason && (
                         <p className="mt-1 max-w-[220px] text-xs text-gray-500">{record.reject_reason}</p>
                       )}
@@ -580,7 +628,7 @@ export function ProviderReviewPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setRejectTarget({ kind: 'service', record, reason: '' })}
+                      onClick={() => setRejectTarget({ kind: 'service', record, reason: '', code: null })}
                       disabled={busy !== null}
                       className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:text-gray-200"
                     >
@@ -623,13 +671,50 @@ export function ProviderReviewPage() {
             <p className="mt-1 text-sm text-gray-500">
               {rejectLabel(rejectTarget)} — vui lòng nêu lý do để người yêu cầu biết.
             </p>
+            {rejectTarget.kind === 'service' && (
+              <div className="mt-3">
+                <label
+                  htmlFor="reject-code"
+                  className="block text-xs font-medium text-gray-700 dark:text-gray-300"
+                >
+                  Nguyên nhân
+                </label>
+                <select
+                  id="reject-code"
+                  value={rejectTarget.code ?? ''}
+                  onChange={(e) =>
+                    setRejectTarget({
+                      ...rejectTarget,
+                      code: (e.target.value || null) as RejectCode | null,
+                    })
+                  }
+                  className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
+                >
+                  <option value="">— Chọn nguyên nhân —</option>
+                  {rejectCodesFor(rejectTarget.record).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                {rejectTarget.code === 'NO_AVAILABILITY' && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    Người yêu cầu sẽ được mời chọn lại khu hoặc ngày khác.
+                  </p>
+                )}
+              </div>
+            )}
             <textarea
               value={rejectTarget.reason}
               onChange={(e) =>
                 setRejectTarget({ ...rejectTarget, reason: e.target.value })
               }
               rows={3}
-              placeholder="Ví dụ: ảnh giấy tờ mờ, chưa đối chiếu được…"
+              placeholder={
+                rejectTarget.kind === 'service'
+                  ? reasonHint(rejectTarget.code)
+                  : 'Ví dụ: ảnh giấy tờ mờ, chưa đối chiếu được…'
+              }
               className="mt-3 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
             />
             <div className="mt-4 flex justify-end gap-2">
@@ -642,7 +727,11 @@ export function ProviderReviewPage() {
               </button>
               <button
                 type="button"
-                disabled={!rejectTarget.reason.trim() || busy !== null}
+                disabled={
+                  !rejectTarget.reason.trim() ||
+                  (rejectTarget.kind === 'service' && !rejectTarget.code) ||
+                  busy !== null
+                }
                 onClick={() => void confirmReject()}
                 className="inline-flex items-center gap-2 rounded-xl bg-red-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
               >

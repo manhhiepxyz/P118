@@ -767,6 +767,74 @@ class WorkflowRepository:
                 _json_dumps(task_data.get("input")),
             )
 
+    async def supersede_task_with_new_attempt(self, workflow_id: str, *, old_task_id: str, new_task: dict) -> None:
+        """Thay một bước bằng một LẦN THỬ MỚI — hai lệnh, một transaction.
+
+        Bước cũ giữ nguyên input, mã lỗi và bằng chứng gửi đi của nó; chỉ trạng
+        thái đổi sang `CANCELLED`, nghĩa là ĐÃ BỊ THAY THẾ. Bước mới ra đời với
+        `provider_submission_status` mặc định (`NOT_SUBMITTED`) và KHÔNG khoá
+        idempotency — nó chưa từng rời khỏi hệ thống.
+
+        Một transaction vì hai nửa chỉ đúng khi đi cùng nhau. Nửa đầu chạy một
+        mình thì bước cũ bị huỷ mà không có gì thay thế — yêu cầu của khách
+        biến mất. Nửa sau chạy một mình thì có HAI bước cùng đòi giữ chỗ, và
+        bước cũ sẽ đâm vào `ALREADY_TERMINAL` rồi kéo cả workflow xuống FAILED.
+
+        `INSERT` KHÔNG dùng `ON CONFLICT`: `new_task_id` do người gọi cấp và đã
+        kiểm là chưa tồn tại. Một lần đụng ở đây nghĩa là logic cấp tên hỏng, và
+        nuốt nó đi sẽ khiến lần thử mới ghi đè lên bằng chứng của một bước khác.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """
+                UPDATE workflow_tasks
+                SET status = 'CANCELLED', updated_at = NOW()
+                WHERE workflow_id = $1 AND task_id = $2
+                """,
+                _uuid(workflow_id),
+                old_task_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO workflow_tasks
+                    (workflow_id, task_id, tool, status, depends_on, input_data)
+                VALUES ($1, $2, $3, 'PENDING', $4, $5)
+                """,
+                _uuid(workflow_id),
+                new_task.get("id") or new_task["task_id"],
+                new_task["tool"],
+                _depends_on_dumps(new_task.get("depends_on")),
+                _json_dumps(new_task.get("input")),
+            )
+
+    async def clear_repair_hints(self, workflow_id: str, task_ids: list[str] | None = None) -> int:
+        """Xoá dấu vết hỏng đã được xử lý. Trả số dòng xoá.
+
+        `save_repair_hints` trả về ngay khi không có hint mới, nên nó KHÔNG bao
+        giờ dọn được hint cũ. Hệ quả đo được: khách trả lời "khu B", hệ thống mở
+        đúng yêu cầu mới, và `GET` vẫn trả `NEEDS_INFORMATION` với ô nhập khu —
+        vì `_demo_response` dựng câu hỏi từ chính bảng này.
+
+        `task_ids = None` nghĩa là xoá hết; danh sách rỗng KHÔNG xoá gì (khác
+        hẳn nhau, và gộp hai ý ấy lại sẽ xoá sạch hint của cả workflow mỗi lần
+        người gọi tình cờ không có bước nào để dọn).
+        """
+        if task_ids is not None and not task_ids:
+            return 0
+        async with self._pool.acquire() as conn:
+            if task_ids is None:
+                result = await conn.execute(
+                    "DELETE FROM workflow_repair_hints WHERE workflow_id = $1",
+                    _uuid(workflow_id),
+                )
+            else:
+                result = await conn.execute(
+                    "DELETE FROM workflow_repair_hints WHERE workflow_id = $1 AND task_id = ANY($2::text[])",
+                    _uuid(workflow_id),
+                    list(task_ids),
+                )
+        return int(result.split()[-1]) if result else 0
+
     async def reopen_cancelled_tasks(self, workflow_id: str) -> int:
         """Đưa các bước ĐÃ HUỶ/HỎNG về PENDING để chạy lại. Trả số dòng đổi.
 
@@ -780,6 +848,14 @@ class WorkflowRepository:
 
         KHÔNG đụng bước đã `SUCCESS`: nó đã chạy thật, có kết quả thật ở phía
         đơn vị cung cấp. Chạy lại nó là đặt hai lần.
+
+        KHÔNG đụng bước có bằng chứng gửi đi ở trạng thái CUỐI, dù trạng thái
+        của nó là gì. `ACKNOWLEDGED`/`UNKNOWN` nghĩa là một lời gọi đã rời khỏi
+        hệ thống và có thể đã được ghi nhận; mở lại nó là gửi lần hai trên cùng
+        một bằng chứng — và `prepare_submission` sẽ từ chối đúng như vậy, biến
+        một lượt "sửa và chạy lại" thành `INTERNAL_SERVICE_ERROR`. Bước bị THAY
+        THẾ bởi một lần thử mới (`supersede_task_with_new_attempt`) rơi đúng
+        vào diện này: nó phải ở lại quá khứ.
         """
         async with self._pool.acquire() as conn:
             result = await conn.execute(
@@ -788,6 +864,7 @@ class WorkflowRepository:
                 SET status = 'PENDING', error_code = NULL, error_message = NULL, updated_at = NOW()
                 WHERE workflow_id = $1
                   AND status IN ('CANCELLED', 'FAILED', 'SKIPPED', 'WAITING_APPROVAL')
+                  AND provider_submission_status NOT IN ('ACKNOWLEDGED', 'UNKNOWN')
                 """,
                 _uuid(workflow_id),
             )
