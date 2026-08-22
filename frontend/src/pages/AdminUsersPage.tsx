@@ -6,11 +6,12 @@ import {
   type AdminUser,
 } from "../lib/agentApi";
 import { useToast } from "../lib/toast";
-import { Users, Lock, Unlock } from "lucide-react";
+import { Lock, Unlock, Search, Loader2 } from "lucide-react";
 
 export function AdminUsersPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState("");
   const toast = useToast();
 
   const fetchUsers = async () => {
@@ -34,147 +35,202 @@ export function AdminUsersPage() {
   ) => {
     try {
       await adminUpdateUserRole(userId, newRole);
-      toast.push("success", "Đã cập nhật quyền thành công");
+      toast.push("success", "Đã cập nhật vai trò người dùng thành công");
       fetchUsers();
     } catch (error: any) {
-      toast.push("error", error.message || "Cập nhật quyền thất bại");
+      toast.push("error", error.message || "Cập nhật vai trò thất bại");
     }
   };
 
   const handleStatusChange = async (userId: string, isArchived: boolean) => {
     try {
       await adminUpdateUserStatus(userId, isArchived);
-      toast.push("success", isArchived ? "Đã khoá tài khoản" : "Đã mở khoá tài khoản");
+      toast.push("success", isArchived ? "Đã khóa truy cập tài khoản" : "Đã kích hoạt lại tài khoản");
       fetchUsers();
     } catch (error: any) {
       toast.push("error", error.message || "Cập nhật trạng thái thất bại");
     }
   };
 
+  const filteredUsers = users.filter((u) => {
+    const q = searchTerm.toLowerCase();
+    return (
+      u.username.toLowerCase().includes(q) ||
+      (u.full_name && u.full_name.toLowerCase().includes(q)) ||
+      (u.email && u.email.toLowerCase().includes(q)) ||
+      u.id.toLowerCase().includes(q)
+    );
+  });
+
   if (loading) {
     return (
-      <div className="p-8 text-center text-[var(--text-secondary)]">
-        Đang tải...
+      <div className="flex h-64 items-center justify-center text-[var(--text-muted)]">
+        <div className="flex flex-col items-center gap-2">
+          <Loader2 className="h-6 w-6 animate-spin text-[var(--agent)]" />
+          <span className="text-[14px] font-medium">Đang tải danh bạ người dùng...</span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="p-8 max-w-6xl mx-auto min-h-full">
-      <div className="flex items-center gap-4 mb-8">
-        <div className="flex items-center justify-center w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-500 shadow-inner">
-          <Users className="w-6 h-6" strokeWidth={2} />
-        </div>
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--text-primary)]">Quản lý Tài khoản</h1>
-          <p className="text-sm text-[var(--text-secondary)] mt-1">Phân quyền và quản lý trạng thái truy cập của người dùng</p>
+          <p className="font-mono text-[12px] font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">
+            QUẢN TRỊ TÀI KHOẢN
+          </p>
+          <h1 className="mt-2 text-[32px] sm:text-[38px] font-semibold leading-[1.12] tracking-[-0.03em] text-[var(--text-primary)]">
+            Người dùng & Phân quyền
+          </h1>
+          <p className="mt-2 text-[14.5px] text-[var(--text-secondary)]">
+            Kiểm soát vai trò (RBAC) và quản lý trạng thái truy cập tài khoản trên toàn hệ thống.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--text-muted)]" />
+            <input
+              type="text"
+              placeholder="Tìm tên, email, UUID..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="h-10 w-[240px] pl-10 pr-3 rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] text-[14px] text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none transition-colors focus:border-[var(--agent)]"
+            />
+          </div>
+          <span className="font-mono text-[12px] font-semibold px-3 py-2 rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] text-[var(--text-secondary)]">
+            {filteredUsers.length} TÀI KHOẢN
+          </span>
         </div>
       </div>
 
-      <div className="bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--border-light)] rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-[var(--surface-hover)] border-b border-[var(--border-light)]">
-              <th className="p-4 font-medium text-[var(--text-secondary)]">
-                Tài khoản
-              </th>
-              <th className="p-4 font-medium text-[var(--text-secondary)]">
-                Thông tin
-              </th>
-              <th className="p-4 font-medium text-[var(--text-secondary)]">
-                Quyền
-              </th>
-              <th className="p-4 font-medium text-[var(--text-secondary)]">
-                Trạng thái
-              </th>
-              <th className="p-4 font-medium text-[var(--text-secondary)] text-right">
-                Thao tác
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((user) => (
-              <tr
-                key={user.id}
-                className="border-b border-[var(--border-light)] hover:bg-[var(--surface-hover)] transition-colors"
-              >
-                <td className="p-4">
-                  <div className="font-medium">{user.username}</div>
-                  <div className="text-sm text-[var(--text-secondary)]">
-                    {user.id.slice(0, 8)}...
-                  </div>
-                </td>
-                <td className="p-4">
-                  <div className="text-sm">{user.full_name || "—"}</div>
-                  <div className="text-sm text-[var(--text-secondary)]">
-                    {user.email || user.phone || "—"}
-                  </div>
-                </td>
-                <td className="p-4">
-                  {user.role === "provider" ? (
-                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-500/10 text-purple-500">
-                      Provider (Demo)
+      {/* Main Table Card */}
+      <div className="rounded-[var(--r-md)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] shadow-[var(--shadow-1)] overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-[var(--surface-raised)] border-b border-[var(--border-subtle)]">
+                <th className="py-3.5 px-6 font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                  Tài khoản & Định danh
+                </th>
+                <th className="py-3.5 px-6 font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                  Họ tên & Liên hệ
+                </th>
+                <th className="py-3.5 px-6 font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                  Vai trò (Role)
+                </th>
+                <th className="py-3.5 px-6 font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                  Trạng thái
+                </th>
+                <th className="py-3.5 px-6 font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)] text-right">
+                  Hành động
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--border-subtle)]">
+              {filteredUsers.map((user) => (
+                <tr
+                  key={user.id}
+                  className="hover:bg-[var(--surface-raised)] transition-colors duration-[var(--t-hover)]"
+                >
+                  <td className="py-4 px-6">
+                    <div className="text-[14.5px] font-semibold text-[var(--text-primary)]">
+                      {user.username}
+                    </div>
+                    <div className="font-mono text-[12px] text-[var(--text-muted)] mt-0.5">
+                      #{user.id.slice(0, 8)}
+                    </div>
+                  </td>
+                  <td className="py-4 px-6">
+                    <div className="text-[14px] font-medium text-[var(--text-primary)]">
+                      {user.full_name || "—"}
+                    </div>
+                    <div className="text-[12.5px] text-[var(--text-muted)] mt-0.5">
+                      {user.email || user.phone || "Chưa cập nhật"}
+                    </div>
+                  </td>
+                  <td className="py-4 px-6">
+                    {user.role === "provider" ? (
+                      <span
+                        className="inline-flex items-center px-2.5 py-1 rounded-[var(--r-xs)] font-mono text-[11.5px] font-semibold tracking-[0.05em] uppercase"
+                        style={{
+                          color: "var(--running)",
+                          backgroundColor: "color-mix(in srgb, var(--running) 12%, transparent)",
+                        }}
+                      >
+                        PROVIDER
+                      </span>
+                    ) : (
+                      <select
+                        className="h-8 bg-[var(--surface-overlay)] border border-[var(--border-subtle)] rounded-[var(--r-sm)] px-2.5 py-1 text-[13px] font-medium text-[var(--text-primary)] outline-none transition-colors hover:border-[var(--border-strong)] focus:border-[var(--agent)]"
+                        value={user.role}
+                        onChange={(e) =>
+                          handleRoleChange(user.id, e.target.value as any)
+                        }
+                      >
+                        <option value="customer">CUSTOMER</option>
+                        <option value="admin">ADMIN</option>
+                      </select>
+                    )}
+                  </td>
+                  <td className="py-4 px-6">
+                    <span
+                      className="inline-flex items-center px-2.5 py-1 rounded-[var(--r-xs)] font-mono text-[11.5px] font-semibold tracking-[0.05em] uppercase"
+                      style={{
+                        color: user.archived_at ? "var(--danger)" : "var(--success)",
+                        backgroundColor: user.archived_at
+                          ? "color-mix(in srgb, var(--danger) 12%, transparent)"
+                          : "color-mix(in srgb, var(--success) 12%, transparent)",
+                      }}
+                    >
+                      {user.archived_at ? "ĐÃ KHÓA" : "HOẠT ĐỘNG"}
                     </span>
-                  ) : (
-                    <select
-                      className="bg-[var(--bg-primary)] border border-[var(--border-light)] rounded-lg px-2 py-1 text-sm outline-none focus:border-[var(--primary)]"
-                      value={user.role}
-                      onChange={(e) =>
-                        handleRoleChange(user.id, e.target.value as any)
+                  </td>
+                  <td className="py-4 px-6 text-right">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleStatusChange(user.id, !user.archived_at)
+                      }
+                      className={`press inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--r-sm)] text-[13px] font-medium transition-all ${
+                        user.archived_at
+                          ? "border border-[var(--border-subtle)] bg-[var(--surface-overlay)] text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-raised)]"
+                          : "text-white hover:opacity-90"
+                      }`}
+                      style={
+                        !user.archived_at
+                          ? { backgroundColor: "var(--danger)" }
+                          : undefined
                       }
                     >
-                      <option value="customer">Customer</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                  )}
-                </td>
-                <td className="p-4">
-                  <span
-                    className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                      user.archived_at
-                        ? "bg-red-500/10 text-red-500"
-                        : "bg-green-500/10 text-green-500"
-                    }`}
+                      {user.archived_at ? (
+                        <>
+                          <Unlock className="w-3.5 h-3.5" style={{ color: "var(--agent)" }} /> Mở khóa
+                        </>
+                      ) : (
+                        <>
+                          <Lock className="w-3.5 h-3.5" /> Khóa
+                        </>
+                      )}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {filteredUsers.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={5}
+                    className="py-12 text-center text-[14px] text-[var(--text-muted)]"
                   >
-                    {user.archived_at ? "Đã khoá" : "Hoạt động"}
-                  </span>
-                </td>
-                <td className="p-4 text-right">
-                  <button
-                    onClick={() =>
-                      handleStatusChange(user.id, !user.archived_at)
-                    }
-                    className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                      user.archived_at
-                        ? "bg-[var(--surface)] border border-[var(--border-light)] text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
-                        : "bg-red-500/10 text-red-500 hover:bg-red-500/20"
-                    }`}
-                  >
-                    {user.archived_at ? (
-                      <>
-                        <Unlock className="w-4 h-4" /> Mở khoá
-                      </>
-                    ) : (
-                      <>
-                        <Lock className="w-4 h-4" /> Khoá
-                      </>
-                    )}
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {users.length === 0 && (
-              <tr>
-                <td
-                  colSpan={5}
-                  className="p-8 text-center text-[var(--text-secondary)]"
-                >
-                  Không có dữ liệu
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+                    Không tìm thấy người dùng nào phù hợp.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

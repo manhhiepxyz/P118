@@ -120,15 +120,21 @@ async def get_current_user(
     return user
 
 
-def require_roles(*roles: str):
+def require_roles(*roles: str | list[str] | tuple[str, ...]):
     """Factory trả dependency chặn 403 nếu user.role không trong `roles`.
 
     Ví dụ: `user: dict = Depends(require_roles("admin"))` — dùng cho endpoint
     quản trị sau Demo Day (user management, HITL review).
     """
+    flat_roles: set[str] = set()
+    for r in roles:
+        if isinstance(r, (list, tuple, set)):
+            flat_roles.update(str(item) for item in r)
+        else:
+            flat_roles.add(str(r))
 
     async def _checker(user: dict = Depends(get_current_user)) -> dict:
-        if user.get("role") not in roles:
+        if user.get("role") not in flat_roles:
             raise HTTPException(status_code=403, detail="Bạn không có quyền thực hiện thao tác này.")
         return user
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -441,6 +442,8 @@ async def list_admin_requests(
     limit: int = 50,
     search_user: str | None = None,
     status: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
     _admin: dict = Depends(require_roles("admin")),
 ) -> dict:
     """Ai đang yêu cầu gì, đang chờ ai, và có gì hỏng.
@@ -450,7 +453,14 @@ async def list_admin_requests(
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=422, detail="limit phải trong khoảng 1–200.")
     repository = await acquire_repository()
-    page_data = await repository.list_admin_requests(page=page, limit=limit, search_user=search_user, status=status)
+    page_data = await repository.list_admin_requests(
+        page=page,
+        limit=limit,
+        search_user=search_user,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+    )
     items = []
     for row in page_data["items"]:
         items.append(

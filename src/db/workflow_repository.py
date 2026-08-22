@@ -1894,69 +1894,6 @@ class WorkflowRepository:
             record["parent_workflow_id"] = str(record["parent_workflow_id"])
         return record
 
-    async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
-        """Lấy danh sách tất cả các luồng hoạt động cho Admin.
-
-        Đã bỏ cơ chế ẩn danh theo yêu cầu để hỗ trợ quản lý. Trả về `goal` gốc,
-        `owner_username`, và `input_data` của task bị lỗi.
-        Hỗ trợ lọc theo `search_user`.
-        """
-        offset = (page - 1) * limit
-        async with self._pool.acquire() as conn:
-            if search_user:
-                total_query = """
-                    SELECT COUNT(*) 
-                    FROM workflows w
-                    LEFT JOIN users u ON w.owner_user_id = u.id
-                    WHERE u.username ILIKE '%' || $1 || '%'
-                """
-                total = await conn.fetchval(total_query, search_user)
-            else:
-                total = await conn.fetchval("SELECT COUNT(*) FROM workflows")
-
-            rows_query = """
-                SELECT 
-                    w.workflow_id, 
-                    w.goal, 
-                    w.status, 
-                    w.error_code,
-                    w.created_at, 
-                    w.updated_at,
-                    w.assistant_answer,
-                    u.username as owner_username,
-                    (
-                        SELECT COALESCE(json_agg(t.tool), '[]'::json)
-                        FROM (
-                            SELECT tool FROM workflow_tasks wt 
-                            WHERE wt.workflow_id = w.workflow_id 
-                            ORDER BY wt.id
-                        ) t
-                    ) as tools,
-                    (
-                        SELECT json_build_object('tool', wt.tool, 'message', wt.error_message, 'input', wt.input_data)
-                        FROM workflow_tasks wt
-                        WHERE wt.workflow_id = w.workflow_id AND wt.status = 'FAILED'
-                        LIMIT 1
-                    ) as failed_task
-                FROM workflows w
-                LEFT JOIN users u ON w.owner_user_id = u.id
-                WHERE ($3::text IS NULL OR u.username ILIKE '%' || $3 || '%')
-                ORDER BY w.created_at DESC
-                LIMIT $1 OFFSET $2
-            """
-            rows = await conn.fetch(rows_query, limit, offset, search_user)
-
-        items = []
-        for r in rows:
-            item = dict(r)
-            item["workflow_id"] = str(item["workflow_id"])
-            if isinstance(item.get("tools"), str):
-                item["tools"] = json.loads(item["tools"])
-            if isinstance(item.get("failed_task"), str):
-                item["failed_task"] = json.loads(item["failed_task"])
-            items.append(item)
-        return {"items": items, "total": total, "page": page, "limit": limit}
-
     # ------------------------------------------------------------------
     # Giám sát của ADMIN — đọc, và chỉ đọc.
     #
@@ -1977,6 +1914,8 @@ class WorkflowRepository:
         limit: int = 50,
         search_user: str | None = None,
         status: str | None = None,
+        date_from: object | None = None,
+        date_to: object | None = None,
     ) -> dict[str, Any]:
         """Danh sách yêu cầu cho màn giám sát: ai, việc gì, đang ở đâu.
 
@@ -1994,9 +1933,13 @@ class WorkflowRepository:
                 LEFT JOIN users u ON u.id = w.owner_user_id
                 WHERE ($1::text IS NULL OR u.username ILIKE '%' || $1 || '%')
                   AND ($2::text IS NULL OR w.status = $2)
+                  AND ($3::date IS NULL OR w.created_at::date >= $3::date)
+                  AND ($4::date IS NULL OR w.created_at::date <= $4::date)
                 """,
                 search_user,
                 status,
+                date_from,
+                date_to,
             )
             rows = await conn.fetch(
                 """
@@ -2038,11 +1981,15 @@ class WorkflowRepository:
                 LEFT JOIN users u ON u.id = w.owner_user_id
                 WHERE ($1::text IS NULL OR u.username ILIKE '%' || $1 || '%')
                   AND ($2::text IS NULL OR w.status = $2)
+                  AND ($3::date IS NULL OR w.created_at::date >= $3::date)
+                  AND ($4::date IS NULL OR w.created_at::date <= $4::date)
                 ORDER BY w.updated_at DESC NULLS LAST, w.created_at DESC
-                LIMIT $3 OFFSET $4
+                LIMIT $5 OFFSET $6
                 """,
                 search_user,
                 status,
+                date_from,
+                date_to,
                 limit,
                 offset,
             )
@@ -2088,8 +2035,7 @@ class WorkflowRepository:
                 wid,
             )
             events = await conn.fetch(
-                "SELECT stage, created_at FROM workflow_events WHERE workflow_id = $1 "
-                "ORDER BY sequence LIMIT 100",
+                "SELECT stage, created_at FROM workflow_events WHERE workflow_id = $1 ORDER BY sequence LIMIT 100",
                 wid,
             )
         return {

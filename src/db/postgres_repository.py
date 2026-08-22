@@ -353,14 +353,23 @@ class PostgreSQLWorkflowStateRepository:
     async def list_workflows_by_session(self, session_id: str, *, owner_user_id: str | None = None) -> list[dict]:
         return await self.workflows.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
 
-    async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
-        return await self.workflows.list_all_workflows_history(page=page, limit=limit, search_user=search_user)
-
     async def list_admin_requests(
-        self, *, page: int = 1, limit: int = 50, search_user: str | None = None, status: str | None = None
+        self,
+        *,
+        page: int = 1,
+        limit: int = 50,
+        search_user: str | None = None,
+        status: str | None = None,
+        date_from: object | None = None,
+        date_to: object | None = None,
     ) -> dict:
         return await self.workflows.list_admin_requests(
-            page=page, limit=limit, search_user=search_user, status=status
+            page=page,
+            limit=limit,
+            search_user=search_user,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
         )
 
     async def get_admin_request(self, workflow_id: str) -> dict | None:

@@ -945,12 +945,18 @@ export async function adminRequests(
   page = 1,
   limit = 50,
   search_user?: string,
+  status?: string,
+  date_from?: string,
+  date_to?: string,
 ): Promise<AdminRequestPage> {
   const query = new URLSearchParams({
     page: page.toString(),
     limit: limit.toString(),
   });
   if (search_user) query.append("search_user", search_user);
+  if (status) query.append("status", status);
+  if (date_from) query.append("date_from", date_from);
+  if (date_to) query.append("date_to", date_to);
   return request<AdminRequestPage>(`/admin/requests?${query.toString()}`);
 }
 
@@ -961,4 +967,3 @@ export async function adminRequestDetail(
     `/admin/requests/${encodeURIComponent(workflowId)}`,
   );
 }
-

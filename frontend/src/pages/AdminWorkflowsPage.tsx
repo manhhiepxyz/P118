@@ -9,7 +9,7 @@ import {
   type AdminWaitingFor,
 } from "../lib/agentApi";
 import { useToast } from "../lib/toast";
-import { AlertTriangle, Clock, Eye, Search, X } from "lucide-react";
+import { AlertTriangle, CalendarDays, Clock, Eye, Search, X } from "lucide-react";
 
 /**
  * Màn GIÁM SÁT của admin. Chỉ đọc.
@@ -81,6 +81,9 @@ export function AdminWorkflowsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
+  const [status, setStatus] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState<AdminRequestDetail | null>(null);
   const limit = 20;
@@ -96,7 +99,14 @@ export function AdminWorkflowsPage() {
   useEffect(() => {
     let huy = false;
     setLoading(true);
-    adminRequests(page, limit, debounced || undefined)
+    adminRequests(
+      page,
+      limit,
+      debounced || undefined,
+      status || undefined,
+      dateFrom || undefined,
+      dateTo || undefined,
+    )
       .then((data) => {
         if (huy) return;
         setItems(data.items);
@@ -111,7 +121,7 @@ export function AdminWorkflowsPage() {
     return () => {
       huy = true;
     };
-  }, [page, debounced, toast]);
+  }, [page, debounced, status, dateFrom, dateTo, toast]);
 
   const soTrang = useMemo(() => Math.max(1, Math.ceil(total / limit)), [total]);
 
@@ -132,16 +142,81 @@ export function AdminWorkflowsPage() {
         </p>
       </header>
 
-      <label className="relative block max-w-sm">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-        <span className="sr-only">Tìm theo tài khoản</span>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Tìm theo tài khoản…"
-          className="h-10 w-full rounded-xl border border-gray-300 bg-white pl-9 pr-3 text-sm outline-none focus:border-teal-600"
-        />
-      </label>
+      <div className="grid gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-4 shadow-[var(--shadow-1)] md:grid-cols-[minmax(220px,1fr)_180px_170px_170px_auto]">
+        <label className="relative block">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+          <span className="sr-only">Tìm theo tài khoản</span>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Tìm theo tài khoản…"
+            className="h-10 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] pl-9 pr-3 text-sm outline-none focus:border-[var(--agent)]"
+          />
+        </label>
+
+        <select
+          aria-label="Lọc trạng thái"
+          value={status}
+          onChange={(e) => {
+            setStatus(e.target.value);
+            setPage(1);
+          }}
+          className="h-10 rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-3 text-sm outline-none focus:border-[var(--agent)]"
+        >
+          <option value="">Tất cả trạng thái</option>
+          <option value="PENDING">Đang chuẩn bị</option>
+          <option value="RUNNING">Đang chạy</option>
+          <option value="WAITING_APPROVAL">Đang chờ</option>
+          <option value="SUCCESS">Hoàn tất</option>
+          <option value="FAILED">Không thành công</option>
+          <option value="CANCELLED">Đã huỷ</option>
+        </select>
+
+        <label className="relative">
+          <CalendarDays className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+          <span className="sr-only">Từ ngày</span>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => {
+              setDateFrom(e.target.value);
+              setPage(1);
+            }}
+            className="h-10 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] pl-9 pr-2 text-sm outline-none focus:border-[var(--agent)]"
+          />
+        </label>
+
+        <label className="relative">
+          <CalendarDays className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+          <span className="sr-only">Đến ngày</span>
+          <input
+            type="date"
+            value={dateTo}
+            min={dateFrom || undefined}
+            onChange={(e) => {
+              setDateTo(e.target.value);
+              setPage(1);
+            }}
+            className="h-10 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] pl-9 pr-2 text-sm outline-none focus:border-[var(--agent)]"
+          />
+        </label>
+
+        <button
+          type="button"
+          disabled={!search && !status && !dateFrom && !dateTo}
+          onClick={() => {
+            setSearch("");
+            setDebounced("");
+            setStatus("");
+            setDateFrom("");
+            setDateTo("");
+            setPage(1);
+          }}
+          className="inline-flex h-10 items-center justify-center gap-1 rounded-[var(--r-sm)] border border-[var(--border-subtle)] px-3 text-sm text-[var(--text-secondary)] disabled:opacity-40"
+        >
+          <X className="h-4 w-4" /> Xoá lọc
+        </button>
+      </div>
 
       <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">

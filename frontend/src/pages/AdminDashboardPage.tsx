@@ -5,303 +5,400 @@ import {
   Loader2,
   Cpu,
   ArrowRight,
+  ShieldAlert,
+  Clock,
+  Zap,
+  TrendingUp,
+  Users,
+  BarChart3,
+  TimerReset,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import {
-  PieChart,
-  Pie,
-  Cell,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
 
 import { adminMetrics } from "../lib/agentApi";
 import { usePolling } from "../lib/usePolling";
 
-const COLORS = {
-  success: "#22c55e",
-  running: "#3b82f6",
-  waiting_approval: "#f59e0b",
-  failed: "#ef4444",
-  cancelled: "#6b7280",
-  awaiting_user: "#8b5cf6",
-};
-
-const CARDS = [
-  {
-    key: "total",
-    label: "Tổng luồng",
-    Icon: Building2,
-    color: "text-blue-500",
-    bg: "bg-blue-500/10",
-  },
-  {
-    key: "running",
-    label: "Đang xử lý",
-    Icon: Loader2,
-    color: "text-amber-500",
-    bg: "bg-amber-500/10",
-  },
-  {
-    key: "success",
-    label: "Hoàn tất",
-    Icon: CheckCircle2,
-    color: "text-green-500",
-    bg: "bg-green-500/10",
-  },
-  {
-    key: "failed",
-    label: "Thất bại",
-    Icon: AlertTriangle,
-    color: "text-red-500",
-    bg: "bg-red-500/10",
-  },
+// ─── Hero Cards ───────────────────────────────────────────────────────────────
+const HERO_CARDS = [
+  { key: "total",   label: "Tổng luồng hệ thống", badge: "TỔNG SỐ",   Icon: Building2,   token: "var(--agent)",   spin: false, linkStatus: "" },
+  { key: "running", label: "Đang xử lý",           badge: "ĐANG CHẠY", Icon: Loader2,      token: "var(--running)", spin: true,  linkStatus: "RUNNING" },
+  { key: "success", label: "Thành công",            badge: "HOÀN TẤT", Icon: CheckCircle2, token: "var(--success)", spin: false, linkStatus: "SUCCESS" },
+  { key: "failed",  label: "Sự cố / Thất bại",     badge: "CẦN XỬ LÝ",Icon: AlertTriangle,token: "var(--danger)",  spin: false, linkStatus: "FAILED" },
 ];
 
+// ─── Lifecycle breakdown rows ─────────────────────────────────────────────────
+const LIFECYCLE_ROWS = [
+  { key: "running",          label: "Đang xử lý",       token: "var(--running)"      },
+  { key: "waiting_approval", label: "Chờ duyệt (HITL)", token: "var(--waiting-user)" },
+  { key: "awaiting_user",    label: "Chờ người dùng",    token: "var(--agent)"        },
+  { key: "cancelled",        label: "Đã hủy",            token: "var(--text-muted)"   },
+];
+
+function successRateColor(r: number) {
+  if (r >= 90) return "var(--success)";
+  if (r >= 70) return "var(--waiting-user)";
+  return "var(--danger)";
+}
+function successRateLabel(r: number) {
+  if (r >= 90) return "Khỏe";
+  if (r >= 70) return "Cần chú ý";
+  return "Nguy hiểm";
+}
+
 export function AdminDashboardPage() {
-  const { data, loading, error } = usePolling(adminMetrics, 10000);
+  const { data, loading, error } = usePolling(adminMetrics, 10_000);
 
-  const pieData = data
-    ? [
-        { name: "Hoàn tất", value: data.success, color: COLORS.success },
-        { name: "Đang chạy", value: data.running, color: COLORS.running },
-        {
-          name: "Chờ xác nhận",
-          value: data.waiting_approval,
-          color: COLORS.waiting_approval,
-        },
-        { name: "Thất bại", value: data.failed, color: COLORS.failed },
-        { name: "Đã hủy", value: data.cancelled, color: COLORS.cancelled },
-        { name: "Chờ khách", value: data.awaiting_user, color: COLORS.awaiting_user },
-      ].filter((item) => item.value > 0)
-    : [];
+  // Derived
+  const total     = data?.total    ?? 0;
+  const failed    = data?.failed   ?? 0;
+  const success   = data?.success  ?? 0;
+  const cancelled = data?.cancelled ?? 0;
+  const waiting   = data?.waiting_approval ?? 0;
+  const orphaned  = (data as any)?.orphaned ?? 0;
 
-  const barData = data
-    ? [
-        {
-          name: "LLM Usage",
-          Tokens: data.llm_tokens,
-          Calls: data.llm_calls,
-        },
-      ]
-    : [];
+  const denominator = success + failed + cancelled;
+  const successRate = denominator > 0 ? Math.round((success / denominator) * 100) : null;
+  const rateColor   = successRate !== null ? successRateColor(successRate) : "var(--text-muted)";
+
+  const tokensPerWf = total > 0 ? Math.round((data?.llm_tokens ?? 0) / total) : null;
+  const callsPerWf  = total > 0 ? ((data?.llm_calls ?? 0) / total).toFixed(1)  : null;
+  const latencyS    = data?.avg_latency_ms ? (data.avg_latency_ms / 1000).toFixed(1) : null;
+
+  // Alert
+  const hasAlert   = failed > 0 || orphaned > 0 || waiting > 0;
+  const alertParts: string[] = [];
+  if (failed > 0)   alertParts.push(`${failed} luồng thất bại`);
+  if (orphaned > 0) alertParts.push(`${orphaned} luồng treo (orphaned)`);
+  if (waiting > 0)  alertParts.push(`${waiting} luồng chờ duyệt HITL`);
+
+  // Lifecycle max for proportional bars
+  const lifecycleMax = Math.max(
+    data?.running ?? 0, data?.waiting_approval ?? 0,
+    data?.awaiting_user ?? 0, data?.cancelled ?? 0, 1
+  );
 
   return (
-    <div className="h-full overflow-y-auto p-8">
-      <div className="mx-auto max-w-6xl">
-        <div className="flex items-center gap-4 mb-8">
-          <div className="flex items-center justify-center w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 text-blue-500 shadow-inner">
-            <Building2 className="w-6 h-6" strokeWidth={2} />
-          </div>
+    <div className="space-y-7">
+      {/* Header */}
+      <div>
+        <p className="font-mono text-[12px] font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">
+          BẢNG ĐIỀU KHIỂN QUẢN TRỊ
+        </p>
+        <h1 className="mt-2 text-[32px] sm:text-[38px] font-semibold leading-[1.12] tracking-[-0.03em] text-[var(--text-primary)]">
+          Tổng quan Vận hành
+        </h1>
+        <p className="mt-2 text-[14.5px] text-[var(--text-secondary)]">
+          Theo dõi sức khỏe hệ thống và hiệu suất Agent AI theo thời gian thực.
+        </p>
+      </div>
+
+      {/* Backend error */}
+      {error && (
+        <div
+          role="alert"
+          className="flex items-center gap-3 rounded-[var(--r-sm)] p-4 text-[14px]"
+          style={{
+            color: "var(--danger)",
+            backgroundColor: "color-mix(in srgb, var(--danger) 11%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--danger) 25%, transparent)",
+          }}
+        >
+          <ShieldAlert className="h-5 w-5 shrink-0" />
+          <span>Không thể tải dữ liệu chỉ số. Vui lòng kiểm tra kết nối với máy chủ backend!</span>
+        </div>
+      )}
+
+      {/* ── Alert Banner ── */}
+      {!loading && hasAlert && (
+        <div
+          className="flex items-start gap-3 rounded-[var(--r-sm)] p-4 text-[14px]"
+          style={{
+            color: "var(--danger)",
+            backgroundColor: "color-mix(in srgb, var(--danger) 9%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--danger) 22%, transparent)",
+          }}
+        >
+          <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5" />
           <div>
-            <h1 className="text-2xl font-bold text-[var(--text-primary)]">Tổng quan Vận hành</h1>
-            <p className="text-sm text-[var(--text-secondary)] mt-1">Giám sát trạng thái hoạt động của các luồng xử lý và tài nguyên AI trong thời gian thực</p>
+            <p className="font-semibold">Hệ thống cần chú ý</p>
+            <p className="text-[13px] mt-0.5 opacity-80">
+              {alertParts.join(" · ")}.{" "}
+              <Link
+                to="/admin/workflows"
+                className="underline underline-offset-2 font-medium hover:opacity-100 transition-opacity"
+              >
+                Xem chi tiết →
+              </Link>
+            </p>
           </div>
         </div>
+      )}
 
-        {error && (
-          <div className="mb-8 rounded-xl bg-red-500/10 p-4 text-red-500 border border-red-500/20">
-            Không thể tải dữ liệu. Vui lòng kiểm tra kết nối!
-          </div>
-        )}
-
-        {/* Cards Section */}
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-          {CARDS.map(({ key, label, Icon, color, bg }) => (
+      {/* ── 4 Hero Cards ── */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {HERO_CARDS.map(({ key, label, badge, Icon, token, spin, linkStatus }) => {
+          const value = loading && !data ? null : (data?.[key as keyof typeof data] ?? 0) as number;
+          const isCritical = key === "failed" && (value ?? 0) > 0;
+          return (
             <Link
               key={key}
-              to="/admin/workflows"
-              className="group relative flex flex-col justify-between overflow-hidden rounded-2xl bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--border-light)] p-6 shadow-sm hover:shadow-md transition-all hover:border-[var(--border-strong)]"
+              to={linkStatus ? `/admin/workflows?status=${linkStatus}` : "/admin/workflows"}
+              className="group relative flex flex-col justify-between rounded-[var(--r-md)] border bg-[var(--surface-overlay)] p-5 shadow-[var(--shadow-1)] transition-all duration-[var(--t-hover)] hover:shadow-[var(--shadow-2)]"
+              style={{
+                borderColor: isCritical
+                  ? `color-mix(in srgb, ${token} 35%, transparent)`
+                  : "var(--border-subtle)",
+              }}
             >
+              {isCritical && (
+                <span
+                  className="absolute inset-x-0 top-0 h-[3px] rounded-t-[var(--r-md)]"
+                  style={{ backgroundColor: token }}
+                />
+              )}
               <div className="flex items-center justify-between mb-4">
                 <div
-                  className={`flex h-12 w-12 items-center justify-center rounded-xl ${bg}`}
+                  className="flex h-9 w-9 items-center justify-center rounded-[var(--r-sm)]"
+                  style={{
+                    backgroundColor: `color-mix(in srgb, ${token} 13%, transparent)`,
+                    color: token,
+                  }}
                 >
-                  <Icon className={`h-6 w-6 ${color}`} strokeWidth={2} />
+                  <Icon className={`h-4.5 w-4.5 ${spin && (value ?? 0) > 0 ? "animate-spin" : ""}`} strokeWidth={2} />
                 </div>
-                <ArrowRight className="h-5 w-5 text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-opacity transform group-hover:translate-x-1" />
+                <span
+                  className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.08em] px-2 py-0.5 rounded-[var(--r-xs)]"
+                  style={{ backgroundColor: "var(--surface-sunken)", color: "var(--text-muted)" }}
+                >
+                  {badge}
+                </span>
               </div>
               <div>
-                <p className="text-3xl font-bold text-[var(--text-primary)] tabular-nums">
-                  {loading && !data
-                    ? "—"
-                    : (data?.[key as keyof typeof data] ?? 0).toLocaleString("vi-VN")}
+                <p
+                  className="font-mono text-[32px] font-bold tracking-tight tabular-nums"
+                  style={{ color: isCritical ? token : "var(--text-primary)" }}
+                >
+                  {value === null ? "—" : value.toLocaleString("vi-VN")}
                 </p>
-                <p className="mt-1 text-sm font-medium text-[var(--text-secondary)]">
-                  {label}
-                </p>
+                <div className="flex items-center justify-between mt-1 text-[13px] font-medium text-[var(--text-secondary)]">
+                  <span>{label}</span>
+                  <ArrowRight
+                    className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 transition-all transform group-hover:translate-x-0.5"
+                    style={{ color: "var(--agent)" }}
+                  />
+                </div>
               </div>
             </Link>
-          ))}
+          );
+        })}
+      </div>
+
+      {/* ── System Health KPI ── */}
+      <div className="rounded-[var(--r-md)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-1)]">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-[15px] font-semibold text-[var(--text-primary)] tracking-[-0.01em] flex items-center gap-2">
+            <TrendingUp className="h-4 w-4" style={{ color: "var(--agent)" }} />
+            Sức khỏe Hệ thống
+          </h2>
+          <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+            TARGET ≥ 90%
+          </span>
         </div>
 
-        {/* Charts Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Pie Chart: Status Distribution */}
-          <div className="rounded-2xl bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--border-light)] p-6 shadow-sm flex flex-col">
-            <h2 className="text-lg font-bold text-[var(--text-primary)] mb-6">
-              Phân bổ Trạng thái Luồng
+        {loading && !data ? (
+          <div className="flex items-center gap-2 text-[var(--text-muted)]">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span className="text-[13.5px]">Đang tải...</span>
+          </div>
+        ) : successRate === null ? (
+          <p className="text-[13.5px] text-[var(--text-muted)]">Chưa có đủ dữ liệu để tính tỷ lệ.</p>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[13.5px] text-[var(--text-secondary)]">
+                Tỷ lệ thành công — {success} / {denominator} luồng đã kết thúc
+              </span>
+              <div className="flex items-center gap-2">
+                <span
+                  className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] px-2 py-0.5 rounded-[var(--r-xs)]"
+                  style={{
+                    color: rateColor,
+                    backgroundColor: `color-mix(in srgb, ${rateColor} 13%, transparent)`,
+                  }}
+                >
+                  {successRateLabel(successRate)}
+                </span>
+                <span className="font-mono text-[22px] font-bold tabular-nums" style={{ color: rateColor }}>
+                  {successRate}%
+                </span>
+              </div>
+            </div>
+            <div className="h-2.5 w-full rounded-full bg-[var(--surface-sunken)] overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-700"
+                style={{ width: `${successRate}%`, backgroundColor: rateColor }}
+              />
+            </div>
+            <div className="flex justify-between text-[11px] font-mono text-[var(--text-muted)]">
+              <span>0%</span>
+              <span className="opacity-50">70%</span>
+              <span className="opacity-50">90%</span>
+              <span>100%</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Bottom Two Panels ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+        {/* Panel A: AI Efficiency */}
+        <div className="rounded-[var(--r-md)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-1)]">
+          <div className="flex items-center justify-between mb-5 pb-3 border-b border-[var(--border-subtle)]">
+            <h2 className="text-[15px] font-semibold text-[var(--text-primary)] tracking-[-0.01em] flex items-center gap-2">
+              <Cpu className="h-4 w-4" style={{ color: "var(--agent)" }} />
+              AI Agent Efficiency
             </h2>
-            <div className="h-[250px] w-full flex-1">
-              {loading && !data ? (
-                <div className="flex h-full items-center justify-center">
-                  <Loader2 className="h-8 w-8 animate-spin text-[var(--text-muted)]" />
+            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">PER WORKFLOW</span>
+          </div>
+
+          <div className="space-y-3.5">
+            {/* Tokens/wf */}
+            <div className="flex items-center justify-between rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-4 py-3">
+              <div className="flex items-center gap-2.5">
+                <Zap className="h-4 w-4 shrink-0" style={{ color: "var(--agent)" }} />
+                <div>
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Tokens / Workflow</p>
+                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                    Tổng: {loading && !data ? "—" : (data?.llm_tokens ?? 0).toLocaleString("vi-VN")}
+                  </p>
                 </div>
-              ) : pieData.length > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={pieData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={70}
-                      outerRadius={95}
-                      paddingAngle={4}
-                      dataKey="value"
+              </div>
+              <p className="font-mono text-[24px] font-bold text-[var(--text-primary)] tabular-nums">
+                {loading && !data ? "—" : tokensPerWf !== null ? tokensPerWf.toLocaleString("vi-VN") : "—"}
+              </p>
+            </div>
+
+            {/* Calls/wf */}
+            <div className="flex items-center justify-between rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-4 py-3">
+              <div className="flex items-center gap-2.5">
+                <BarChart3 className="h-4 w-4 shrink-0" style={{ color: "var(--running)" }} />
+                <div>
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Lần Gọi LLM / Workflow</p>
+                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                    Tổng: {loading && !data ? "—" : (data?.llm_calls ?? 0).toLocaleString("vi-VN")}
+                  </p>
+                </div>
+              </div>
+              <p className="font-mono text-[24px] font-bold text-[var(--text-primary)] tabular-nums">
+                {loading && !data ? "—" : callsPerWf ?? "—"}
+              </p>
+            </div>
+
+            {/* Avg Latency */}
+            <div className="flex items-center justify-between rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-4 py-3">
+              <div className="flex items-center gap-2.5">
+                <TimerReset className="h-4 w-4 shrink-0" style={{ color: "var(--waiting-user)" }} />
+                <div>
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Avg E2E Latency</p>
+                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">Target: &lt; 5s</p>
+                </div>
+              </div>
+              {latencyS !== null ? (
+                <p
+                  className="font-mono text-[24px] font-bold tabular-nums"
+                  style={{ color: parseFloat(latencyS) < 5 ? "var(--success)" : "var(--danger)" }}
+                >
+                  {latencyS}s
+                </p>
+              ) : (
+                <p className="font-mono text-[18px] font-bold text-[var(--text-muted)]">N/A</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Panel B: Workflow Lifecycle */}
+        <div className="rounded-[var(--r-md)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-1)]">
+          <div className="flex items-center justify-between mb-5 pb-3 border-b border-[var(--border-subtle)]">
+            <h2 className="text-[15px] font-semibold text-[var(--text-primary)] tracking-[-0.01em] flex items-center gap-2">
+              <Clock className="h-4 w-4" style={{ color: "var(--running)" }} />
+              Vòng đời Luồng
+            </h2>
+            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">TRẠNG THÁI</span>
+          </div>
+
+          <div className="space-y-4">
+            {LIFECYCLE_ROWS.map(({ key, label, token }) => {
+              const count = loading && !data ? null : (data?.[key as keyof typeof data] ?? 0) as number;
+              const pct = count !== null && lifecycleMax > 0 ? Math.round((count / lifecycleMax) * 100) : 0;
+              return (
+                <div key={key}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[13px] font-medium text-[var(--text-secondary)]">{label}</span>
+                    <span
+                      className="font-mono text-[14px] font-bold tabular-nums"
+                      style={{ color: (count ?? 0) > 0 ? token : "var(--text-muted)" }}
                     >
-                      {pieData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={{
-                        borderRadius: "12px",
-                        border: "none",
-                        boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-                        backgroundColor: "var(--surface)",
-                        color: "var(--text-primary)",
-                      }}
-                      itemStyle={{ fontWeight: 500 }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-                  Chưa có dữ liệu
-                </div>
-              )}
-            </div>
-            {/* Custom Legend */}
-            <div className="mt-4 flex flex-wrap justify-center gap-4">
-              {pieData.map((entry, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <span
-                    className="block h-3 w-3 rounded-full"
-                    style={{ backgroundColor: entry.color }}
-                  />
-                  <span className="text-sm text-[var(--text-secondary)]">
-                    {entry.name}
-                  </span>
-                  <span className="text-sm font-medium text-[var(--text-primary)]">
-                    {entry.value.toLocaleString("vi-VN")}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Bar Chart: LLM Usage */}
-          <div className="rounded-2xl bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--border-light)] p-6 shadow-sm flex flex-col">
-            <h2 className="text-lg font-bold text-[var(--text-primary)] mb-6 flex items-center gap-2">
-              <Cpu className="h-5 w-5 text-indigo-500" /> Tiêu thụ AI (LLM)
-            </h2>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-              <div className="rounded-xl bg-indigo-500/10 p-4 border border-indigo-500/20">
-                <p className="text-sm font-medium text-indigo-600 mb-1">
-                  Tổng Tokens
-                </p>
-                <p className="text-2xl font-bold text-[var(--text-primary)] tabular-nums">
-                  {loading && !data
-                    ? "—"
-                    : (data?.llm_tokens ?? 0).toLocaleString("vi-VN")}
-                </p>
-              </div>
-              <div className="rounded-xl bg-purple-500/10 p-4 border border-purple-500/20">
-                <p className="text-sm font-medium text-purple-600 mb-1">
-                  Tổng Calls
-                </p>
-                <p className="text-2xl font-bold text-[var(--text-primary)] tabular-nums">
-                  {loading && !data
-                    ? "—"
-                    : (data?.llm_calls ?? 0).toLocaleString("vi-VN")}
-                </p>
-              </div>
-              <div className="rounded-xl bg-emerald-500/10 p-4 border border-emerald-500/20">
-                <p className="text-sm font-medium text-emerald-600 mb-1">
-                  Chi phí ($)
-                </p>
-                <p className="text-2xl font-bold text-[var(--text-primary)] tabular-nums">
-                  {loading && !data
-                    ? "—"
-                    : `$${(data?.total_cost ?? 0).toFixed(4)}`}
-                </p>
-              </div>
-              <div className="rounded-xl bg-rose-500/10 p-4 border border-rose-500/20">
-                <p className="text-sm font-medium text-rose-600 mb-1">
-                  Trễ TB (ms)
-                </p>
-                <p className="text-2xl font-bold text-[var(--text-primary)] tabular-nums">
-                  {loading && !data
-                    ? "—"
-                    : (data?.avg_latency_ms ?? 0).toFixed(0)}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex-1 min-h-[150px] w-full mt-auto">
-              {loading && !data ? (
-                <div className="flex h-full items-center justify-center">
-                  <Loader2 className="h-8 w-8 animate-spin text-[var(--text-muted)]" />
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart
-                    data={barData}
-                    layout="vertical"
-                    margin={{ top: 0, right: 0, left: 0, bottom: 0 }}
-                  >
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                      horizontal={false}
-                      vertical={true}
-                      stroke="var(--border-subtle)"
-                    />
-                    <XAxis type="number" hide />
-                    <YAxis dataKey="name" type="category" hide />
-                    <Tooltip
-                      cursor={{ fill: "var(--surface-hover)" }}
-                      contentStyle={{
-                        borderRadius: "12px",
-                        border: "none",
-                        boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-                        backgroundColor: "var(--surface)",
-                        color: "var(--text-primary)",
+                      {count === null ? "—" : count}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-[var(--surface-sunken)] overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-700"
+                      style={{
+                        width: `${pct}%`,
+                        backgroundColor: (count ?? 0) > 0 ? token : "transparent",
                       }}
                     />
-                    <Bar
-                      dataKey="Tokens"
-                      fill="#6366f1"
-                      radius={[0, 4, 4, 0]}
-                      barSize={20}
-                    />
-                    <Bar
-                      dataKey="Calls"
-                      fill="#a855f7"
-                      radius={[0, 4, 4, 0]}
-                      barSize={20}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Orphaned alert */}
+            {!loading && orphaned > 0 && (
+              <div
+                className="mt-1 flex items-center justify-between rounded-[var(--r-sm)] px-3 py-2.5 text-[13px]"
+                style={{
+                  color: "var(--danger)",
+                  backgroundColor: "color-mix(in srgb, var(--danger) 10%, transparent)",
+                  border: "1px solid color-mix(in srgb, var(--danger) 22%, transparent)",
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  <span className="font-medium">Luồng treo (Orphaned)</span>
+                </div>
+                <span className="font-mono font-bold">{orphaned}</span>
+              </div>
+            )}
           </div>
         </div>
+      </div>
+
+      {/* ── Quick Actions ── */}
+      <div className="flex items-center gap-3 pt-1">
+        <span className="font-mono text-[11.5px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)] whitespace-nowrap">
+          ĐIỀU HƯỚNG NHANH
+        </span>
+        <div className="flex-1 h-px bg-[var(--border-subtle)]" />
+        <Link
+          to="/admin/workflows"
+          className="press inline-flex items-center gap-2 px-4 py-2 rounded-[var(--r-sm)] text-[13px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-overlay)] text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-raised)] transition-all whitespace-nowrap"
+        >
+          <BarChart3 className="h-4 w-4" style={{ color: "var(--agent)" }} />
+          Xem Lịch sử Luồng
+          <ArrowRight className="h-3.5 w-3.5 text-[var(--text-muted)]" />
+        </Link>
+        <Link
+          to="/admin/users"
+          className="press inline-flex items-center gap-2 px-4 py-2 rounded-[var(--r-sm)] text-[13px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-overlay)] text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-raised)] transition-all whitespace-nowrap"
+        >
+          <Users className="h-4 w-4" style={{ color: "var(--running)" }} />
+          Quản lý Tài khoản
+          <ArrowRight className="h-3.5 w-3.5 text-[var(--text-muted)]" />
+        </Link>
       </div>
     </div>
   );
