@@ -52,6 +52,14 @@ class SubmissionStatus(StrEnum):
 # thiếu bằng chứng cho MỌI lần tool ấy chạy.
 EXTERNAL_ID_FIELD_BY_TOOL: dict[str, str] = {
     "book_parking": "booking_id",
+    # Đổi khu trả về CHÍNH `booking_id` đã có — nó không tạo tham chiếu mới, và
+    # đó là điểm mạnh của thao tác này so với huỷ-rồi-đặt.
+    "change_parking_zone": "booking_id",
+    "cancel_property_viewing": "viewing_id",
+    "cancel_parking": "booking_id",
+    "cancel_maintenance": "maintenance_id",
+    "cancel_move": "move_request_id",
+    "cancel_shuttle": "shuttle_id",
     "book_shuttle": "shuttle_id",
     "create_maintenance_request": "maintenance_id",
     "pay_fee": "payment_id",

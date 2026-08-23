@@ -50,6 +50,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from src.common.enums import TaskStatus
 from src.common.task_plan import InputRef, Task, TaskPlan
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,26 @@ def _needs_new_identity(row: dict[str, Any], task: Task, answered: dict[str, Any
     `refused` do người gọi tra từ hàng đợi duyệt trong database, không suy từ
     câu lỗi và không nhận từ client.
     """
+    # Bước ĐÃ XONG thì không thay thế, dù bằng chứng nói gì.
+    #
+    # `ACKNOWLEDGED` là trạng thái CUỐI, nhưng nó mang nghĩa NGƯỢC hẳn với
+    # `UNKNOWN`: provider đã nhận và việc đã xong. Gộp hai nghĩa ấy lại là lỗi
+    # đo được trên workflow 148c9f30:
+    #
+    #   T3    ZONE_A  SUCCESS/ACKNOWLEDGED   BOOK-019 có thật trong parking_bookings
+    #   T3R2  ZONE_B  FAILED                 BOOKING_ALREADY_EXISTS
+    #                                        "Vehicle already booked for that date"
+    #
+    # Khách đã có chỗ đỗ Khu A. Họ gõ "đổi qua khu B", hệ thống mở lần thử mới,
+    # và provider từ chối vì chính chiếc xe ấy đã có chỗ ngày hôm đó. Workflow
+    # chốt FAILED cho một yêu cầu vốn đã hoàn thành.
+    #
+    # Với một bước đã tạo cam kết thật, "đổi khu" không phải một yêu cầu mới —
+    # nó là "huỷ chỗ cũ rồi đặt chỗ khác", và bước huỷ ấy chưa tồn tại. Mở lần
+    # thử mới ở đây nghĩa là đặt chỗ THỨ HAI cho cùng một xe cùng một ngày.
+    if str(row.get("status")) == TaskStatus.SUCCESS.value:
+        return False
+
     da_ra_ngoai = refused or row.get("provider_submission_status") in TERMINAL_SUBMISSION_STATUSES
     if not da_ra_ngoai:
         return False

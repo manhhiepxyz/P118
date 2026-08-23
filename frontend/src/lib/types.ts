@@ -464,6 +464,12 @@ export interface ServiceApprovalRecord {
 export interface ViewingApprovalDecision {
   decision: 'approve' | 'reject'
   reject_reason?: string
+  /**
+   * Nguyên nhân canonical. BẮT BUỘC khi `decision === 'reject'` — cùng hợp
+   * đồng với hàng đợi dịch vụ. Thiếu nó thì backend trả 422 và đơn vị đọc
+   * "Yêu cầu chưa hợp lệ" cho một lời từ chối hoàn toàn hợp lệ.
+   */
+  reject_code?: 'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER'
 }
 
 export interface ViewingApprovalListResponse {

@@ -491,18 +491,34 @@ def _flatten_facts(facts: Any) -> str:
 
 
 def _numbers_in_view(view: ReplyView) -> set[str]:
-    """Con số model được phép nhắc lại — CHỈ từ nguồn có thẩm quyền.
+    """Con số model được phép nhắc lại — từ nguồn có thẩm quyền, CỘNG yêu cầu
+    của chính người dùng sau khi đã cắt bỏ mọi khoản tiền.
 
-    `view.goal` cố ý KHÔNG nằm trong danh sách này. Goal là chữ người dùng tự
-    gõ: họ có thể viết "phí 100.000" trong khi booking thật là 150.000, và nếu
-    coi goal là nguồn thì model được phép nhắc lại con số sai đó như một sự
-    thật của hệ thống.
+    Bản trước loại `view.goal` HOÀN TOÀN, với lý do đúng nhưng quá rộng: người
+    dùng có thể viết "phí 100.000" trong khi booking thật là 150.000, và coi
+    goal là nguồn thì model được nhắc lại con số sai ấy như một sự thật.
 
-    Nguồn hợp lệ: kết quả bước đã chạy, câu deterministic, báo giá authoritative
-    — tất cả đều do backend dựng.
+    Rủi ro đó là RỦI RO VỀ TIỀN, và nó đã có hai lớp riêng lo:
+
+        `_MONEY` + `_UNPAID_MARKERS`     nhắc tiền thì phải nói rõ chưa trả
+        `_reject_untrusted_payment_values`  plan không lấy tiền từ goal
+
+    Còn ngày, giờ, số khách, biển số thì không mang rủi ro ấy: chúng là điều
+    người dùng YÊU CẦU, và nhắc lại đúng lời họ là việc một trợ lý phải làm.
+
+    Loại cả goal tạo ra một mâu thuẫn nội tại: `goal` NẰM TRONG prompt — model
+    được cho đọc — rồi bị phạt vì đã dùng. Đo được trên stack thật: một yêu cầu
+    hai dịch vụ chờ duyệt có đúng MỘT con số hợp lệ (số bước), nên 14/14 lượt
+    bị loại. Khách luôn nhận câu nền, và mỗi lượt tốn thêm hai lời gọi model
+    (~3s) để rồi vứt cả hai.
+
+    Nên goal được nhận, nhưng `_MONEY.sub` cắt sạch mọi cụm tiền trước đã: cửa
+    mở đúng bằng phần không có rủi ro, không rộng hơn.
     """
     source = " ".join(
         [
+            # Yêu cầu của người dùng, ĐÃ CẮT mọi khoản tiền.
+            _MONEY.sub(" ", view.goal or ""),
             view.baseline_message,
             " ".join(f"{s.get('title', '')} {s.get('status', '')} {s.get('message', '')}" for s in view.steps),
             " ".join(str(v) for v in (view.payment_quote or {}).values()),

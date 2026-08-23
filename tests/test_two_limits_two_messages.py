@@ -24,21 +24,16 @@ _API = Path(__file__).resolve().parents[1] / "frontend" / "src" / "lib" / "agent
 
 
 def test_the_backend_says_when_the_quota_reopens() -> None:
-    """"Thử lại sau" mà không nói KHI NÀO thì người dùng chỉ còn cách bấm dò."""
+    """ "Thử lại sau" mà không nói KHI NÀO thì người dùng chỉ còn cách bấm dò."""
     source = inspect.getsource(routes._enforce_daily_quota)
-    assert "giới hạn" in source and "dùng tiếp được sau" in source, (
-        "câu từ chối hạn ngạch không còn mang mốc mở lại"
-    )
+    assert "giới hạn" in source and "dùng tiếp được sau" in source, "câu từ chối hạn ngạch không còn mang mốc mở lại"
 
 
 def test_the_frontend_shows_that_message_instead_of_the_burst_one() -> None:
     source = _API.read_text(encoding="utf-8")
     branch = source[source.index("case 429:") :]
     branch = branch[: branch.index("case 503:")]
-    assert "quotaDetail(" in branch, (
-        "429 vẫn trả một câu duy nhất — người hết suất trong ngày được bảo chờ "
-        "vài giây"
-    )
+    assert "quotaDetail(" in branch, "429 vẫn trả một câu duy nhất — người hết suất trong ngày được bảo chờ vài giây"
     assert "thao tác hơi nhanh" in branch, "mất câu cho trường hợp bùng phát thật"
 
 

@@ -433,12 +433,19 @@ export function logout(): void {
  * Body chỉ có `goal` (+ `project_name` tuỳ chọn). Mọi thứ khác — quyền, danh
  * tính cư dân, phiên, chủ sở hữu — backend tự dựng từ token.
  */
+export interface InitialWorkflowFormFields {
+  consent?: boolean
+  needs_elevator?: boolean
+  needs_loading_support?: boolean
+}
+
 export async function startWorkflow(
   goal: string,
   projectName?: string,
   sessionId?: string | null,
+  formFields?: InitialWorkflowFormFields,
 ): Promise<AgentWorkflowResponse> {
-  const body: Record<string, string> = { goal };
+  const body: Record<string, unknown> = { goal };
   if (projectName) body.project_name = projectName;
   // Nối vào cuộc trò chuyện đang mở. Không gửi = bắt đầu cuộc mới.
   //
@@ -446,6 +453,8 @@ export async function startWorkflow(
   // hữu, và `account_state` vẫn lấy từ bảng `sessions`. Gửi session của người
   // khác thì bị bỏ qua, không phải được chấp nhận.
   if (sessionId) body.session_id = sessionId;
+  if (formFields && Object.keys(formFields).length > 0)
+    body.form_fields = formFields;
   return request<AgentWorkflowResponse>("/workflows/demo/start", {
     method: "POST",
     body,
@@ -786,6 +795,26 @@ export async function listServiceApprovals(
  * Theo từng bước, không theo cả yêu cầu: hai đơn vị khác nhau có thể cùng xuất
  * hiện trong một yêu cầu, và người này không được quyết thay người kia.
  */
+/**
+ * Chuyển một lời nhờ ("xin đổi lịch", "xin huỷ lịch") tới đơn vị.
+ *
+ * KHÔNG đổi, KHÔNG huỷ. Một việc đã xong là một cam kết đã tồn tại ở phía đơn
+ * vị; sửa nó là quyết định của họ. Hàm này chỉ ghim hồ sơ vào hàng đợi họ đang
+ * dùng và trả về mã hồ sơ.
+ *
+ * Khác `cancelWorkflow`: hàm đó đánh dấu workflow CANCELLED trong database của
+ * chính hệ thống này và không nói gì với đơn vị — lịch bên kia vẫn nằm nguyên.
+ */
+export async function createSupportRequest(
+  workflowId: string,
+  body: { task_id: string; kind: 'AMEND' | 'CANCEL'; note?: string },
+): Promise<{ request_id: string; message: string }> {
+  return request<{ request_id: string; message: string }>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/support-requests`,
+    { method: 'POST', body },
+  )
+}
+
 export async function decideServiceApproval(
   workflowId: string,
   taskId: string,

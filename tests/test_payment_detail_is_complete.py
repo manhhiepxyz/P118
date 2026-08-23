@@ -100,8 +100,7 @@ def test_the_history_view_passes_the_results_through() -> None:
     labels = {item.label: item.value for item in (views["T4"].details or [])}
 
     assert "Số tiền" in labels, (
-        "màn hình Lịch sử không nhận được kết quả của task khác nên bước thanh "
-        "toán vẫn chỉ hiện mã và trạng thái"
+        "màn hình Lịch sử không nhận được kết quả của task khác nên bước thanh toán vẫn chỉ hiện mã và trạng thái"
     )
     assert "150.000" in labels["Số tiền"]
     assert labels.get("Mã đặt chỗ") == "BOOK-047"

@@ -26,7 +26,7 @@ async def _seed(db_pool, owner, n: int, hours_ago: float = 1) -> None:
             # đòi chúng chạm trần.
             "INSERT INTO workflows (goal, status, owner_user_id, created_at, task_plan) "
             "VALUES ($1,'SUCCESS',$2, NOW() - make_interval(hours => $3), "
-            "'[{\"task_id\":\"T1\",\"tool\":\"book_parking\"}]'::jsonb)",
+            '\'[{"task_id":"T1","tool":"book_parking"}]\'::jsonb)',
             f"việc {i}",
             owner,
             hours_ago,
@@ -50,7 +50,7 @@ async def test_under_the_quota_goes_through(client, db_pool, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_hitting_the_quota_is_refused_and_says_when(client, db_pool, monkeypatch):
-    """"Thử lại sau" mà không nói KHI NÀO thì người dùng chỉ còn cách bấm lại
+    """ "Thử lại sau" mà không nói KHI NÀO thì người dùng chỉ còn cách bấm lại
     liên tục để dò — đúng thứ hạn ngạch định chặn."""
     monkeypatch.setattr(get_settings(), "daily_workflow_quota", 5, raising=False)
     token = await _register_and_login(client, "nn_quota_het")

@@ -249,9 +249,7 @@ def test_every_decision_path_asks_for_a_spoken_answer():
         "sửa rồi chạy lại": continue_demo_workflow,
     }
     thieu = [
-        ten
-        for ten, handler in duong_quyet_dinh.items()
-        if "request_fresh_answer" not in inspect.getsource(handler)
+        ten for ten, handler in duong_quyet_dinh.items() if "request_fresh_answer" not in inspect.getsource(handler)
     ]
     assert not thieu, f"{thieu} không xin câu trả lời mới — khách sẽ đọc lại câu của tình huống trước"
 
@@ -377,9 +375,7 @@ async def test_the_lookup_matches_what_booking_will_actually_allow(db_pool):
     # `zone_capacity_config` là bảng CẤU HÌNH, không nằm trong `clean_tables`.
     # Sửa xong mà không trả lại thì test này bẻ gãy
     # `test_zone_b_has_room_for_a_demo` ở file khác — đo được đúng như vậy.
-    original = await db_pool.fetchval(
-        "SELECT capacity FROM zone_capacity_config WHERE parking_zone = 'ZONE_B'"
-    )
+    original = await db_pool.fetchval("SELECT capacity FROM zone_capacity_config WHERE parking_zone = 'ZONE_B'")
     await db_pool.execute("UPDATE zone_capacity_config SET capacity = 1 WHERE parking_zone = 'ZONE_B'")
     await db_pool.execute(
         "INSERT INTO residents (resident_id, full_name, apartment_code, residential_area) "
@@ -397,22 +393,16 @@ async def test_the_lookup_matches_what_booking_will_actually_allow(db_pool):
         before = next(r for r in await repo.availability(when, 1) if r["parking_zone"] == "ZONE_B")
         assert before["remaining"] == 1
 
-        await repo.check_and_reserve_capacity(
-            "ZONE_B", when.isoformat(), "BK-AV-1", "VEH-AV-1", 100000
-        )
+        await repo.check_and_reserve_capacity("ZONE_B", when.isoformat(), "BK-AV-1", "VEH-AV-1", 100000)
 
         after = next(r for r in await repo.availability(when, 1) if r["parking_zone"] == "ZONE_B")
         assert after["remaining"] == 0
 
         # Và lời hứa "hết chỗ" phải đúng: lượt đặt tiếp theo bị từ chối thật.
         with pytest.raises(NoAvailabilityError):
-            await repo.check_and_reserve_capacity(
-                "ZONE_B", when.isoformat(), "BK-AV-2", "VEH-AV-2", 100000
-            )
+            await repo.check_and_reserve_capacity("ZONE_B", when.isoformat(), "BK-AV-2", "VEH-AV-2", 100000)
     finally:
-        await db_pool.execute(
-            "UPDATE zone_capacity_config SET capacity = $1 WHERE parking_zone = 'ZONE_B'", original
-        )
+        await db_pool.execute("UPDATE zone_capacity_config SET capacity = $1 WHERE parking_zone = 'ZONE_B'", original)
 
 
 # ---------------------------------------------------------------------------
@@ -523,9 +513,7 @@ async def test_the_answer_is_rewritten_when_the_waiting_changes_hands(client, db
     async def _run(actor: str, answer: str) -> None:
         monkeypatch.setattr(routes, "ResponseAgent", _FakeAgent(AgentReply(answer=answer, suggestions=[])))
         job = {
-            "response": DemoWorkflowResponse(
-                workflow_id=workflow_id, status="WAITING_APPROVAL", approval_actor=actor
-            ),
+            "response": DemoWorkflowResponse(workflow_id=workflow_id, status="WAITING_APPROVAL", approval_actor=actor),
             "goal": "kiểm khoá",
         }
         await routes._attach_answer(job, workflow_id, goal="kiểm khoá")

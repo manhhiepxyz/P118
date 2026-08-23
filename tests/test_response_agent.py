@@ -591,9 +591,7 @@ def _question_view(**overrides) -> ReplyView:
 @pytest.mark.asyncio
 async def test_invented_availability_dates_are_refused_even_as_bare_numbers():
     """Đúng câu đã lọt ra ngoài. Không có test này thì nó lọt lại."""
-    agent = ResponseAgent(
-        _FakeLLM(AgentReply(answer="Khu B hiện còn trống vào các ngày 25, 27 và 30 tháng 8."))
-    )
+    agent = ResponseAgent(_FakeLLM(AgentReply(answer="Khu B hiện còn trống vào các ngày 25, 27 và 30 tháng 8.")))
     reply = await agent.reply(_question_view(facts=_PARKING_FACTS))
     assert reply.answer == "Mình chưa tra được thông tin này."
 
@@ -602,9 +600,7 @@ async def test_invented_availability_dates_are_refused_even_as_bare_numbers():
 async def test_availability_read_from_the_database_may_be_quoted():
     """Tra cứu mà vẫn bị guard loại thì việc tra cứu tự vô hiệu hoá chính nó."""
     answer = "Khu B còn chỗ ngày 22/08 (100 chỗ) và 25/08 (98 chỗ). Khu A đã kín rồi bạn nhé."
-    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(
-        _question_view(facts=_PARKING_FACTS)
-    )
+    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(_question_view(facts=_PARKING_FACTS))
     assert reply.answer == answer
 
 
@@ -616,9 +612,7 @@ async def test_a_date_in_the_data_may_be_read_out_loud_the_vietnamese_way():
     là một lần khách nhận câu nền thay cho câu trả lời.
     """
     answer = "Khu B còn chỗ vào ngày 22 tháng 8 và ngày 25 tháng 8 bạn nhé."
-    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(
-        _question_view(facts=_PARKING_FACTS)
-    )
+    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(_question_view(facts=_PARKING_FACTS))
     assert reply.answer == answer
 
 
@@ -629,18 +623,16 @@ async def test_saying_its_own_name_is_not_an_invented_number():
     Không gỡ tên sản phẩm ra trước khi soi, mọi câu tự giới thiệu đều bị loại.
     """
     answer = "Mình là P-118 đây. Khu A đã kín, Khu B còn 100 chỗ ngày 22/08 nhé."
-    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(
-        _question_view(facts=_PARKING_FACTS)
-    )
+    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(_question_view(facts=_PARKING_FACTS))
     assert reply.answer == answer
 
 
 @pytest.mark.asyncio
 async def test_without_a_lookup_every_date_is_still_an_invention():
     """Không tra được thì không có gì để đối chiếu — guard phải chặt như cũ."""
-    reply = await ResponseAgent(
-        _FakeLLM(AgentReply(answer="Khu B còn chỗ ngày 22/08 và 25/08 bạn nhé."))
-    ).reply(_question_view())
+    reply = await ResponseAgent(_FakeLLM(AgentReply(answer="Khu B còn chỗ ngày 22/08 và 25/08 bạn nhé."))).reply(
+        _question_view()
+    )
     assert reply.answer == "Mình chưa tra được thông tin này."
 
 

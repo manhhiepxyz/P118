@@ -16,9 +16,7 @@ async def _start(client, token, goal, session_id=None):
     body = {"goal": goal}
     if session_id:
         body["session_id"] = session_id
-    return await client.post(
-        "/api/v1/workflows/demo/start", headers={"Authorization": f"Bearer {token}"}, json=body
-    )
+    return await client.post("/api/v1/workflows/demo/start", headers={"Authorization": f"Bearer {token}"}, json=body)
 
 
 @pytest.mark.asyncio

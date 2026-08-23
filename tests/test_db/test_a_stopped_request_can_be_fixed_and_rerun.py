@@ -20,7 +20,12 @@ import pytest
 
 from src.common.enums import WorkflowStatus
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
-from src.orchestration.demo_service import AMENDABLE_STATUSES, NotAmendable, amend_and_rerun
+from src.orchestration.demo_service import (
+    AMENDABLE_STATUSES,
+    AMENDABLE_WHILE_WAITING,
+    NotAmendable,
+    amend_and_rerun,
+)
 
 
 async def _seed(pool, status: str) -> str:
@@ -90,7 +95,7 @@ async def test_a_finished_step_is_never_rerun(client, db_pool):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["SUCCESS", "RUNNING", "PENDING", "WAITING_APPROVAL"])
+@pytest.mark.parametrize("status", ["SUCCESS", "RUNNING", "PENDING"])
 async def test_only_a_stopped_request_may_be_amended(client, db_pool, status: str):
     """Sửa đè lên một yêu cầu đã hoàn tất sẽ xoá bản ghi của việc THẬT SỰ đã xảy ra.
 
@@ -103,9 +108,55 @@ async def test_only_a_stopped_request_may_be_amended(client, db_pool, status: st
     assert "mới" in str(err.value) or "dừng" in str(err.value), str(err.value)
 
 
+@pytest.mark.asyncio
+async def test_a_request_waiting_for_the_customer_may_be_amended(client, db_pool):
+    """`WAITING_APPROVAL` KHÔNG còn là một lời từ chối — nhưng hàng rào không đổi.
+
+    Trạng thái này mang hai tình huống rất khác nhau, và cột `status` không phân
+    biệt được chúng:
+
+        chờ ĐƠN VỊ duyệt      khách không được sửa thứ người khác đang cầm
+        chờ KHÁCH bấm trả tiền  đây là đúng lúc người ta đổi ý về khu đỗ xe
+
+    Hàng rào thật nằm ở HÀNG ĐỢI DUYỆT, không ở cột trạng thái: còn dòng
+    `AWAITING` thì `ALREADY_SENT`, hết rồi thì đang chờ chính khách. Trước đây
+    cả hai bị chặn chung, nên "đổi qua khu B" lúc thẻ thanh toán còn treo rơi
+    thẳng vào Planner như một yêu cầu MỚI — và yêu cầu mới ấy đi đặt chỗ lần
+    hai cho một chiếc xe đã có chỗ.
+    """
+    workflow_id = await _seed(db_pool, "WAITING_APPROVAL")
+
+    # Đơn vị đang cầm: vẫn không sửa được.
+    await db_pool.execute(
+        "INSERT INTO service_approvals (workflow_id, task_id, tool, service_label, details, status)"
+        " VALUES ($1::uuid,'T1','book_parking','Giữ chỗ đỗ xe','{}'::jsonb,'AWAITING')",
+        workflow_id,
+    )
+    with pytest.raises(NotAmendable) as err:
+        await amend_and_rerun(workflow_id, {"parking_zone": "ZONE_B"})
+    assert err.value.code == "ALREADY_SENT"
+
+    # Đơn vị đã quyết xong, giờ chỉ còn chờ khách: KHÔNG bị chặn ở cửa này nữa.
+    await db_pool.execute(
+        "UPDATE service_approvals SET status='APPROVED', decided_by='don_vi', decided_at=NOW()"
+        " WHERE workflow_id=$1::uuid",
+        workflow_id,
+    )
+    try:
+        await amend_and_rerun(workflow_id, {"parking_zone": "ZONE_B"})
+    except NotAmendable as exc:  # pragma: no cover - đây chính là lỗi đang sửa
+        pytest.fail(f"chặn một yêu cầu đang chờ chính khách: {exc.code}")
+    except Exception:  # noqa: BLE001 - chạy tiếp có thể hỏng vì seed tối giản
+        pass
+
+
 def test_the_amendable_list_is_short_and_justified():
     """Danh sách này phải NGẮN và có lý do — thêm một trạng thái là một quyết định."""
     assert AMENDABLE_STATUSES == frozenset({WorkflowStatus.CANCELLED.value, WorkflowStatus.FAILED.value})
+    # Đúng MỘT trạng thái được thêm, và chỉ cho đường "sửa rồi chạy lại".
+    # `AMENDABLE_STATUSES` vẫn là tập quyết định "có mở lại các bước không" —
+    # nới nó ra sẽ kéo `pay_fee` khỏi trạng thái mà thẻ thanh toán đang mô tả.
+    assert AMENDABLE_WHILE_WAITING - AMENDABLE_STATUSES == {WorkflowStatus.WAITING_APPROVAL.value}
 
 
 @pytest.mark.asyncio

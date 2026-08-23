@@ -11,6 +11,7 @@ import {
   XCircle,
 } from 'lucide-react'
 
+import { createSupportRequest } from '../../lib/agentApi'
 import type { AgentTaskResult } from '../../lib/types'
 
 /**
@@ -23,6 +24,12 @@ import type { AgentTaskResult } from '../../lib/types'
  * Nhóm thông tin theo NHÃN do backend đặt, KHÔNG theo tên tool — giữ đúng ranh
  * giới đã định: giao diện không suy diễn nghiệp vụ từ `tool`. Nhãn lạ rơi vào
  * nhóm "Khác" và vẫn hiện, nên thêm nghiệp vụ mới không phải sửa file này.
+ *
+ * Cùng lý do đó, MỌI chữ nêu tên một dịch vụ cụ thể đều đã bị gỡ. Thẻ này từng
+ * viết "Lịch tham quan" và "Trước buổi tham quan" cố định, nên khi nó bắt đầu
+ * phục vụ chỗ đỗ xe, bảo trì và xe đưa đón thì cả ba hiện ra dưới tên một dịch
+ * vụ khác. Tên dịch vụ lấy từ `task.title` — chuỗi backend đã đặt cho đúng tool
+ * ấy. Nếu thấy mình sắp gõ tên một dịch vụ vào file này: đừng.
  */
 
 const CONTACT_LABELS = new Set(['Liên hệ', 'Người đón tiếp', 'Số điện thoại', 'Điện thoại'])
@@ -32,6 +39,8 @@ const PHONE_LABELS = new Set(['Số điện thoại', 'Điện thoại'])
 interface Props {
   task: AgentTaskResult
   journeyTitle: string
+  /** Yêu cầu chứa bước này — cần để ghim hồ sơ vào đúng hàng đợi. */
+  workflowId: string
 }
 
 /** "2026-10-05 10:00" → nhãn tiếng Việt. Không parse được thì trả nguyên văn. */
@@ -100,8 +109,57 @@ function Block({ title, children }: { title: string; children: React.ReactNode }
   )
 }
 
-export function ResultSummary({ task, journeyTitle }: Props) {
+export function ResultSummary({ task, journeyTitle, workflowId }: Props) {
   const [note, setNote] = useState<string | null>(null)
+  const [dangGui, setDangGui] = useState<'AMEND' | 'CANCEL' | null>(null)
+
+  /**
+   * Gửi lời nhờ tới đơn vị. KHÔNG tự đổi, KHÔNG tự huỷ.
+   *
+   * Hai nút này từng chỉ hiện một dòng chữ bảo người dùng đi gõ chat. Ô chat ấy
+   * đã bị gỡ, và kể cả khi còn thì nó cũng không dẫn tới đâu: không có tool nào
+   * đổi hay huỷ một việc đã xong.
+   *
+   * Câu trả về là câu backend viết. Không dựng câu ở đây: màn hình này không
+   * biết đơn vị sẽ trả lời gì, và một câu lạc quan ("đã huỷ nhé") sẽ sai ngay
+   * khi đơn vị từ chối.
+   */
+  /**
+   * Nói TRƯỚC kết cục tiền, không phải sau.
+   *
+   * Luật hoàn tiền là tất định (huỷ trước 24 giờ thì được hoàn), nên hệ thống
+   * BIẾT kết cục ngay lúc khách chưa bấm. Giấu nó tới sau khi đơn vị duyệt là
+   * để họ bấm một nút mà không biết nó tốn bao nhiêu.
+   *
+   * `null` = không có gì để cảnh báo: chưa tới hạn, hoặc không đọc được mốc.
+   * Không đoán theo hướng đáng sợ hơn — một cảnh báo sai làm người ta bỏ một
+   * việc họ hoàn toàn làm được.
+   */
+  function loiCanhBao(): string | null {
+    if (!whenRaw) return null
+    const moc = Date.parse(whenRaw.replace(' ', 'T'))
+    if (Number.isNaN(moc)) return null
+    if (moc - Date.now() >= 24 * 60 * 60 * 1000) return null
+    return 'Còn dưới 24 giờ nữa tới giờ hẹn. Huỷ lúc này vẫn được, nhưng khoản đã thanh toán sẽ không được hoàn.'
+  }
+
+  async function nho(kind: 'AMEND' | 'CANCEL') {
+    if (dangGui) return
+    if (kind === 'CANCEL') {
+      const canh_bao = loiCanhBao()
+      if (canh_bao && !window.confirm(`${canh_bao}\n\nBạn vẫn muốn gửi yêu cầu huỷ?`)) return
+    }
+    setDangGui(kind)
+    setNote(null)
+    try {
+      const res = await createSupportRequest(workflowId, { task_id: task.task_id, kind })
+      setNote(res.message)
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Chưa gửi được yêu cầu. Bạn thử lại giúp mình nhé.')
+    } finally {
+      setDangGui(null)
+    }
+  }
 
   const details = task.details ?? []
   const byLabel = new Map(details.map((detail) => [detail.label, detail.value]))
@@ -156,7 +214,11 @@ export function ResultSummary({ task, journeyTitle }: Props) {
     <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_300px]">
       {/* ── Cột chính: kết quả, rồi chuẩn bị ───────────────────────── */}
       <div className="space-y-11">
-        <Block title="Lịch tham quan">
+        {/* Tiêu đề là TÊN DỊCH VỤ do backend đặt, không phải chữ cứng.
+            Trước đây nó là "Lịch tham quan" cố định, nên một chỗ đỗ xe hay một
+            lịch bảo trì cũng hiện ra dưới cái tên ấy. Đúng lỗi `INT-003` mà
+            cổng `if (!when)` phía trên tồn tại để chặn — chỉ đổi nạn nhân. */}
+        <Block title={task.title}>
           {when && (
             <div className="mb-6">
               <p className="text-[24px] font-semibold leading-[1.25] tracking-[-0.02em] text-[var(--text-primary)]">
@@ -195,20 +257,22 @@ export function ResultSummary({ task, journeyTitle }: Props) {
                 dùng biết cách làm, không giả vờ đã thực hiện. */}
             <button
               type="button"
-              onClick={() => setNote('Nhắn cho P-118 ở ô bên dưới, ví dụ: "Đổi lịch sang 14:00".')}
-              className="press inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border border-[var(--border-strong)] px-4 text-[14px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+              onClick={() => void nho('AMEND')}
+              disabled={dangGui !== null}
+              className="press inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border border-[var(--border-strong)] px-4 text-[14px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
             >
               <RefreshCw className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-              Đổi lịch
+              {dangGui === 'AMEND' ? 'Đang gửi…' : 'Đổi lịch'}
             </button>
             <button
               type="button"
-              onClick={() => setNote('Nhắn cho P-118 ở ô bên dưới: "Huỷ lịch tham quan".')}
-              className="press inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] px-4 text-[14px] font-medium transition-colors"
+              onClick={() => void nho('CANCEL')}
+              disabled={dangGui !== null}
+              className="press inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] px-4 text-[14px] font-medium transition-colors disabled:opacity-50"
               style={{ color: 'var(--danger)' }}
             >
               <XCircle className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-              Huỷ lịch
+              {dangGui === 'CANCEL' ? 'Đang gửi…' : 'Huỷ lịch'}
             </button>
           </div>
 
@@ -219,7 +283,7 @@ export function ResultSummary({ task, journeyTitle }: Props) {
           )}
         </Block>
 
-        <Block title="Trước buổi tham quan">
+        <Block title="Trước buổi hẹn">
           <ul className="space-y-2.5">
             {/* Hai dòng đầu suy từ trạng thái THẬT. */}
             <li className="flex items-start gap-2.5 text-[15px] leading-[1.5] text-[var(--text-primary)]">
@@ -272,7 +336,7 @@ export function ResultSummary({ task, journeyTitle }: Props) {
             /* Không bịa địa chỉ. Backend chưa trả `meeting_location` cho lượt
                chạy này, nên nói thật là chưa có thay vì dựng một địa chỉ giả. */
             <p className="text-[14.5px] leading-[1.55] text-[var(--text-secondary)]">
-              Chưa có thông tin điểm gặp. Chuyên viên phụ trách sẽ báo trước buổi tham quan.
+              Chưa có thông tin điểm gặp. Chuyên viên phụ trách sẽ báo trước buổi hẹn.
             </p>
           )}
 
@@ -344,7 +408,7 @@ export function ResultSummary({ task, journeyTitle }: Props) {
 
         <p className="flex items-start gap-2 text-[13px] leading-[1.55] text-[var(--text-muted)]">
           <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-          Cần đổi gì? Nhắn cho P-118 ở ô bên dưới.
+          Cần đổi gì? Dùng nút Đổi lịch hoặc Huỷ lịch phía trên — mình sẽ chuyển tới đơn vị.
         </p>
       </div>
     </div>

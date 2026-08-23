@@ -193,6 +193,11 @@ class PostgreSQLWorkflowStateRepository:
                 SELECT task_id, status, reject_reason
                 FROM viewing_approvals
                 WHERE workflow_id = $1 AND status = 'REJECTED'
+                -- Lượt từ chối GẦN NHẤT. Một workflow có thể có nhiều lượt gửi
+                -- (`T1`, `T1R2`…), và không nêu thứ tự thì khách đọc lại lý do
+                -- của lượt họ đã xử lý xong từ lâu.
+                ORDER BY created_at DESC, task_id DESC
+                LIMIT 1
                 """,
                 _uuid(workflow_id),
             )

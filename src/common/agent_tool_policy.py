@@ -44,6 +44,24 @@ from src.common.task_plan import AllowedTool
 
 PROVIDER_TOOLS: frozenset[str] = frozenset(get_args(AllowedTool))
 
-AGENT_FORBIDDEN_TOOLS: frozenset[str] = frozenset({"register_resident", "search_properties"})
+# `change_parking_zone` nằm đây vì nó KHÔNG phải một dịch vụ người dùng yêu cầu
+# từ đầu — nó là thao tác SỬA trên một chỗ đã giữ, chỉ có nghĩa khi đã tồn tại
+# `booking_id` thật từ một bước trước.
+#
+# Cho Planner lập kế hoạch với nó nghĩa là model được phép tự viết ra một
+# `booking_id` literal — đúng loại giá trị mà trust boundary tồn tại để chặn.
+# Đường sửa lỗi dựng task này từ kết quả ĐÃ CHẠY, không từ câu người dùng gõ.
+AGENT_FORBIDDEN_TOOLS: frozenset[str] = frozenset(
+    {
+        "register_resident",
+        "search_properties",
+        "change_parking_zone",
+        "cancel_property_viewing",
+        "cancel_parking",
+        "cancel_maintenance",
+        "cancel_move",
+        "cancel_shuttle",
+    }
+)
 
 AGENT_REACHABLE_TOOLS: frozenset[str] = PROVIDER_TOOLS - AGENT_FORBIDDEN_TOOLS

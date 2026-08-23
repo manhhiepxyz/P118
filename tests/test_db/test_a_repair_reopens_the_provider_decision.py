@@ -106,8 +106,7 @@ async def test_changing_a_field_asks_the_provider_again(db_pool):
     # Quyết định cũ phải bị xoá hẳn, không để lại chữ ký của người chưa duyệt
     # lần này.
     decided = await db_pool.fetchrow(
-        "SELECT decided_by, decided_at, details FROM service_approvals "
-        "WHERE workflow_id = $1::uuid AND task_id = 'T1'",
+        "SELECT decided_by, decided_at, details FROM service_approvals WHERE workflow_id = $1::uuid AND task_id = 'T1'",
         workflow_id,
     )
     assert decided["decided_by"] is None
@@ -296,9 +295,7 @@ async def test_an_already_finished_viewing_is_not_parked_again(db_pool):
 
     wid = uuid.uuid4()
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO workflows (workflow_id, goal, status) VALUES ($1,'tham quan','RUNNING')", wid
-        )
+        await conn.execute("INSERT INTO workflows (workflow_id, goal, status) VALUES ($1,'tham quan','RUNNING')", wid)
         await conn.execute(
             "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, input_data) "
             "VALUES ($1,'T1','schedule_property_viewing','SUCCESS','{}'::jsonb)",
@@ -385,13 +382,16 @@ async def test_approving_a_service_never_rewinds_a_step_that_already_ran(client,
         db_pool,
         workflow_id=workflow_id,
         rows=[
-            {"task_id": "T1", "tool": "schedule_property_viewing", "service_label": "Đặt lịch tham quan", "details": {}},
+            {
+                "task_id": "T1",
+                "tool": "schedule_property_viewing",
+                "service_label": "Đặt lịch tham quan",
+                "details": {},
+            },
             {"task_id": "T2", "tool": "book_parking", "service_label": "Giữ chỗ đỗ xe", "details": {}},
         ],
     )
-    await db_pool.execute(
-        "UPDATE service_approvals SET status='APPROVED' WHERE workflow_id = $1::uuid", wid
-    )
+    await db_pool.execute("UPDATE service_approvals SET status='APPROVED' WHERE workflow_id = $1::uuid", wid)
 
     try:
         await resume_after_service_decision(workflow_id)

@@ -61,7 +61,9 @@ def test_a_generic_failure_message_is_not_the_fallback_for_repairable_errors() -
     source = inspect.getsource(demo_service.resume_after_service_decision)
     i = source.index("repair_answer = _repair_answer_for(")
     tail = source[i:]
-    assert "answer=repair_answer" in tail, "câu chung đè lên câu hỏi lại"
-    assert tail.index("answer=repair_answer") < tail.index("compose_final_answer"), (
-        "thứ tự ưu tiên ngược: câu chung đứng trước câu hỏi lại"
+    # Câu chốt giờ được GHÉP: lời từ chối dứt khoát của dịch vụ khác (nếu có),
+    # rồi tới câu hỏi lại — và câu chung chỉ được dùng khi KHÔNG có câu hỏi nào.
+    # Vẫn đúng một luật cũ: có repair hint thì câu chung không được thay nó.
+    assert "repair_answer or compose_final_answer" in tail.replace("\n", " ").replace("  ", " "), (
+        "câu chung đè lên câu hỏi lại"
     )

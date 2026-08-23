@@ -1158,3 +1158,60 @@ BEGIN
             ));
     END IF;
 END $$;
+
+
+-- 2026-08 — `service_approvals.kind`: phân biệt BƯỚC với LỜI NHỜ.
+--
+-- Hai nút "Đổi lịch" / "Huỷ lịch" trên thẻ kết quả ghim một hồ sơ vào chính
+-- hàng đợi đơn vị đang dùng. Hồ sơ ấy không phải một bước: không tool, không
+-- dòng `workflow_tasks`. Thiếu cột này thì lượt resume sau khi đơn vị duyệt sẽ
+-- gọi `update_task_status` cho một `task_id` không tồn tại và ném giữa chừng.
+--
+-- Mặc định `TASK`: mọi dòng có trước cột này đều là bước.
+ALTER TABLE service_approvals ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'TASK';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'ck_service_approvals_kind'
+    ) THEN
+        ALTER TABLE service_approvals ADD CONSTRAINT ck_service_approvals_kind
+            CHECK (kind IN ('TASK', 'REQUEST'));
+    END IF;
+END $$;
+
+
+-- 2026-08 — `parking_bookings.status`: chỗ đã huỷ ở lại bảng.
+--
+-- Huỷ MUỘN vẫn huỷ nhưng không hoàn tiền, nên dòng `payments` PAID còn nguyên
+-- và trỏ vào booking. Xoá booking khi ấy để khoản tiền trỏ vào hư không.
+--
+-- `to_regclass` KHÔNG qualify schema: migration bám theo search_path, nên guard
+-- phải giải tên bảng đúng cách `ALTER` bên dưới sẽ giải.
+DO $$
+BEGIN
+    IF to_regclass('parking_bookings') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE parking_bookings ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_parking_bookings_status') THEN
+        ALTER TABLE parking_bookings ADD CONSTRAINT ck_parking_bookings_status
+            CHECK (status IN ('ACTIVE', 'CANCELLED'));
+    END IF;
+
+    -- Ràng buộc "một xe một chỗ mỗi ngày" chỉ tính chỗ CÒN HIỆU LỰC. Giữ bản cũ
+    -- nghĩa là chỗ đã huỷ vẫn chặn lần đặt lại của chính người vừa huỷ — và đặt
+    -- lại là lý do phổ biến nhất người ta bấm huỷ.
+    --
+    -- Đổi từ CONSTRAINT sang partial INDEX: PostgreSQL không có `UNIQUE ... WHERE`
+    -- ở dạng table constraint. Tên giữ nguyên nên `_violated()` vẫn nhận ra nó.
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_bookings_vehicle_date') THEN
+        ALTER TABLE parking_bookings DROP CONSTRAINT uq_bookings_vehicle_date;
+    END IF;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_vehicle_date
+        ON parking_bookings (vehicle_id, booking_date)
+        WHERE status = 'ACTIVE';
+END $$;

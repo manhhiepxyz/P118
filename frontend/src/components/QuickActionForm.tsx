@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 
-import { listProjects } from '../lib/agentApi'
+import { listProjects, type InitialWorkflowFormFields } from '../lib/agentApi'
 import type { Capability } from '../lib/types'
 
 interface Props {
   capabilities: Capability[]
   submitting: boolean
-  onSubmit: (goal: string) => Promise<void>
+  onSubmit: (goal: string, formFields: InitialWorkflowFormFields) => Promise<void>
   onCancel: () => void
 }
 
@@ -153,7 +153,16 @@ export function QuickActionForm({ capabilities, submitting, onSubmit, onCancel }
     setError(null)
     try {
       const segments = capabilities.map(buildSegment)
-      await onSubmit(`Tôi muốn ${segments.join('; đồng thời ')}.`)
+      const formFields: InitialWorkflowFormFields = {}
+      for (const capability of capabilities) {
+        const name = capability.name.toLocaleLowerCase('vi-VN')
+        if (name.includes('quan tâm')) formFields.consent = getValue(capability, 'consent') === 'yes'
+        if (name.includes('chuyển nhà')) {
+          formFields.needs_elevator = getValue(capability, 'elevator') === 'yes'
+          formFields.needs_loading_support = getValue(capability, 'loading') === 'yes'
+        }
+      }
+      await onSubmit(`Tôi muốn ${segments.join('; đồng thời ')}.`, formFields)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Chưa gửi được yêu cầu.')
     }

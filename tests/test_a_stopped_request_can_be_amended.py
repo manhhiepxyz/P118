@@ -35,7 +35,7 @@ _BINH_THUONG = {"ban_da_noi": "xin chào", "_da_huy": False}
     [
         "tôi muốn đỗi chỗ đỗ xe sang khu B",
         "đổi qua khu B",
-        "chuyển sang khu D",           # khu không có thật vẫn là một SỬA ĐỔI
+        "chuyển sang khu D",  # khu không có thật vẫn là một SỬA ĐỔI
         "đổi biển số sang 51K-12345",
         "đổi sang xe ô tô",
         "dời sang ngày 2026-09-04",
@@ -62,9 +62,7 @@ def test_a_vague_reply_can_never_resurrect_a_stopped_request(goal):
     """Đây là tính chất bản vá KHÔNG được làm mất: Dừng phải dừng thật."""
     assert _amends_a_previous_request(goal) is False
     turns = _recall_for_planner([_DA_HUY, _BINH_THUONG], goal) or []
-    assert all(not t.get("_da_huy") for t in turns), (
-        "một câu cụt dựng lại được việc người dùng đã chủ động dừng"
-    )
+    assert all(not t.get("_da_huy") for t in turns), "một câu cụt dựng lại được việc người dùng đã chủ động dừng"
 
 
 def test_turns_that_were_never_cancelled_are_untouched():

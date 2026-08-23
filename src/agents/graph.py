@@ -454,6 +454,7 @@ def build_planner_graph(
     *,
     parent_workflow_id: str | None = None,
     session_id: str | None = None,
+    fast_lane: Any = None,
 ) -> StateGraph:
     """Dựng graph Planner → Validator → Execution.
 
@@ -473,6 +474,39 @@ def build_planner_graph(
     async def plan_node(state: AgentState) -> dict:
         """Gọi Planner. Không log goal hay existing_context."""
         await emit("PLANNING")
+
+        # Đường nhanh đứng TRƯỚC, nhưng không có đặc quyền nào.
+        #
+        # Đo trên `llm_usage` của stack demo: Planner chiếm 89% toàn bộ thời
+        # gian gọi model (trung vị 32,98s, p90 78,28s, 86 lượt thật), và một
+        # workflow 5 dịch vụ mất 101 giây riêng cho lượt lập kế hoạch. Phần cấu
+        # trúc của kết quả ấy là cơ học — `plan_assembly` dựng lại 38/38 đồ thị
+        # và 149/149 InputRef của các kế hoạch đã ghi.
+        #
+        # Kế hoạch nó trả về đi tiếp qua ĐÚNG những bước mà kế hoạch Planner đi
+        # qua: `_apply_user_answers`, `_inject_trusted_identity`,
+        # `_ensure_payment_is_offered`, rồi `validate_node`. Không đường tắt
+        # nào — đó là điều kiện để đường này an toàn, vì cổng chung là thứ duy
+        # nhất chặn được ca đo được "từ 5/9" → "2023-09-05".
+        #
+        # `None` ở mọi nhánh không chắc chắn, và ta rơi về Planner như hôm nay.
+        if fast_lane is not None:
+            nhanh = await fast_lane.plan(
+                state.get("goal", ""), state.get("existing_context", {})
+            )
+            if nhanh is not None:
+                _apply_user_answers(nhanh, state.get("user_answers") or {})
+                _inject_trusted_identity(nhanh, state.get("existing_context", {}))
+                _ensure_payment_is_offered(nhanh)
+                await emit("PLANNED", {"plan": nhanh})
+                return {
+                    "planner_status": "READY",
+                    "plan": nhanh,
+                    "missing_fields": (),
+                    "plan_validated": False,
+                    "explicit_facts": {},
+                }
+
         try:
             result = await planner.plan(
                 state.get("goal", ""),

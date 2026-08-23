@@ -144,6 +144,7 @@ const SERVICE_TAB_LABELS: Record<string, string> = {
   create_maintenance_request: 'Bảo trì',
   schedule_move: 'Chuyển nhà',
   register_property_interest: 'Nhận tư vấn',
+  change_parking_zone: 'Đổi khu đỗ xe',
 }
 
 const SERVICE_ORDER = [
@@ -154,6 +155,9 @@ const SERVICE_ORDER = [
   'create_maintenance_request',
   'schedule_move',
   'register_property_interest',
+  // Đổi khu đứng NGAY SAU chỗ đỗ xe thì hợp lý hơn, nhưng thứ tự này là thứ tự
+  // người duyệt đã quen. Thêm vào cuối để không đẩy sáu tab kia sang chỗ khác.
+  'change_parking_zone',
 ]
 
 function detailText(value: string | number | boolean | null): string {
@@ -270,11 +274,19 @@ export function ProviderReviewPage() {
     }
     try {
       if (record.tool === 'schedule_property_viewing') {
-        // Hàng đợi THAM QUAN có route riêng và chưa nhận `reject_code` —
-        // không đổi hợp đồng của nó ở lượt này.
+        // Hàng đợi THAM QUAN có route RIÊNG — nó chạy `reject_viewing`, viết
+        // câu chốt từ lý do đơn vị vừa gõ và mở vòng hỏi lại. Route dịch vụ
+        // không làm những việc đó, nên vẫn gửi vào đúng đường của nó.
+        //
+        // Nhưng hợp đồng thì GIỐNG NHAU: từ chối phải kèm nguyên nhân
+        // canonical. Bản trước cắt `reject_code` đi ở đúng nhánh này — theo
+        // một ghi chú đã cũ, viết từ lúc route ấy chưa nhận mã. Hậu quả đo
+        // được: đơn vị chọn nguyên nhân trong hộp thoại, bấm xác nhận, và
+        // nhận lại 422 "Yêu cầu chưa hợp lệ" cho một lời từ chối hợp lệ —
+        // lịch tham quan là dịch vụ DUY NHẤT từ chối không được.
         await decideViewingApproval(record.workflow_id, {
           decision,
-          ...(decision === 'reject' ? { reject_reason: reason } : {}),
+          ...(decision === 'reject' ? { reject_reason: reason, reject_code: code } : {}),
         })
       } else {
         await decideServiceApproval(record.workflow_id, record.task_id, body)

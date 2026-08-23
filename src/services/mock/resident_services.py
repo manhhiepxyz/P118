@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.mock import schemas
-from src.mock.errors import install_error_handler
+from src.mock.errors import install_error_handler, not_found
 from src.mock.ids import make_generator
 
 resident_services_app = FastAPI(
@@ -67,6 +67,39 @@ def schedule_move(payload: schemas.ScheduleMoveRequest) -> schemas.ApiEnvelope:
     with _lock:
         _move_requests[move_request_id] = result
     return schemas.ApiEnvelope(success=True, data=result, message="Move scheduled")
+
+
+def _huy(kho: dict[str, dict], ma: str, o_trang_thai: str, ten: str) -> schemas.ApiEnvelope:
+    """Đánh dấu một yêu cầu là đã huỷ. Idempotent: gọi lần hai vẫn 200.
+
+    ĐÁNH DẤU chứ không xoá, cùng lý do với chỗ đỗ xe và lịch tham quan: xoá thì
+    lần gọi thứ hai không phân biệt được "đã huỷ rồi" với "chưa bao giờ tồn
+    tại", và cả hai đều thành 200 — tức xác nhận một việc chưa từng xảy ra cho
+    một mã bịa ra.
+    """
+    with _lock:
+        row = kho.get(ma)
+        if row is None:
+            raise not_found(f"{ten}_NOT_FOUND", f"Không tìm thấy yêu cầu {ma}")
+        row[o_trang_thai] = "CANCELLED"
+        ket_qua = dict(row)
+    return schemas.ApiEnvelope(success=True, data=ket_qua, message="Cancelled")
+
+
+@resident_services_app.post(
+    "/api/resident-services/maintenance/{maintenance_id}/cancel",
+    summary="Huỷ yêu cầu bảo trì",
+)
+def cancel_maintenance(maintenance_id: str) -> schemas.ApiEnvelope:
+    return _huy(_maintenance_requests, maintenance_id, "maintenance_status", "MAINTENANCE")
+
+
+@resident_services_app.post(
+    "/api/resident-services/moves/{move_request_id}/cancel",
+    summary="Huỷ lịch chuyển nhà",
+)
+def cancel_move(move_request_id: str) -> schemas.ApiEnvelope:
+    return _huy(_move_requests, move_request_id, "move_status", "MOVE")
 
 
 @resident_services_app.get("/health", tags=["meta"])

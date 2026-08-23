@@ -164,7 +164,7 @@ async def test_failed_prefix_is_returned_without_requesting_viewing_approval() -
             finalize: bool = True,
             parent_workflow_id: str | None = None,
             session_id: str | None = None,
-        **_forwarded,
+            **_forwarded,
         ) -> tuple[str, dict[str, StandardResult]]:
             return workflow_id or "wf-failed", {
                 "T1": StandardResult.fail(
@@ -211,8 +211,7 @@ async def test_failed_prefix_is_returned_without_requesting_viewing_approval() -
     # Đo được trên 957e39e6 và 4289ea67: viewing PENDING, 0 dòng AWAITING, màn
     # hình vẫn báo chờ duyệt. Người dùng ngồi đợi một quyết định không tồn tại.
     assert ("T2", TaskStatus.CANCELLED) in repository.statuses, (
-        "bước tham quan bị bỏ lại PENDING — giao diện sẽ báo chờ duyệt cho một "
-        "yêu cầu chưa từng được gửi đi"
+        "bước tham quan bị bỏ lại PENDING — giao diện sẽ báo chờ duyệt cho một yêu cầu chưa từng được gửi đi"
     )
 
 

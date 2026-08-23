@@ -180,6 +180,12 @@ export const TASK_STATUS: Record<AgentDisplayTaskStatus, StatusConfig> = {
 export const TOOL_LABELS: Record<string, string> = {
   register_vehicle: 'Đăng ký phương tiện',
   book_parking: 'Đặt chỗ đậu xe',
+  change_parking_zone: 'Đổi khu đỗ xe',
+  cancel_property_viewing: 'Huỷ lịch tham quan',
+  cancel_parking: 'Huỷ chỗ đỗ xe',
+  cancel_maintenance: 'Huỷ yêu cầu bảo trì',
+  cancel_move: 'Huỷ lịch chuyển nhà',
+  cancel_shuttle: 'Huỷ xe đưa đón',
   pay_fee: 'Thanh toán phí',
   search_properties: 'Tìm bất động sản',
   schedule_property_viewing: 'Đặt lịch xem nhà',

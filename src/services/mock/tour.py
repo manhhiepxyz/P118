@@ -190,10 +190,14 @@ def schedule_property_viewing(
     # thông tin liên hệ do provider giữ chứ không đi qua TaskPlan. Đây cũng là
     # điểm khác endpoint legacy `book_tour` (khoá theo resident_id + buổi) — hai
     # endpoint dùng chung store nên khác biệt này phải là chủ ý, không phải tình cờ.
+    # Lịch ĐÃ HUỶ không giữ chỗ nữa. Bỏ điều kiện này thì huỷ xong vẫn không
+    # đặt lại được đúng khung giờ vừa trả về — và đó là lý do phổ biến nhất
+    # người ta bấm huỷ.
     if any(
         t.get("project_id") == project.project_id
         and t.get("tour_date") == viewing_date
         and t.get("viewing_time") == payload.viewing_time
+        and t.get("viewing_status") != "CANCELLED"
         for t in store.tour_bookings.values()
     ):
         raise conflict(
@@ -245,6 +249,39 @@ def schedule_property_viewing(
             "reception_time": payload.viewing_time,
         },
         message="Created",
+    )
+
+
+@tour_app.post("/api/property/viewings/{viewing_id}/cancel", summary="Huỷ lịch xem nhà")
+def cancel_property_viewing(viewing_id: str, fail: str | None = None) -> schemas.ApiEnvelope:
+    """Trả lại khung giờ. Idempotent: gọi lần hai vẫn 200, và không trừ hai lần.
+
+    Huỷ phải TRẢ SUẤT về `tour_load`, không chỉ đánh dấu dòng đặt chỗ. Hai bộ
+    đếm ấy độc lập: `tour_bookings` trả lời "ai đang giữ", `tour_load` trả lời
+    "khung này còn chỗ không". Sửa một mà quên hai thì khung vừa huỷ vẫn báo
+    kín, và không ai đặt lại được — kể cả chính người vừa huỷ.
+
+    ĐÁNH DẤU chứ không xoá dòng. Xoá thì lần gọi thứ hai không phân biệt được
+    "đã huỷ rồi" với "chưa bao giờ tồn tại", và cả hai đều thành 200 — tức xác
+    nhận một việc chưa từng xảy ra cho một mã bịa ra. Giữ dòng lại thì mã lạ
+    vẫn 404, mã đã huỷ vẫn 200, và `tour_load` chỉ trừ đúng một lần.
+    """
+    if fail:
+        raise inject_failure(fail)
+
+    with store._lock:
+        viewing = store.tour_bookings.get(viewing_id)
+        if viewing is None:
+            raise not_found("VIEWING_NOT_FOUND", f"Không tìm thấy lịch xem {viewing_id}")
+        if viewing.get("viewing_status") != "CANCELLED":
+            viewing["viewing_status"] = "CANCELLED"
+            load_key = (viewing["residential_area"], viewing["tour_date"], viewing["tour_slot"])
+            store.tour_load[load_key] = max(0, store.tour_load.get(load_key, 0) - 1)
+
+    return schemas.ApiEnvelope(
+        success=True,
+        data={"viewing_id": viewing_id, "viewing_status": "CANCELLED"},
+        message="Cancelled",
     )
 
 

@@ -19,6 +19,7 @@ sở hữu mà booking/payment dựa vào.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import asyncpg
 from fastapi import Depends, FastAPI, Header
@@ -26,6 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.db.parking_payment_repository import (
     BookingError,
+    cancel_parking_booking,
+    change_booking_zone,
     create_booking,
     create_vehicle,
     get_vehicle,
@@ -121,6 +124,67 @@ async def get_vehicle_endpoint(
     if vehicle is None:
         raise not_found("VEHICLE_NOT_FOUND", "Vehicle not found")
     return schemas.ApiEnvelope(success=True, data=vehicle.as_output(), message="Found")
+
+
+@transport_app.post("/api/parking/bookings/{booking_id}/cancel", summary="Huỷ chỗ đã giữ")
+async def cancel_parking(
+    booking_id: str,
+    fail: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> schemas.ApiEnvelope:
+    """Huỷ một chỗ đỗ và quyết khoản hoàn theo luật 24 giờ.
+
+    Huỷ LUÔN thành công; chỉ tiền là có điều kiện. Mốc do provider tính từ
+    `booking_date` — không nhận `now` từ caller, cùng lý do với `amount`: thời
+    điểm là dữ kiện của bên bán, và nhận nó từ ngoài là để khách tự chọn mình
+    còn hạn hay không.
+
+    Body rỗng: `booking_id` đã định danh đủ, và một body có trường thừa là một
+    chỗ để ai đó gửi kèm thứ không nên gửi.
+    """
+    if fail:
+        raise inject_failure(fail)
+    try:
+        ket_qua = await cancel_parking_booking(pool, booking_id=booking_id, now=datetime.now(UTC))
+    except BookingError as exc:
+        raise as_api_error(exc) from exc
+    return schemas.ApiEnvelope(
+        success=True,
+        data={
+            "booking_id": ket_qua.booking_id,
+            "booking_status": "CANCELLED",
+            "refunded_amount": ket_qua.refunded,
+            "refund_denied": ket_qua.refund_denied,
+        },
+    )
+
+
+@transport_app.post("/api/parking/bookings/{booking_id}/zone", summary="Đổi khu cho chỗ đã giữ")
+async def change_parking_zone(
+    booking_id: str,
+    payload: schemas.ChangeParkingZoneRequest,
+    fail: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> schemas.ApiEnvelope:
+    """Chuyển một chỗ đỗ sang khu khác — nguyên tử, giữ nguyên `booking_id`.
+
+    Không phải huỷ-rồi-đặt. Toàn bộ nằm trong một transaction ở
+    `change_booking_zone`, nên khu mới hết chỗ thì không có gì đổi và chỗ cũ
+    còn nguyên. `booking_id` không đổi để thẻ thanh toán và hoá đơn của khách
+    vẫn trỏ đúng chỗ.
+    """
+    if fail:
+        raise inject_failure(fail)
+    try:
+        doi = await change_booking_zone(pool, booking_id=booking_id, parking_zone=payload.parking_zone.value)
+    except BookingError as exc:
+        raise as_api_error(exc) from exc
+    # `refunded_amount` là số tiền provider ĐÃ trả lại trong chính lời gọi này —
+    # 0 ở mọi trường hợp trừ khi khách đã trả tiền và khu mới rẻ hơn. Nó đi kèm
+    # kết quả để tầng trên nói ra được, không phải để tầng trên tính lại.
+    data = dict(doi.booking.__dict__)
+    data["refunded_amount"] = doi.refunded
+    return schemas.ApiEnvelope(success=True, data=data)
 
 
 @transport_app.post("/api/parking/bookings", status_code=201, summary="Đặt chỗ đậu xe")

@@ -22,6 +22,8 @@ bị speech lane chặn. Đây là đường an toàn cho mọi prompt tấn cô
 
 from __future__ import annotations
 
+from src.common.projects import PROJECTS
+
 import re
 import unicodedata
 from collections import Counter
@@ -81,6 +83,33 @@ _ACKNOWLEDGEMENTS = frozenset(
         "ok bạn",
         "ok luôn",
         "ok ok",
+        # Lời xác nhận trống — người dùng đồng ý với điều vừa nói, không yêu cầu
+        # gì thêm. Trước đây chúng rơi thẳng xuống Planner: đo trên `llm_usage`
+        # của stack demo, một chữ "đúng" khiến Planner chạy 64,0 GIÂY và sinh ra
+        # 0 task. Planner chiếm 89% toàn bộ thời gian gọi model, và 40% số lượt
+        # của nó không sinh task nào — đây là một trong số đó.
+        #
+        # An toàn vì `_is_acknowledgement` so khớp TRỌN chuỗi đã chuẩn hoá, chứ
+        # không phải tiền tố hay chuỗi con: "đúng, tôi muốn đổi ngày tham quan
+        # sang ngày 28" không bằng "đúng" nên vẫn xuống Planner nguyên vẹn.
+        # tests/test_a_bare_yes_does_not_wake_the_planner.py giữ cả hai chiều.
+        #
+        # Không đụng tới lượt phê duyệt: `/continue` không gọi `classify`.
+        "đúng",
+        "đúng rồi",
+        "đúng vậy",
+        "chính xác",
+        "chuẩn",
+        "chuẩn rồi",
+        "vâng",
+        "vâng ạ",
+        "dạ",
+        "dạ vâng",
+        "ừ",
+        "ừm",
+        "phải rồi",
+        "yes",
+        "yep",
     }
 )
 
@@ -306,6 +335,57 @@ def _is_greeting(message: str) -> bool:
             if not remainder and normalized.count(greeting) >= 2:
                 return True
     return False
+
+
+def mentions_a_service(message: str) -> bool:
+    """Câu có nhắc tới một dịch vụ để LÀM. Bản công khai của `_has_service_intent`.
+
+    Có mặt để `routes.py` không phải import một hàm gạch dưới: luật "không còn
+    gì để sửa" cần đúng phép thử này để không nuốt một yêu cầu ĐẶT MỚI.
+    """
+    return _has_service_intent(message)
+
+
+# --- Hỏi DANH MỤC DỰ ÁN --------------------------------------------------------
+#
+# Nguyên văn, workflow a39d6ebc trên stack demo:
+#
+#     Bạn:    có những dự án nào
+#     P-118:  Hiện tại mình có các dự án: Khu A, Khu B, Khu C.
+#
+# "Khu A/B/C" là KHU ĐỖ XE. Không có dự án nào tên như vậy.
+#
+# Câu trả lời ĐÚNG vẫn luôn nằm trong code — `PROJECTS` có đủ bảy tên thật. Chỗ
+# hỏng là đường đi: bản duy nhất trả lời được nằm trong `/continue`, sau cổng
+# `"project_name" in missing_fields`, tức CHỈ khi đã có workflow đang chờ chọn
+# dự án. Hỏi độc lập thì không qua cổng ấy, nên câu rơi xuống Planner → QUESTION
+# → Response Agent viết câu trả lời mà KHÔNG được đưa danh mục, và nó lấy thứ
+# gần nhất trong vốn từ của mình.
+#
+# Không phải model kém. Là ta bảo nó trả lời rồi không đưa dữ liệu.
+_PROJECT_CATALOG_MARKERS = (
+    "co nhung du an nao",
+    "co du an nao",
+    "danh sach du an",
+    "ho tro du an nao",
+    "nhung du an nao",
+    "du an nao duoc ho tro",
+    "cac du an",
+    "du an nao",
+)
+
+
+def _asks_for_the_project_catalogue(message: str) -> str | None:
+    """Danh sách dự án THẬT, hoặc None. Đọc `PROJECTS`, không chép tay.
+
+    Chép tay là cách hỏng đã đo được ở nhánh `_is_about_agent`: một chuỗi cứng
+    quảng cáo hai dịch vụ không tồn tại, và người dùng gõ theo rồi bị từ chối.
+    """
+    normalized = _normalize(message)
+    if not any(marker in normalized for marker in _PROJECT_CATALOG_MARKERS):
+        return None
+    names = "; ".join(str(p["project_name"]) for p in PROJECTS)
+    return f"Hiện mình hỗ trợ các dự án: {names}. Bạn cho mình biết muốn dùng dịch vụ nào ở dự án nào nhé."
 
 
 def _has_service_intent(message: str) -> bool:
@@ -574,6 +654,18 @@ def classify(message: str) -> SmallTalk | None:
     date_reply = _asks_todays_date(text)
     if date_reply is not None:
         return SmallTalk(speech_type=SpeechType.HOW_TO, reply=date_reply)
+
+    # Danh mục dự án — dữ liệu, không phải thứ để model nghĩ ra.
+    #
+    # Đứng TRƯỚC service-intent, cùng lý do với `_asks_todays_date`: "có những
+    # dự án nào" mang danh từ dịch vụ nên nếu để service-intent thắng thì nó
+    # xuống Planner, và Response Agent bịa ra danh sách.
+    #
+    # Không nuốt yêu cầu thật: marker đòi cụm "dự án nào" / "danh sách dự án".
+    # "đặt lịch tham quan dự án Vinhomes Pearl Bay ngày…" không chứa cụm nào.
+    catalogue = _asks_for_the_project_catalogue(text)
+    if catalogue is not None:
+        return SmallTalk(speech_type=SpeechType.HOW_TO, reply=catalogue)
 
     # Việc Agent KHÔNG có tool để làm — kiểm trước tất cả.
     outside = _outside_toolspace(text)

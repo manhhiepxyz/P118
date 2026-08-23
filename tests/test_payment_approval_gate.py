@@ -140,7 +140,7 @@ async def test_failed_prefix_is_returned_without_requesting_payment_approval() -
             finalize: bool = True,
             parent_workflow_id: str | None = None,
             session_id: str | None = None,
-        **_forwarded,
+            **_forwarded,
         ) -> tuple[str, dict[str, StandardResult]]:
             return workflow_id or "wf-failed", {
                 "T1": StandardResult.fail(

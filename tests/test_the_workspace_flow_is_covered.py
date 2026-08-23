@@ -54,8 +54,7 @@ def test_the_frame_is_checked_at_every_stage() -> None:
     """Khung trang là thứ đã hỏng bốn lần; nó phải được đo ở MỌI chặng."""
     source = _SCRIPT.read_text(encoding="utf-8")
     assert source.count("await frame(") >= 5, (
-        "khung trang không còn được kiểm ở đủ các chặng — đó chính là chỗ lỗi "
-        "cứ mọc lại"
+        "khung trang không còn được kiểm ở đủ các chặng — đó chính là chỗ lỗi cứ mọc lại"
     )
     for neo in ("thanh điều hướng trái còn", "ô nhập còn", "cột phải còn"):
         assert neo in source, f"kịch bản thôi kiểm: {neo}"

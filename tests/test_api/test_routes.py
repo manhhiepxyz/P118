@@ -139,15 +139,21 @@ def test_book_shuttle_presentation_shows_driver_details() -> None:
     assert by_label["Tài xế"] == "Anh Tuấn"
     assert by_label["Biển số xe"] == "29A-456.78"
     assert by_label["Loại xe"] == "Ô tô 7 chỗ"
-    assert by_label["Giờ đón"] == "07:30"
+    # Ngày và giờ đón gộp thành MỘT mốc `Thời gian` — cùng tên với mọi dịch vụ
+    # có hẹn. Giao diện chọn bố cục theo nhãn này; hai ô rời thì nó không nhận
+    # ra đây là một buổi hẹn. Xem `tests/test_every_appointment_says_when.py`.
+    assert by_label["Thời gian"] == "2026-08-20 07:30"
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("22/8/2026", "2026-08-22"),
-        ("2026-08-22", "2026-08-22"),
-        ("31/2/2026", None),
+        # Ngày tương lai cố định, đủ xa để không hết hạn: `_extract_date` từ
+        # chối ngày quá khứ, nên một ngày ghim cứng gần hôm nay sẽ biến test
+        # này thành bom hẹn giờ.
+        ("22/8/2030", "2030-08-22"),
+        ("2030-08-22", "2030-08-22"),
+        ("31/2/2030", None),
     ],
 )
 def test_follow_up_date_is_parsed_deterministically(value, expected) -> None:
@@ -170,12 +176,22 @@ def test_follow_up_time_does_not_truncate_an_invalid_hour_or_minute(value) -> No
 
 
 def test_follow_up_extracts_the_exact_viewing_answer_used_in_terminal() -> None:
+    """Ngày phải là ngày TƯƠNG LAI, tính từ hôm nay.
+
+    Bản trước ghim cứng "22/8/2026". `_extract_date` từ chối ngày quá khứ, nên
+    test này xanh cho tới đúng 23/08/2026 rồi đỏ mãi mãi — hỏng vì thời gian
+    trôi, không vì mã nguồn đổi. Một test như thế không nói được điều gì về
+    lần sửa vừa rồi, và người đọc nó sẽ đi tìm lỗi ở nhầm chỗ.
+    """
+    from datetime import date, timedelta
+
+    mai = date.today() + timedelta(days=30)
     answers, unresolved = routes._extract_follow_up_answers(
-        "22/8/2026,12h",
+        f"{mai.day}/{mai.month}/{mai.year},12h",
         ["viewing_date", "viewing_time"],
     )
 
-    assert answers == {"viewing_date": "2026-08-22", "viewing_time": "12:00"}
+    assert answers == {"viewing_date": mai.isoformat(), "viewing_time": "12:00"}
     assert unresolved == []
 
 
@@ -424,7 +440,10 @@ async def test_continue_workflow_maps_answer_into_context_without_rewriting_goal
 
     assert response.status_code == 202
     assert captured["goal"] == original_goal
-    assert captured["context"] == {"project_id": "PRJ-001", "viewing_time": "13:40"}
+    # Ngữ cảnh mang thêm DANH TÍNH do server tra ở mỗi lượt; bài kiểm này nói
+    # về việc câu trả lời có vào đúng chỗ mà không viết lại `goal` hay không.
+    assert captured["context"]["project_id"] == "PRJ-001"
+    assert captured["context"]["viewing_time"] == "13:40"
     assert "Thông tin người dùng bổ sung" not in captured["goal"]
 
 
@@ -456,12 +475,17 @@ async def test_continue_workflow_accepts_partial_answer_then_planner_can_ask_rem
     monkeypatch.setattr(routes, "_run_demo_job", _fake_run)
     response = await client.post(
         f"/api/v1/workflows/demo/{original_id}/continue",
-        json={"message": "22/8/2026"},
+        json={"message": "22/8/2030"},
     )
     await asyncio.sleep(0)
 
     assert response.status_code == 202
-    assert captured == {"project_id": "PRJ-001", "viewing_date": "2026-08-22"}
+    # Ngữ cảnh giờ mang thêm DANH TÍNH do server tra được ở mỗi lượt
+    # (`resident_verification_status`, `account_id`…). Bài kiểm này nói về việc
+    # câu trả lời có vào đúng chỗ không, nên nó kiểm phần ấy chứ không đòi
+    # ngữ cảnh chỉ có đúng hai khoá.
+    assert captured["project_id"] == "PRJ-001"
+    assert captured["viewing_date"] == "2030-08-22"
 
 
 @pytest.mark.asyncio
@@ -569,6 +593,61 @@ async def test_demo_start_maps_public_project_name_to_trusted_internal_id(client
     job = routes._DEMO_JOBS[response.json()["workflow_id"]]
     assert job["existing_context"]["project_id"] == "PRJ-007"
     assert "project_name" not in job["existing_context"]
+
+
+@pytest.mark.asyncio
+async def test_demo_start_keeps_boolean_values_selected_in_the_service_form(client, monkeypatch) -> None:
+    """Dữ liệu đã chọn trong form không được phụ thuộc Planner nhớ trích lại.
+
+    Đây là lỗi production đã đo được: goal có ``tôi đồng ý được liên hệ``
+    nhưng model bỏ ``consent`` khỏi ``explicit_facts`` rồi hỏi lại đúng ô người
+    dùng vừa chọn. Ba boolean là dữ liệu người dùng, không phải danh tính/quyền,
+    nên route nhận chúng qua một object đóng và đưa vào context của Planner.
+    """
+    routes._DEMO_JOBS.clear()
+
+    async def _fake_job(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
+    response = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={
+            "goal": "Đăng ký nhận tư vấn; tôi đồng ý được liên hệ.",
+            "form_fields": {
+                "consent": True,
+                "needs_elevator": False,
+                "needs_loading_support": True,
+            },
+        },
+    )
+    await asyncio.sleep(0)
+
+    assert response.status_code == 202
+    job = routes._DEMO_JOBS[response.json()["workflow_id"]]
+    assert (
+        job["existing_context"]
+        | {
+            "consent": True,
+            "needs_elevator": False,
+            "needs_loading_support": True,
+        }
+        == job["existing_context"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_demo_start_rejects_privileged_or_unknown_form_fields(client) -> None:
+    for form_fields in (
+        {"resident_id": "RES-FORGED"},
+        {"owner_user_id": "USER-FORGED"},
+        {"consent": "true"},
+    ):
+        response = await client.post(
+            "/api/v1/workflows/demo/start",
+            json={"goal": "Đăng ký nhận tư vấn.", "form_fields": form_fields},
+        )
+        assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -857,7 +936,7 @@ def test_demo_response_presents_four_business_steps_in_vietnamese() -> None:
     assert {item.label: item.value for item in response.tasks[2].details} == {
         "Mã đặt chỗ": "BOOK-001",
         "Khu vực": "Khu A",
-        "Ngày đặt": "2026-08-20",
+        "Thời gian": "2026-08-20",
         "Phí đặt chỗ": "150.000 VND",
     }
 

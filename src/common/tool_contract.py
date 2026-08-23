@@ -209,6 +209,48 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
                 "reception_time": _TIME,
             },
         ),
+        # Huỷ một lịch ĐÃ ĐẶT. Chỉ `viewing_id` — mã do provider cấp, đọc từ
+        # kết quả bước đã chạy. Không ô nào người dùng gõ được, và đó là chủ ý:
+        # nhận thêm bất kỳ ô nào ở đây là mở đường cho một mã lịch bịa ra.
+        # Huỷ một chỗ đỗ ĐÃ GIỮ. `refunded_amount` do provider quyết theo luật
+        # 24 giờ; tầng trên chỉ NÓI LẠI con số ấy, không tính lại.
+        "cancel_maintenance": _contract(
+            inputs={"maintenance_id": _STRING},
+            outputs={
+                "maintenance_id": _STRING,
+                "maintenance_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
+        "cancel_move": _contract(
+            inputs={"move_request_id": _STRING},
+            outputs={
+                "move_request_id": _STRING,
+                "move_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
+        "cancel_shuttle": _contract(
+            inputs={"shuttle_id": _STRING},
+            outputs={
+                "shuttle_id": _STRING,
+                "shuttle_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
+        "cancel_parking": _contract(
+            inputs={"booking_id": _STRING},
+            outputs={
+                "booking_id": _STRING,
+                "booking_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+                "refunded_amount": FieldSpec(kind="int"),
+                "refund_denied": FieldSpec(kind="bool"),
+            },
+        ),
+        "cancel_property_viewing": _contract(
+            inputs={"viewing_id": _STRING},
+            outputs={
+                "viewing_id": _STRING,
+                "viewing_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
         "register_property_interest": _contract(
             inputs={
                 "project_id": _STRING,
@@ -291,6 +333,26 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
                 # trả về. Chúng đi tiếp sang pay_fee bằng InputRef, không bao
                 # giờ do người dùng hay LLM tự khai.
                 # Báo giá luôn là số dương: một chỗ đỗ 0 đồng không phải báo giá.
+                "amount": FieldSpec(kind="integer", minimum=0, exclusive_minimum=True),
+                "currency": _CURRENCY,
+            },
+        ),
+        # Đổi khu cho một chỗ ĐÃ GIỮ. Một thao tác, không phải huỷ-rồi-đặt:
+        # hai lời gọi tách rời để lại khoảng trống, và trong khoảng ấy chỗ ở
+        # khu mới có thể bị người khác lấy — khách vào có chỗ, ra tay trắng.
+        #
+        # `amount` là ĐẦU RA, y như `book_parking`: giá do bên bán quyết theo
+        # khu (`ZONE_A` 150.000 / `ZONE_B` 100.000). Cho caller khai giá là cho
+        # caller tự định giá dịch vụ.
+        "change_parking_zone": _contract(
+            inputs={
+                "booking_id": _STRING,
+                "parking_zone": FieldSpec(kind="enum", enum=frozenset({"ZONE_A", "ZONE_B"})),
+            },
+            outputs={
+                "booking_id": _STRING,
+                "parking_zone": FieldSpec(kind="enum", enum=frozenset({"ZONE_A", "ZONE_B"})),
+                "booking_date": _DATE,
                 "amount": FieldSpec(kind="integer", minimum=0, exclusive_minimum=True),
                 "currency": _CURRENCY,
             },

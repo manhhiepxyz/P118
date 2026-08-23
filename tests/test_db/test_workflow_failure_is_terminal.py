@@ -258,9 +258,7 @@ async def test_a_successful_workflow_is_never_overwritten_as_failed(client, db_p
     workflow_id = started.json()["workflow_id"]
     await asyncio.sleep(0)
 
-    await db_pool.execute(
-        "UPDATE workflows SET status = 'SUCCESS' WHERE workflow_id = $1::uuid", workflow_id
-    )
+    await db_pool.execute("UPDATE workflows SET status = 'SUCCESS' WHERE workflow_id = $1::uuid", workflow_id)
     await routes._mark_workflow_failed_safely(workflow_id, "EXECUTION_ERROR")
 
     status = await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id = $1::uuid", workflow_id)

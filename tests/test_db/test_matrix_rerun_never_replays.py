@@ -112,9 +112,7 @@ async def test_a_successful_prefix_is_never_called_again(client, db_pool, spy_co
     # Thứ phân biệt được: bước đã SUCCESS có bị lôi trở lại hàng đợi duyệt không.
     assert spy.count("register_vehicle") == 0
 
-    still = await db_pool.fetchrow(
-        "SELECT status FROM workflow_tasks WHERE workflow_id=$1 AND task_id='T1'", wid
-    )
+    still = await db_pool.fetchrow("SELECT status FROM workflow_tasks WHERE workflow_id=$1 AND task_id='T1'", wid)
     assert still["status"] == TaskStatus.SUCCESS.value, "bước đã xong bị đưa về trạng thái chờ"
     requeued = await db_pool.fetchval(
         "SELECT count(*) FROM service_approvals WHERE workflow_id=$1 AND task_id='T1'", wid
@@ -125,9 +123,7 @@ async def test_a_successful_prefix_is_never_called_again(client, db_pool, spy_co
     # tới provider. Bất biến cần kiểm ở đây là giá trị đã sửa đi vào đúng hồ sơ,
     # và `vehicle_id` là giá trị CŨ đọc từ `result_data` — không phải một cái mới.
     assert spy.count("book_parking") == 0, "chạy chỗ đỗ trước khi đơn vị duyệt"
-    queued = await db_pool.fetchrow(
-        "SELECT details FROM service_approvals WHERE workflow_id=$1 AND task_id='T2'", wid
-    )
+    queued = await db_pool.fetchrow("SELECT details FROM service_approvals WHERE workflow_id=$1 AND task_id='T2'", wid)
     assert queued is not None, "bước cần duyệt không vào hàng đợi"
     details = json.loads(queued["details"]) if isinstance(queued["details"], str) else queued["details"]
     assert details["parking_zone"] == "ZONE_B", details
@@ -207,21 +203,14 @@ async def test_only_the_broken_branch_runs_again(client, db_pool, spy_connectors
     await rerun_with_answers(str(wid), {"move_time": "09:00"})
 
     assert spy.count("create_maintenance_request") == 0
-    still = await db_pool.fetchrow(
-        "SELECT status FROM workflow_tasks WHERE workflow_id=$1 AND task_id='T1'", wid
-    )
+    still = await db_pool.fetchrow("SELECT status FROM workflow_tasks WHERE workflow_id=$1 AND task_id='T1'", wid)
     assert still["status"] == TaskStatus.SUCCESS.value, "nhánh đã xong bị đưa về chờ"
     assert (
-        await db_pool.fetchval(
-            "SELECT count(*) FROM service_approvals WHERE workflow_id=$1 AND task_id='T1'", wid
-        )
-        == 0
+        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1 AND task_id='T1'", wid) == 0
     ), "nhánh đã xong bị xin duyệt lại"
     # `schedule_move` cũng có cổng duyệt — nó vào hàng đợi với giá trị ĐÃ SỬA.
     assert spy.count("schedule_move") == 0
-    queued = await db_pool.fetchrow(
-        "SELECT details FROM service_approvals WHERE workflow_id=$1 AND task_id='T2'", wid
-    )
+    queued = await db_pool.fetchrow("SELECT details FROM service_approvals WHERE workflow_id=$1 AND task_id='T2'", wid)
     assert queued is not None
     details = json.loads(queued["details"]) if isinstance(queued["details"], str) else queued["details"]
     assert details["move_time"] == "09:00", details

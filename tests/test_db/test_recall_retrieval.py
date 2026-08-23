@@ -72,9 +72,7 @@ async def test_the_current_workflow_is_excluded(client, db_pool):
     current = await _turn(db_pool, owner, "yêu cầu đang chạy", None, None, minutes_ago=0)
     await _turn(db_pool, owner, "yêu cầu cũ", "xong", "book_parking", minutes_ago=10)
 
-    rows = await repo.recent_turns_for_owner(
-        owner_user_id=str(owner), exclude_workflow_id=current, limit=10
-    )
+    rows = await repo.recent_turns_for_owner(owner_user_id=str(owner), exclude_workflow_id=current, limit=10)
 
     assert [r["goal"] for r in rows] == ["yêu cầu cũ"], rows
 

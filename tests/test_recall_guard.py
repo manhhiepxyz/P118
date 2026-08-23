@@ -36,7 +36,7 @@ RECALLED = [{"goal": "đặt chỗ đỗ xe khu A ngày 2030-01-01", "answer": "
 
 
 def test_a_value_that_only_exists_in_memory_is_flagged():
-    """"khu A" của lần trước không phải khu người dùng muốn hôm nay."""
+    """ "khu A" của lần trước không phải khu người dùng muốn hôm nay."""
     offending = Planner._fields_taken_from_recall(
         _plan(parking_zone="ZONE_A", booking_date="2030-06-01"),
         RECALLED,

@@ -96,7 +96,12 @@ def test_runtime_factory_registers_resident_services_connector() -> None:
     connectors = build_connectors(resident_services_url="http://resident-services")
     connector = next(item for item in connectors if isinstance(item, ResidentServicesConnector))
     assert connector.base_url == "http://resident-services"
-    assert set(connector.tool_names) == {"create_maintenance_request", "schedule_move"}
+    assert set(connector.tool_names) == {
+        "create_maintenance_request",
+        "schedule_move",
+        "cancel_maintenance",
+        "cancel_move",
+    }
 
 
 class _Boundary:
@@ -208,6 +213,10 @@ async def test_resident_services_provider_rejects_invalid_schedule(path: str, pa
 # ---------------------------------------------------------------------------
 
 _RESIDENT_ONLY_PLANS = {
+    "change_parking_zone": {"booking_id": "BOOK-001", "parking_zone": "ZONE_B"},
+    "cancel_parking": {"booking_id": "BOOK-001"},
+    "cancel_maintenance": {"maintenance_id": "MAINT-001"},
+    "cancel_move": {"move_request_id": "MOVE-001"},
     "register_vehicle": {"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"},
     "book_parking": {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
     "pay_fee": {"booking_id": "BOOK-001", "amount": 1000, "currency": "VND"},

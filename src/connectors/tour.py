@@ -55,7 +55,65 @@ class TourConnector(Connector):
 
     @property
     def tool_names(self) -> list[str]:
-        return ["schedule_property_viewing"]
+        return ["schedule_property_viewing", "cancel_property_viewing"]
+
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Chỉ `cancel_property_viewing` chứng minh được là gọi lại an toàn.
+
+        Huỷ là phép GÁN: đặt một lịch về `CANCELLED` hai lần vẫn ra đúng một
+        lịch đã huỷ, và provider chỉ trả suất về kho đúng một lần (xem
+        `cancel_property_viewing` trong `services/mock/tour.py`).
+
+        `schedule_property_viewing` thì KHÔNG: nó tạo bản ghi mới và provider tự
+        sinh mã, nên một lượt gọi lại sau timeout có thể tạo lịch thứ hai —
+        provider đã ghi rồi mới timeout ở đường về là chuyện bình thường.
+        """
+        return tool_name == "cancel_property_viewing"
+
+    async def _cancel_viewing(self, input_data: dict[str, Any]) -> StandardResult:
+        """Huỷ một lịch ĐÃ ĐẶT → POST /api/property/viewings/{id}/cancel.
+
+        `viewing_id` đi trong ĐƯỜNG DẪN, không trong body: nó định danh tài
+        nguyên. Body rỗng — không có gì để khai, và một body có trường thừa là
+        một chỗ để ai đó gửi kèm thứ không nên gửi.
+
+        Thiếu `viewing_id` thì dừng TRƯỚC khi ra ngoài: một lời gọi huỷ không có
+        mã là một lời gọi không biết mình huỷ cái gì.
+        """
+        viewing_id = str(input_data.get("viewing_id") or "").strip()
+        if not viewing_id:
+            return StandardResult.fail(
+                error_code=ErrorCode.INVALID_INPUT,
+                message="Thiếu mã lịch xem để huỷ",
+                retryable=False,
+            )
+        try:
+            async with self._get_client() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/property/viewings/{viewing_id}/cancel",
+                    timeout=self.timeout,
+                )
+                if not response.is_success:
+                    return self._handle_error_response(response)
+                data, env_error = self._extract_payload(response.json())
+                if env_error is not None:
+                    return self._build_envelope_failure(env_error)
+                thieu = [khoa for khoa in ("viewing_id", "viewing_status") if khoa not in data]
+                if thieu:
+                    return StandardResult.fail(
+                        error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                        message=f"Thiếu {', '.join(thieu)} trong response",
+                        retryable=False,
+                    )
+                return StandardResult.ok({khoa: data[khoa] for khoa in ("viewing_id", "viewing_status")})
+        except httpx.TimeoutException:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_TIMEOUT, message="Tour service timeout", retryable=True
+            )
+        except httpx.ConnectError:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_UNAVAILABLE, message="Không thể kết nối Tour service", retryable=True
+            )
 
     async def execute(
         self,
@@ -67,6 +125,9 @@ class TourConnector(Connector):
         # Tool của connector này không mang khoá idempotency; `context` có mặt
         # để hợp đồng đồng nhất, và bỏ qua ở đây là cố ý.
         del context
+        if tool_name == "cancel_property_viewing":
+            return await self._cancel_viewing(input_data)
+
         # --- Bước 1: Guard – chỉ xử lý tool được khai báo ---
         if tool_name != "schedule_property_viewing":
             return StandardResult.fail(

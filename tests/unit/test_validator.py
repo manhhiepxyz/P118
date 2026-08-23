@@ -677,6 +677,16 @@ EXPECTED_TOOLS = frozenset(
         "register_resident",
         "register_vehicle",
         "book_parking",
+        # Có trong contract nhưng Planner KHÔNG lập kế hoạch với nó — xem
+        # `AGENT_FORBIDDEN_TOOLS`. Đường sửa lỗi dựng task này từ kết quả đã
+        # chạy, không từ câu người dùng gõ.
+        "change_parking_zone",
+        # Cùng lý do: huỷ một lịch chỉ có nghĩa với `viewing_id` từ bước đã chạy.
+        "cancel_property_viewing",
+        "cancel_parking",
+        "cancel_maintenance",
+        "cancel_move",
+        "cancel_shuttle",
         "pay_fee",
         "book_shuttle",
     }

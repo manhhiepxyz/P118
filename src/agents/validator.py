@@ -34,6 +34,12 @@ class TaskPlanValidator:
     ALLOWED_TOOLS: frozenset[str] = frozenset(
         {
             "search_properties",
+            "change_parking_zone",
+            "cancel_property_viewing",
+            "cancel_parking",
+            "cancel_maintenance",
+            "cancel_move",
+            "cancel_shuttle",
             "schedule_property_viewing",
             "register_property_interest",
             "create_maintenance_request",
@@ -60,6 +66,14 @@ class TaskPlanValidator:
         "register_vehicle": frozenset({"resident_id", "plate_number", "vehicle_type"}),
         "book_parking": frozenset({"vehicle_id", "booking_date", "parking_zone"}),
         "pay_fee": frozenset({"booking_id", "amount", "currency"}),
+        # Đổi khu cho một chỗ ĐÃ GIỮ. `amount` KHÔNG phải input: giá do bên bán
+        # tính lại theo khu, y như lúc đặt mới.
+        "change_parking_zone": frozenset({"booking_id", "parking_zone"}),
+        "cancel_property_viewing": frozenset({"viewing_id"}),
+        "cancel_parking": frozenset({"booking_id"}),
+        "cancel_maintenance": frozenset({"maintenance_id"}),
+        "cancel_move": frozenset({"move_request_id"}),
+        "cancel_shuttle": frozenset({"shuttle_id"}),
         "book_shuttle": frozenset({"viewing_id", "tour_date", "passenger_count"}),
     }
 

@@ -51,11 +51,7 @@ def test_compose_points_every_required_provider_at_the_container_network() -> No
 
     backend = _compose_service_block("backend")
 
-    missing = [
-        field.upper()
-        for field in REQUIRED_SERVICE_URLS
-        if f"{field.upper()}:" not in backend
-    ]
+    missing = [field.upper() for field in REQUIRED_SERVICE_URLS if f"{field.upper()}:" not in backend]
     assert not missing, f"backend thiếu URL provider trong compose: {', '.join(missing)}"
 
     # `localhost` trong container là chính backend. Một URL như vậy lọt qua mọi
@@ -76,13 +72,11 @@ def test_every_service_backend_depends_on_starts_by_default() -> None:
     # comment giải thích "KHÔNG đặt sau `profiles:` nữa" — nghĩa là nó đang
     # khớp văn bản, không khớp cấu hình.
     block = "\n".join(
-        line for line in _compose_service_block("mock-ownership").splitlines()
-        if not line.strip().startswith("#")
+        line for line in _compose_service_block("mock-ownership").splitlines() if not line.strip().startswith("#")
     )
 
     assert "profiles:" not in block, (
-        "mock-ownership phục vụ luồng xác minh căn hộ — nó phải lên cùng stack, "
-        "không phải một tuỳ chọn"
+        "mock-ownership phục vụ luồng xác minh căn hộ — nó phải lên cùng stack, không phải một tuỳ chọn"
     )
 
 

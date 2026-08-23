@@ -57,7 +57,45 @@ class ShuttleConnector(Connector):
 
     @property
     def tool_names(self) -> list[str]:
-        return ["book_shuttle"]
+        return ["book_shuttle", "cancel_shuttle"]
+
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Chỉ `cancel_shuttle`. Huỷ là phép GÁN, không phải phép cộng."""
+        return tool_name == "cancel_shuttle"
+
+    async def _cancel(self, input_data: dict[str, Any]) -> StandardResult:
+        """Huỷ một xe đã đặt. Mã trong đường dẫn, body rỗng."""
+        shuttle_id = str(input_data.get("shuttle_id") or "").strip()
+        if not shuttle_id:
+            return StandardResult.fail(
+                error_code=ErrorCode.INVALID_INPUT, message="Thiếu shuttle_id để huỷ", retryable=False
+            )
+        try:
+            async with self._get_client() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/shuttles/bookings/{shuttle_id}/cancel", timeout=self.timeout
+                )
+                if not response.is_success:
+                    return self._handle_error_response(response)
+                data, env_error = self._extract_payload(response.json())
+                if env_error is not None:
+                    return self._build_envelope_failure(env_error)
+                thieu = [k for k in ("shuttle_id", "shuttle_status") if k not in data]
+                if thieu:
+                    return StandardResult.fail(
+                        error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                        message=f"Thiếu {', '.join(thieu)} trong response",
+                        retryable=False,
+                    )
+                return StandardResult.ok({k: data[k] for k in ("shuttle_id", "shuttle_status")})
+        except httpx.TimeoutException:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_TIMEOUT, message="Shuttle service timeout", retryable=True
+            )
+        except httpx.ConnectError:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_UNAVAILABLE, message="Không thể kết nối Shuttle service", retryable=True
+            )
 
     async def execute(
         self,
@@ -69,6 +107,9 @@ class ShuttleConnector(Connector):
         # Tool của connector này không mang khoá idempotency; `context` có mặt
         # để hợp đồng đồng nhất, và bỏ qua ở đây là cố ý.
         del context
+        if tool_name == "cancel_shuttle":
+            return await self._cancel(input_data)
+
         # --- Bước 1: Guard – chỉ xử lý tool được khai báo ---
         if tool_name != "book_shuttle":
             return StandardResult.fail(

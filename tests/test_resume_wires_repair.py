@@ -43,8 +43,7 @@ def test_resume_path_passes_on_failure_to_the_executor() -> None:
         "bao giờ được sinh, và lỗi đổi-khu-là-xong sẽ chết thành FAILED"
     )
     assert "save_repair_hints" in source, (
-        "hint chỉ nằm trong bộ nhớ của request; không ghim xuống database thì "
-        "`_demo_response` không đọc được"
+        "hint chỉ nằm trong bộ nhớ của request; không ghim xuống database thì `_demo_response` không đọc được"
     )
     assert "repair_question(" in source, "không còn dựng câu hỏi lại từ hint"
     # Dựng câu thôi chưa đủ — phải THẬT SỰ ghim nó.
@@ -120,8 +119,7 @@ def test_resume_does_not_rerun_tasks_that_already_succeeded() -> None:
         "resume không đọc lại danh sách task đã SUCCESS từ database"
     )
     assert "seed_results=seed_results" in source, (
-        "seed status mà không seed kết quả thì InputRef của bước sau không "
-        "resolve được"
+        "seed status mà không seed kết quả thì InputRef của bước sau không resolve được"
     )
 
 
@@ -154,4 +152,6 @@ def test_seeded_results_are_standard_results_not_raw_json() -> None:
     with pytest.raises(AttributeError):
         executor._resolve_input(_PayFee(), {"T3": {"amount": 150000}})
 
-    assert "StandardResult(" in inspect.getsource(demo_service), "seed kết quả bằng JSON thô — Executor sẽ nổ khi resolve InputRef"
+    assert "StandardResult(" in inspect.getsource(demo_service), (
+        "seed kết quả bằng JSON thô — Executor sẽ nổ khi resolve InputRef"
+    )

@@ -53,6 +53,10 @@ SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
     {
         "register_vehicle",
         "book_parking",
+        # Đổi khu là một YÊU CẦU gửi đơn vị, không phải một lệnh: họ có thể
+        # từ chối (khu kia hết chỗ, quá hạn đổi, chính sách phí). Cùng cổng,
+        # cùng `reject_code`, cùng vòng sửa lỗi với lúc đặt mới.
+        "change_parking_zone",
         "create_maintenance_request",
         "schedule_move",
         "book_shuttle",
@@ -62,8 +66,15 @@ SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
 
 # Tên dịch vụ cho người duyệt đọc. Đơn vị nhìn hàng đợi, không nhìn tên tool.
 SERVICE_LABELS: dict[str, str] = {
+    # `schedule_property_viewing` có mặt ở đây dù KHÔNG nằm trong
+    # `SERVICE_GATED_TOOLS` — nó đi qua cổng duyệt riêng của đơn vị tour. Bảng
+    # này trả lời câu "gọi dịch vụ này là gì cho người đọc", và câu ấy cần một
+    # câu trả lời cho MỌI dịch vụ, kể cả dịch vụ đi cổng khác. Thiếu nó thì hồ
+    # sơ liên hệ hiện lên hàng đợi dưới cái tên `schedule_property_viewing`.
+    "schedule_property_viewing": "Đặt lịch tham quan",
     "register_vehicle": "Đăng ký phương tiện",
     "book_parking": "Giữ chỗ đỗ xe",
+    "change_parking_zone": "Đổi khu đỗ xe",
     "create_maintenance_request": "Yêu cầu bảo trì",
     "schedule_move": "Đăng ký chuyển nhà",
     "book_shuttle": "Xe đưa đón tham quan",
@@ -429,11 +440,86 @@ async def expire_pending_service_approvals(pool: asyncpg.Pool, workflow_id: str)
     return int(result.rsplit(" ", 1)[-1] or 0)
 
 
+# Nhãn cho hàng đợi của đơn vị. Họ nhìn TÊN VIỆC, không nhìn mã.
+_REQUEST_LABELS: dict[str, str] = {
+    "AMEND": "Xin đổi lịch",
+    "CANCEL": "Xin huỷ lịch",
+}
+
+
+async def save_support_request(
+    pool: asyncpg.Pool,
+    *,
+    workflow_id: str,
+    task_id: str,
+    kind: str,
+    note: str | None = None,
+) -> str:
+    """Ghim một LỜI NHỜ vào hàng đợi đơn vị. Trả mã hồ sơ vừa tạo.
+
+    Khách bấm "Đổi lịch" hoặc "Huỷ lịch" trên một việc ĐÃ XONG. Hệ thống không
+    tự làm thay: nó chuyển lời nhờ tới đơn vị, và đơn vị quyết.
+
+    Vì sao dùng lại chính bảng này thay vì dựng một kênh riêng: đơn vị đã có một
+    màn hình duyệt, có phân quyền, có mã từ chối, có đường báo lại cho khách.
+    Một kênh thứ hai là dựng lại cả bốn thứ ấy, rồi giữ cho chúng không lệch nhau.
+
+    `kind='REQUEST'` là thứ giữ cho lời nhờ không bị đọc thành mệnh lệnh — xem
+    ghi chú tại cột `kind` trong `schema.sql`.
+
+    Mã hồ sơ KHÔNG bao giờ đụng một `task_id` có thật: khoá chính là
+    `(workflow_id, task_id)`, và một lần đụng nghĩa là hồ sơ này ghi đè bằng
+    chứng của một bước. Bước mang tên `T5`, `T5R2`, `T5Z2`; hồ sơ mang tên `YC1`,
+    `YC2`… — hai không gian tên rời nhau.
+
+    `task_id` gốc đi vào `details`, không vào khoá: nhiều lời nhờ có thể cùng
+    nói về một bước, và lời nhờ thứ hai không được xoá lời nhờ thứ nhất.
+    """
+    if kind not in _REQUEST_LABELS:
+        raise ValueError("Loại yêu cầu không nằm trong danh sách.")
+    dich_vu = ""
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock_workflow_row(conn, workflow_id)
+        row = await conn.fetchrow(
+            "SELECT tool FROM workflow_tasks WHERE workflow_id = $1 AND task_id = $2",
+            UUID(workflow_id),
+            task_id,
+        )
+        if row is None:
+            raise ValueError("Không tìm thấy bước này trong yêu cầu.")
+        dich_vu = str(row["tool"])
+        # Đánh số trong CÙNG transaction đang giữ khoá workflow, nên hai lần
+        # bấm đồng thời không thể cùng nhận một mã.
+        dang_co = await conn.fetchval(
+            "SELECT COUNT(*) FROM service_approvals WHERE workflow_id = $1 AND kind = 'REQUEST'",
+            UUID(workflow_id),
+        )
+        ma = f"YC{int(dang_co) + 1}"
+        await conn.execute(
+            """
+            INSERT INTO service_approvals
+                (workflow_id, task_id, tool, service_label, details, kind,
+                 applicant_user_id, applicant_name, applicant_phone)
+            SELECT $1, $2, $3, $4, $5::jsonb, 'REQUEST', w.owner_user_id, u.full_name, u.phone
+              FROM workflows w
+              LEFT JOIN users u ON u.id = w.owner_user_id
+             WHERE w.workflow_id = $1
+            """,
+            UUID(workflow_id),
+            ma,
+            dich_vu,
+            f"{_REQUEST_LABELS[kind]} — {SERVICE_LABELS.get(dich_vu, dich_vu)}",
+            json.dumps({"loai": kind, "task_id": task_id, "ghi_chu": note or ""}, ensure_ascii=False),
+        )
+    return ma
+
+
 async def pending_for_workflow(pool: asyncpg.Pool, workflow_id: str) -> list[dict[str, Any]]:
     """Các bước của workflow này còn chờ đơn vị quyết."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT task_id, tool, service_label, details, status, reject_code, reject_reason FROM service_approvals "
+            "SELECT task_id, tool, service_label, details, status, kind, reject_code, reject_reason "
+            "FROM service_approvals "
             "WHERE workflow_id = $1 ORDER BY task_id",
             UUID(workflow_id),
         )

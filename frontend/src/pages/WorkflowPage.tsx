@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2, ChevronDown, Clock3, Info, XCircle } from 'lucide-react'
+import { Link, useParams } from 'react-router-dom'
+import { ArrowLeft, ChevronDown, Clock3, Info } from 'lucide-react'
 
-import { ClarificationReply } from '../components/ClarificationReply'
 import { InspectorPanel } from '../components/workspace/InspectorPanel'
 import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 import { ResultSummary } from '../components/workspace/ResultSummary'
@@ -12,15 +11,8 @@ import { AmendPanel } from '../components/AmendPanel'
 import { describeFailure, describeWorkflowFailure } from '../lib/status'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import {
-  cancelWorkflow,
-  continueWorkflow,
-  decidePayment,
-  getWorkflow,
-  listSessionWorkflows,
   retryWorkflow,
-  startWorkflow,
 } from '../lib/agentApi'
-import type { AgentWorkflowListItem } from '../lib/types'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
 /**
@@ -37,8 +29,6 @@ import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 /* Chờ backend ngã ngũ sau khi gõ tiếp: có bước (việc mới) hay có câu trả lời
    (chỉ là một câu). Trần 30 giây — quá đó thì coi như một câu và ở lại, hơn là
    treo người dùng trong một khoảng chờ không có điểm dừng. */
-const FOLLOW_UP_POLL_MS = 1500
-const FOLLOW_UP_MAX_POLLS = 20
 
 const TONE: Record<string, { label: string; token: string }> = {
   PENDING: { label: 'Đang chờ', token: 'var(--text-muted)' },
@@ -86,9 +76,6 @@ const TERMINAL_STATUSES = new Set(['SUCCESS', 'FAILED', 'CANCELLED'])
 
 export function WorkflowPage() {
   const { workflowId = '' } = useParams()
-  const navigate = useNavigate()
-  const [deciding, setDeciding] = useState<'approve' | 'reject' | null>(null)
-  const [decisionError, setDecisionError] = useState<string | null>(null)
   /** Diễn biến kỹ thuật: gập mặc định sau khi việc đã xong. */
   const [showTrace, setShowTrace] = useState(false)
 
@@ -137,50 +124,6 @@ export function WorkflowPage() {
    * đó. Workflow đang mở vẫn lấy nội dung từ `data` (mới hơn một nhịp poll so
    * với danh sách phiên), các lượt còn lại lấy từ phiên.
    */
-  const sessionId = data?.session_id ?? null
-  const [sessionTurns, setSessionTurns] = useState<AgentWorkflowListItem[]>([])
-  const [pendingFollowUp, setPendingFollowUp] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!sessionId) {
-      setSessionTurns([])
-      return
-    }
-    let alive = true
-    listSessionWorkflows(sessionId)
-      .then((res) => {
-        if (alive) setSessionTurns(res.workflows)
-      })
-      // Hội thoại là phần phụ trợ: mất nó thì trang vẫn dùng được với lượt
-      // hiện tại. Không dựng thêm một thông báo lỗi nữa cho việc đó.
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-    // `data?.answer` nằm trong deps để lượt vừa xong xuất hiện luôn ở các
-    // lượt sau, không phải chờ tới lần vào trang kế tiếp.
-  }, [sessionId, data?.status, data?.answer])
-
-  const turns = useMemo(() => {
-    if (!data) return []
-    const current = {
-      id: workflowId,
-      goal: data.goal,
-      answer: data.answer,
-      isCurrent: true,
-    }
-    const others = sessionTurns
-      .filter((item) => item.workflow_id !== workflowId)
-      .map((item) => ({ id: item.workflow_id, goal: item.goal, answer: item.answer, isCurrent: false }))
-    // Chèn lượt hiện tại đúng vị trí thời gian của nó: phiên trả về theo
-    // `created_at` tăng dần, và lượt đang mở KHÔNG chắc là lượt cuối — người
-    // dùng mở lại một yêu cầu cũ từ Lịch sử thì nó nằm ở giữa.
-    const index = sessionTurns.findIndex((item) => item.workflow_id === workflowId)
-    if (index < 0) return [...others, current]
-    return [...others.slice(0, index), current, ...others.slice(index)]
-  }, [data, sessionTurns, workflowId])
-  const [cancelling, setCancelling] = useState(false)
-  const [cancelError, setCancelError] = useState<string | null>(null)
   const [retrying, setRetrying] = useState(false)
   const [retryError, setRetryError] = useState<string | null>(null)
 
@@ -199,113 +142,6 @@ export function WorkflowPage() {
     } finally {
       setRetrying(false)
     }
-  }
-
-  async function handleCancel() {
-    if (!workflowId || cancelling) return
-    setCancelError(null)
-    setCancelling(true)
-    try {
-      await cancelWorkflow(workflowId)
-      await load()
-    } catch (err) {
-      setCancelError(err instanceof Error ? err.message : 'Chưa dừng được yêu cầu này.')
-    } finally {
-      setCancelling(false)
-    }
-  }
-
-  async function handleDecision(decision: 'approve' | 'reject') {
-    if (deciding) return
-    setDeciding(decision)
-    setDecisionError(null)
-    try {
-      // Body CHỈ có `decision`. Số tiền và mã đặt chỗ là dữ liệu có thẩm quyền
-      // của backend; gửi từ browser là để người dùng tự định giá dịch vụ.
-      await decidePayment(workflowId, decision)
-      await load()
-    } catch (e) {
-      setDecisionError(e instanceof Error ? e.message : 'Không gửi được quyết định.')
-    } finally {
-      setDeciding(null)
-    }
-  }
-
-  /**
-   * Nói tiếp từ trang chi tiết — một yêu cầu MỚI trong CÙNG cuộc trò chuyện.
-   *
-   * Khác `handleClarification`: chỗ đó trả lời một câu hỏi đang treo của chính
-   * workflow này. Chỗ này dành cho lúc yêu cầu đã xong (hoặc đã hỏng) mà người
-   * dùng còn muốn nhờ tiếp — "đặt thêm một chỗ nữa", "đổi sang khu B".
-   *
-   * Gửi kèm `session_id` của workflow đang xem. Không có nó, câu tiếp theo mở
-   * một cuộc mới và toàn bộ ngữ cảnh người dùng vừa đọc trên màn hình không đi
-   * theo — họ phải kể lại từ đầu đúng thứ đang hiện trước mắt.
-   */
-  /**
-   * Gõ tiếp ở khung chat.
-   *
-   * KHÔNG nhảy trang vô điều kiện. Bản trước gọi `startWorkflow` rồi
-   * `navigate` ngay, nên mọi câu — kể cả "hôm nay là ngày mấy" hay "cảm ơn" —
-   * đều đá người dùng khỏi yêu cầu họ đang xem. Đo được: đang xem một hành
-   * trình có bước, gõ một câu hỏi, màn hình nhảy sang một yêu cầu 0 bước và
-   * hành trình cũ biến mất.
-   *
-   * Chỉ hai kết cục, và chúng cần hai hành vi khác nhau:
-   *
-   *   có kế hoạch  → đây là VIỆC MỚI. Sang trang của nó để theo dõi, vì nó có
-   *                  thể cần duyệt hoặc cần bổ sung thông tin.
-   *   không có     → đây là một CÂU. Ở nguyên đây; hội thoại vốn hiển thị mọi
-   *                  lượt của phiên nên câu trả lời tự xuất hiện đúng chỗ.
-   *
-   * Không quyết định được ngay lúc gửi: `/start` trả 202 và `plan` còn rỗng
-   * cho cả hai. Nên chờ tới khi backend ngã ngũ — có bước, hoặc có câu trả lời.
-   */
-  async function handleFollowUp(message: string) {
-    // Tin nhắn phải xuất hiện TRƯỚC round-trip tới Planner. Nếu đợi toàn bộ
-    // vòng poll xong mới reload session, người dùng nhìn textarea còn nguyên,
-    // nút đổi trạng thái nhưng hội thoại không có lời họ vừa gửi.
-    setPendingFollowUp(message)
-    try {
-      const next = await startWorkflow(message, undefined, data?.session_id ?? null)
-      const id = next.workflow_id
-      if (!id) throw new Error('Hệ thống chưa tạo được lượt trao đổi mới.')
-
-      for (let attempt = 0; attempt < FOLLOW_UP_MAX_POLLS; attempt += 1) {
-        const seen = await getWorkflow(id).catch(() => null)
-        if (seen && seen.plan.length > 0) {
-          setPendingFollowUp(null)
-          navigate(`/workflow/${id}`)
-          return
-        }
-        if (seen?.answer) break
-        await new Promise((resolve) => setTimeout(resolve, FOLLOW_UP_POLL_MS))
-      }
-
-      // Câu hỏi (hoặc hết giờ chờ): ở lại, và kéo lượt mới vào hội thoại.
-      setSessionTurns(await listSessionWorkflows(sessionId ?? id).then((r) => r.workflows).catch(() => sessionTurns))
-      setPendingFollowUp(null)
-    } catch (error) {
-      setPendingFollowUp(null)
-      throw error
-    }
-  }
-
-  async function handleClarification(message: string) {
-    // Gửi vào ĐÚNG workflow đang hỏi — gọi start lần nữa sẽ tạo một yêu cầu
-    // mới và bỏ rơi toàn bộ ngữ cảnh đã thu thập.
-    const next = await continueWorkflow(workflowId, { message })
-
-    // Backend trả lời bằng một workflow CON: câu trả lời được tiêu thụ một lần
-    // và lượt chạy mới có id riêng. Ở lại URL cũ thì trang tiếp tục poll
-    // workflow cha — cái đã trả lời xong và không tiến thêm — nên người dùng
-    // thấy màn hình đứng yên, hoặc thấy lại chính câu hỏi vừa trả lời.
-    if (next.workflow_id && next.workflow_id !== workflowId) {
-      navigate(`/workflow/${next.workflow_id}`, { replace: true })
-      return
-    }
-
-    await load()
   }
 
   if (loading && !data) {
@@ -369,14 +205,28 @@ export function WorkflowPage() {
   const traceEvents = finished
     ? data.events.filter((event) => !NOISE.some((noise) => (event.message ?? '').toLowerCase().includes(noise)))
     : data.events
-  /** Bước xong CUỐI có chi tiết — thứ người dùng thật sự nhận được. */
-  const resultTask = [...data.tasks].reverse().find(
+  /**
+   * Bước mang thứ người dùng THẬT SỰ nhận được.
+   *
+   * "Bước xong cuối cùng" là sai với mọi luồng có thanh toán: bước cuối là
+   * `pay_fee`, và nó chỉ có mã giao dịch cùng chữ PAID. Đo được trên browser —
+   * một chỗ đỗ xe đã đặt và trả tiền xong hiện ra là "Thanh toán phí thành
+   * công · Mã thanh toán · Trạng thái", không ngày, không khu, và KHÔNG có hai
+   * nút Đổi/Huỷ. Cái khách giữ trong tay là chỗ đỗ, không phải biên lai.
+   *
+   * Ưu tiên bước có MỐC THỜI GIAN — cùng dữ kiện mà `ResultSummary` dùng để
+   * quyết định dựng thẻ hẹn. Không có bước nào như vậy (đăng ký tư vấn, tìm bất
+   * động sản) thì rơi về bước cuối như cũ.
+   */
+  const successWithDetails = data.tasks.filter(
     (task) => task.status === 'SUCCESS' && (task.details?.length ?? 0) > 0,
   )
+  const resultTask =
+    [...successWithDetails].reverse().find((task) => task.details?.some((d) => d.label === 'Thời gian')) ??
+    successWithDetails[successWithDetails.length - 1]
   const subject = resultTask?.details?.find((detail) => detail.label === 'Dự án')?.value ?? null
   // Tiêu đề gọn: nói KẾT QUẢ, không lặp lại cả câu tường thuật.
   const headline = finished && resultTask ? `${resultTask.title} thành công` : (data.summary || data.message || 'Yêu cầu của bạn')
-  const needsInfo = data.status === 'NEEDS_INFORMATION'
   /** Bước hỏng ĐẦU TIÊN — cái sau thường chỉ là hệ quả của cái này. */
   const failedStep = data.tasks.find((task) => task.status === 'FAILED')
   const quote = data.payment_quote ?? {}
@@ -514,161 +364,47 @@ export function WorkflowPage() {
             </section>
           )}
 
-          {/* Yêu cầu còn treo thì phải dừng được.
-              `WAITING_APPROVAL` chờ người khác, `NEEDS_INFORMATION` chờ chính
-              người dùng — cả hai đều chiếm một suất hạn ngạch ngày và một dòng
-              đang-chờ trong Lịch sử cho tới khi có ai đó chốt. Đo được: 42
-              workflow nằm ở trạng thái chờ bổ sung không ai giải quyết. */}
+          {/* Yêu cầu CHƯA XONG thì việc của nó nằm ở workspace, không ở đây.
+              Trang này chỉ đọc: mọi hành động resume/fallback — dừng, trả lời
+              câu hỏi đang treo, duyệt khoản thanh toán — sống ở một chỗ duy
+              nhất, và đó là workspace.
+
+              Nhưng Lịch sử chỉ trỏ tới `/workflow/{id}`, không có đường nào
+              quay lại. Bỏ các nút đi mà không mở lối này thì mọi yêu cầu đang
+              dở mở ra từ Lịch sử đều là ngõ cụt: đọc được, không làm gì được,
+              và không có chỗ nào để đi tiếp.
+
+              `?w=` là tham số workspace đã dùng để khôi phục một yêu cầu sau
+              khi tải lại trang — dùng lại nó, không dựng đường thứ hai. */}
           {!TERMINAL_STATUSES.has(data.status) && (
             <div className="mt-6">
-              <button
-                type="button"
-                onClick={handleCancel}
-                disabled={cancelling}
-                className="press cursor-pointer rounded-[var(--r-sm)] px-3.5 py-2 text-[13.5px] font-medium disabled:cursor-not-allowed"
-                style={{ color: 'var(--danger)', boxShadow: 'inset 0 0 0 1px var(--border-subtle)' }}
-              >
-                {cancelling ? 'Đang dừng…' : 'Dừng yêu cầu này'}
-              </button>
-              {cancelError && (
-                <p className="mt-2 text-[13px]" style={{ color: 'var(--danger)' }} role="alert">
-                  {cancelError}
+              {/* Câu hỏi đang treo phải ĐỌC ĐƯỢC ở đây, dù không trả lời được.
+                  "Chỉ đọc" nghĩa là bỏ nút, không bỏ thông tin: khách mở Lịch
+                  sử ra đúng để biết việc của mình đang vướng ở đâu, và giấu
+                  câu hỏi đi thì lối sang workspace chỉ là một nút không nói
+                  được nó dẫn tới việc gì. */}
+              {data.question && (
+                <p className="mb-4 whitespace-pre-line text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                  {data.question}
                 </p>
               )}
+              <Link
+                to={`/workspace?w=${encodeURIComponent(workflowId)}`}
+                className="press inline-flex min-h-11 items-center gap-2 rounded-[var(--r-sm)] px-4 text-[14px] font-semibold"
+                style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
+              >
+                Tiếp tục trong workspace
+              </Link>
+              <p className="mt-2 text-[13.5px] leading-[1.6] text-[var(--text-secondary)]">
+                Yêu cầu này còn dở. Bạn trả lời, đổi thông tin hoặc dừng nó ở workspace.
+              </p>
             </div>
           )}
 
-
-          {/* ── Trao đổi ─────────────────────────────────────────────
-              Câu người dùng đã nói + câu P-118 trả lời, đặt cạnh nhau.
-
-              Trước đây trang này chỉ có một trong hai: `data.answer` render
-              trần, không có ngữ cảnh, và chỉ trong nhánh "cần bổ sung thông
-              tin". Người dùng mở lại một yêu cầu cũ thì thấy một câu trả lời
-              mà không thấy mình đã hỏi gì — còn mục "Trao đổi" ở Lịch sử thì
-              nằm tách hẳn, gắn nhãn bằng `#a3f9c1`.
-
-              Cuộc trao đổi THUỘC VỀ workflow. Đặt nó ở đây là bỏ được một mục
-              rời rạc, và câu hỏi lẫn câu trả lời cuối cùng cũng ở cùng chỗ. */}
-          {turns.some((turn) => turn.goal || turn.answer) && (
-            <section className="rise mt-9" aria-label="Trao đổi">
-              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
-                Trao đổi
-              </h2>
-              <div className="mt-4 space-y-3">
-                {/* MỌI lượt của phiên, cũ đến mới — không chỉ lượt đang mở. */}
-                {turns.map((turn) => (
-                  <div key={turn.id} className="space-y-3" data-session-turn={turn.id}>
-                    {turn.goal && (
-                      <div className="flex justify-end" data-turn="user">
-                        <p className="max-w-[80%] whitespace-pre-line rounded-[var(--r-sm)] bg-[var(--surface-overlay)] px-4 py-3 text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                          {turn.goal}
-                        </p>
-                      </div>
-                    )}
-                    {(turn.answer || (turn.isCurrent && needsInfo && data.question)) && (
-                      <div className="flex gap-3" data-turn="agent">
-                        <span
-                          aria-hidden
-                          className="mt-[3px] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--r-xs)] font-mono text-[11px] font-bold"
-                          style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
-                        >
-                          P
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <p className="whitespace-pre-line text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                            {turn.answer || data.question}
-                          </p>
-                          {/* Lượt trước có hành trình RIÊNG của nó. Không có
-                              lối sang đó thì các bước của những lượt cũ nằm
-                              sau một URL người dùng không còn cách nào đoán. */}
-                          {!turn.isCurrent && (
-                            <Link
-                              to={`/workflow/${turn.id}`}
-                              className="mt-1.5 inline-block text-[13px] font-medium text-[var(--agent)] hover:underline"
-                            >
-                              Xem các bước của lượt này
-                            </Link>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-
-                {/* Lượt vừa bấm Gửi xuất hiện ngay, không đợi Planner xong mới
-                    đọc lại session. `data-*` giúp browser E2E kiểm đúng hành vi
-                    thay vì bám vào màu hay class trình bày. */}
-                {pendingFollowUp && (
-                  <div className="flex justify-end" data-turn="user" data-pending-follow-up="true">
-                    <p className="max-w-[80%] whitespace-pre-line rounded-[var(--r-sm)] bg-[var(--surface-overlay)] px-4 py-3 text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                      {pendingFollowUp}
-                    </p>
-                  </div>
-                )}
-
-                {/* P-118 ĐANG SOẠN.
-                    Không có dòng này, người dùng gửi câu mới rồi nhìn một khung
-                    chỉ có lời của chính mình — không biết hệ thống đã nhận
-                    chưa, có đang chạy không, hay đã chết. Họ gửi lại, và lần
-                    gửi lại tạo thêm một workflow nữa.
-
-                    Điều kiện là "chưa kết thúc VÀ chưa có câu trả lời": xong
-                    rồi mà vẫn quay là nói dối theo hướng ngược lại. */}
-                {((running && !data.answer) || pendingFollowUp) && (
-                  <div className="flex items-center gap-3" data-turn="agent-pending">
-                    <span
-                      aria-hidden
-                      className="mt-[3px] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--r-xs)] font-mono text-[11px] font-bold"
-                      style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
-                    >
-                      P
-                    </span>
-                    <span
-                      className="inline-flex items-center gap-2 text-[14.5px]"
-                      style={{ color: 'var(--text-muted)' }}
-                      aria-live="polite"
-                    >
-                      P-118 đang xử lý
-                      {/* Ba chấm nhấp nháy dùng lại `think-dot` của hội thoại
-                          workspace — cùng một nhịp cho cùng một ý nghĩa. */}
-                      <span className="inline-flex items-center gap-1" aria-hidden>
-                        {[0, 1, 2].map((i) => (
-                          <span
-                            key={i}
-                            className="think-dot h-[5px] w-[5px] rounded-full bg-current"
-                            style={{ animationDelay: `${i * 160}ms` }}
-                          />
-                        ))}
-                      </span>
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Ô nhập nằm DƯỚI hội thoại, như mọi khung chat.
-                  Trước đây nó ở TRÊN: người dùng gõ ở đầu trang rồi phải cuộn
-                  xuống mới thấy thứ mình vừa nói. Câu mới luôn xuất hiện ở
-                  cuối, nên chỗ gõ cũng phải ở cuối. */}
-              {!needsInfo && (
-                <div className="mt-6">
-                  <ClarificationReply onSubmit={handleFollowUp} busy={running} onStop={handleCancel} />
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* ── Cần bạn bổ sung ─────────────────────────────────────── */}
-          {needsInfo && data.question && (
-            <section className="rise mt-6">
-              {/* CHỈ còn ô trả lời. Câu hỏi đã nằm trong hội thoại phía trên —
-                  in lại ở đây là bắt người dùng đọc hai lần cùng một câu, và
-                  hai bản đó có thể lệch nhau khi một bên cập nhật trước. */}
-              <div>
-                <ClarificationReply onSubmit={handleClarification} busy={running} onStop={handleCancel} />
-              </div>
-            </section>
-          )}
+          {/* Ô trả lời câu hỏi sửa lỗi ĐÃ GỠ — workspace có sẵn, và có cả
+              biểu mẫu chọn giá trị thay vì bắt gõ tay. Hai chỗ cùng trả lời
+              một câu hỏi là hai chỗ có thể lệch nhau. Câu hỏi vẫn hiện ở phần
+              trạng thái phía trên; nút "Tiếp tục trong workspace" là lối đi. */}
 
           {/* ── Chờ ĐƠN VỊ duyệt: không có nút, và nói thẳng như vậy ─── */}
           {waitingViewing && data.viewing_approval && (
@@ -738,40 +474,25 @@ export function WorkflowPage() {
                 Chỗ đỗ xe đã được giữ. Khoản này chưa được thanh toán — chỉ thu sau khi bạn đồng ý.
               </p>
 
-              {decisionError && (
-                <p className="mt-3 text-[14px]" style={{ color: 'var(--danger)' }} role="alert">
-                  {decisionError}
-                </p>
-              )}
-
-              <div className="mt-5 flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => handleDecision('approve')}
-                  disabled={deciding !== null}
-                  className="press inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] px-6 text-[15px] font-semibold disabled:opacity-50"
-                  style={{ backgroundColor: 'var(--waiting-user)', color: 'var(--surface-base)' }}
-                >
-                  <CheckCircle2 className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-                  {deciding === 'approve' ? 'Đang gửi…' : 'Xác nhận thanh toán'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDecision('reject')}
-                  disabled={deciding !== null}
-                  className="press inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border border-[var(--border-strong)] px-6 text-[15px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
-                >
-                  <XCircle className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-                  {deciding === 'reject' ? 'Đang gửi…' : 'Từ chối'}
-                </button>
-              </div>
+              {/* Nút "Xác nhận thanh toán" / "Từ chối" ĐÃ GỠ.
+                  Tiền là quyết định nặng nhất trong cả luồng, và nó phải có
+                  đúng MỘT chỗ để bấm. Hai chỗ nghĩa là hai đường có thể lệch
+                  nhau, và chỗ lệch ấy nằm ngay trên một khoản tiền thật.
+                  Báo giá vẫn hiện ở đây — đọc được, không bấm được. */}
+              <Link
+                to={`/workspace?w=${encodeURIComponent(workflowId)}`}
+                className="press mt-5 inline-flex min-h-12 items-center gap-2 rounded-[var(--r-sm)] px-6 text-[15px] font-semibold"
+                style={{ backgroundColor: 'var(--waiting-user)', color: 'var(--surface-base)' }}
+              >
+                Xem và xác nhận ở workspace
+              </Link>
             </section>
           )}
 
           {/* ── Kết quả cho NGƯỜI DÙNG ─────────────────────────────── */}
           {finished && resultTask && (
             <div className="mt-11">
-              <ResultSummary task={resultTask} journeyTitle={headline} />
+              <ResultSummary task={resultTask} journeyTitle={headline} workflowId={workflowId} />
             </div>
           )}
 

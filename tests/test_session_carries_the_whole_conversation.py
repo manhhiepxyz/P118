@@ -39,7 +39,7 @@ def test_the_session_query_selects_the_assistant_columns() -> None:
 
 def test_the_session_endpoint_fills_both_sides_of_each_turn() -> None:
     source = inspect.getsource(routes.list_demo_workflows_by_session)
-    assert "goal=row.get(\"goal\")" in source, (
+    assert 'goal=row.get("goal")' in source, (
         "endpoint chỉ trả `title` — bản cắt ngắn cho danh sách. Dựng bong bóng "
         "chat từ nó thì người dùng đọc lại chính câu mình vừa viết, bị cụt"
     )
@@ -55,5 +55,10 @@ def test_the_answer_must_match_the_status_it_was_written_for() -> None:
     stale = {"assistant_for_status": "WAITING_APPROVAL", "status": "SUCCESS", "assistant_answer": "Đang chờ bạn duyệt."}
     assert routes._assistant_fields(stale)["answer"] is None
 
-    fresh = {"assistant_for_status": "SUCCESS", "status": "SUCCESS", "assistant_answer": "Đã xong.", "assistant_suggestions": None}
+    fresh = {
+        "assistant_for_status": "SUCCESS",
+        "status": "SUCCESS",
+        "assistant_answer": "Đã xong.",
+        "assistant_suggestions": None,
+    }
     assert routes._assistant_fields(fresh)["answer"] == "Đã xong."

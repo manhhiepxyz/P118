@@ -25,8 +25,7 @@ _PAGE = Path(__file__).resolve().parents[1] / "frontend" / "src" / "pages" / "Jo
 def test_free_text_does_not_switch_screens_on_its_own() -> None:
     page = _PAGE.read_text(encoding="utf-8")
     assert "if (provisional.current.length > 0) setMode('journey')" in page, (
-        "vẫn đổi màn ngay khi gửi — câu hỏi nào cũng bị trình bày như một "
-        "hành trình đang được chuẩn bị"
+        "vẫn đổi màn ngay khi gửi — câu hỏi nào cũng bị trình bày như một hành trình đang được chuẩn bị"
     )
 
 
@@ -76,9 +75,7 @@ def test_the_service_menu_does_not_come_back_mid_conversation() -> None:
         có kế hoạch  → canvas hành trình
     """
     page = _PAGE.read_text(encoding="utf-8")
-    assert "{mode === 'journey' || talking ? null : (" in page, (
-        "bảng dịch vụ vẫn hiện khi đang có hội thoại"
-    )
+    assert "{mode === 'journey' || talking ? null : (" in page, "bảng dịch vụ vẫn hiện khi đang có hội thoại"
     assert "{mode === 'journey' && (\n                <JourneyCanvas" in page, (
         "canvas hành trình không còn gắn với đúng trạng thái của nó"
     )
@@ -119,7 +116,7 @@ def test_nothing_in_the_frame_depends_on_mode_alone() -> None:
 
     # Những nơi được phép chỉ đọc `mode`: chính sân khấu, và nhãn của nó.
     duoc_phep = {
-        "if (mode === 'journey') {",                 # rẽ nhánh trong execute()
+        "if (mode === 'journey') {",  # rẽ nhánh trong execute()
         "mode === 'journey' && live?.status === 'SUCCESS' && live.summary && (",
         "{mode === 'journey' && (\n                <JourneyCanvas",
         "journeyLabel={mode === 'journey' ? title : undefined}",
@@ -137,7 +134,4 @@ def test_nothing_in_the_frame_depends_on_mode_alone() -> None:
             continue
         con_lai.append(dong.strip())
 
-    assert not con_lai, (
-        "còn chỗ buộc khung trang vào mình `mode` — gõ một câu chat sẽ làm nó "
-        f"biến mất: {con_lai}"
-    )
+    assert not con_lai, f"còn chỗ buộc khung trang vào mình `mode` — gõ một câu chat sẽ làm nó biến mất: {con_lai}"

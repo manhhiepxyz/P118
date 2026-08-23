@@ -68,11 +68,7 @@ _DELIBERATELY_TERMINAL = {
 def test_every_pause_code_is_named_in_the_graph_handler():
     """Rơi xuống nhánh `else` nghĩa là phát ra `EXECUTION_FAILED`."""
     source = inspect.getsource(graph_module)
-    missing = sorted(
-        code
-        for code in _all_policy_codes() - _DELIBERATELY_TERMINAL
-        if f'"{code}"' not in source
-    )
+    missing = sorted(code for code in _all_policy_codes() - _DELIBERATELY_TERMINAL if f'"{code}"' not in source)
     assert not missing, (
         f"{missing} không có nhánh riêng trong graph.py — chúng sẽ được phát ra "
         "thành EXECUTION_FAILED và người dùng đọc 'Yêu cầu đã dừng lại giữa chừng' "
@@ -164,6 +160,4 @@ def test_a_pause_is_never_shown_to_the_user_as_an_error(code: str):
         {"policy_error": code, "plan": plan, "plan_validated": True, "workflow_id": "W-1"},
         False,
     )
-    assert response.status != "EXECUTION_ERROR", (
-        f"{code} là một lần TẠM DỪNG nhưng được trình bày như lỗi thực thi"
-    )
+    assert response.status != "EXECUTION_ERROR", f"{code} là một lần TẠM DỪNG nhưng được trình bày như lỗi thực thi"

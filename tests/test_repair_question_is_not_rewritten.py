@@ -47,8 +47,7 @@ def test_every_repair_question_is_recognised(tool: str, code: str, inputs: dict)
     if question is None:
         pytest.skip(f"{tool}/{code} chưa có câu riêng")
     assert _is_repair_question(question), (
-        f"câu sửa lỗi không được nhận ra nên sẽ bị Response Agent viết lại "
-        f"và mất lý do: {question!r}"
+        f"câu sửa lỗi không được nhận ra nên sẽ bị Response Agent viết lại và mất lý do: {question!r}"
     )
 
 

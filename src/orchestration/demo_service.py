@@ -7,6 +7,8 @@ sau khi LangGraph hoàn tất.
 
 from __future__ import annotations
 
+import os
+
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
@@ -15,6 +17,7 @@ from uuid import UUID, uuid4
 import httpx
 
 from src.agents.graph import _apply_user_answers, build_planner_graph
+from src.agents.fast_lane import FastLane
 from src.agents.planner import Planner
 from src.agents.validator import TaskPlanValidator
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
@@ -51,9 +54,11 @@ from src.orchestration.repair import RepairHint, RepairManager, repair_missing_f
 from src.orchestration.repair_attempt import open_new_attempts
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import (
+    SERVICE_LABELS,
     ServiceApprovalBoundary,
     pending_for_workflow,
 )
+from src.orchestration.support_request import run_approved_requests
 from src.orchestration.viewing_approval import (
     APPROVED as VIEWING_APPROVED,
 )
@@ -77,6 +82,7 @@ from src.orchestration.viewing_approval import (
 from src.orchestration.viewing_approval import (
     expire_pending_viewing_approval as _expire_pending_viewing,
 )
+from src.orchestration.zone_change import open_zone_change, repin_payment_after_zone_change
 from src.services.llm import get_llm, structured_output_method
 
 # Năm chỗ trong file này gọi `logger.warning(...)` mà chưa bao giờ có `logger`.
@@ -196,6 +202,11 @@ class ResidentAccessBoundary:
         {
             "register_vehicle",
             "book_parking",
+            "change_parking_zone",
+            # Huỷ một chỗ đỗ chạm vào tài sản của cư dân — quyền y như lúc đặt.
+            "cancel_parking",
+            "cancel_maintenance",
+            "cancel_move",
             "pay_fee",
             "create_maintenance_request",
             "schedule_move",
@@ -578,12 +589,29 @@ async def run_demo_workflow(
             approved=False,
             repository=repository,
         )
+        # Đường nhanh: một lượt gọi rẻ thay cho một lượt lập kế hoạch đắt.
+        #
+        # `FAST_LANE=0` tắt hoàn toàn và hệ thống chạy y như trước — công tắc có
+        # mặt vì đây là thành phần LÕI, và một hồi quy ở đây làm hỏng mọi yêu
+        # cầu chứ không phải một luồng.
+        #
+        # `fast=True` tắt suy luận: đo được trung vị 1,56s / p90 1,83s trên 54
+        # goal thật, so với trung vị 32,98s của Planner. Nó KHÔNG quyết định gì
+        # — kế hoạch nó lắp đi qua đúng `TaskPlanValidator` mà kế hoạch Planner
+        # đi qua, và trả None ở mọi nhánh không chắc chắn.
+        fast_lane = None
+        if os.getenv("FAST_LANE", "1") != "0":
+            fast_lane = FastLane(
+                get_llm(callbacks=[usage_logger, *trace_callbacks()], fast=True),
+                structured_output_method=structured_output_method(),
+            )
         graph = build_planner_graph(
             planner,
             service_guarded_boundary,
             on_stage=on_stage,
             parent_workflow_id=parent_workflow_id,
             session_id=session_id,
+            fast_lane=fast_lane,
         )
         initial_state: dict[str, Any] = {
             "goal": goal,
@@ -1044,8 +1072,84 @@ def _repairable_refusals(
     return ket_qua
 
 
+def _terminal_refusals(
+    rows: list[dict[str, Any]],
+    sua_duoc: dict[str, str],
+    statuses_now: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """`task_id -> lý do` cho những lời từ chối DỨT KHOÁT — loại không hỏi lại được.
+
+    "Dứt khoát" nghĩa là khách không có ô nào để đổi rồi thử lại: `OTHER`,
+    `INVALID_REQUEST`, `SERVICE_UNAVAILABLE`. Chúng vẫn phải NÓI ra được lý do —
+    đó là thứ duy nhất khách mang đi hỏi tiếp được.
+
+    Bước ĐÃ ĐƯỢC XỬ LÝ ở lượt trước bị loại — cùng luật với `_repairable_refusals`,
+    và vì cùng một lý do: hàng đợi duyệt KHÔNG bị dọn, nên dòng `REJECTED` của
+    Khu A vẫn nằm đó sau khi khách đã đổi sang Khu B. Không lọc thì mỗi lượt lại
+    đọc thêm một lời từ chối cũ, và câu chốt dài dần ra bằng chính những lý do
+    khách đã xử lý xong.
+    """
+    da_xong = statuses_now or {}
+    return {
+        row["task_id"]: str(row.get("reject_reason") or "")
+        for row in rows
+        if row.get("status") == "REJECTED"
+        and row["task_id"] not in sua_duoc
+        and str(da_xong.get(row["task_id"], "")) not in _TERMINAL_TASK_STATUSES
+    }
+
+
+def _refusal_sentence(refusals: dict[str, str], plan: TaskPlan | None) -> str:
+    """Lời đơn vị viết, NGUYÊN VĂN, kèm tên dịch vụ. Rỗng nếu không có gì.
+
+    Chỉ ghép thêm TÊN DỊCH VỤ ở đầu: một lời từ chối không nói nó thuộc về việc
+    nào thì khách phải tự đoán, nhất là khi yêu cầu gồm nhiều dịch vụ.
+    """
+    if not refusals:
+        return ""
+    ten = {task.task_id: SERVICE_LABELS.get(task.tool, task.tool) for task in (plan.tasks if plan else ())}
+    cau = []
+    for task_id, ly_do in refusals.items():
+        dich_vu = ten.get(task_id, "Yêu cầu")
+        cau.append(f"{dich_vu}: {ly_do.strip()}" if ly_do.strip() else f"{dich_vu}: đơn vị chưa nhận yêu cầu này.")
+    return "Đơn vị cung cấp dịch vụ đã từ chối. " + " ".join(cau)
+
+
+async def _speak_the_refusal(repository: Any, workflow_id: str, refusals: dict[str, str], plan: TaskPlan) -> None:
+    """Nói lại NGUYÊN VĂN lý do đơn vị đã viết.
+
+    Đơn vị là người DUY NHẤT biết vì sao họ từ chối. Trước đây chỉ lịch tham
+    quan có đường đưa lý do ra màn hình (`_load_rejected_viewing`, đọc khung
+    nhìn `viewing_approvals`) — nó ra đời khi mới có một dịch vụ đi qua cổng
+    duyệt. Sáu dịch vụ thêm vào sau không có gì tương ứng, nên người duyệt chọn
+    "Lý do khác", gõ lý do, và khách nhận lại một bước biến mất cùng một câu
+    chung chung.
+
+    KHÔNG viết lại lời họ: một câu mặc định là bản diễn giải, và bản ấy có thể
+    nói sai điều người duyệt đã cân nhắc. Chỉ ghép thêm TÊN DỊCH VỤ ở đầu, vì
+    một lời từ chối không nói nó thuộc về việc nào thì khách phải tự đoán.
+    """
+    noi_dung = _refusal_sentence(refusals, plan)
+    if not noi_dung:
+        return
+    try:
+        await repository.save_assistant_response(
+            workflow_id,
+            answer=noi_dung,
+            suggestions=[],
+            state="FALLBACK",
+            for_status=WorkflowStatus.CANCELLED.value,
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("không ghi được lý do từ chối của đơn vị (%s)", type(exc).__name__)
+
+
 async def _park_for_repair(
-    repository: Any, workflow_id: str, plan: TaskPlan, refusals: dict[str, str]
+    repository: Any,
+    workflow_id: str,
+    plan: TaskPlan,
+    refusals: dict[str, str],
+    terminal: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Biến lời từ chối vì hết chỗ thành một lượt hỏi khách trả lời được.
 
@@ -1076,7 +1180,14 @@ async def _park_for_repair(
     cau_hoi = _repair_answer_for(hints, plan)
     # Lý do của đơn vị đứng TRƯỚC hướng dẫn: nó là thứ trả lời câu "vì sao",
     # và câu hướng dẫn chung chung đứng một mình thì không nói được điều đó.
-    cau_chot = " ".join(part for part in (ly_do.strip(), cau_hoi or "") if part).strip()
+    # Lời từ chối DỨT KHOÁT của dịch vụ KHÁC cũng phải được nói ra.
+    #
+    # Khi một yêu cầu có cả hai loại — chỗ đỗ hết chỗ (hỏi lại được) và bảo trì
+    # bị từ chối hẳn — nhánh này return TRƯỚC, nên lý do của cái thứ hai rơi
+    # mất hoàn toàn. Khách chỉ đọc được câu hỏi về khu đỗ xe và không bao giờ
+    # biết vì sao yêu cầu bảo trì biến mất.
+    cau_dut_khoat = _refusal_sentence(terminal or {}, plan)
+    cau_chot = " ".join(part for part in (cau_dut_khoat, ly_do.strip(), cau_hoi or "") if part).strip()
     await _persist_repair_clarification(repository, workflow_id, hints, plan, cau_chot or cau_hoi)
 
     try:
@@ -1145,6 +1256,24 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         #
         # Đọc MÃ, không đọc câu chữ. Một `LIKE '%hết chỗ%'` biến chính tả của
         # người duyệt thành logic nghiệp vụ và hỏng ngay lần đầu ai đó viết khác.
+        # Hồ sơ đơn vị VỪA DUYỆT được thực hiện TRƯỚC, và bằng đường riêng.
+        #
+        # "Đồng ý cho huỷ" phải thành một lời gọi ra ngoài — nếu không, lịch vẫn
+        # nằm nguyên bên đơn vị trong khi cả hai bên đều tưởng đã xong. Nó không
+        # đi qua `Executor`: một hồ sơ được duyệt không phải một bước trong kế
+        # hoạch của khách, và đưa nó vào kế hoạch nghĩa là mọi lượt resume sau
+        # này đều cân nhắc chạy lại nó.
+        await run_approved_requests(repository, workflow_id, rows, build_connectors(workflow_id=workflow_id, **urls))
+
+        # Hồ sơ LIÊN HỆ ("xin đổi", "xin huỷ") nằm chung hàng đợi nhưng không
+        # phải một bước: không tool, không dòng `workflow_tasks`. Lọc chúng ra
+        # NGAY ĐÂY, trước mọi vòng phía dưới.
+        #
+        # Thiếu bộ lọc này, vòng "APPROVED → PENDING" gọi `update_task_status`
+        # cho một `task_id` không tồn tại và ném `TaskNotFoundError` giữa lượt
+        # resume — kéo theo cả những bước đơn vị vừa duyệt trong cùng lượt.
+        rows = [row for row in rows if str(row.get("kind") or "TASK") == "TASK"]
+
         refused = {
             row["task_id"]
             for row in rows
@@ -1168,7 +1297,12 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
             if trimmed is None:
                 if sua_duoc:
                     # Không còn gì để chạy, nhưng vẫn còn một câu để hỏi.
-                    return await _park_for_repair(repository, workflow_id, plan, sua_duoc)
+                    return await _park_for_repair(
+                        repository, workflow_id, plan, sua_duoc, _terminal_refusals(rows, sua_duoc, statuses_now)
+                    )
+                await _speak_the_refusal(
+                    repository, workflow_id, _terminal_refusals(rows, sua_duoc, statuses_now), plan
+                )
                 await repository.update_workflow_status(workflow_id, WorkflowStatus.CANCELLED)
                 return {"workflow_id": workflow_id, "status": WorkflowStatus.CANCELLED.value}
             # Bước phụ thuộc vào một lời từ chối DỨT KHOÁT cũng phải dừng.
@@ -1252,6 +1386,10 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
             )
         except PolicyInterruptionError as pause:
             await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
+            # Đổi khu vừa xong thì con số trên thẻ phải là giá khu MỚI. Đường
+            # trên đọc báo giá từ tập kết quả, và tập ấy còn mang `book_parking`
+            # được seed lại với giá khu CŨ — xem `repin_payment_after_zone_change`.
+            await repin_payment_after_zone_change(repository, workflow_id, plan)
             return {"workflow_id": workflow_id, "status": WorkflowStatus.WAITING_APPROVAL.value}
 
         # Đơn vị đã nói hết chỗ: phần được duyệt vừa chạy xong, giờ mới hỏi lại.
@@ -1260,7 +1398,13 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         # thì khách giữ được kết quả của chúng và chỉ phải trả lời đúng phần
         # còn vướng.
         if sua_duoc:
-            return await _park_for_repair(repository, workflow_id, locals().get("ke_hoach_day_du") or plan, sua_duoc)
+            return await _park_for_repair(
+                repository,
+                workflow_id,
+                locals().get("ke_hoach_day_du") or plan,
+                sua_duoc,
+                _terminal_refusals(rows, sua_duoc, statuses_now),
+            )
 
         hints = repair_manager.hints_for(workflow_id)
         await _persist_hints(repository, workflow_id, hints)
@@ -1268,6 +1412,7 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         final_status = _final_status(statuses)
         if final_status is WorkflowStatus.WAITING_APPROVAL:
             await _ensure_payment_card(repository, workflow_id, plan)
+            await repin_payment_after_zone_change(repository, workflow_id, plan)
 
         # Lỗi SỬA ĐƯỢC thì câu chốt phải là CÂU HỎI LẠI, không phải cáo phó.
         #
@@ -1286,11 +1431,21 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         # dựng từ chính repair hint. Ghim dưới FAILED là ghim vào chỗ không ai đọc.
         repair_answer = _repair_answer_for(hints, plan)
         await _persist_repair_clarification(repository, workflow_id, hints, plan, repair_answer)
+        # Lời từ chối DỨT KHOÁT đứng TRƯỚC câu tổng kết.
+        #
+        # Ca này khác ca "không còn gì để chạy": phần được duyệt vẫn chạy xong,
+        # nên câu chốt được dựng từ kết quả của nó — và nghe như mọi thứ đều
+        # ổn. Đo được: một dịch vụ bị từ chối kèm lý do, một dịch vụ chạy xong,
+        # và khách chỉ đọc được câu tổng kết của cái thứ hai.
+        tu_choi_han = _terminal_refusals(rows, sua_duoc, statuses_now)
+        cau_tu_choi = _refusal_sentence(tu_choi_han, ke_hoach_day_du if refused else plan)
         try:
+            cau_chinh = repair_answer or compose_final_answer(
+                await repository.list_tasks(workflow_id), final_status.value
+            )
             await repository.save_assistant_response(
                 workflow_id,
-                answer=repair_answer
-                or compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                answer=" ".join(part for part in (cau_tu_choi, cau_chinh) if part),
                 suggestions=[],
                 state="FALLBACK",
                 for_status="NEEDS_INFORMATION" if repair_answer else final_status.value,
@@ -1533,6 +1688,19 @@ class RetryNotAllowed(Exception):
 # viết đè lên yêu cầu cũ — viết đè sẽ xoá mất bản ghi của việc thật sự đã xảy ra.
 AMENDABLE_STATUSES: frozenset[str] = frozenset({WorkflowStatus.CANCELLED.value, WorkflowStatus.FAILED.value})
 
+# "Đang chờ CHÍNH KHÁCH bấm trả tiền" cũng là đang dừng, và đó là đúng lúc
+# người ta đổi ý về khu đỗ xe.
+#
+# Trước đây trạng thái này không sửa được, nên "đổi qua khu B" lúc thẻ thanh
+# toán còn treo rơi thẳng vào Planner như một yêu cầu MỚI — và yêu cầu mới ấy
+# đi đặt chỗ lần hai cho một chiếc xe đã có chỗ.
+#
+# Nó an toàn vì hàng rào thật không nằm ở cột `status`: `amend_and_rerun` từ
+# chối mọi workflow còn dòng AWAITING trong hàng đợi duyệt. Qua được hàng rào
+# ấy mà vẫn WAITING_APPROVAL nghĩa là hệ thống đang chờ NGƯỜI DÙNG, không chờ
+# đơn vị — và người dùng thì được đổi ý về việc của chính mình.
+AMENDABLE_WHILE_WAITING: frozenset[str] = AMENDABLE_STATUSES | {WorkflowStatus.WAITING_APPROVAL.value}
+
 
 class NotAmendable(Exception):
     """Yêu cầu này không sửa-rồi-chạy-lại được. `message` viết cho người đọc."""
@@ -1567,7 +1735,7 @@ async def amend_and_rerun(workflow_id: str, answers: dict[str, Any], **urls: str
         if record is None:
             raise NotAmendable("NOT_FOUND", "Không tìm thấy yêu cầu này.")
         status = (record.get("workflow") or {}).get("status")
-        if status not in AMENDABLE_STATUSES:
+        if status not in AMENDABLE_WHILE_WAITING:
             raise NotAmendable(
                 "NOT_AMENDABLE",
                 "Yêu cầu này không sửa lại được. Chỉ những yêu cầu đã dừng hoặc đã hỏng "
@@ -1582,20 +1750,36 @@ async def amend_and_rerun(workflow_id: str, answers: dict[str, Any], **urls: str
         #
         # Hàng đợi là nguồn sự thật cho câu hỏi "đã gửi đi chưa", vì nó CHÍNH LÀ
         # thứ được gửi đi.
-        if any(row.get("status") == "AWAITING" for row in await pending_for_workflow(pool, workflow_id)):
+        # Chỉ tính dòng là BƯỚC. Một hồ sơ liên hệ đang chờ nói rằng khách đã
+        # nhờ đơn vị việc gì đó, không nói rằng đơn vị đang cầm một bước — và
+        # chặn khách sửa vì chính lời nhờ của họ là một ngõ cụt.
+        if any(
+            row.get("status") == "AWAITING" and str(row.get("kind") or "TASK") == "TASK"
+            for row in await pending_for_workflow(pool, workflow_id)
+        ):
             raise NotAmendable(
                 "ALREADY_SENT",
                 "Yêu cầu này đã gửi tới đơn vị cung cấp và đang chờ duyệt, nên chưa sửa được. "
                 "Bạn huỷ yêu cầu trước rồi sửa nhé.",
             )
-        moved = await repository.reopen_cancelled_tasks(workflow_id)
-        # Mở lại CẢ dòng workflow, không chỉ các bước.
+        # CHỈ mở lại khi thật sự có thứ đã dừng.
         #
-        # `update_workflow_status` từ chối đưa một workflow rời khỏi
-        # `CANCELLED`, nên gọi nó ở đây là một lệnh KHÔNG LÀM GÌ — đúng ở
-        # trường hợp duy nhất mà đường này tồn tại để phục vụ.
-        reopened = await repository.reopen_cancelled_workflow(workflow_id)
-        logger.warning("sửa và chạy lại %s: mở lại %d bước, workflow=%s", workflow_id[:8], moved, reopened)
+        # `reopen_cancelled_tasks` đưa cả `WAITING_APPROVAL` về `PENDING`. Với
+        # một workflow đang chờ khách bấm trả tiền, đó là kéo `pay_fee` ra khỏi
+        # trạng thái mà dòng `payment_approvals` AWAITING đang mô tả — thẻ nói
+        # "đang chờ duyệt" còn bước nói "chưa tới lượt". Ở đây không có gì bị
+        # dừng để mà mở lại, nên đường ngắn nhất cũng là đường đúng nhất.
+        if status in AMENDABLE_STATUSES:
+            moved = await repository.reopen_cancelled_tasks(workflow_id)
+            # Mở lại CẢ dòng workflow, không chỉ các bước.
+            #
+            # `update_workflow_status` từ chối đưa một workflow rời khỏi
+            # `CANCELLED`, nên gọi nó ở đây là một lệnh KHÔNG LÀM GÌ — đúng ở
+            # trường hợp duy nhất mà đường này tồn tại để phục vụ.
+            reopened = await repository.reopen_cancelled_workflow(workflow_id)
+            logger.warning("sửa và chạy lại %s: mở lại %d bước, workflow=%s", workflow_id[:8], moved, reopened)
+        else:
+            logger.warning("sửa và chạy lại %s: đang chờ khách quyết, không mở lại bước nào", workflow_id[:8])
     finally:
         await pool.close()
 
@@ -1652,6 +1836,12 @@ async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: 
         # Lời giải KHÔNG phải nới cổng: nó cấp cho Khu B một danh tính riêng,
         # bằng chứng riêng và một lượt duyệt riêng. Xem
         # `src/orchestration/repair_attempt.py`.
+        # ĐỔI KHU trên một chỗ ĐÃ GIỮ đi trước, vì nó là ca duy nhất mà một
+        # bước SUCCESS cũng phải sinh việc mới. `open_new_attempts` cố tình
+        # không đụng bước đã SUCCESS (xem `_needs_new_identity`), nên thiếu
+        # dòng dưới thì khách xin đổi khu và KHÔNG có gì xảy ra cả.
+        plan, _zone_change = await open_zone_change(repository, workflow_id, plan, answers)
+
         plan, _superseded = await open_new_attempts(repository, workflow_id, plan, answers)
 
         # Cửa duy nhất vào tầng thực thi cho đường này.
@@ -1730,6 +1920,7 @@ async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: 
         final_status = _final_status(statuses)
         if final_status is WorkflowStatus.WAITING_APPROVAL:
             await _ensure_payment_card(repository, workflow_id, plan)
+            await repin_payment_after_zone_change(repository, workflow_id, plan)
 
         repair_answer = _repair_answer_for(hints, plan)
         await _persist_repair_clarification(repository, workflow_id, hints, plan, repair_answer)
@@ -1883,6 +2074,7 @@ async def retry_failed_tasks(
         final_status = _final_status(statuses)
         if final_status is WorkflowStatus.WAITING_APPROVAL:
             await _ensure_payment_card(repository, workflow_id, plan)
+            await repin_payment_after_zone_change(repository, workflow_id, plan)
 
         repair_answer = _repair_answer_for(hints, plan)
         await _persist_repair_clarification(repository, workflow_id, hints, plan, repair_answer)
@@ -2283,13 +2475,30 @@ async def _materialize_and_run_remaining(
         await pool.close()
 
 
-async def reject_viewing(workflow_id: str, reason: str | None, decided_by: str | None = None) -> None:
+async def reject_viewing(
+    workflow_id: str,
+    reason: str | None,
+    decided_by: str | None = None,
+    *,
+    reject_code: str | None = None,
+) -> dict[str, Any]:
     """Từ chối lịch tham quan. TUYỆT ĐỐI không gọi Tour provider.
 
-    Đánh FAILED (khác reject_payment dùng CANCELLED): chỗ đỗ khi từ chối vẫn
-    được giữ để thanh toán sau, còn lịch tham quan không tồn tại để "giữ" — từ
-    chối nghĩa là lịch không được xác nhận, và đặt xe cho một lịch không có là
-    vô nghĩa nên các bước phụ thuộc phải FAILED cùng.
+    HAI loại từ chối, đọc theo MÃ chứ không theo câu chữ — y như hàng đợi dịch
+    vụ (`resume_after_service_decision`):
+
+      NO_AVAILABILITY   hết khung giờ. Khách sửa được bằng cách chọn giờ hoặc
+                        ngày khác, nên đây là một CÂU HỎI: hint + lượt hỏi
+                        lại, và bước bị từ chối đánh `CANCELLED` để lần thử
+                        mới mọc bên cạnh nó (xem `repair_attempt.py`).
+
+      còn lại           lịch không được xác nhận. Đánh FAILED cả chuỗi: đặt xe
+                        cho một lịch không tồn tại là vô nghĩa, nên các bước
+                        phụ thuộc phải hỏng cùng.
+
+    Trước bản này mọi lời từ chối đều rơi vào nhánh thứ hai. Đo được: đơn vị
+    viết "khung giờ 10:00 đã kín lịch, bạn chọn giờ khác giúp mình" — đúng thứ
+    khách cần — và yêu cầu dừng hẳn, không ô nào để đổi giờ.
     """
     if not await record_viewing_decision_or_fail(workflow_id, VIEWING_REJECTED, decided_by):
         raise ResumeError("ALREADY_DECIDED", "Yêu cầu tham quan này đã được xử lý.")
@@ -2297,11 +2506,26 @@ async def reject_viewing(workflow_id: str, reason: str | None, decided_by: str |
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
-        await save_viewing_reject_reason(pool, workflow_id, reason)
+        await save_viewing_reject_reason(pool, workflow_id, reason, reject_code=reject_code)
+
+        record = await repository.get_workflow(workflow_id)
+        plan = _plan_from_task_rows(
+            ((record or {}).get("workflow") or {}).get("goal") or "", (record or {}).get("tasks") or []
+        )
+        rows = await pending_for_workflow(pool, workflow_id)
+        statuses_now = {r["task_id"]: r.get("status") for r in await repository.list_tasks(workflow_id)}
+        sua_duoc = _repairable_refusals(rows, plan, statuses_now)
+
+        if sua_duoc:
+            for task_id in sua_duoc:
+                await repository.update_task_status(workflow_id, task_id, TaskStatus.CANCELLED)
+            return await _park_for_repair(repository, workflow_id, plan, sua_duoc)
+
         for row in await repository.list_tasks(workflow_id):
             if row.get("status") in _TERMINAL_TASK_STATUSES:
                 continue
             await repository.update_task_status(workflow_id, row["task_id"], TaskStatus.FAILED)
         await repository.update_workflow_status(workflow_id, WorkflowStatus.FAILED)
+        return {"workflow_id": workflow_id, "status": WorkflowStatus.FAILED.value}
     finally:
         await pool.close()

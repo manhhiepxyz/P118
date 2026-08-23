@@ -91,12 +91,43 @@ CREATE TABLE IF NOT EXISTS parking_bookings (
     booking_date DATE         NOT NULL,
     amount       INTEGER      NOT NULL CHECK (amount > 0),
     currency     VARCHAR(10)  NOT NULL DEFAULT 'VND',
+    -- Chỗ đã HUỶ vẫn ở lại bảng, không bị xoá.
+    --
+    -- Xoá dòng là mất bản ghi duy nhất trả lời được "khách đã trả tiền cho cái
+    -- gì". Với một lần huỷ MUỘN — vẫn huỷ nhưng không hoàn tiền — dòng
+    -- `payments` PAID còn nguyên và trỏ vào booking này; xoá booking thì khoản
+    -- tiền ấy trỏ vào hư không, và không ai giải thích được nó là tiền gì.
+    status       VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE'
+                     CHECK (status IN ('ACTIVE', 'CANCELLED')),
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-
-    -- Vi phạm → 409 BOOKING_ALREADY_EXISTS (xe + ngày không được trùng)
-    CONSTRAINT uq_bookings_vehicle_date UNIQUE (vehicle_id, booking_date)
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- `CREATE TABLE IF NOT EXISTS` KHÔNG thêm cột vào một bảng đã có, nên trên một
+-- database đang chạy, cột `status` ở trên chưa tồn tại lúc file này chạy — và
+-- chỉ mục phía dưới tham chiếu tới nó sẽ đổ. Dòng này là thứ giữ cho hai đường
+-- (database mới và database đã có dữ liệu) đi tới cùng một hình dạng.
+ALTER TABLE parking_bookings ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
+
+-- Một xe một chỗ mỗi ngày — nhưng chỉ tính chỗ CÒN HIỆU LỰC.
+--
+-- Ràng buộc này từng là `UNIQUE (vehicle_id, booking_date)` trên toàn bảng. Khi
+-- chỗ đã huỷ ở lại bảng, ràng buộc ấy chặn luôn lần đặt lại của chính người vừa
+-- huỷ — và đặt lại là lý do phổ biến nhất người ta bấm huỷ.
+--
+-- Vi phạm → 409 BOOKING_ALREADY_EXISTS.
+DO $$
+BEGIN
+    -- Bảng cũ mang ràng buộc trên TOÀN bộ dòng. Nó chặn luôn lần đặt lại của
+    -- chính người vừa huỷ, nên phải nhường chỗ cho bản partial bên dưới.
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_bookings_vehicle_date') THEN
+        ALTER TABLE parking_bookings DROP CONSTRAINT uq_bookings_vehicle_date;
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_vehicle_date
+    ON parking_bookings (vehicle_id, booking_date)
+    WHERE status = 'ACTIVE';
 
 -- [fix] Bảng kiểm soát sức chứa — bỏ booked_count denormalized.
 -- booked_count được tính real-time bằng COUNT(*) FROM parking_bookings
@@ -638,6 +669,18 @@ CREATE TABLE IF NOT EXISTS service_approvals (
     details           JSONB        NOT NULL DEFAULT '{}'::jsonb,
     status            VARCHAR(20)  NOT NULL DEFAULT 'AWAITING'
                       CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+    -- Dòng này là một BƯỚC để chạy, hay một LỜI NHỜ để đọc?
+    --
+    -- Mọi dòng ở đây từng được coi là bước. `resume_after_service_decision` đẩy
+    -- mỗi dòng APPROVED về `PENDING` để Executor chạy — đúng với một bước, và
+    -- là lỗi với một hồ sơ "xin đổi lịch": nó không có tool nào để chạy, và
+    -- `task_id` của nó không có dòng `workflow_tasks`. `update_task_status` ném
+    -- `TaskNotFoundError` GIỮA lượt resume, kéo theo cả những bước đơn vị vừa
+    -- duyệt trong cùng lượt ấy.
+    --
+    -- `TASK` là mặc định vì mọi dòng có TRƯỚC cột này đều là bước.
+    kind              VARCHAR(16)  NOT NULL DEFAULT 'TASK'
+                      CHECK (kind IN ('TASK', 'REQUEST')),
     applicant_user_id UUID,
     applicant_name    VARCHAR(200),
     applicant_phone   VARCHAR(20),

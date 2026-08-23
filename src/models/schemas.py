@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 
 class DemoContactProfile(BaseModel):
@@ -43,12 +43,33 @@ class ChatResponse(BaseModel):
     analysis: str = Field(default="", description="Phân tích nội bộ")
 
 
+class DemoWorkflowFormFields(BaseModel):
+    """Giá trị boolean người dùng đã chọn trong form dịch vụ.
+
+    Đây là dữ liệu do người dùng khai, KHÔNG phải context tin cậy. Object đóng
+    này cố ý chỉ có ba boolean thuộc contract công khai; danh tính, quyền, mã
+    cư dân và dữ liệu provider không thể biểu diễn qua đường này.
+
+    ``StrictBool`` chặn chuỗi ``"true"``: browser phải gửi boolean JSON thật,
+    để không xuất hiện hai luật diễn giải cùng một giá trị ở hai đầu API.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    consent: StrictBool | None = None
+    needs_elevator: StrictBool | None = None
+    needs_loading_support: StrictBool | None = None
+
+
 class DemoWorkflowRequest(BaseModel):
     """Input public tối thiểu; không nhận existing_context từ browser."""
 
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(..., min_length=1, max_length=5000)
+    # Form biết chắc người dùng vừa chọn gì; không bắt Planner đọc lại rồi có
+    # lúc bỏ quên. Prompt tự do không gửi field này và vẫn đi qua LLM như cũ.
+    form_fields: DemoWorkflowFormFields | None = None
     # Cuộc trò chuyện mà câu này thuộc về. Bỏ trống = bắt đầu cuộc mới.
     #
     # KHÔNG phải giá trị tin cậy: nó chỉ nói "tôi muốn nối vào cuộc này". Server
@@ -267,6 +288,24 @@ class DemoCapabilityItem(BaseModel):
 
 class DemoCapabilityListResponse(BaseModel):
     capabilities: list[DemoCapabilityItem] = Field(default_factory=list)
+
+
+class DemoSupportRequest(BaseModel):
+    """Body của nút "Đổi lịch" / "Huỷ lịch" trên thẻ kết quả.
+
+    CHỈ ba trường, và không trường nào mang quyết định. Khách nêu việc; đơn vị
+    quyết. Browser không gửi `tool`, `service_label` hay bất kỳ định danh nội bộ
+    nào — backend đọc chúng từ chính bước được nhắc tới.
+
+    `note` là lời của khách, dài tối đa 500 ký tự và được cắt sạch trước khi
+    lưu: nó đi thẳng ra màn hình người duyệt.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=20)
+    kind: Literal["AMEND", "CANCEL"]
+    note: str | None = Field(default=None, max_length=500)
 
 
 class DemoPaymentDecisionRequest(BaseModel):

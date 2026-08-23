@@ -12,7 +12,7 @@ from datetime import date, time, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Trần tương lai — provider tự bảo vệ mình, không phải request nào cũng đi qua
 # Validator. Không có trần thì "2199-12-31" hợp lệ ở mọi lớp và chỗ đỗ năm 2199
@@ -104,6 +104,23 @@ class BookParkingRequest(BaseModel):
     parking_zone: ParkingZone
 
     _booking_not_past = field_validator("booking_date")(_reject_past)
+
+
+class ChangeParkingZoneRequest(BaseModel):
+    """Đổi khu cho một chỗ đã giữ.
+
+    Chỉ có `parking_zone`: `booking_id` nằm ở đường dẫn, và `amount` do server
+    tính lại theo khu — client gửi giá là client tự định giá dịch vụ.
+
+    `extra="forbid"` chứ không bỏ qua field thừa. Bỏ qua im lặng nghĩa là một
+    caller gửi kèm `amount` vẫn được nhận, và ngày nào đó ai đó thêm `amount`
+    vào schema này thì giá của client lặng lẽ thắng giá của server — không có
+    diff nào lộ ra. Từ chối ồn ào thì lỗi ấy chết ngay ở request đầu tiên.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    parking_zone: ParkingZone
 
 
 # ---- pay_fee ----

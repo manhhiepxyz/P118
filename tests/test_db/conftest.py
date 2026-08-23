@@ -46,6 +46,24 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
     Thứ tự xóa theo FK dependency (con trước, cha sau).
     """
     yield
+    # Chờ tác vụ NỀN xong TRƯỚC khi dọn bảng.
+    #
+    # `request_fresh_answer` và đường chạy workflow đều `create_task` rồi trả về
+    # ngay, nên chúng còn sống sau khi test đã xong — và còn cầm khoá dòng.
+    # `TRUNCATE` lấy khoá theo thứ tự liệt kê, tác vụ nền lấy theo thứ tự
+    # nghiệp vụ của nó; hai thứ tự ngược nhau là công thức của một deadlock:
+    #
+    #     asyncpg.exceptions.DeadlockDetectedError: deadlock detected
+    #     Process A waits for AccessExclusiveLock ...; blocked by B.
+    #     Process B waits for RowShareLock ...; blocked by A.
+    #
+    # PostgreSQL giết một bên, và bên thua đổi theo tải máy — nên nó hiện ra
+    # như "một test khác nhau mỗi lượt, ~1/3 số lượt". Không phải flaky: dọn
+    # bảng dưới chân một việc đang chạy thì đó là lỗi của phép dọn.
+    from src.api.routes import drain_demo_tasks
+
+    await drain_demo_tasks()
+
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
