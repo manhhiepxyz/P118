@@ -6,7 +6,7 @@ import { CommandRail } from '../components/workspace/CommandRail'
 import { InspectorPanel } from '../components/workspace/InspectorPanel'
 import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 
-import { AgentPresence } from '../components/workspace/AgentPresence'
+import { LogoutButton } from '../components/workspace/LogoutButton'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { SERVICE_FIELDS, SHARED_FIELDS, matchOption, missingFields, today, type FormValues } from '../lib/serviceForms'
 import { JourneySummary } from '../components/workspace/JourneySummary'
@@ -29,6 +29,30 @@ const TERMINAL = new Set([
   'PLANNING_ERROR',
   'VALIDATION_ERROR',
 ])
+
+/**
+ * Câu duy nhất được nói trong lúc P-118 còn đang soạn câu trả lời.
+ *
+ * Nó cố ý KHÔNG mang nội dung: không nêu thiếu field nào, không đoán kết quả,
+ * không hứa thời gian. Chỉ nói "đang chạy, chờ một chút". Mọi thông tin thật
+ * đến ở đúng một lượt sau đó.
+ *
+ * Là hằng số nên `sayOnce` nhận ra và không lặp lại qua các nhịp poll.
+ */
+const WAITING = 'Mình đang xử lý yêu cầu của bạn, chờ mình một chút nhé.'
+
+/**
+ * Chờ bao lâu rồi mới trấn an.
+ *
+ * Dưới mốc này thì im lặng — nhịp ba chấm đã cho biết P-118 đang nghĩ, và một
+ * câu trả lời đến sau vài giây tự nó là đủ. Trên mốc này thì khoảng lặng bắt
+ * đầu giống như hỏng, nên nói một câu.
+ *
+ * 8 giây chọn từ số đo thật: hỏi đáp ngắn trả lời trong 5–7 giây (không hiện
+ * câu này), còn đặt lịch tham quan mất 25–35 giây vì phải gọi provider (có
+ * hiện). Ranh giới nằm đúng giữa hai nhóm, không phải một con số tròn cho đẹp.
+ */
+const WAITING_AFTER_MS = 8000
 
 /**
  * Form đã điền → một câu mục tiêu cho Planner.
@@ -185,7 +209,6 @@ export function JourneyWorkspacePage() {
    * sang "Đang chờ bạn xác nhận thanh toán" thì nó không còn là tên của việc
    * nữa — nó là một dòng trạng thái đặt nhầm chỗ.
    */
-  const [goalText, setGoalText] = useState('')
   const turnId = useRef(0)
   /**
    * Câu P-118 đã nói rồi — để nhịp poll kế tiếp không nói lại y hệt.
@@ -194,6 +217,13 @@ export function JourneyWorkspacePage() {
    * bị lặp vô hạn cùng một dòng.
    */
   const said = useRef<Set<string>>(new Set())
+  /**
+   * Thời điểm bắt đầu chờ câu trả lời của lượt hiện tại, hoặc null nếu không chờ.
+   *
+   * Đặt lại về null mỗi khi câu trả lời tới, để lượt sau đo lại từ đầu chứ
+   * không cộng dồn thời gian chờ của cả cuộc hội thoại.
+   */
+  const pendingSince = useRef<number | null>(null)
 
   function say(from: ChatTurn['from'], text: string) {
     turnId.current += 1
@@ -228,7 +258,43 @@ export function JourneyWorkspacePage() {
     // tức làm người dùng tưởng P-118 đã trả lời xong, rồi câu thật của model
     // đến sau lại mâu thuẫn với nó. Trong lúc chờ, nhịp ba chấm nói đúng thứ
     // đang xảy ra: model đang nghĩ.
-    sayOnce(res.answer || res.question || (next ? next.message : null))
+    //
+    // Trong lúc backend còn đang soạn (`response_state === 'PENDING'`), chỉ nói
+    // ĐÚNG một câu báo tiến trình — không nói nội dung.
+    //
+    // Trước đây chỗ này rơi xuống `res.question` (hoặc `next.message`), nên khi
+    // thiếu thông tin người dùng nhận HAI câu xin cùng một thứ, cách nhau 5
+    // giây và chỉ khác cách diễn đạt:
+    //
+    //   t+5s   "Mình cần thêm thông tin để lập kế hoạch: tên dự án…, ngày…"
+    //   t+10s  "Để đặt lịch tham quan, mình cần bạn bổ sung thêm: tên dự án…"
+    //
+    // Câu sau mới là câu model viết cho chính yêu cầu này. Câu trước là bản
+    // dựng sẵn từ danh sách `missing_fields`. Nói cả hai buộc người đọc phải tự
+    // nhận ra chúng là một, và đọc lại lần thứ hai không thu được gì mới.
+    //
+    // `WAITING` là hằng số nên `sayOnce` tự dedupe qua mọi nhịp poll.
+    //
+    // Và nó CHỈ được nói khi người dùng đã chờ đủ lâu để thấy sốt ruột. Câu
+    // trấn an đặt đúng chỗ thì hữu ích; đặt sai chỗ thì nó tự tố cáo hệ thống:
+    //
+    //   Bạn:   hôm nay là ngày mấy
+    //   P-118: Mình đang xử lý yêu cầu của bạn, chờ mình một chút nhé.
+    //   P-118: (5 giây sau, câu trả lời thật)
+    //
+    // Một câu hỏi trả lời được trong năm giây mà vẫn xin phép được chờ — đọc
+    // lên giống một tổng đài đang câu giờ hơn là một trợ lý.
+    //
+    // Mốc thời gian, KHÔNG phải loại tác vụ: "chat" và "tác vụ" không tách bạch
+    // — câu hỏi ngày tháng cũng đi qua planner như một workflow. Thứ quyết định
+    // câu này có ích hay lố bịch là người dùng đã chờ bao lâu.
+    if (res.response_state === 'PENDING') {
+      if (pendingSince.current === null) pendingSince.current = performance.now()
+      if (performance.now() - pendingSince.current >= WAITING_AFTER_MS) sayOnce(WAITING)
+    } else {
+      pendingSince.current = null
+      sayOnce(res.answer || res.question || (next ? next.message : null))
+    }
     // Lời kết nói SAU cùng, và chỉ khi thật sự xong. `sayOnce` lo phần không
     // lặp lại ở những nhịp poll tiếp theo.
     sayOnce(closingLine(res))
@@ -281,6 +347,31 @@ export function JourneyWorkspacePage() {
   const respond = (intent: ReturnType<typeof normalizeIntent>, value?: string, source: 'chat' | 'field' = 'chat') =>
     respondTo(pending, intent, value, source)
 
+  /**
+   * Gửi TẤT CẢ ô của form trong một lượt.
+   *
+   * Backend áp luật all-or-none cho câu trả lời dạng form: thiếu một ô là từ
+   * chối cả lượt (xem `_extract_structured_follow_up_answers`). Đường cũ gửi
+   * đúng một khoá, nên người dùng điền đúng dự án rồi bị trả lời về ngày tham
+   * quan — một ô họ chưa hề được hỏi.
+   */
+  async function respondWithFields(values: Record<string, string>) {
+    const action = pending
+    if (!action) return
+    try {
+      const fields: Record<string, string> = {}
+      for (const [key, value] of Object.entries(values)) fields[key] = extractValue(value)
+      absorb(await continueWorkflow(action.workflowId, { fields }))
+    } catch (error) {
+      // Nói LẠI LÝ DO backend đưa ra, không phủ lên nó một câu chung chung.
+      // Người dùng từng thấy "Mình chưa gửi được xác nhận của bạn" đè lên câu
+      // giải thích thật — hai câu mâu thuẫn về cùng một sự việc.
+      const detail = error instanceof Error ? error.message : String(error)
+      say('agent', detail || 'Mình chưa gửi được câu trả lời của bạn. Bạn thử lại giúp mình nhé.')
+      setFault(detail)
+    }
+  }
+
   async function respondTo(
     action: PendingAction | null,
     intent: ReturnType<typeof normalizeIntent>,
@@ -308,7 +399,27 @@ export function JourneyWorkspacePage() {
       { workflowId: action?.workflowId ?? '', fingerprint: action?.fingerprint ?? '' },
       value,
     )
-    if (!outcome.ok || !action) {
+    /*
+     * Câu hỏi phụ phải ĐI TỚI BACKEND, không bị trả lời tại chỗ.
+     *
+     * `resolve()` gặp `intent === 'QUESTION'` thì trả `{ ok: false, reply:
+     * action.explain }` — một câu mẫu như "Mình cần thông tin này để lập kế
+     * hoạch tiếp." Câu hỏi không bao giờ rời khỏi trình duyệt.
+     *
+     * Đo được: đang chờ bổ sung thông tin mà hỏi "Có những dự án nào?" thì
+     * người dùng nhận về câu mẫu vô can. Trong khi cùng câu đó gửi thẳng
+     * `POST /continue` cho kết quả đúng — backend liệt kê bảy dự án thật VÀ
+     * giữ nguyên `NEEDS_INFORMATION`, nên clarification không mất. Toàn bộ
+     * năng lực trả lời đã có sẵn ở backend; chỉ có giao diện là chặn đường.
+     *
+     * `explain` vẫn dùng được cho các loại pending khác (thanh toán, chờ đơn
+     * vị duyệt) — ở đó nó ĐÚNG là câu giải thích cho đúng câu hỏi "việc này là
+     * gì". Chỉ `missing_info` mới cần chuyển tiếp, vì ở đó người dùng đang đối
+     * thoại với Planner chứ không đứng trước một nút bấm.
+     */
+    const forwardAside = intent === 'QUESTION' && action?.kind === 'missing_info'
+
+    if (!action || (!outcome.ok && !forwardAside)) {
       say('agent', outcome.reply)
       return
     }
@@ -329,7 +440,10 @@ export function JourneyWorkspacePage() {
         // BIẾT bảng giá trị ấy; bắt Planner đoán lại là tự tạo một vòng lặp —
         // nó đoán trượt và hỏi lại đúng câu cũ.
         const key = action.field?.key
-        const matched = key && source === 'chat' ? matchOption(key, value ?? '') : null
+        // Câu hỏi thì KHÔNG chạy `matchOption`: "Có những dự án nào?" mà lỡ
+        // khớp một giá trị enum nào đó sẽ bị ghi nhận thành câu trả lời cho
+        // field — im lặng và sai.
+        const matched = !forwardAside && key && source === 'chat' ? matchOption(key, value ?? '') : null
 
         res =
           source === 'field' && action.field
@@ -353,11 +467,25 @@ export function JourneyWorkspacePage() {
       // câu>" — một câu có thể chứa bốn thông tin, và gán tất cả cho field đầu
       // tiên là mô tả sai thứ vừa xảy ra. Để backend nói phần cụ thể ở lượt
       // sau; ở đây chỉ xác nhận đã nhận.
-      say('agent', source === 'chat' && intent === 'VALUE' ? 'Mình đã ghi nhận, để mình xử lý tiếp nhé.' : outcome.reply)
+      // Câu hỏi phụ: câu trả lời do BACKEND viết, `absorb` sẽ hiện nó. Nói
+      // thêm "Mình đã ghi nhận" ở đây là dán một câu xác nhận vô nghĩa lên
+      // trên một câu trả lời — người dùng vừa hỏi, có ghi nhận gì đâu.
+      if (!forwardAside) {
+        say(
+          'agent',
+          source === 'chat' && intent === 'VALUE'
+            ? 'Mình đã ghi nhận, để mình xử lý tiếp nhé.'
+            : outcome.reply,
+        )
+      }
       absorb(res)
     } catch (error) {
-      say('agent', 'Mình chưa gửi được xác nhận của bạn. Bạn thử lại giúp mình nhé.')
-      setFault(error instanceof Error ? error.message : String(error))
+      // Câu mẫu "chưa gửi được" nói SAI chuyện đã xảy ra khi server đã nhận và
+      // từ chối có lý do. Người dùng thấy hai câu chồng lên nhau và không biết
+      // tin câu nào.
+      const detail = error instanceof Error ? error.message : String(error)
+      say('agent', detail || 'Mình chưa gửi được câu trả lời của bạn. Bạn thử lại giúp mình nhé.')
+      setFault(detail)
     }
   }
 
@@ -418,9 +546,9 @@ export function JourneyWorkspacePage() {
         return
       }
 
-      setGoalText(text)
       setFault(null)
       said.current = new Set()
+      pendingSince.current = null
       startWorkflow(text)
         .then(absorb)
         .catch((error) => {
@@ -462,7 +590,7 @@ export function JourneyWorkspacePage() {
     }
 
     said.current = new Set()
-    setGoalText(goal)
+    pendingSince.current = null
     setTurns([])
     setFault(null)
     say('user', goal)
@@ -497,7 +625,12 @@ export function JourneyWorkspacePage() {
   const selected = steps.find((step) => step.id === selectedId) ?? null
   const done = steps.filter((step) => step.state === 'success').length
   const needsYou = steps.filter((step) => step.state === 'waiting_user').length
-  const title = goalText || journey?.title || 'Đang chuẩn bị…'
+  // Tiêu đề tóm tắt VIỆC, không phải câu người dùng đã gõ.
+  //
+  // `goalText` từng đứng trước — nghĩa là thanh tiêu đề và cả cột phải hiển thị
+  // nguyên văn tin nhắn vừa gửi, lặp lại đúng thứ đang nằm trong hội thoại ngay
+  // bên dưới. Câu càng dài thì hai chỗ đó càng vô dụng.
+  const title = journey?.title || 'Đang chuẩn bị…'
 
   /**
    * P-118 đang nghĩ: workflow còn chạy, hoặc câu trả lời đang được soạn.
@@ -509,7 +642,12 @@ export function JourneyWorkspacePage() {
   const thinking =
     mode === 'journey' &&
     !!live &&
-    !pending &&
+    // Thẻ chờ hiện lên KHÔNG có nghĩa là hết chuyện để nói. Nó mang dữ kiện có
+    // cấu trúc ("chờ ai, việc gì"); câu của model mới là lời giải thích. Trước
+    // đây `!pending` tắt nhịp ba chấm ngay khi thẻ hiện, nên khoảng 18 giây
+    // chờ model soạn xong trở thành im lặng không dấu hiệu — và chính khoảng
+    // im lặng đó là lý do phải chèn một câu mẫu vào lấp chỗ.
+    (!pending || live.response_state === 'PENDING') &&
     // Đã có câu của model thì thôi nghĩ. Không có điều kiện này, một workflow
     // dừng ở trạng thái không nằm trong `TERMINAL` sẽ để ba chấm chạy mãi —
     // và một chỉ báo "đang xử lý" không bao giờ tắt là lời nói dối tệ hơn cả
@@ -519,15 +657,28 @@ export function JourneyWorkspacePage() {
 
   return (
     <WorkspaceShell>
-        {/* Chỉ báo P-118 nổi góc phải — trạng thái hệ thống luôn thấy được,
-            không chiếm một dải ngang riêng. */}
+        {/* Góc phải trên: ĐĂNG XUẤT.
+            Chỗ này từng là chỉ báo "P-118 · Sẵn sàng". Nó đọc dữ liệu GIẢ
+            (`JOURNEY_STEPS` trong journeyMock) nên "Sẵn sàng" không phản ánh
+            trạng thái thật — và nhịp ba chấm trong hội thoại đã nói đúng việc
+            đó bằng dữ liệu thật. Một chỉ báo trang trí chiếm mất vị trí đắt
+            nhất màn hình, trong khi lối ra thì không có ở đâu cả. */}
         <div className="pointer-events-none absolute right-6 top-5 z-20">
           <div className="pointer-events-auto">
-            <AgentPresence idle={mode === 'launcher'} />
+            <LogoutButton />
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-1">
+        {/* `data-journey-state` mang thẳng trạng thái workflow đang sống.
+            Neo cho kiểm thử, và nó thay thế cả một nhóm helper của harness từng
+            phải ĐOÁN trạng thái bằng cách đọc nhãn chữ trên thẻ — nhãn ấy thuộc
+            về `ChatWorkflowCard`, bề mặt chat CŨ, nên chúng chờ 240 giây rồi
+            trả "(hết giờ chờ)" trong khi workflow đã xong từ lâu.
+
+            Trạng thái là DỮ LIỆU, không phải cách trình bày. Bắt kiểm thử suy
+            ngược nó từ tiếng Việt hiển thị là buộc chúng vào lớp dễ đổi nhất
+            của sản phẩm. */}
+        <div className="flex min-h-0 flex-1" data-journey-state={live?.status ?? 'IDLE'}>
           <div className="relative flex min-w-0 flex-1 flex-col">
             {mode === 'journey' && (
               <div className="rise shrink-0 pb-5 pt-6">
@@ -634,6 +785,7 @@ export function JourneyWorkspacePage() {
               onExecute={execute}
               journeyLabel={mode === 'journey' ? title : undefined}
               busy={leaving}
+              working={thinking}
               notice={blocked ?? fault}
             />
           </div>
@@ -652,11 +804,19 @@ export function JourneyWorkspacePage() {
                   action={pending}
                   onApprove={() => respond('APPROVE')}
                   onReject={() => respond('REJECT')}
-                  onValue={(value) => {
+                  onValue={(values) => {
                     // Điền vào ô có cấu trúc cũng là một lượt trả lời — ghi vào
                     // hội thoại để hai lối không kể hai câu chuyện khác nhau.
-                    say('user', value)
-                    respond('VALUE', value, 'field')
+                    // Ghi bằng NHÃN người dùng thấy, không bằng khoá nội bộ.
+                    const labelOf = (key: string) =>
+                      (pending?.fields ?? []).find((f) => f.key === key)?.label ?? key
+                    say(
+                      'user',
+                      Object.entries(values)
+                        .map(([key, value]) => `${labelOf(key)}: ${value}`)
+                        .join(' · '),
+                    )
+                    respondWithFields(values)
                   }}
                 />
               )}

@@ -28,6 +28,17 @@ const TONE: Record<string, { label: string; token: string }> = {
   SUCCESS: { label: 'Hoàn tất', token: 'var(--success)' },
   FAILED: { label: 'Chưa xong', token: 'var(--danger)' },
   CANCELLED: { label: 'Đã huỷ', token: 'var(--text-muted)' },
+  // Backend còn trả các trạng thái HIỂN THỊ ngoài bảy cái trên — xem
+  // `WORKFLOW_STATUS` trong `lib/status.ts`. Thiếu chúng ở đây không phải là
+  // hiển thị xấu, mà là RÒ RỈ: fallback cũ dùng thẳng `data.status` làm nhãn,
+  // nên người dùng đọc được đúng chuỗi `EXECUTION_ERROR` trên màn hình. Mã lỗi
+  // là từ vựng nội bộ; nó nói cho người viết code biết chuyện gì, và nói cho
+  // người dùng biết rằng có thứ gì đó đã lọt ra ngoài.
+  PAYMENT_APPROVAL_REQUIRED: { label: 'Chờ xác nhận thanh toán', token: 'var(--waiting-user)' },
+  PLANNING_ERROR: { label: 'Chưa hiểu được yêu cầu', token: 'var(--danger)' },
+  VALIDATION_ERROR: { label: 'Yêu cầu chưa hợp lệ', token: 'var(--danger)' },
+  EXECUTION_ERROR: { label: 'Không thực hiện được', token: 'var(--danger)' },
+  CHAT: { label: 'Đã trả lời', token: 'var(--text-secondary)' },
 }
 
 /* `STATUS_LABEL` cũ đã gộp vào `TONE` — nhãn và sắc đi cùng nhau thì không
@@ -132,7 +143,9 @@ export function WorkflowPage() {
     )
   }
 
-  const tone = TONE[data.status] ?? { label: data.status, token: 'var(--text-muted)' }
+  // Fallback KHÔNG dùng `data.status`: một trạng thái mới ở backend thì tệ nhất
+  // là nhãn mơ hồ, chứ không được thành một mã nội bộ hiện giữa màn hình.
+  const tone = TONE[data.status] ?? { label: 'Đang cập nhật', token: 'var(--text-muted)' }
   const finished = data.status === 'SUCCESS'
   /**
    * Diễn biến người dùng còn quan tâm SAU KHI việc đã xong.
@@ -181,7 +194,15 @@ export function WorkflowPage() {
                 <p className="mt-1.5 text-[19px] leading-[1.3] text-[var(--text-secondary)]">{subject}</p>
               )}
               <p className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[14px]">
-                <span className="font-semibold" style={{ color: tone.token }}>
+                {/* `data-workflow-state` mang TRẠNG THÁI, `tone.label` mang câu
+                    tiếng Việt cho người đọc. Harness từng đọc nhãn qua
+                    `header p.text-sm.text-gray-500` — một class của bảng màu cũ
+                    đã bỏ, nên nó luôn trả chuỗi rỗng. */}
+                <span
+                  data-workflow-state={data.status}
+                  className="font-semibold"
+                  style={{ color: tone.token }}
+                >
                   {tone.label}
                 </span>
                 {data.tasks.length > 0 && (
@@ -192,6 +213,23 @@ export function WorkflowPage() {
               </p>
             </div>
           </div>
+
+          {/* ── Câu P-118 nói về chính yêu cầu này ───────────────────
+              `data.answer` do Response Agent viết và ĐƯỢC LƯU vào
+              `workflows.assistant_answer`. Trước đây nó chỉ render trong nhánh
+              "cần bổ sung thông tin", nên với workflow đã xong, câu ấy nằm
+              trong database mà không ai đọc được: người dùng mở lại một yêu cầu
+              cũ và chỉ thấy danh sách bước.
+
+              Đó là mất mát thật — các bước nói HỆ THỐNG đã làm gì, còn câu này
+              nói KẾT QUẢ nghĩa là gì với họ. */}
+          {!needsInfo && data.answer && (
+            <section className="rise mt-9">
+              <p className="mat-raised whitespace-pre-line rounded-[var(--r-sm)] px-5 py-4 text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                {data.answer}
+              </p>
+            </section>
+          )}
 
           {/* ── Cần bạn bổ sung ─────────────────────────────────────── */}
           {needsInfo && data.question && (
@@ -259,7 +297,14 @@ export function WorkflowPage() {
                 <Info className="h-4 w-4" strokeWidth={2.2} aria-hidden />
                 Cần bạn xác nhận
               </p>
-              <p className="mt-3 font-mono text-[30px] font-semibold tabular-nums text-[var(--text-primary)]">
+              {/* `data-quote-amount`: neo cho kiểm thử. Harness từng bám vào
+                  `p.text-2xl` — một BẬC TYPOGRAPHY. Cỡ chữ đổi là phép kiểm
+                  "báo giá khớp booking" báo đỏ, dù số tiền vẫn đúng và vẫn
+                  hiện ngay đó. */}
+              <p
+                data-quote-amount
+                className="mt-3 font-mono text-[30px] font-semibold tabular-nums text-[var(--text-primary)]"
+              >
                 {formatVnd(quote.amount as number | undefined, quote.currency as string | undefined)}
               </p>
               <p className="mt-2 text-[15px] leading-[1.6] text-[var(--text-secondary)]">

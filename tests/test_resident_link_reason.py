@@ -48,8 +48,15 @@ def test_an_unlinked_user_is_told_about_linking():
     state = {"goal": "đặt chỗ đỗ xe", "existing_context": {}}
     message = _resident_link_required_message(state)
     assert message is not None
-    assert "liên kết căn hộ" in message.lower()
+    # Tên mục phải KHỚP menu thật. Câu này từng bảo người dùng vào mục "Liên
+    # kết căn hộ", trong khi thanh bên ghi "Xác minh căn hộ" — sai một cái tên
+    # là toàn bộ phần hướng dẫn thành vô dụng, vì họ đi tìm đúng thứ mình bảo
+    # họ tìm và không thấy.
+    assert "xác minh căn hộ" in message.lower()
+    assert "liên kết căn hộ" not in message.lower(), "trỏ tới một mục không tồn tại trên giao diện"
     assert "mô tả lại" not in message.lower(), "vẫn mời làm lại một việc không thể chạy"
+    # Không dừng ở "bạn chưa đủ điều kiện": phải nói LÀM GÌ để đủ.
+    assert any(verb in message.lower() for verb in ("mở mục", "nhập", "gửi")), message
 
 
 def test_a_verified_resident_is_not_told_to_link_again():
@@ -63,7 +70,7 @@ def test_the_response_says_it_instead_of_asking_for_a_better_description():
         {"goal": "đặt chỗ đỗ xe", "existing_context": {}, "clarification_error": "..."},
         payment_approved=False,
     )
-    assert "liên kết căn hộ" in (response.summary or "").lower(), response.summary
+    assert "xác minh căn hộ" in (response.summary or "").lower(), response.summary
 
 
 def test_a_completed_workflow_is_never_overwritten_by_this_message():
@@ -72,7 +79,7 @@ def test_a_completed_workflow_is_never_overwritten_by_this_message():
         {"goal": "đặt chỗ đỗ xe", "existing_context": {}, "plan_validated": True, "results": {}},
         payment_approved=False,
     )
-    assert "liên kết căn hộ" not in (response.summary or "").lower()
+    assert "xác minh căn hộ" not in (response.summary or "").lower()
 
 
 @pytest.mark.asyncio

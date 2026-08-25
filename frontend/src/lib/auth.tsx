@@ -137,7 +137,31 @@ export function useAuth(): AuthContextValue {
   return ctx
 }
 
-/** Chặn route cần đăng nhập — chưa login → chuyển về /login. */
+/**
+ * Bề mặt KHÁCH HÀNG. Cần đăng nhập, và cần đúng vai.
+ *
+ * Trước đây route này chỉ hỏi "có phải người đăng nhập không", không hỏi vai —
+ * nên provider vào được toàn bộ màn hình khách hàng: `/workspace` (Agent),
+ * `/profile`, `/apartment-link`, `/verify`, `/workflows`. Đo bằng trình duyệt
+ * thật, cả sáu đều mở. Tài khoản provider vì thế chỉ là tài khoản khách hàng
+ * kèm một cờ role, chứ không phải một danh tính riêng của bên thứ 3.
+ *
+ * Nghiêm trọng hơn vẻ ngoài: `/verify` cho provider tự nộp hồ sơ xác minh căn
+ * hộ, mà họ lại có quyền duyệt. Đường tự duyệt đó đã chạy được thật (xem
+ * `_reject_self_review` phía backend). Chốt backend là thứ ngăn leo thang
+ * quyền; cổng này chỉ ngăn người ta đi lạc vào chỗ không thuộc về mình.
+ *
+ * Đưa họ về ĐÚNG NHÀ của vai mình chứ không phải `/`: `/` là `HomeRedirect`,
+ * và để nó tự phân luồng thì mỗi lần đi lạc là một lần nhảy hai chặng.
+ */
+const ROLE_HOME: Record<string, string> = {
+  // CHỈ provider. Admin là người của P-118 — chặn họ khỏi `/profile` nghĩa là
+  // admin không sửa được hồ sơ của chính mình, một mất mát thật để đổi lấy
+  // không gì cả. Vấn đề cần giải là danh tính bên thứ 3 lang thang trong bề
+  // mặt khách hàng, không phải "ai không phải khách hàng thì cấm hết".
+  provider: '/review',
+}
+
 export function ProtectedRoute({ children }: { children: ReactNode }) {
   const { user, initializing } = useAuth()
   const location = useLocation()
@@ -151,6 +175,10 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   }
   if (!user) {
     return <Navigate to="/login" state={{ from: location.pathname }} replace />
+  }
+  const home = ROLE_HOME[user.role]
+  if (home && home !== location.pathname) {
+    return <Navigate to={home} replace />
   }
   return <>{children}</>
 }

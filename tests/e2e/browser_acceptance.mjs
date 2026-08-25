@@ -8,7 +8,7 @@
  *
  * Chạy:
  *   sh scripts/stack_up.sh
- *   cd frontend && VITE_API_PROXY_TARGET=http://127.0.0.1:8080 npm run dev -- --port 5273
+ *   cd frontend && VITE_API_PROXY_TARGET=http://127.0.0.1:$APP_PORT npm run dev -- --port 5273
  *   node tests/e2e/browser_acceptance.mjs
  *
  * Database: p118_db của stack hiện tại. Không đọc/in API key, token hay DSN.
@@ -16,11 +16,37 @@
 
 import { chromium } from 'playwright'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
 const APP = process.env.P118_APP ?? 'http://127.0.0.1:5273'
-const API = process.env.P118_API ?? 'http://127.0.0.1:8080/api/v1'
+
+/**
+ * Cổng host của backend, phân giải ĐÚNG như docker compose phân giải nó.
+ *
+ * Compose đọc `${APP_PORT:-8080}`: biến môi trường trước, rồi `.env` ở gốc
+ * repo. Harness này trước đây hardcode 8080, nên với `APP_PORT=8000` trong
+ * `.env` — cấu hình đang dùng thật — mọi lệnh gọi API đều rơi vào một cổng
+ * không ai lắng nghe. Kết quả không phải "harness hỏng" mà là một tràng check
+ * đỏ trông y hệt lỗi sản phẩm.
+ */
+function appPort() {
+  if (process.env.APP_PORT) return process.env.APP_PORT
+  try {
+    const line = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../.env'), 'utf8')
+      .split('\n')
+      .find((l) => l.startsWith('APP_PORT='))
+    // Chỉ bốc đúng một khoá — `.env` còn chứa API key thật.
+    const value = line?.slice('APP_PORT='.length).trim().replace(/^['"]|['"]$/g, '')
+    if (value) return value
+  } catch {
+    // Không có `.env` là chuyện bình thường (CI truyền qua môi trường).
+  }
+  return '8080'
+}
+
+const API = process.env.P118_API ?? `http://127.0.0.1:${appPort()}/api/v1`
 const DB = 'p118_db'
 const PASSWORD = 'MatKhauBrowser!2030'
 const STAMP = String(Date.now()).slice(-9)
@@ -65,6 +91,34 @@ function sql(query, { expectRows = null } = {}) {
 
 const mask = (v) => (v && v.length > 8 ? `${v.slice(0, 8)}…` : v || '—')
 
+/** PNG 1×1 hợp lệ — đủ qua kiểm kiểu tệp, không mang nội dung thật. */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+/**
+ * Body multipart cho `POST /verification-records` (hồ sơ căn hộ).
+ *
+ * Endpoint này thay `POST /auth/resident-link-requests` từ 7a6a884: nó nhận
+ * ảnh giấy tờ nên phải là multipart, và dữ liệu khai nằm trong `claimed_data`
+ * (JSONB) chứ không còn là cột riêng.
+ */
+function apartmentForm(apartmentCode, residentialArea, fullName) {
+  const form = new FormData()
+  form.append('record_type', 'apartment')
+  form.append(
+    'claimed_data',
+    JSON.stringify({
+      apartment_code: apartmentCode,
+      residential_area: residentialArea,
+      full_name: fullName,
+    }),
+  )
+  form.append('files', new Blob([PNG_1X1], { type: 'image/png' }), 'so-hong-canary.png')
+  return form
+}
+
 function check(name, ok, detail = '') {
   RESULTS.push({ name, ok, detail })
   console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${detail ? ` — ${detail}` : ''}`)
@@ -96,14 +150,23 @@ const TERMINAL_LABELS = new Set([
   'Chưa hiểu được yêu cầu', 'Yêu cầu chưa hợp lệ', 'Không thực hiện được',
 ])
 
+/**
+ * Trạng thái workflow trên TRANG CHI TIẾT — đọc dữ liệu, không đọc nhãn.
+ *
+ * Bản trước bám vào `header p.text-sm.text-gray-500`, một class của bảng màu đã
+ * bỏ, nên nó luôn trả chuỗi rỗng và mọi phép kiểm dùng nó âm thầm sai.
+ */
 async function statusLabel(page) {
-  return (await page.locator('header p.text-sm.text-gray-500').first().innerText().catch(() => '')).trim()
+  return (await page.locator('[data-workflow-state]').first()
+    .getAttribute('data-workflow-state').catch(() => null)) || ''
 }
 
 async function waitForApprovalCard(page, workflowId, timeoutMs = 240000) {
-  const scope = workflowId
-    ? cardFor(page, workflowId).locator('text=Cần bạn xác nhận khoản thanh toán')
-    : page.locator('text=Cần bạn xác nhận khoản thanh toán')
+  // Workspace hiện ĐÚNG MỘT hành trình đang sống, nên thẻ chờ không cần lọc
+  // theo workflow — `[data-pending-card="approval"]` là đủ và không lệ thuộc
+  // vào bố cục. `cardFor` bám vào `ChatWorkflowCard`, markup của bề mặt chat
+  // CŨ mà giờ chỉ `HomePage` còn dùng.
+  const scope = page.locator('[data-pending-card="approval"]')
   try {
     await scope.first().waitFor({ timeout: timeoutMs })
     return true
@@ -141,8 +204,21 @@ async function lockedCapabilities(page) {
  * Mở trong tab riêng để không cướp mất trang mà phép kiểm đang dùng.
  */
 async function cardWorkflowIds(page) {
+  // Token nằm ở `sessionStorage`, và sessionStorage KHÔNG chia sẻ giữa các tab
+  // — kể cả cùng một browser context. Tab mới mở ra là một phiên chưa đăng
+  // nhập, `/workflows` đá về `/login`, và hàm này trả mảng rỗng mãi mãi. Hệ
+  // quả: `waitForNewCard` chờ đủ 120 giây rồi trả `''`, nên mọi phép kiểm dựa
+  // vào nó báo "không thấy workflow" trong khi workflow đã nằm trong database.
+  //
+  // Chép token sang trước khi điều hướng. Vẫn dùng tab riêng để không phá
+  // trạng thái trang đang mở — 2e kiểm chính URL của nó.
+  const token = await page.evaluate(() => sessionStorage.getItem('p118.access_token'))
   const tab = await page.context().newPage()
   try {
+    await tab.goto(`${APP}/login`)
+    if (token) {
+      await tab.evaluate((t) => sessionStorage.setItem('p118.access_token', t), token)
+    }
     await tab.goto(`${APP}/workflows`)
     await tab.waitForTimeout(2500)
     const hrefs = await tab.locator('a[href^="/workflow/"]').evaluateAll(
@@ -194,28 +270,31 @@ async function sendGoal(page, goal) {
  * một workflow khác, nên phép chờ và phép bấm rơi vào nhầm việc. Chỉ đích danh
  * theo id thì không còn chỗ cho nhầm lẫn.
  */
-function cardFor(page, workflowId) {
-  return page.locator(
-    `section[aria-label="Tiến trình yêu cầu"]:has(a[href="/workflow/${workflowId}"])`,
-  )
+/**
+ * Trạng thái workflow đang sống trên workspace — đọc DỮ LIỆU, không đọc nhãn.
+ *
+ * Bản trước suy ngược trạng thái từ tiếng Việt hiển thị trên `ChatWorkflowCard`
+ * (bề mặt chat CŨ, giờ chỉ `HomePage` dùng). Workspace không có nhãn ấy, nên
+ * mọi vòng chờ quay đủ 240 giây rồi trả "(hết giờ chờ)" trong khi workflow đã
+ * xong từ lâu — phép kiểm đỏ vì lý do không liên quan gì tới thứ nó kiểm.
+ */
+async function journeyState(page) {
+  return (await page.locator('[data-journey-state]').first()
+    .getAttribute('data-journey-state').catch(() => null)) || ''
 }
+
+// Backend còn trả trạng thái HIỂN THỊ ngoài ba cái cơ bản — xem
+// `WORKFLOW_STATUS` trong `frontend/src/lib/status.ts`. Thiếu chúng ở đây thì
+// vòng chờ quay đủ 240 giây trên một workflow đã kết thúc từ lâu.
+const TERMINAL_STATES = new Set([
+  'SUCCESS', 'FAILED', 'CANCELLED', 'CHAT',
+  'PLANNING_ERROR', 'VALIDATION_ERROR', 'EXECUTION_ERROR',
+])
 
 /** Nhãn trạng thái của một thẻ cụ thể. */
-async function cardLabel(page, workflowId) {
-  const scope = workflowId ? cardFor(page, workflowId) : page.locator('section[aria-label="Tiến trình yêu cầu"]').last()
-  return (await scope.locator('span').first().innerText().catch(() => '')).trim()
-}
-
-/** Chờ thẻ rời trạng thái đang chạy — dừng cả ở điểm chờ người dùng. */
-async function waitForCardSettled(page, workflowId, timeoutMs = 240000) {
-  const started = Date.now()
-  let last = ''
-  while (Date.now() - started < timeoutMs) {
-    last = await cardLabel(page, workflowId)
-    if (last && !['Đang chuẩn bị', 'Đang thực hiện'].includes(last)) return last
-    await page.waitForTimeout(1200)
-  }
-  return last || '(hết giờ chờ)'
+async function cardLabel(page) {
+  const scope = page.locator('[data-pending-card]').last()
+  return (await scope.locator('h3').first().innerText().catch(() => '')).trim()
 }
 
 /** Chờ thẻ KẾT THÚC hẳn.
@@ -228,8 +307,8 @@ async function waitForCardTerminal(page, workflowId, timeoutMs = 240000) {
   const started = Date.now()
   let last = ''
   while (Date.now() - started < timeoutMs) {
-    last = await cardLabel(page, workflowId)
-    if (TERMINAL_LABELS.has(last)) return last
+    last = await journeyState(page)
+    if (TERMINAL_STATES.has(last)) return last
     await page.waitForTimeout(1200)
   }
   return last || '(hết giờ chờ)'
@@ -400,7 +479,19 @@ async function main() {
   const lockedBefore = await lockedCapabilities(pageA)
   check('3a. Chưa liên kết: dịch vụ cư dân bị khoá', lockedBefore > 0, `khoá=${lockedBefore}`)
 
+  // Đi ĐÚNG đường người dùng đi: `/apartment-link` giờ chỉ là CỬA VÀO — nó cho
+  // biết đang ở bước nào rồi dẫn sang cổng của đơn vị xác thực (`/verify`), nơi
+  // đặt form nộp. Ranh giới đó phản ánh thực tế: xác minh căn hộ không nằm
+  // trong 10 tool của Agent, một đơn vị độc lập mới quyết định.
+  //
+  // Harness cũ `goto('/apartment-link')` rồi đợi thẳng `#link-apartment`, nên
+  // nó treo 20 giây ở một trang không còn form — và cả bộ dừng ngay mục 3.
+  // Bấm nút thay vì `goto('/verify')`: nếu nút gãy thì đó là hỏng thật, còn
+  // `goto` sẽ che mất.
   await pageA.goto(`${APP}/apartment-link`)
+  await pageA.getByRole('link', { name: /xác thực với đơn vị|xem hồ sơ đã gửi/i }).click()
+  await pageA.waitForURL(/\/verify/, { timeout: 20000 })
+  // Màn chuyển giao có sàn hiển thị ~900ms trước khi nhường chỗ cho form.
   await pageA.locator('#link-apartment').waitFor({ timeout: 20000 })
   const linkFormIds = await pageA.locator('form input, form select').evaluateAll((els) => els.map((e) => e.id))
   check('3b. Form chỉ hỏi thông tin người dùng biết',
@@ -426,23 +517,31 @@ async function main() {
   await pageA.waitForTimeout(3000)
 
   const uidA = sql(`SELECT id FROM users WHERE username = '${userA}'`, { expectRows: 1 })[0]
-  const pending1 = sql(`SELECT count(*) FROM resident_link_requests WHERE user_id = '${uidA}' AND status = 'PENDING'`)[0]
+  const pending1 = sql(
+    `SELECT count(*) FROM verification_records
+     WHERE applicant_user_id = '${uidA}' AND record_type = 'apartment' AND status = 'PENDING'`)[0]
   check('3c. Gửi tạo đúng một yêu cầu PENDING', pending1 === '1', `PENDING=${pending1}`)
 
   await pageA.reload()
   await pageA.waitForTimeout(2500)
   const afterReload = await pageA.locator('body').innerText()
-  check('3d. Reload vẫn thấy trạng thái chờ duyệt', /chờ ban quản lý duyệt/i.test(afterReload))
+  // "ban quản lý" → "đơn vị xác thực": cùng một hồ sơ mà hai trang gọi bên
+  // duyệt bằng hai tên khác nhau, đã thống nhất lại.
+  check('3d. Reload vẫn thấy trạng thái chờ duyệt', /chờ đơn vị xác thực duyệt/i.test(afterReload))
 
   // Gửi lần hai: form đã bị ẩn khi đang PENDING, nên thử thẳng qua API bằng
   // token của chính trang — kiểm ràng buộc backend chứ không kiểm việc ẩn nút.
   const tokenA = await pageA.evaluate(() => sessionStorage.getItem('p118.access_token'))
-  const dup = await fetch(`${API}/auth/resident-link-requests`, {
+  const dup = await fetch(`${API}/verification-records`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
-    body: JSON.stringify({ apartment_code: apartment, residential_area: area, full_name: 'Nguyen Van Browser' }),
+    headers: { Authorization: `Bearer ${tokenA}` },
+    // multipart, KHÔNG phải JSON: endpoint nhận ảnh giấy tờ. Không tự đặt
+    // `Content-Type` — boundary do FormData sinh ra, ghi đè là hỏng parse.
+    body: apartmentForm(apartment, area, 'Nguyen Van Browser'),
   })
-  const pending2 = sql(`SELECT count(*) FROM resident_link_requests WHERE user_id = '${uidA}' AND status = 'PENDING'`)[0]
+  const pending2 = sql(
+    `SELECT count(*) FROM verification_records
+     WHERE applicant_user_id = '${uidA}' AND record_type = 'apartment' AND status = 'PENDING'`)[0]
   check('3e. Gửi lần hai không tạo yêu cầu trùng', dup.status === 409 && pending2 === '1',
     `http=${dup.status} PENDING=${pending2}`)
 
@@ -457,14 +556,34 @@ async function main() {
   await loginViaUi(pageAdm, adminU)
   await pageAdm.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 40000 })
 
-  await pageAdm.goto(`${APP}/admin/link-requests`)
+  // Cổng duyệt đã chuyển từ `/admin/link-requests` sang `/review` (7a6a884):
+  // việc duyệt hồ sơ xác thực thuộc về bên thứ ba, không phải admin nội bộ.
+  // Trang mở mặc định ở tab "Căn hộ".
+  await pageAdm.goto(`${APP}/review`)
   await pageAdm.waitForTimeout(3000)
   const queueText = await pageAdm.locator('body').innerText()
-  check('4a. Admin thấy yêu cầu thật trong hàng chờ',
-    queueText.includes(apartment) && queueText.includes(userA), `căn hộ ${apartment}`)
+  // KHÔNG đòi hàng chờ hiện `userA`: trang duyệt cố ý không phơi tên đăng nhập
+  // của người nộp đơn — 4c ngay dưới đây canh đúng nguyên tắc đó. Đòi cả hai
+  // là tự mâu thuẫn.
+  check('4a. Người duyệt thấy yêu cầu thật trong hàng chờ',
+    queueText.includes(apartment), `căn hộ ${apartment}`)
   check('4b. Hàng chờ không có ô nhập UUID/mã cư dân',
     (await pageAdm.locator('input[id="user-id"], input[id="resident-id"]').count()) === 0)
-  check('4c. Tên hiển thị đã mask', !queueText.includes('Nguyen Van Browser'))
+  // 4c KHÔNG còn là "tên đã mask".
+  //
+  // Ở hàng chờ admin nội bộ cũ, tên người nộp đơn bị che. Cổng /review là một
+  // BÊN THỨ BA và công việc của họ là đối chiếu tên khai với hồ sơ căn hộ —
+  // che đi thì không duyệt được gì. Nên tên KHAI được hiện, có chủ ý.
+  //
+  // Thứ vẫn phải giấu là `owner_name` trong registry: provider chỉ trả
+  // `ownership_match: bool`. Đó mới là ranh giới thật, và đây là chỗ canh nó.
+  const reviewToken = await pageAdm.evaluate(() => sessionStorage.getItem('p118.access_token'))
+  const queueJson = await (await fetch(`${API}/verification-records?record_type=apartment&status=PENDING`, {
+    headers: { Authorization: `Bearer ${reviewToken}` },
+  })).text()
+  check('4c. Người duyệt nhận ownership_match, KHÔNG nhận owner_name',
+    !queueJson.includes('owner_name') && queueJson.includes('ownership_match'),
+    `owner_name=${queueJson.includes('owner_name')}`)
 
   const row = pageAdm.locator('li', { hasText: apartment }).first()
   await row.locator('button', { hasText: 'Duyệt' }).click()
@@ -482,25 +601,38 @@ async function main() {
   await pageA.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 40000 })
   await pageA.goto(`${APP}/`)
   await pageA.waitForTimeout(3000)
-  const homeAfter = await pageA.locator('body').innerText()
   const lockedAfter = await lockedCapabilities(pageA)
-  check('4e. Customer reload thấy căn hộ và dịch vụ được mở',
-    homeAfter.includes(apartment) && lockedAfter === 0, `khoá còn=${lockedAfter}`)
+
+  // Mã căn hộ đọc ở `/profile`, không phải `/`.
+  //
+  // `/` giờ chuyển hướng sang `/workspace` — không gian làm việc không hiện
+  // thông tin hồ sơ, và đó là chủ ý (`HomeRedirect` trong App.tsx ghi rõ, kèm
+  // ghi chú rằng harness cần cập nhật). Đòi mã căn hộ ở đây là đòi một màn
+  // hình khác phải làm việc của trang hồ sơ.
+  await pageA.goto(`${APP}/profile`)
+  await pageA.waitForTimeout(3000)
+  const profileAfter = await pageA.locator('body').innerText()
+  check('4e. Customer thấy căn hộ ở hồ sơ và dịch vụ được mở',
+    profileAfter.includes(apartment) && lockedAfter === 0,
+    `căn hộ hiện=${profileAfter.includes(apartment)} khoá còn=${lockedAfter}`)
 
   // Customer không tự duyệt được.
   const ctxR = await browser.newContext()
   const pageR = await ctxR.newPage()
   await registerViaUi(pageR, userR)
   const tokenR0 = await pageR.evaluate(() => sessionStorage.getItem('p118.access_token'))
-  await fetch(`${API}/auth/resident-link-requests`, {
+  const rejectCode = `RJ-${STAMP.slice(-4)}`
+  await fetch(`${API}/verification-records`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenR0}` },
-    body: JSON.stringify({ apartment_code: `RJ-${STAMP.slice(-4)}`, residential_area: area, full_name: 'Khach Reject' }),
+    headers: { Authorization: `Bearer ${tokenR0}` },
+    body: apartmentForm(rejectCode, area, 'Khach Reject'),
   })
   const uidR = sql(`SELECT id FROM users WHERE username = '${userR}'`, { expectRows: 1 })[0]
-  const reqR = sql(`SELECT request_id FROM resident_link_requests WHERE user_id = '${uidR}'`, { expectRows: 1 })[0]
+  const reqR = sql(
+    `SELECT record_id FROM verification_records WHERE applicant_user_id = '${uidR}'`,
+    { expectRows: 1 })[0]
 
-  const selfApprove = await fetch(`${API}/admin/resident-link-requests/${reqR}/decision`, {
+  const selfApprove = await fetch(`${API}/verification-records/${reqR}/decide`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenR0}` },
     body: JSON.stringify({ decision: 'approve' }),
@@ -510,13 +642,23 @@ async function main() {
     && sql(`SELECT count(*) FROM user_resident_links WHERE user_id = '${uidR}'`)[0] === '0',
     `http=${selfApprove.status}`)
 
-  await pageAdm.goto(`${APP}/admin/link-requests`)
+  await pageAdm.goto(`${APP}/review`)
   await pageAdm.waitForTimeout(3000)
-  await pageAdm.locator('li', { hasText: `RJ-${STAMP.slice(-4)}` }).first()
+  await pageAdm.locator('li', { hasText: rejectCode }).first()
     .locator('button', { hasText: 'Từ chối' }).click()
+  // Từ chối BẮT BUỘC lý do: backend trả 422 nếu thiếu, và UI chặn bằng modal.
+  // Bỏ qua bước này thì phép bấm không bao giờ thành một quyết định, và 4g đỏ
+  // vì lý do không liên quan tới thứ nó đang kiểm.
+  //
+  // Bám ĐÚNG chữ trên nút xác nhận. Bản trước dùng `/^(Xác nhận|Từ chối)$/` và
+  // khớp trúng một nút khác đang disabled, nên phép bấm treo đủ 30 giây rồi
+  // giết cả lượt chạy — một thất bại của harness đội lốt lỗi sản phẩm.
+  const reasonBox = pageAdm.locator('textarea').last()
+  await reasonBox.fill('Ảnh giấy tờ không đọc được')
+  await pageAdm.locator('button', { hasText: 'Xác nhận từ chối' }).click()
   await pageAdm.waitForTimeout(4000)
   check('4g. Từ chối: không mở quyền, yêu cầu ghi REJECTED',
-    sql(`SELECT status FROM resident_link_requests WHERE user_id = '${uidR}'`)[0] === 'REJECTED'
+    sql(`SELECT status FROM verification_records WHERE applicant_user_id = '${uidR}'`)[0] === 'REJECTED'
     && sql(`SELECT count(*) FROM user_resident_links WHERE user_id = '${uidR}'`)[0] === '0')
 
   if (stopHere('admin')) return finish(browser)
@@ -530,17 +672,22 @@ async function main() {
     }
   })
 
-  await pageA.goto(`${APP}/`)
+  // Danh sách dịch vụ giờ là `ul.seq` trong workspace, KHÔNG còn
+  // `<section><h2>Dịch vụ</h2>` của màn Home cũ; field xổ ngay trong từng dòng
+  // thay vì gom vào một `<form data-quick-action-form>` với `<fieldset>` mỗi
+  // dịch vụ. Các phép kiểm bên dưới giữ nguyên Ý NGHĨA, chỉ đổi cách chỉ tới
+  // phần tử — riêng 2e đổi cả kỳ vọng vì `/` nay chuyển hướng sang `/workspace`.
+  await pageA.goto(`${APP}/workspace`)
   await pageA.waitForTimeout(2500)
-  const cards = pageA.locator('section:has(h2:text-is("Dịch vụ")) button:not([disabled])')
+  const cards = pageA.locator('ul.seq > li button[aria-pressed]:not([disabled])')
   await cards.nth(0).click()
   await pageA.waitForTimeout(1200)
   check('2a. Click một quick action KHÔNG tạo workflow', startPosts.length === 0,
     `POST /start=${startPosts.length}`)
 
-  const quickForm = pageA.locator('form[data-quick-action-form]').first()
+  const serviceList = pageA.locator('ul.seq')
   check('2b. Quick action mở form chuẩn bị ngay trên trang',
-    await quickForm.count() === 1 && await quickForm.locator('input, select').count() >= 3)
+    (await serviceList.locator('input, select').count()) >= 3)
   check('2c. Ô prompt vẫn độc lập và không bị quick action điền hộ',
     (await pageA.locator('#ws-composer').inputValue()) === '')
 
@@ -548,29 +695,40 @@ async function main() {
   // thay form cũ như single-select. Sau đó bỏ mục thứ hai để phần happy path
   // bên dưới chỉ cần điền một dịch vụ.
   await cards.nth(1).click()
+  await pageA.waitForTimeout(800)
   check('2c1. Có thể chọn nhiều dịch vụ và form xổ đủ từng nhóm',
-    (await pageA.locator('button[aria-pressed="true"]').count()) === 2
-    && (await quickForm.locator('fieldset').count()) === 2)
+    (await serviceList.locator('button[aria-pressed="true"]').count()) === 2
+    && (await serviceList.locator('> li:has(input, select)').count()) === 2)
   await cards.nth(1).click()
+  await pageA.waitForTimeout(800)
   check('2c2. Bấm lại chỉ bỏ đúng dịch vụ đó',
-    (await pageA.locator('button[aria-pressed="true"]').count()) === 1
-    && (await quickForm.locator('fieldset').count()) === 1)
+    (await serviceList.locator('button[aria-pressed="true"]').count()) === 1
+    && (await serviceList.locator('> li:has(input, select)').count()) === 1)
   check('2c3. Dịch vụ tìm gợi ý bất động sản đã được gỡ',
-    !((await pageA.locator('section:has(h2:text-is("Dịch vụ"))').innerText())
-      .includes('Tìm gợi ý bất động sản')))
+    !(await serviceList.innerText()).includes('Tìm gợi ý bất động sản'))
 
-  const projectSelect = quickForm.locator('select').first()
+  // Id ổn định do `serviceForms.ts` sinh: `f-<khoá field>`. Bám theo id thay vì
+  // thứ tự thẻ — thêm một field mới sẽ không lặng lẽ làm phép điền lệch ô.
+  const projectSelect = pageA.locator('#f-project')
   for (let i = 0; i < 40; i++) {
     if (await projectSelect.locator('option').count() > 1) break
     await pageA.waitForTimeout(500)
   }
   await projectSelect.selectOption({ index: 1 })
-  await quickForm.locator('input[type="date"]').fill(date1)
-  await quickForm.locator('input[type="time"]').fill('10:00')
+  // `date` là field DÙNG CHUNG: nó nằm ngoài dòng dịch vụ và mang tiền tố id
+  // KHÁC — `shared-<khoá>` chứ không phải `f-<khoá>`. Hai tiền tố phản ánh hai
+  // chỗ dựng khác nhau (`ServiceLauncher` vs `InlineServiceForm`).
+  await pageA.locator('#shared-date').fill(date1)
+  await pageA.locator('#f-time').selectOption({ index: 1 })
+  // `needs_shuttle` là field BẮT BUỘC. Bỏ trống thì nút "Thực hiện" vẫn sáng
+  // nhưng execute bị chặn kèm thông báo "Còn thiếu: Xe đưa đón" — không có
+  // request nào đi, và 2d đỏ với `POST=0` trông y như lỗi backend.
+  // Chọn "Tôi tự đi" để không kéo theo nhóm field địa điểm đón.
+  await pageA.locator('#f-needs_shuttle').selectOption('false')
 
   const before = Number(sql(`SELECT count(*) FROM workflows WHERE owner_user_id = '${uidA}'`)[0])
   const cardsBeforeSend = await cardWorkflowIds(pageA)
-  await quickForm.locator('button[type="submit"]').click()
+  await pageA.locator('button', { hasText: 'Thực hiện' }).first().click()
   const wfQuick = await waitForNewCard(pageA, cardsBeforeSend)
   const after = Number(sql(`SELECT count(*) FROM workflows WHERE owner_user_id = '${uidA}'`)[0])
   check('2d. Chỉ khi gửi form mới tạo ĐÚNG một workflow',
@@ -579,11 +737,22 @@ async function main() {
   // Luồng cũ đẩy người dùng sang /workflow/{id} ngay sau khi gửi. Cuộc hội
   // thoại vì thế đứt làm hai màn hình.
   check('2e. Gửi form xong KHÔNG bị đẩy sang trang khác',
-    new URL(pageA.url()).pathname === '/', `url=${new URL(pageA.url()).pathname}`)
+    new URL(pageA.url()).pathname === '/workspace', `url=${new URL(pageA.url()).pathname}`)
+  // Goal do form dựng mang TÊN DỰ ÁN và ngày, không phải tên dịch vụ chung
+  // chung: "Đặt lịch tham quan Vinhomes Ocean Park ngày …". Bản trước tìm
+  // "Đặt lịch tham quan dự án" — nhãn trong danh sách năng lực, không bao giờ
+  // là câu được gửi đi.
+  const conversation = await pageA.locator('body').innerText()
   check('2f. Goal do form chuẩn bị xuất hiện trong hội thoại',
-    (await pageA.locator('text=Đặt lịch tham quan dự án').count()) > 0)
-  check('2g. Thẻ workflow xuất hiện ngay trong hội thoại',
-    Boolean(wfQuick) && (await pageA.locator('section[aria-label="Tiến trình yêu cầu"]').count()) >= 1)
+    /Đặt lịch tham quan .*ngày \d{4}-\d{2}-\d{2}/.test(conversation),
+    /Đặt lịch tham quan .*ngày \d{4}-\d{2}-\d{2}/.test(conversation)
+      ? ''
+      : (conversation.includes('Đặt lịch tham quan') ? 'có chữ nhưng sai dạng' : 'không thấy goal'))
+  // Workspace không dựng `section[aria-label="Tiến trình yêu cầu"]` như hội
+  // thoại cũ; tiến trình nằm ở canvas hành trình.
+  check('2g. Hành trình xuất hiện ngay sau khi gửi',
+    Boolean(wfQuick) && (await pageA.locator('[aria-label="Chi tiết hành trình"]').count()) >= 1,
+    `workflow=${Boolean(wfQuick)}`)
 
   const body = JSON.parse(startPosts[0] || '{}')
   const forbidden = ['tasks', 'task_plan', 'tools', 'resident_id', 'account_state', 'owner_user_id',
@@ -617,25 +786,48 @@ async function main() {
   const cardsBeforeQuestion = await cardWorkflowIds(pageA)
   const lookupReply = pageA.locator('#ws-composer')
   await lookupReply.fill('Có những dự án nào?')
+  // Ghi lại MỌI request đi ra trong lúc này. Nếu câu hỏi phụ lại rơi vào một
+  // workflow khác (hoặc mở workflow mới), đó là một phát hiện về sản phẩm —
+  // và phải đọc được, thay vì lẫn vào một lần treo 30 giây không giải thích.
+  const lookupCalls = []
+  const recordCall = (r) => {
+    if (r.url().includes('/workflows/demo/')) lookupCalls.push(`${r.method()} ${r.url().split('/api/v1')[1]}`)
+  }
+  pageA.on('request', recordCall)
   const lookupResponsePromise = pageA.waitForResponse(
     (response) => response.url().includes(`/workflows/demo/${wfCompound}/continue`)
       && response.request().method() === 'POST',
-  )
-  await pageA.getByRole('button', { name: 'Gửi', exact: true }).click()
+  ).catch(() => null)
+  // Nút gửi của workspace KHÔNG tên "Gửi": ở chế độ chọn dịch vụ nó là
+  // "Thực hiện", ở chế độ hành trình là "Gửi cho P-118" (xem `CommandRail`).
+  // `getByRole(name: 'Gửi', exact: true)` không khớp cái nào, nên phép bấm
+  // không xảy ra và `waitForResponse` treo đủ 30 giây rồi ném lỗi ra ngoài
+  // `try` — giết cả lượt chạy thay vì đánh đỏ một check.
+  //
+  // `.console-run` là chính nút đó, và các helper khác trong file này đã dùng
+  // nó — bám theo cho nhất quán.
+  await pageA.locator('.console-run').click()
   const lookupResponse = await lookupResponsePromise
-  const lookupBody = await lookupResponse.json().catch(() => ({}))
-  check('6b1. Câu hỏi phụ được API chấp nhận', lookupResponse.status() === 202,
-    `http=${lookupResponse.status()} detail=${String(lookupBody.detail ?? '').slice(0, 120)}`)
-  if (lookupResponse.status() !== 202) return finish(browser)
+  pageA.off('request', recordCall)
+  const lookupBody = lookupResponse ? await lookupResponse.json().catch(() => ({})) : {}
+  check('6b1. Câu hỏi phụ được API chấp nhận', lookupResponse?.status() === 202,
+    lookupResponse
+      ? `http=${lookupResponse.status()} detail=${String(lookupBody.detail ?? '').slice(0, 120)}`
+      : `không có POST /continue tới ${wfCompound.slice(0, 8)} — đã gọi: [${lookupCalls.join(', ') || 'không gì'}]`)
+  if (lookupResponse?.status() !== 202) return finish(browser)
   // Câu trả lời là một bubble hội thoại độc lập, không nhét ngược vào card
   // tiến trình. Đây chính là ranh giới giúp card chỉ biểu diễn trạng thái.
-  await pageA.locator('div.flex.flex-col.items-start > p', { hasText: 'Vinhomes Ocean Park' })
+  // `[data-turn="agent"]` thay cho `div.flex.flex-col.items-start > p`: selector
+  // cũ bám vào class Tailwind và đã chết khi bố cục hội thoại đổi — nó treo 30
+  // giây rồi giết cả lượt chạy, trong khi câu trả lời vẫn hiện đúng trên màn
+  // hình. Xem `ConversationStream`.
+  await pageA.locator('[data-turn="agent"]', { hasText: 'Vinhomes Ocean Park' })
     .last().waitFor({ timeout: 30000 })
   check('6b2. Hỏi danh sách dự án được trả lời mà không tạo workflow mới',
     JSON.stringify(await cardWorkflowIds(pageA)) === JSON.stringify(cardsBeforeQuestion)
     && (await pageA.locator('#ws-composer').count()) === 1)
-  const userHistory = await pageA.locator('div.flex.justify-end > p').allInnerTexts()
-  const assistantHistory = await pageA.locator('div.flex.flex-col.items-start > p').allInnerTexts()
+  const userHistory = await pageA.locator('[data-turn="user"]').allInnerTexts()
+  const assistantHistory = await pageA.locator('[data-turn="agent"]').allInnerTexts()
   check('6b3. Hỏi tiếp không làm mất lịch sử cùng workflow',
     userHistory.some((text) => text.includes('Đặt lịch tham quan dự án'))
     && userHistory.some((text) => text.includes('Có những dự án nào'))
@@ -651,36 +843,61 @@ async function main() {
     plate_number: `51B-${STAMP.slice(-5)}`, vehicle_type: 'car',
     booking_date: date1, parking_zone: 'ZONE_A',
   })
+  // Hội thoại giờ ở `/workspace`, không phải `/` — `HomeRedirect` đưa khách
+  // hàng sang đó và `/` chỉ còn là chặng chuyển hướng.
   check('6a2. Trả lời xong vẫn ở lại hội thoại, thẻ chuyển sang lượt chạy mới',
-    new URL(pageA.url()).pathname === '/' && wfPay !== wfCompound,
+    new URL(pageA.url()).pathname === '/workspace' && wfPay !== wfCompound,
     `url=${new URL(pageA.url()).pathname} wf=${mask(wfPay)}`)
   const cardShown = await waitForApprovalCard(pageA, wfPay)
-  const steps = await pageA.locator('section[aria-label="Tiến trình yêu cầu"] ol li p').allInnerTexts().catch(() => [])
+  // Workspace vẽ các bước bằng canvas (`JourneyNode`), KHÔNG phải `StepList` —
+  // `StepList` chỉ còn trang chi tiết `/workflow/:id` dùng. Selector gốc
+  // (`section[aria-label="Tiến trình yêu cầu"] ol li p`) là markup của bề mặt
+  // chat CŨ. Cả hai đều trả rỗng, nên phép kiểm này báo đỏ trong khi các bước
+  // vẫn hiện đầy đủ trên màn hình.
+  //
+  // Đọc thuộc tính chứ không đọc `innerText`: node còn mang tóm tắt, chi tiết
+  // và mốc thời gian, nên `innerText` sẽ trộn tất cả vào rồi phép kiểm "không
+  // chứa tên tool" bắt nhầm chuỗi từ chỗ khác.
+  const steps = await pageA.locator('[data-journey-step]')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('data-journey-step') || ''))
+    .catch(() => [])
   check('6c. Hiện đủ bước nghiệp vụ bằng tiếng Việt',
     cardShown && steps.length >= 3 && !steps.some((s) => /register_vehicle|book_parking|pay_fee/.test(s)),
     steps.slice(0, 3).join(' | ').slice(0, 80))
 
-  const uiAmount = await pageA.locator('p.text-2xl').first().innerText().catch(() => '')
+  // Hỏi theo NHÃN thay vì bám vào cỡ chữ (`p.text-2xl`): số tiền vẫn là số
+  // tiền kể cả khi thiết kế đổi bậc typography.
+  const uiAmount = await pageA.locator('[data-detail="Số tiền"] dd').first().innerText().catch(() => '')
   const dbAmount = sql(
     `SELECT b.amount FROM payment_approvals a JOIN parking_bookings b ON b.booking_id = a.booking_id
      WHERE a.workflow_id = '${wfPay}'::uuid AND a.status = 'AWAITING'`)[0]
+  // Hai giá trị RỖNG bằng nhau vẫn là bằng nhau — và phép so ngây thơ ở bản
+  // trước báo xanh cho `UI="" DB=undefined`, tức không đọc được gì mà vẫn nói
+  // "khớp". Một phép kiểm đạt một cách vô nghĩa còn tệ hơn phép kiểm đỏ: nó
+  // khẳng định thứ nó chưa hề nhìn thấy.
+  const uiDigits = uiAmount.replace(/\D/g, '')
+  const dbDigits = String(dbAmount ?? '').replace(/\D/g, '')
   check('6d. Báo giá khớp booking authoritative',
-    uiAmount.replace(/\D/g, '') === String(dbAmount || '').replace(/\D/g, ''),
+    uiDigits.length > 0 && dbDigits.length > 0 && uiDigits === dbDigits,
     `UI="${uiAmount}" DB=${dbAmount}`)
 
   const payBefore = Number(sql('SELECT count(*) FROM payments')[0])
-  await cardFor(pageA, wfPay).locator('button', { hasText: 'Xác nhận thanh toán' }).click()
+  // Nút nằm trong thẻ chờ của workspace. `cardFor` bám vào `ChatWorkflowCard`
+  // — bề mặt chat CŨ — nên phép bấm này treo 30 giây rồi giết cả lượt chạy.
+  await pageA.locator('[data-pending-card="approval"]')
+    .getByRole('button', { name: 'Xác nhận thanh toán' })
+    .click()
   const okLabel = await waitForCardTerminal(pageA, wfPay)
   const payAfter = Number(sql('SELECT count(*) FROM payments')[0])
   check('6e. Duyệt → Hoàn thành, đúng một payment',
-    okLabel === 'Hoàn thành' && payAfter === payBefore + 1, `${okLabel} · payments ${payBefore}→${payAfter}`)
+    okLabel === 'SUCCESS' && payAfter === payBefore + 1, `${okLabel} · payments ${payBefore}→${payAfter}`)
 
   // Response Agent: P-118 phải NÓI một câu về chính yêu cầu này, ngay trong
   // hội thoại. Trước lượt này chỗ đó chỉ có câu ghép cứng theo stage.
   // Câu trả lời tới sau kết quả vài nhịp (backend sinh ở tác vụ nền).
-  await pageA.locator('div.flex.flex-col.items-start p').first()
+  await pageA.locator('[data-turn="agent"]').first()
     .waitFor({ timeout: 30000 }).catch(() => {})
-  const bubbles = await pageA.locator('div.flex.flex-col.items-start p').allInnerTexts().catch(() => [])
+  const bubbles = await pageA.locator('[data-turn="agent"]').allInnerTexts().catch(() => [])
   const spoken = bubbles.filter((b) => b.trim().length > 20)
   check('6h. P-118 trả lời bằng lời trong hội thoại', spoken.length > 0,
     (spoken.at(-1) ?? '').slice(0, 90))
@@ -702,7 +919,9 @@ async function main() {
     `SELECT b.booking_id FROM payment_approvals a JOIN parking_bookings b ON b.booking_id = a.booking_id
      WHERE a.workflow_id = '${wfR}'::uuid`)
   const payBeforeR = Number(sql('SELECT count(*) FROM payments')[0])
-  await cardFor(pageA, wfR).locator('button', { hasText: 'Từ chối' }).click()
+  await pageA.locator('[data-pending-card="approval"]')
+    .getByRole('button', { name: 'Từ chối' })
+    .click()
   const rejLabel = await waitForCardTerminal(pageA, wfR)
   const payAfterR = Number(sql('SELECT count(*) FROM payments')[0])
   check('6f. Từ chối: không thu tiền, chỗ đã giữ vẫn còn',
@@ -728,9 +947,13 @@ async function main() {
     // kế. Điều PHẢI sống sót là workflow: mở trang chi tiết và kiểm ở đó.
     await pageA.goto(`${APP}/workflow/${wfS}`)
     await pageA.waitForTimeout(4000)
-    const stepsAfter = await pageA.locator('ol li p.font-medium').count()
+    // Trang chi tiết `/workflow/:id` dựng bước bằng `StepList` — đây là chỗ
+    // `data-step-list` thuộc về (workspace thì dùng canvas, xem
+    // `data-journey-step`). Số tiền đọc qua `data-quote-amount` thay vì
+    // `p.text-2xl`, một bậc typography.
+    const stepsAfter = await pageA.locator('[data-step-list] [data-step]').count()
     const btns = await pageA.locator('button', { hasText: /Xác nhận thanh toán|Từ chối/ }).count()
-    const amountAfter = await pageA.locator('p.text-2xl').first().innerText().catch(() => '')
+    const amountAfter = await pageA.locator('[data-quote-amount]').first().innerText().catch(() => '')
     check('6g. Restart container: giữ báo giá và hai nút',
       stepsAfter >= 3 && btns === 2 && amountAfter.replace(/\D/g, '').length > 0,
       `bước=${stepsAfter} nút=${btns} tiền="${amountAfter}"`)
@@ -743,11 +966,16 @@ async function main() {
 
   await pageA.reload()
   await pageA.waitForTimeout(5000)
+  // Đo HỘI THOẠI, không đo danh sách workflow. `cardWorkflowIds` mở một tab
+  // sang `/workflows` và liệt kê MỌI workflow của người dùng — tới bước này họ
+  // đã có cả chục, nên phép kiểm cũ không thể đạt và nó không hề nói về thứ nó
+  // định nói: sau F5, khung chat phải TRỐNG.
   check('8a. F5 mở cuộc trò chuyện mới, không tự nhét workflow cũ vào chat',
-    (await cardWorkflowIds(pageA)).length === 0
+    (await pageA.locator('[data-turn]').count()) === 0
     && (await pageA.locator('#clarification-reply').count()) === 0
     && (await pageA.locator('#ws-composer').count()) === 1
-    && new URL(pageA.url()).pathname === '/')
+    // Hội thoại giờ ở `/workspace`; `/` chỉ còn là chặng chuyển hướng.
+    && new URL(pageA.url()).pathname === '/workspace')
 
   // Workflow không mất: người dùng chủ động mở lại từ mục Workflows (ở đây
   // dùng URL đã biết để kiểm đúng contract của trang chi tiết).
@@ -755,13 +983,17 @@ async function main() {
     plate_number: `51H-${STAMP.slice(-5)}`, vehicle_type: 'car',
     booking_date: date4, parking_zone: 'ZONE_A',
   })
-  await pageA.locator('text=Cần bạn xác nhận khoản thanh toán').waitFor({ timeout: 240000 })
+  // Ở đây đang trên TRANG CHI TIẾT `/workflow/:id`, không phải workspace —
+  // `answerOnDetail` vừa điều hướng tới đó. `[data-pending-card]` là thẻ của
+  // workspace và không tồn tại ở trang này; `[data-quote-amount]` chỉ render
+  // khi có báo giá, nên nó vừa là dấu hiệu đúng vừa không bám vào câu chữ.
+  await pageA.locator('[data-quote-amount]').first().waitFor({ timeout: 240000 })
 
   await pageA.reload()
   await pageA.waitForTimeout(5000)
-  const stepsH = await pageA.locator('ol li').count()
+  const stepsH = await pageA.locator('[data-step-list] [data-step]').count()
   const btnsH = await pageA.locator('button', { hasText: /Xác nhận thanh toán|Từ chối/ }).count()
-  const amountH = await pageA.locator('p.text-2xl').first().innerText().catch(() => '')
+  const amountH = await pageA.locator('[data-quote-amount]').first().innerText().catch(() => '')
   check('8b. Workflow đang dở mở lại vẫn có bước, báo giá và hai nút',
     stepsH >= 3 && btnsH === 2 && amountH.replace(/\D/g, '').length > 0,
     `bước=${stepsH} nút=${btnsH} tiền="${amountH}"`)
@@ -817,11 +1049,14 @@ async function main() {
   check('8f. Đăng nhập lại vẫn thấy yêu cầu trong danh sách workflow',
     afterRelogin.includes('Đăng ký ô tô, đặt chỗ đỗ xe'))
 
-  const cardLinks = await pageA.locator('a[href^="/workflow/"]').evaluateAll(
-    (els) => els.map((e) => e.getAttribute('href')))
+  // Đếm HÀNG, không đếm thẻ `<a>`: mỗi hàng có ba `<Link>` cùng trỏ về một
+  // workflow (tiêu đề, trạng thái, mũi tên), nên phép đếm cũ luôn báo "nhân
+  // đôi" — nó đo số lối vào chứ không đo số workflow.
+  const cardLinks = await pageA.locator('[data-workflow-row]').evaluateAll(
+    (els) => els.map((e) => e.getAttribute('data-workflow-row')))
   check('8g. Danh sách không nhân đôi workflow',
-    new Set(cardLinks).size === cardLinks.length,
-    `thẻ=${cardLinks.length} khác nhau=${new Set(cardLinks).size}`)
+    cardLinks.length > 0 && new Set(cardLinks).size === cardLinks.length,
+    `hàng=${cardLinks.length} khác nhau=${new Set(cardLinks).size}`)
 
   // Workflow cha đã archived không được hiện thành một yêu cầu riêng.
   check('8h. Workflow cha đã bàn giao không hiện lại',
@@ -883,7 +1118,9 @@ async function main() {
 
   const wfErr = await sendGoal(pageA, 'Tôi muốn đặt lịch tham quan căn hộ.')
   const errLabel = await waitForCardTerminal(pageA, wfErr, 120000)
-  check('5b. UI hiện lỗi terminal, không quay mãi', TERMINAL_LABELS.has(errLabel), `nhãn="${errLabel}"`)
+  // `waitForCardTerminal` giờ trả TRẠNG THÁI (`SUCCESS`/`FAILED`/`CANCELLED`),
+  // không trả nhãn tiếng Việt — xem `journeyState`.
+  check('5b. UI hiện lỗi terminal, không quay mãi', TERMINAL_STATES.has(errLabel), `trạng thái="${errLabel}"`)
 
   // Polling phải DỪNG HẲN, không phải dừng ngay lập tức.
   //
@@ -907,7 +1144,7 @@ async function main() {
   const errText = await pageA.locator('body').innerText()
   const dbErr = sql(`SELECT status || '|' || coalesce(error_code,'-') FROM workflows WHERE workflow_id = '${wfErr}'::uuid`)[0]
   check('5d. Reload vẫn thấy lỗi, đọc từ PostgreSQL',
-    TERMINAL_LABELS.has(await statusLabel(pageA)) && dbErr.startsWith('FAILED|LLM_CONFIGURATION_ERROR'),
+    TERMINAL_STATES.has(await statusLabel(pageA)) && dbErr.startsWith('FAILED|LLM_CONFIGURATION_ERROR'),
     `DB=${dbErr}`)
 
   const leaked = ['LLMConfigurationError', 'OPENROUTER_API_KEY', 'postgresql://', 'SELECT ',
@@ -931,7 +1168,8 @@ async function main() {
   console.log('\n--- PostgreSQL (p118_db, đã mask) ---')
   console.log('  user A          :', mask(uidA))
   console.log('  liên kết        :', sql(`SELECT verification_status FROM user_resident_links WHERE user_id = '${uidA}'`)[0])
-  console.log('  yêu cầu liên kết:', sql(`SELECT status FROM resident_link_requests WHERE user_id = '${uidA}'`)[0])
+  console.log('  hồ sơ xác thực  :', sql(
+    `SELECT status FROM verification_records WHERE applicant_user_id = '${uidA}'`)[0])
   console.log('  workflow của A  :', sql(`SELECT count(*) FROM workflows WHERE owner_user_id = '${uidA}'`)[0])
   console.log('  workflow bị kẹt :', sql(
     "SELECT count(*) FROM workflows WHERE status IN ('PENDING','RUNNING') AND archived_at IS NULL "

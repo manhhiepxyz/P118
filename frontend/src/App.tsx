@@ -6,6 +6,8 @@ import { AdminRoute, AuthProvider, ProtectedRoute, ProviderRoute, useAuth } from
 import { NotificationProvider } from './lib/notifications'
 import { AdminDashboardPage } from './pages/AdminDashboardPage'
 import { ApartmentLinkPage } from './pages/ApartmentLinkPage'
+import { SupportPage } from './pages/SupportPage'
+import { VerifyApartmentPage } from './pages/VerifyApartmentPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { LoginPage } from './pages/LoginPage'
 import { ProfilePage } from './pages/ProfilePage'
@@ -91,6 +93,34 @@ export default function App() {
             }
           />
 
+          {/* Cổng của ĐƠN VỊ XÁC THỰC, phía người nộp hồ sơ.
+              Dùng chung vỏ với `/review` — cùng một cổng, hai vai — nên người
+              dùng thấy rõ mình đã rời P-118. `/apartment-link` bên Agent chỉ
+              còn là cửa vào: nó cho biết đang ở bước nào rồi dẫn sang đây.
+              Ranh giới này phản ánh đúng thực tế: xác minh căn hộ KHÔNG nằm
+              trong 10 tool của Agent, một đơn vị độc lập mới quyết định. */}
+          <Route
+            path="/verify"
+            element={
+              <ProtectedRoute>
+                <ReviewPortalLayout audience="applicant" />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<VerifyApartmentPage />} />
+          </Route>
+
+          {/* Hỗ trợ — câu hỏi thường gặp, quyền riêng tư, liên hệ.
+              Cùng vỏ workspace như các trang khách hàng khác. */}
+          <Route
+            path="/support"
+            element={
+              <ProtectedRoute>
+                <SupportPage />
+              </ProtectedRoute>
+            }
+          />
+
           <Route
             path="/vehicle-register"
             element={
@@ -142,6 +172,21 @@ export default function App() {
             }
           />
 
+          {/* Admin — chỉ admin; dashboard chỉ còn số liệu vận hành. Việc duyệt
+              hồ sơ xác thực đã chuyển hẳn cho cổng bên thứ 3 (`/review`).
+
+              Nằm NGOÀI `AppLayout` như `/workspace` và `/workflows`: trang này
+              dựng `WorkspaceShell`, vốn tự có sidebar và khoá 100dvh. Để trong
+              AppLayout sẽ ra hai sidebar chồng nhau. */}
+          <Route
+            path="/admin"
+            element={
+              <AdminRoute>
+                <AdminDashboardPage />
+              </AdminRoute>
+            }
+          />
+
           {/* App chính — yêu cầu đăng nhập */}
           <Route
             element={
@@ -162,16 +207,6 @@ export default function App() {
 
             <Route path="/approvals" element={<ApprovalsPage />} />
 
-            {/* Admin — chỉ admin; dashboard chỉ còn giám sát workflow. Việc
-                duyệt hồ sơ xác thực đã chuyển hẳn cho cổng bên thứ 3 (`/review`). */}
-            <Route
-              path="/admin"
-              element={
-                <AdminRoute>
-                  <AdminDashboardPage />
-                </AdminRoute>
-              }
-            />
           </Route>
 
           {/* Fallback */}

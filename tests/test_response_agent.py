@@ -285,6 +285,41 @@ async def test_it_may_not_invent_a_date():
 
 
 @pytest.mark.asyncio
+async def test_a_viewing_date_may_be_written_the_way_vietnamese_people_write_it():
+    """Dữ liệu mang `2029-01-15`; câu trả lời viết `15/01/2029`. Cùng một ngày.
+
+    Trước khi có `_vietnamese_date_forms`, hai chuỗi này khác nhau sau khi bỏ
+    dấu phân cách, nên guard kết luận model bịa số và MỌI câu nhắc tới lịch
+    tham quan đều rơi về câu mặc định. Đo được: hai lượt gọi model liên tiếp
+    trên stack thật đều bị loại với đúng lý do đó.
+    """
+    answer = "Mình đã gửi yêu cầu tham quan Vinhomes Ocean Park lúc 08:00 ngày 15/01/2029."
+    reply = await _reply(
+        AgentReply(answer=answer),
+        status="WAITING_APPROVAL",
+        approval_actor="PROVIDER",
+        viewing={"du_an": "Vinhomes Ocean Park", "ngay": "2029-01-15", "gio": "08:00"},
+    )
+    assert reply.answer == answer
+
+
+@pytest.mark.asyncio
+async def test_a_viewing_date_that_is_not_in_the_data_is_still_refused():
+    """Guard KHÔNG bị nới lỏng: chỉ ngày đã có trong view mới được viết lại.
+
+    Không có phép thử này thì `_vietnamese_date_forms` có thể âm thầm biến
+    thành "chấp nhận mọi ngày" mà suite vẫn xanh.
+    """
+    reply = await _reply(
+        AgentReply(answer="Mình đã gửi yêu cầu tham quan lúc 08:00 ngày 20/02/2030."),
+        status="WAITING_APPROVAL",
+        approval_actor="PROVIDER",
+        viewing={"du_an": "Vinhomes Ocean Park", "ngay": "2029-01-15", "gio": "08:00"},
+    )
+    assert reply.answer == BASELINE
+
+
+@pytest.mark.asyncio
 async def test_json_mode_prompts_contain_the_word_json():
     """Thiếu chữ "json" là mọi lượt gọi đều hỏng — và hỏng HOÀN TOÀN im lặng.
 
@@ -343,3 +378,161 @@ async def test_a_very_long_answer_is_refused():
     """ "Giải thích ngắn gọn" là một yêu cầu, nên nó phải được cưỡng chế."""
     long_answer = "Mình đã đăng ký xe và giữ chỗ đỗ xe cho bạn xong rồi nhé. " * 12
     assert (await _reply(AgentReply(answer=long_answer))).answer == BASELINE
+
+
+@pytest.mark.parametrize(
+    ("actor", "expected"),
+    [
+        ("USER", "thanh toán"),
+        ("PROVIDER", "đơn vị cung cấp dịch vụ"),
+        ("ADMIN", "ban quản lý"),
+    ],
+)
+def test_waiting_approval_tells_the_model_who_is_actually_deciding(actor: str, expected: str) -> None:
+    """Một mã trạng thái, ba người quyết định khác nhau.
+
+    `WAITING_APPROVAL` dùng cho cả "chờ khách xác nhận khoản tiền" lẫn "chờ đơn
+    vị duyệt lịch tham quan". Bản trước dịch cứng thành nghĩa thứ nhất, nên với
+    một lịch tham quan model được BẢO là đang chờ thanh toán — và nó viết đúng
+    theo đó: "Bạn vui lòng xác nhận thanh toán giúp mình nhé", cho một việc
+    không có khoản phí nào.
+    """
+    from src.agents.prompts.response_prompt import _human_status
+
+    assert expected in _human_status("WAITING_APPROVAL", actor)
+
+
+@pytest.mark.parametrize(
+    ("wants_shuttle", "passengers", "expect_key"),
+    [
+        (False, None, False),
+        (False, 3, False),
+        (True, 3, True),
+        (True, None, False),
+    ],
+)
+def test_only_facts_that_apply_are_handed_to_the_model(wants_shuttle, passengers, expect_key) -> None:
+    """`None` trong payload không đọc là "không áp dụng" — model đọc là "còn thiếu".
+
+    `passenger_count` thuộc về đặt xe đưa đón, không phải input của
+    `schedule_property_viewing`. Khi khách chọn tự đi, nó là `None` — và gửi
+    `so_khach: null` khiến model kết câu bằng "bạn vui lòng cho biết số lượng
+    khách tham gia nhé", xin một thông tin không ai cần cho một lịch đã gửi đi.
+    """
+    from src.api.routes import _viewing_facts
+    from src.models.schemas import DemoViewingApproval
+
+    facts = _viewing_facts(
+        DemoViewingApproval(
+            task_id="t1",
+            project_id="ocean-park",
+            project_name="Vinhomes Ocean Park",
+            viewing_date="2029-01-15",
+            viewing_time="08:00",
+            passenger_count=passengers,
+            wants_shuttle=wants_shuttle,
+        )
+    )
+    assert ("so_khach" in facts) is expect_key
+    # Quyết định "không cần xe" là một sự thật, không phải ô trống.
+    assert facts["co_xe_dua_don"] is wants_shuttle
+    assert None not in facts.values()
+
+
+def test_a_permission_refusal_is_not_described_to_the_model_as_an_error() -> None:
+    """`ACTION_DENIED` là quyết định bình thường, không phải hỏng hóc.
+
+    Nó dùng chung status `EXECUTION_ERROR` với lỗi thật. Dịch cứng thành "đã
+    dừng lại vì lỗi" khiến model viết "Quy trình đang tạm dừng vì lỗi ở một số
+    bước" cho một tài khoản chỉ đơn giản là chưa xác minh căn hộ — đo được
+    nguyên văn trên stack thật. Người dùng đi tìm một sự cố không tồn tại thay
+    vì đi xác minh căn hộ.
+    """
+    from src.agents.prompts.response_prompt import _human_status
+
+    denied = _human_status("EXECUTION_ERROR", None, "ACTION_DENIED")
+    assert "lỗi hệ thống" not in denied.replace("không phải lỗi hệ thống", "")
+    assert "chưa đủ điều kiện" in denied
+    # Lỗi thật vẫn phải được gọi là lỗi.
+    assert "lỗi" in _human_status("EXECUTION_ERROR", None, "SERVICE_UNAVAILABLE")
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_drops_the_instruction_is_refused():
+    """Bị chặn mà không nói cách gỡ thì câu trả lời chưa làm xong việc của nó.
+
+    Đo được trên stack thật: câu nền nêu rõ mở mục "Xác minh căn hộ", nhập mã
+    căn hộ, đính kèm ảnh giấy tờ. Model viết lại thành "hiện chưa đủ điều kiện
+    sử dụng, và không phải do lỗi hệ thống nên việc thử lại sẽ không giúp ích"
+    — đúng, lịch sự, và bỏ mất đúng phần người dùng cần để thoát khỏi tình
+    huống.
+
+    Rớt guard này thì rơi về câu nền, mà câu nền có đủ hướng dẫn — nên người
+    dùng không bao giờ mất thông tin.
+    """
+    reply = await _reply(
+        AgentReply(answer="Dịch vụ này hiện chưa đủ điều kiện sử dụng, bạn thử lại sau nhé."),
+        status="EXECUTION_ERROR",
+        error_code="ACTION_DENIED",
+        next_step="Mở mục “Xác minh căn hộ” ở thanh bên, nhập mã căn hộ…",
+    )
+    assert reply.answer == BASELINE
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_keeps_the_instruction_is_accepted():
+    """Chỉ đòi cái NEO, không đòi chép nguyên văn — model vẫn được tự diễn đạt."""
+    answer = "Mình chưa chạy được vì căn hộ chưa xác minh. Bạn mở mục “Xác minh căn hộ” rồi gửi hồ sơ nhé."
+    reply = await _reply(
+        AgentReply(answer=answer),
+        status="EXECUTION_ERROR",
+        error_code="ACTION_DENIED",
+        next_step="Mở mục “Xác minh căn hộ” ở thanh bên, nhập mã căn hộ…",
+    )
+    assert reply.answer == answer
+
+
+@pytest.mark.asyncio
+async def test_the_instruction_guard_is_off_when_there_is_nothing_to_instruct():
+    """`next_step` không đặt thì guard phải im — nếu không mọi câu đều rơi về nền."""
+    answer = "Mình đã đăng ký xe và giữ chỗ đỗ xe cho bạn xong rồi nhé."
+    assert (await _reply(AgentReply(answer=answer))).answer == answer
+
+
+def test_the_prompt_does_not_repeat_prohibitions_that_code_already_enforces() -> None:
+    """Prompt nói về GIỌNG; guard lo an toàn. Đừng để hai vai trộn lại.
+
+    Bản trước có 7/15 dòng là điều cấm và đúng MỘT dòng nói về giọng, nên model
+    viết nhạt vì được yêu cầu viết nhạt. Bốn điều cấm đã gỡ đi vì
+    `_reject_reason()` chặn chúng bằng code:
+
+        con số ngoài dữ liệu → `_numbers_in_view`
+        "đã hoàn tất" khi chưa → `_COMPLETION_CLAIMS`
+        tên kỹ thuật / mã nội bộ → `_FORBIDDEN_MARKERS` + `_SNAKE_CASE`
+        kể lại quá trình suy nghĩ → `_REASONING_MARKERS`
+
+    Đo được: sau khi gỡ, 15 lượt gọi model thật cho 0 lần rớt guard, và 5/5 câu
+    khác nhau mỗi tình huống. Nới prompt KHÔNG làm model vi phạm nhiều hơn.
+
+    Test này tồn tại để lần sau ai đó gặp một câu trả lời lạ sẽ không phản xạ
+    "thêm một dòng cấm vào prompt" — chỗ đúng là thêm vào guard.
+    """
+    from src.agents.prompts.response_prompt import RESPONSE_SYSTEM_PROMPT
+
+    for banned in ("không kể lại quá trình suy nghĩ", "tên bảng", "mã trạng thái"):
+        assert banned not in RESPONSE_SYSTEM_PROMPT.lower(), (
+            f"{banned!r} đã được `_reject_reason()` chặn — nêu lại trong prompt chỉ tốn chỗ"
+        )
+
+
+def test_the_prompt_actually_asks_for_a_voice() -> None:
+    """Có phần dạy giọng, và có ví dụ — tính từ một mình không dạy được văn phong."""
+    from src.agents.prompts.response_prompt import RESPONSE_SYSTEM_PROMPT
+
+    assert "Giọng của bạn" in RESPONSE_SYSTEM_PROMPT
+    assert "dí dỏm" in RESPONSE_SYSTEM_PROMPT
+    # Đọc tình huống trước khi chọn giọng: đùa lúc khách đang mắc kẹt là tệ hơn
+    # cả khô khan.
+    assert "mắc kẹt" in RESPONSE_SYSTEM_PROMPT
+    # Ranh giới không đổi: sáng tạo ở CÁCH NÓI, không ở nội dung.
+    assert "CHỈ nói những gì có trong dữ liệu" in RESPONSE_SYSTEM_PROMPT

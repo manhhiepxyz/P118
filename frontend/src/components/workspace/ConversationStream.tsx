@@ -41,10 +41,20 @@ export function ConversationStream({
         aria-live="polite"
         aria-label="Trao đổi với P-118"
       >
-        <ol className="space-y-3.5 py-3">
+        {/* `data-turn` là NEO CHO KIỂM THỬ, và nó tồn tại vì một lý do cụ thể.
+            Harness chấp nhận từng bám vào class Tailwind
+            (`div.flex.justify-end > p`, `div.flex.flex-col.items-start > p`) và
+            đã gãy HAI LẦN khi bố cục đổi — lần gần nhất nó treo 30 giây rồi
+            giết cả lượt chạy, trong khi sản phẩm hoàn toàn đúng: câu trả lời
+            vẫn hiện trên màn hình, chỉ là ở một cấu trúc DOM khác.
+
+            Một lượt kiểm thử báo đỏ vì lớp trình bày đổi là tiếng ồn; nó dạy
+            người đọc phớt lờ kết quả. Thuộc tính này là hợp đồng công khai với
+            harness, đổi bố cục thoải mái mà không phá nó. */}
+        <ol className="space-y-3.5 py-3" data-chat-transcript>
           {turns.map((turn) =>
             turn.from === 'agent' ? (
-              <li key={turn.id} className="rise flex gap-3">
+              <li key={turn.id} className="rise flex gap-3" data-turn="agent">
                 <span
                   aria-hidden
                   className="mt-[3px] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--r-xs)] font-mono text-[11px] font-bold"
@@ -62,7 +72,7 @@ export function ConversationStream({
                 </div>
               </li>
             ) : (
-              <li key={turn.id} className="rise flex justify-end">
+              <li key={turn.id} className="rise flex justify-end" data-turn="user">
                 <span className="sr-only">Bạn: </span>
                 <p
                   className="max-w-[75%] rounded-[var(--r-sm)] px-3.5 py-2 text-[15px] leading-[1.55] text-[var(--text-secondary)]"

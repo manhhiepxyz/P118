@@ -55,8 +55,18 @@ export interface PendingAction {
   details: PendingDetail[]
   approveLabel?: string
   rejectLabel?: string
-  /** Với `missing_info`: ô cần điền. */
+  /** Với `missing_info`: ô ĐẦU TIÊN cần điền — giữ cho các lối gọi cũ. */
   field?: { key: string; label: string; placeholder: string }
+  /**
+   * TẤT CẢ ô backend đang chờ, theo đúng thứ tự nó hỏi.
+   *
+   * Backend áp luật all-or-none cho câu trả lời dạng form: thiếu một ô là từ
+   * chối cả lượt. Luật ấy dựa trên giả định "form hiển thị đủ mọi ô đang
+   * hỏi" — mà giao diện lại chỉ vẽ ô đầu tiên. Hệ quả đo được: người dùng điền
+   * đúng dự án, bấm Tiếp tục, và bị trả lời về NGÀY THAM QUAN, một ô họ chưa
+   * hề được hỏi.
+   */
+  fields?: { key: string; label: string; placeholder: string }[]
   /**
    * Dấu vân của thứ đang được duyệt — số tiền, mã chỗ đỗ, ngày.
    *

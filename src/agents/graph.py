@@ -284,6 +284,24 @@ CLARIFICATION_UNAVAILABLE_MESSAGE = (
     "Mình chưa đủ cơ sở để hỏi thêm cho yêu cầu này. Bạn mô tả lại cụ thể hơn giúp mình nhé."
 )
 
+# Thiếu `resident_id` KHÔNG phải "không hỏi được", mà là "chưa đủ điều kiện".
+#
+# `resident_id` không nằm trong `_USER_PROVIDED_FIELDS` — đúng, không ai được
+# hỏi người dùng một ID nội bộ. Nhưng vì thế nó rơi vào nhánh từ chối chung, và
+# một khách chưa liên kết căn hộ hỏi "đăng ký ô tô, đặt chỗ đỗ xe" nhận được
+# "Mình chưa đủ cơ sở để hỏi thêm… Bạn mô tả lại cụ thể hơn" — một câu đổ lỗi
+# cho cách họ diễn đạt, trong khi mô tả của họ hoàn toàn rõ ràng. Họ sẽ viết
+# lại, rõ hơn nữa, và nhận đúng câu đó lần nữa.
+#
+# Thiếu `resident_id` chỉ có MỘT nghĩa: tài khoản chưa có liên kết cư dân đã
+# xác minh. Nói thẳng ra, kèm việc cần làm.
+RESIDENT_LINK_REQUIRED_MESSAGE = (
+    "Các dịch vụ này chỉ dành cho cư dân đã xác minh căn hộ. "
+    "Bạn vào mục Xác minh căn hộ, gửi mã căn hộ kèm ảnh giấy tờ để ban quản lý duyệt, "
+    "rồi quay lại nhé. Trong lúc chờ, mình vẫn giúp bạn đặt lịch tham quan hoặc "
+    "đăng ký nhận tư vấn được."
+)
+
 
 def needs_information_update(
     missing_fields: tuple[str, ...] | None,
@@ -307,7 +325,18 @@ def needs_information_update(
     public_fields = _missing_fields_for_user(tuple(missing_fields or ()), existing_context)
     if public_fields is None:
         # Không hỏi được thì từ chối an toàn, không render form rỗng cho user.
-        return {"clarification_error": CLARIFICATION_UNAVAILABLE_MESSAGE, "plan_validated": False}
+        #
+        # Nhưng phân biệt HAI lý do khác nhau: "thiếu một thứ không được phép
+        # hỏi" và "tài khoản chưa đủ điều kiện dùng dịch vụ". Gộp chúng vào một
+        # câu khiến trường hợp thứ hai — trường hợp phổ biến hơn hẳn — nhận một
+        # lời khuyên vô dụng.
+        needs_link = "resident_id" in (missing_fields or ()) and not existing_context.get("resident_id")
+        return {
+            "clarification_error": (
+                RESIDENT_LINK_REQUIRED_MESSAGE if needs_link else CLARIFICATION_UNAVAILABLE_MESSAGE
+            ),
+            "plan_validated": False,
+        }
 
     return {
         "planner_status": "NEEDS_INFORMATION",
@@ -425,6 +454,21 @@ def build_planner_graph(
             return {
                 "planner_status": "READY",
                 "plan": result.plan,
+                "missing_fields": (),
+                "plan_validated": False,
+            }
+
+        if result.status == "QUESTION":
+            # Câu hỏi, không phải việc cần làm. Dừng ở đây: không plan, không
+            # missing_fields, không thực thi gì.
+            #
+            # KHÔNG đặt `question`: đó là câu HỎI LẠI người dùng, dựng từ
+            # `missing_fields`. Ở đây ta không hỏi lại gì cả — ta trả lời. Câu
+            # trả lời do Response Agent viết ở tầng trên, từ dữ liệu nó đã có
+            # (danh mục quyền theo tài khoản, ngày hôm nay).
+            await emit("QUESTION")
+            return {
+                "planner_status": "QUESTION",
                 "missing_fields": (),
                 "plan_validated": False,
             }

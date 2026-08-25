@@ -15,6 +15,7 @@ import pytest
 
 from src.agents.graph import (
     CLARIFICATION_UNAVAILABLE_MESSAGE,
+    RESIDENT_LINK_REQUIRED_MESSAGE,
     build_planner_graph,
     needs_information_update,
 )
@@ -340,8 +341,19 @@ async def test_missing_resident_id_without_context_still_rejected() -> None:
 
     # Không thực thi, không bịa mã cư dân.
     assert boundary.calls == []
-    assert state.get("clarification_error") == CLARIFICATION_UNAVAILABLE_MESSAGE
     assert state.get("plan_validated") is False
+    # Câu từ chối phải NÊU ĐÍCH DANH việc cần làm.
+    #
+    # Bản trước dùng chung `CLARIFICATION_UNAVAILABLE_MESSAGE` ("Bạn mô tả lại
+    # cụ thể hơn giúp mình nhé") cho cả hai lý do rất khác nhau: "thiếu một
+    # thứ không được phép hỏi" và "tài khoản chưa đủ điều kiện". Với trường hợp
+    # thứ hai — phổ biến hơn hẳn — nó đổ lỗi cho cách người dùng diễn đạt,
+    # trong khi mô tả của họ hoàn toàn rõ ràng. Họ viết lại rõ hơn và nhận đúng
+    # câu đó lần nữa.
+    assert state.get("clarification_error") == RESIDENT_LINK_REQUIRED_MESSAGE
+    # Bất biến KHÔNG đổi: không hỏi người dùng một ID nội bộ.
+    assert "resident_id" not in str(state.get("clarification_error"))
+    assert not state.get("missing_fields")
 
 
 @pytest.mark.asyncio
@@ -886,9 +898,14 @@ async def test_planner_branch_never_asks_user_for_system_owned_field(field: str)
 
     # Không rơi vào NEEDS_INFORMATION → UI không có form rỗng để render.
     assert state.get("planner_status") != "NEEDS_INFORMATION"
-    assert state["clarification_error"] == CLARIFICATION_UNAVAILABLE_MESSAGE
+    # `resident_id` có câu riêng: thiếu nó KHÔNG phải "không hỏi được" mà là
+    # "tài khoản chưa liên kết căn hộ" — một việc người dùng làm được, nên phải
+    # nói ra. Các field còn lại thật sự không có gì để hướng dẫn.
+    expected = RESIDENT_LINK_REQUIRED_MESSAGE if field == "resident_id" else CLARIFICATION_UNAVAILABLE_MESSAGE
+    assert state["clarification_error"] == expected
     assert "question" not in state
     assert tuple(state.get("missing_fields") or ()) == ()
+    # Bất biến chung cho MỌI field: tên field nội bộ không bao giờ lọt ra câu chữ.
     assert field not in state["clarification_error"]
     assert boundary.calls == []
 
@@ -965,3 +982,43 @@ def test_both_needs_information_branches_share_one_policy() -> None:
         if field == "vehicle_id":
             continue
         assert "clarification_error" in needs_information_update((field,), {})
+
+
+@pytest.mark.asyncio
+async def test_a_question_stops_before_validation_and_never_executes() -> None:
+    """QUESTION là điểm dừng: không kế hoạch, không kiểm, không thực thi.
+
+    Trạng thái này tồn tại vì suốt trước đó mọi câu HỎI đều bị ép vào khuôn
+    "lập kế hoạch hoặc là thiếu dữ liệu", và cái thứ hai hiện ra với người dùng
+    thành "thông tin bạn cung cấp chưa hợp lệ" — đổ lỗi cho họ vì đã hỏi. Đã vá
+    bằng từ khoá năm lần (hỏi năng lực, hỏi cách làm, xác minh căn hộ, hỏi ngày,
+    hỏi quyền), lần nào cũng chỉ bịt được đúng cách hỏi mình nghĩ ra được.
+    """
+    planner = FakePlanner(PlannerResult(status="QUESTION"))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": "tôi có quyền gì", "existing_context": {}})
+
+    assert state["planner_status"] == "QUESTION"
+    assert boundary.calls == [], "câu hỏi mà vẫn chạy tác vụ"
+    assert state.get("plan") is None
+    assert not state.get("plan_validated")
+    # Không hỏi lại người dùng thứ gì — họ đang hỏi mình, không phải ngược lại.
+    assert tuple(state.get("missing_fields") or ()) == ()
+    assert "question" not in state
+    # Và KHÔNG có câu trả lời nào ở đây: planner phân loại, Response Agent viết.
+    assert "clarification_error" not in state
+
+
+def test_the_planner_cannot_smuggle_prose_through_the_question_status() -> None:
+    """Ranh giới cũ được giữ nguyên: planner không soạn chữ cho người dùng.
+
+    `_PlannerResponse` cố ý không có field văn bản. Nếu một ngày ai đó thêm vào
+    để "tiện", LLM sẽ nói thẳng ra ngoài mà không đi qua guard của Response
+    Agent — test này đỏ trước khi điều đó kịp xảy ra.
+    """
+    from src.agents.planner import _PlannerResponse
+
+    fields = set(_PlannerResponse.model_fields)
+    assert fields == {"status", "plan", "missing_fields"}, fields

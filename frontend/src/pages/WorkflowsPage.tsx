@@ -185,6 +185,11 @@ export function WorkflowsPage() {
                 return (
                   <li
                     key={item.workflow_id}
+                    /* `data-workflow-row`: một HÀNG = một workflow. Mỗi hàng có
+                       ba `<Link>` cùng trỏ về `/workflow/:id`, nên đếm thẻ `<a>`
+                       không đo được "danh sách có nhân đôi workflow không" — nó
+                       chỉ đếm số lối vào. */
+                    data-workflow-row={item.workflow_id}
                     className="group relative border-b border-[var(--border-subtle)] transition-colors duration-[var(--t-hover)] hover:bg-[var(--surface-raised)]"
                   >
                     <div className="flex min-h-[76px] items-center gap-5 py-4 pl-4 pr-4">

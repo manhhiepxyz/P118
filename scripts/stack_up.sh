@@ -26,11 +26,42 @@ PROJECT="$(basename "$PWD" | tr '[:upper:]' '[:lower:]')"
 BUILD=1
 [ "$1" = "--no-build" ] && BUILD=0
 
-APP_PORT_VALUE="${APP_PORT:-8080}"
+# Cổng host của backend — phải giống HỆT thứ compose dùng, nếu không script
+# này chờ ở một cổng còn stack lắng nghe ở cổng khác, rồi kết luận "hệ thống
+# chưa sẵn sàng" cho một hệ thống hoàn toàn khoẻ mạnh.
+#
+# Compose phân giải `${APP_PORT:-8080}` theo THỨ TỰ: biến môi trường trước,
+# rồi tới file `.env` ở gốc repo. Script này trước đây chỉ đọc biến môi
+# trường, nên với `APP_PORT=8000` trong `.env` — cấu hình đang dùng thật —
+# compose map cổng 8000 còn script chờ 8080. `/ready` không bao giờ xanh, và
+# thông báo lỗi đổ tội cho cấu hình LLM.
+#
+# `env_or_dotenv` sao lại đúng thứ tự ưu tiên đó, cho cả APP_PORT lẫn
+# POSTGRES_PORT.
+env_or_dotenv() {
+  eval "_v=\${$1}"
+  if [ -n "$_v" ]; then
+    printf '%s' "$_v"
+    return
+  fi
+  # Chỉ bốc đúng một khoá. KHÔNG `source .env`: file đó chứa API key thật, và
+  # nạp cả vào môi trường của script là mở rộng phạm vi rò rỉ không ai cần.
+  _v=$(sed -n "s/^$1=//p" .env 2>/dev/null | head -1 | tr -d "\"' ")
+  printf '%s' "${_v:-$2}"
+}
+
+APP_PORT_VALUE="$(env_or_dotenv APP_PORT 8080)"
+# Mặc định 5432 để KHỚP `docker-compose.yml:13`. Trước đây file này dùng 5433
+# còn compose dùng 5432, nên bước kiểm cổng soi một cổng trống trong khi
+# container publish sang cổng khác — và một postgres local trên 5432 đi lọt.
+# Hậu quả không phải là stack không lên, mà là mọi kết nối từ host tới
+# `127.0.0.1:5432` vào NHẦM database mà không có gì báo. Đó chính là kịch bản
+# `tests/_dbcheck.py` được viết ra để chặn.
+POSTGRES_PORT_VALUE="$(env_or_dotenv POSTGRES_PORT 5432)"
 # Cổng host mà stack sẽ chiếm. Provider chạy trên cổng canonical, và một
 # uvicorn local trên cùng cổng là nguyên nhân của kiểu lỗi khó chịu nhất:
 # mọi thứ trông bình thường, chỉ dữ liệu là sai.
-HOST_PORTS="$APP_PORT_VALUE ${POSTGRES_PORT:-5433} 8001 8002 8003 8005 8006 8007 8008"
+HOST_PORTS="$APP_PORT_VALUE $POSTGRES_PORT_VALUE 8001 8002 8003 8005 8006 8007 8008"
 
 say()  { printf '%s\n' "$*"; }
 fail() { printf '\nDỪNG: %s\n' "$*" >&2; exit 1; }

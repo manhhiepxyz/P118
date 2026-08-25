@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import os
 import sys
 from pathlib import Path
 
@@ -36,16 +37,32 @@ async def main() -> None:
     try:
         await run_migrations(pool)
 
-        username = input("Username (mặc định: admin): ").strip().lower() or "admin"
+        # Đường KHÔNG tương tác, cho setup tự động và cho môi trường không có tty.
+        #
+        # Dùng biến môi trường chứ KHÔNG dùng tham số dòng lệnh: argv hiện trong
+        # `ps` với mọi user trên máy, và nằm lại trong lịch sử shell. Biến môi
+        # trường chỉ thuộc về tiến trình.
+        #
+        # Interactive vẫn là mặc định — không đặt biến thì hành vi y như cũ.
+        env_username = os.environ.get("P118_ADMIN_USERNAME", "").strip().lower()
+        env_password = os.environ.get("P118_ADMIN_PASSWORD", "")
+
+        username = env_username or (input("Username (mặc định: admin): ").strip().lower() or "admin")
         if len(username) < 3:
             print("Username phải ít nhất 3 ký tự.")
             return
 
-        while True:
-            password = getpass.getpass("Password (ít nhất 8 ký tự): ")
-            if len(password) >= 8:
-                break
-            print("Mật khẩu phải ít nhất 8 ký tự, thử lại.")
+        if env_password:
+            if len(env_password) < 8:
+                print("P118_ADMIN_PASSWORD phải ít nhất 8 ký tự.")
+                return
+            password = env_password
+        else:
+            while True:
+                password = getpass.getpass("Password (ít nhất 8 ký tự): ")
+                if len(password) >= 8:
+                    break
+                print("Mật khẩu phải ít nhất 8 ký tự, thử lại.")
 
         password_hash = hash_password(password)
 

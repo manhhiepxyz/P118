@@ -157,6 +157,8 @@ class DemoWorkflowEvent(BaseModel):
         "TASK_SUCCESS",
         "TASK_FAILED",
         "NEEDS_INFORMATION",
+        # Người dùng HỎI, không yêu cầu làm. Điểm dừng, không có tác vụ nào.
+        "QUESTION",
         "VALIDATION_FAILED",
         "EXECUTION_FAILED",
         "FINISHED",
@@ -280,6 +282,7 @@ class DemoWorkflowResponse(BaseModel):
             "TASK_SUCCESS",
             "TASK_FAILED",
             "NEEDS_INFORMATION",
+            "QUESTION",
             "VALIDATION_FAILED",
             "EXECUTION_FAILED",
             "FINISHED",

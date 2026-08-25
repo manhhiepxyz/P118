@@ -9,7 +9,20 @@ interface Props {
   onChange: (value: string) => void
   onExecute: () => void
   journeyLabel?: string
+  /** Đang gửi / đang chuyển cảnh — KHOÁ nút, không phải trạng thái hệ thống. */
   busy?: boolean
+  /**
+   * P-118 đang thật sự làm việc: workflow còn chạy, hoặc câu trả lời đang soạn.
+   *
+   * Tách khỏi `busy` một cách có chủ ý. Trước đây chỉ báo trạng thái đọc `busy`,
+   * mà `busy` được truyền vào là `leaving` — cờ HOẠT ẢNH của vùng năng lực. Nên
+   * dòng "Đang thực hiện" chỉ nháy trong một transition CSS và chưa bao giờ
+   * hiện lúc hệ thống thật sự chạy.
+   *
+   * Cũng KHÔNG dùng chung với `busy` để khoá nút: người dùng phải hỏi được
+   * giữa chừng trong lúc một workflow đang chờ thông tin.
+   */
+  working?: boolean
   /** Lý do lần bấm vừa rồi không chạy. Hiện ngay cạnh chỉ báo trạng thái. */
   notice?: string | null
 }
@@ -43,6 +56,7 @@ export function CommandRail({
   onExecute,
   journeyLabel,
   busy = false,
+  working = false,
   notice = null,
 }: Props) {
   const canRun = (selected.length > 0 || value.trim().length > 0) && !busy
@@ -68,34 +82,40 @@ export function CommandRail({
       />
 
       <div className="mx-auto w-full max-w-[1000px] px-12 pb-6 pt-1">
-        {/* Chỉ báo trạng thái — ngoài bảng, cỡ nhỏ. Nó nói P-118 đang ở đâu,
-            nên nó thuộc về khung cảnh chứ không phải về ô nhập. */}
-        <div className="mb-2 flex items-center gap-2 px-0.5 text-[12px] text-[var(--text-muted)]">
-          <span
-            aria-hidden
-            className={`h-[6px] w-[6px] shrink-0 rounded-full ${busy ? 'pulse-dot' : ''}`}
-            style={{
-              backgroundColor: busy ? 'var(--running)' : notice ? 'var(--danger)' : 'var(--agent)',
-            }}
-          />
-          <span className="font-mono uppercase tracking-[0.16em] text-[var(--text-secondary)]">P-118</span>
-          <span aria-hidden>·</span>
-          {notice && !busy ? (
-            // `role="alert"` để trình đọc màn hình đọc ngay: đây là phản hồi
-            // cho một hành động vừa xảy ra, không phải chữ trang trí.
-            <span role="alert" className="font-medium" style={{ color: 'var(--danger)' }}>
-              {notice}
-            </span>
-          ) : (
-            <span>{busy ? 'Đang thực hiện' : 'Sẵn sàng'}</span>
-          )}
-          {journeyLabel && !notice && (
-            <>
-              <span aria-hidden>·</span>
-              <span className="min-w-0 flex-1 truncate">{journeyLabel}</span>
-            </>
-          )}
-        </div>
+        {/* Chỉ báo trạng thái — CHỈ hiện khi có gì để nói.
+            Trước đây dòng này luôn hiện, và ở trạng thái rảnh nó đọc là
+            "P-118 · Sẵn sàng" — trạng thái rỗng, chiếm một dòng ngay trên ô
+            nhập để khẳng định rằng không có gì đang xảy ra. Người dùng học cách
+            bỏ qua nó, và khi nó chuyển thành một thông báo lỗi thật thì họ cũng
+            bỏ qua nốt.
+            Giữ đúng ba trường hợp có tín hiệu: đang chạy, có lỗi vừa xảy ra,
+            hoặc đang mở một hành trình cụ thể. */}
+        {(working || notice || journeyLabel) && (
+          <div className="mb-2 flex items-center gap-2 px-0.5 text-[12px] text-[var(--text-muted)]">
+            <span
+              aria-hidden
+              className={`h-[6px] w-[6px] shrink-0 rounded-full ${working ? 'pulse-dot' : ''}`}
+              style={{
+                backgroundColor: working ? 'var(--running)' : notice ? 'var(--danger)' : 'var(--agent)',
+              }}
+            />
+            {notice && !working ? (
+              // `role="alert"` để trình đọc màn hình đọc ngay: đây là phản hồi
+              // cho một hành động vừa xảy ra, không phải chữ trang trí.
+              <span role="alert" className="font-medium" style={{ color: 'var(--danger)' }}>
+                {notice}
+              </span>
+            ) : working ? (
+              <span>Đang thực hiện</span>
+            ) : null}
+            {journeyLabel && !notice && (
+              <>
+                {working && <span aria-hidden>·</span>}
+                <span className="min-w-0 flex-1 truncate">{journeyLabel}</span>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Bảng lệnh. `focus-within` nâng cả bảng chứ không riêng ô nhập —
             người ta đang gõ vào PHẦN MỀM, không phải vào một ô. */}

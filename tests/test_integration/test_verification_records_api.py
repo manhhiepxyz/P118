@@ -415,3 +415,81 @@ async def test_provider_list_never_leaks_owner_name(verif_env, verif_client):
     # List có ownership_match để người duyệt quyết định, nhưng KHÔNG có owner_name.
     assert all("ownership_match" in i for i in items)
     assert not _has_key(res.json(), "owner_name")
+
+
+# ---------------------------------------------------------------------------
+# Không ai duyệt hồ sơ của chính mình
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_reviewer_cannot_approve_their_own_application(verif_env, verif_client):
+    """Leo thang quyền đã tái hiện được, chạy đến tận cùng:
+
+        provider nộp hồ sơ căn hộ "SELF-9001"  → tạo được
+        provider tự duyệt hồ sơ đó              → APPROVED, decided_by=provider
+        /auth/me                                → VERIFIED, căn hộ SELF-9001
+
+    Người duyệt tự cấp cho mình tư cách cư dân của một căn hộ KHÔNG có trong
+    registry. Toàn bộ giá trị của bước xác thực nằm ở chỗ có người thứ hai nhìn
+    vào hồ sơ — người duyệt trùng người nộp thì bước đó bằng không.
+    """
+    provider = await _make_provider(verif_env)
+
+    created = await _create_record(
+        verif_client,
+        provider,
+        "apartment",
+        {"apartment_code": "SELF-9001", "residential_area": "Vinhomes Ocean Park", "full_name": "Toi Tu Khai"},
+    )
+    assert created.status_code == 201, created.text
+    record_id = created.json()["item"]["record_id"]
+
+    decided = await _decide(verif_client, provider, record_id, "approve")
+    assert decided.status_code == 403, f"tự duyệt lọt qua: {decided.status_code} {decided.text}"
+    assert "chính mình" in decided.json()["detail"]
+
+    # Và hồ sơ phải còn nguyên PENDING — chặn sau khi đã đổi trạng thái thì
+    # rollback nghĩa là phải gỡ cả liên kết cư dân đã materialize.
+    mine = await verif_client.get("/api/v1/verification-records/my", headers=_headers(provider))
+    assert mine.json()["items"][0]["status"] == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_self_rejection_is_blocked_too(verif_env, verif_client):
+    """Từ chối cũng là quyết định.
+
+    Chỉ chặn `approve` thì người duyệt vẫn tự dập được hồ sơ bất lợi của mình —
+    và `decide_record` claim bằng UPDATE trên `status='PENDING'`, nên một lần từ
+    chối là hồ sơ hết đường được xem xét lại.
+    """
+    provider = await _make_provider(verif_env)
+    created = await _create_record(
+        verif_client,
+        provider,
+        "apartment",
+        {"apartment_code": "SELF-9002", "residential_area": "Vinhomes Ocean Park", "full_name": "Toi Tu Khai"},
+    )
+    record_id = created.json()["item"]["record_id"]
+
+    decided = await _decide(verif_client, provider, record_id, "reject", "tự dập hồ sơ của mình")
+    assert decided.status_code == 403, decided.text
+
+
+@pytest.mark.asyncio
+async def test_reviewing_someone_elses_application_still_works(verif_env, verif_client):
+    """Chốt phải HẸP. Chặn nhầm cả hồ sơ người khác là làm hỏng luồng duyệt.
+
+    Mutation test sống: siết `_reject_self_review` thành "chặn mọi hồ sơ" thì
+    test này đỏ ngay.
+    """
+    customer = await _register_customer(verif_client)
+    provider = await _make_provider(verif_env)
+
+    created = await _create_record(verif_client, customer, "apartment", OWNER_CLAIM)
+    assert created.status_code == 201, created.text
+    record_id = created.json()["item"]["record_id"]
+
+    decided = await _decide(verif_client, provider, record_id, "reject", "Giấy tờ chưa rõ")
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["item"]["status"] == "REJECTED"

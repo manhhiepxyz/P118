@@ -6,12 +6,13 @@ không có key tương ứng. `/health` nói đúng sự thật của nó — ti
 — nhưng đó không phải câu hỏi người vận hành đang hỏi. Câu họ hỏi là "gửi việc
 vào có chạy không", và câu đó chỉ `/ready` trả lời được.
 
-Bốn thứ được kiểm, đều KHÔNG gọi mạng ra ngoài:
+Năm thứ được kiểm, đều KHÔNG gọi mạng ra ngoài:
 
   1. cấu hình LLM  — provider, key, model có khớp nhau không
-  2. PostgreSQL    — kết nối được không
-  3. migration     — các bảng bắt buộc đã có chưa
-  4. connector     — tám provider có URL đầy đủ và đúng dạng không
+  2. auth          — `JWT_SECRET` có không; thiếu là mọi lần login trả 500
+  3. PostgreSQL    — kết nối được không
+  4. migration     — các bảng bắt buộc đã có chưa
+  5. connector     — tám provider có URL đầy đủ và đúng dạng không
 
 Cố ý KHÔNG gọi thử LLM: healthcheck lặp mỗi 30 giây sẽ đốt tiền và tự tạo rate
 limit cho chính mình. Kiểm khoá thật là việc của lệnh smoke chạy một lần khi
@@ -87,6 +88,28 @@ def _check_llm(settings: Settings) -> ReadinessCheck:
     return ReadinessCheck("llm_config", True, f"provider={settings.llm_provider}")
 
 
+def _check_auth(settings: Settings) -> ReadinessCheck:
+    """`JWT_SECRET` có được cấu hình không.
+
+    Thiếu nó thì `POST /auth/login` trả 500 cho MỌI người dùng — không ai vào
+    được hệ thống. `src/config.py` cố ý fail-closed ở đây, và đó là hành vi
+    đúng; cái sai là `/ready` không nói gì về nó.
+
+    Đo được đúng như vậy trên stack sạch: `/ready` xanh cả bốn mục, register
+    trả 201, rồi login trả 500. Người vận hành nhìn `/ready` và kết luận hệ
+    thống ổn — trong khi chức năng đầu tiên người dùng chạm vào đã hỏng.
+
+    Đó chính là loại "healthy nhưng không dùng được" mà cả module này được
+    dựng lên để bắt; auth chỉ là mảng bị bỏ sót.
+
+    KHÔNG nêu độ dài hay bất kỳ phần nào của khoá: `/ready` thường được mở ra
+    ngoài cho load balancer.
+    """
+    if not settings.jwt_secret:
+        return ReadinessCheck("auth", False, "JWT_SECRET chưa được cấu hình — mọi lần đăng nhập sẽ lỗi")
+    return ReadinessCheck("auth", True, f"token ký bằng {settings.jwt_algorithm}")
+
+
 def _check_connectors(settings: Settings) -> ReadinessCheck:
     """URL provider phải đủ và đúng dạng — không kiểm bằng cách gọi thử.
 
@@ -155,5 +178,11 @@ async def evaluate_readiness(settings: Settings | None = None) -> tuple[bool, li
     """
     settings = settings or get_settings()
     database, migrations = await _check_database_and_migrations()
-    checks = [_check_llm(settings), database, migrations, _check_connectors(settings)]
+    checks = [
+        _check_llm(settings),
+        _check_auth(settings),
+        database,
+        migrations,
+        _check_connectors(settings),
+    ]
     return all(check.ok for check in checks), [check.as_dict() for check in checks]

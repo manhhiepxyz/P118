@@ -227,3 +227,33 @@ def test_no_real_api_key_lives_in_a_tracked_file() -> None:
                 not cleaned or cleaned.startswith("${") or any(marker in lowered for marker in placeholder_markers)
             )
             assert harmless, f"{relative}: {name} có vẻ chứa key thật"
+
+
+def test_fast_mode_turns_reasoning_off_and_normal_mode_leaves_it_alone(monkeypatch) -> None:
+    """`fast=True` chỉ dành cho tầng DIỄN ĐẠT, không cho tầng quyết định.
+
+    Đo trên `deepseek-v4-flash`, cùng tải thật:
+
+        Response Agent  có suy luận  trung vị 3.6s  p90 11.8s  đúng 10/10
+                        TẮT          trung vị 1.3s  p90  1.6s  đúng 10/10
+        Planner         có suy luận  trung vị 5.8s  max 40.1s  đúng  5/6
+                        TẮT          trung vị 1.1s  max  1.2s  đúng  4/6
+
+    Tắt ở Planner là mất một kế hoạch đúng. Test này giữ ranh giới đó: mặc định
+    KHÔNG được lặng lẽ thành `fast`.
+    """
+    from src.config import Settings
+    from src.services.llm import get_llm
+
+    settings = Settings(
+        llm_provider="deepseek",
+        deepseek_api_key="khoa-gia-cho-test",
+        deepseek_model_name="deepseek-v4-flash",
+    )
+
+    normal = get_llm(settings)
+    fast = get_llm(settings, fast=True)
+
+    assert getattr(fast, "reasoning_effort", None) == "none"
+    # Mặc định phải giữ nguyên hành vi model — Planner đi qua đường này.
+    assert getattr(normal, "reasoning_effort", None) != "none"

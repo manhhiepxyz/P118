@@ -516,3 +516,22 @@ export async function decideViewingApproval(
     { method: 'POST', body },
   )
 }
+
+/* Số liệu vận hành TOÀN hệ thống — chỉ admin.                           */
+/* Tách khỏi `listWorkflows()`: hàm đó lọc theo chủ sở hữu, và dùng nó cho
+   màn quản trị là lý do dashboard từng hiện 0 trong khi database có 92
+   workflow. Xem `GET /admin/metrics` phía backend. */
+export interface AdminMetrics {
+  total: number
+  running: number
+  waiting_approval: number
+  failed: number
+  success: number
+  cancelled: number
+  awaiting_user: number
+  orphaned: number
+}
+
+export async function adminMetrics(): Promise<AdminMetrics> {
+  return request<AdminMetrics>('/admin/metrics')
+}
