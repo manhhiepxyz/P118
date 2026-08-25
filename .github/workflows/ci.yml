@@ -14,6 +14,12 @@ jobs:
     # container chỉ sống trong thời gian job chạy, chỉ nghe trên localhost của
     # runner, và chứa dữ liệu test dùng một lần. Không dùng lại giá trị này ở
     # bất kỳ môi trường nào khác.
+    #
+    # Cổng host KHÔNG cố định (`- 5432`, không phải `- 5432:5432`): runner
+    # self-hosted của BTC dùng CHUNG cho mọi team, nên 5432 rất dễ đang bị một
+    # job khác chiếm — đo được: "failed to bind host port 0.0.0.0:5432/tcp:
+    # address already in use". Để Docker tự chọn cổng trống, đọc lại cổng thật
+    # ở step "Đọc cổng Postgres thật" thay vì đoán 5432.
     services:
       postgres:
         image: postgres:16-alpine
@@ -22,7 +28,7 @@ jobs:
           POSTGRES_PASSWORD: p118_ci_ephemeral
           POSTGRES_DB: p118_test_db
         ports:
-          - 5432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U p118_ci -d p118_test_db"
           --health-interval 5s
@@ -32,9 +38,6 @@ jobs:
     env:
       APP_ENV: test
       OPENAI_API_KEY: test-key
-      # Bắt buộc phải có: thiếu biến này thì test PostgreSQL sẽ tự skip và
-      # suite báo xanh giả. Xem step "Guard" bên dưới.
-      TEST_DATABASE_URL: postgresql://p118_ci:p118_ci_ephemeral@localhost:5432/p118_test_db
       # Báo cho conftest biết đang chạy trong CI → thiếu DB phải FAIL, không skip.
       CI: "true"
 
@@ -50,6 +53,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Đọc cổng Postgres thật
+        # `job.services.postgres.ports['5432']` là cổng HOST thật Docker vừa
+        # gán — chỉ biết được sau khi service đã khởi động, nên không đặt được
+        # ở khối `env:` cấp job (khối đó dựng TRƯỚC khi service tồn tại).
+        run: echo "TEST_DATABASE_URL=postgresql://p118_ci:p118_ci_ephemeral@localhost:${{ job.services.postgres.ports['5432'] }}/p118_test_db" >> "$GITHUB_ENV"
+
       - name: Guard — TEST_DATABASE_URL phải được set
         run: |
           if [ -z "${TEST_DATABASE_URL}" ]; then
@@ -61,7 +70,7 @@ jobs:
       - name: Chờ PostgreSQL sẵn sàng
         run: |
           for i in $(seq 1 30); do
-            if pg_isready -h localhost -p 5432 -U p118_ci -d p118_test_db; then
+            if pg_isready -d "$TEST_DATABASE_URL"; then
               echo "PostgreSQL sẵn sàng."
               exit 0
             fi
