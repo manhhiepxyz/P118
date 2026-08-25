@@ -49,6 +49,31 @@ def _require_deepseek_model(value: str) -> str:
     return value.strip()
 
 
+_INVALID_PROVIDER = "LLM_PROVIDER không hợp lệ; chỉ chấp nhận: openai, openrouter, deepseek, groq."
+
+
+def _require_groq_model(value: str) -> str:
+    """Groq không có quy tắc đặt tên cố định — chỉ chặn kiểu gõ nhầm đã có tiền lệ.
+
+    Không khoá cứng danh sách model: danh mục Groq đổi thường xuyên và họ gỡ
+    model cũ, nên khoá lại sẽ biến một lần dọn danh mục bên họ thành sự cố bên
+    mình.
+
+    Nhưng chặn đúng lỗi đã xảy ra với OpenRouter: đổi `LLM_PROVIDER` mà quên đổi
+    tên model. Tên DeepSeek đi vào Groq sẽ bị từ chối lúc GỌI — lỗi nổ ra khi
+    người dùng đã bấm nút, thay vì lúc khởi động.
+    """
+    model = value.strip()
+    if not model:
+        raise LLMConfigurationError("Thiếu biến môi trường GROQ_MODEL_NAME.")
+    if model.startswith("deepseek-"):
+        raise LLMConfigurationError(
+            "GROQ_MODEL_NAME đang là tên model DeepSeek. Đổi LLM_PROVIDER sang groq "
+            "thì phải đổi cả tên model (ví dụ: openai/gpt-oss-20b)."
+        )
+    return model
+
+
 def _require_openrouter_model(value: str) -> str:
     """OpenRouter định tuyến theo `nhà-cung-cấp/model`, nên tên phải có dấu `/`.
 
@@ -97,13 +122,18 @@ def check_llm_configuration(settings: Settings | None = None) -> None:
         _require_openrouter_model(settings.openrouter_model_name)
         return
 
+    if provider == "groq":
+        _require_key(settings.groq_api_key, "GROQ_API_KEY")
+        _require_groq_model(settings.groq_model_name)
+        return
+
     if provider == "openai":
         _require_key(settings.openai_api_key, "OPENAI_API_KEY")
         if not settings.model_name.strip():
             raise LLMConfigurationError("Thiếu biến môi trường MODEL_NAME.")
         return
 
-    raise LLMConfigurationError("LLM_PROVIDER không hợp lệ; chỉ chấp nhận: openai, openrouter, deepseek.")
+    raise LLMConfigurationError(_INVALID_PROVIDER)
 
 
 def get_llm(
@@ -175,6 +205,24 @@ def get_llm(
             **extra,
         )
 
+    if provider == "groq":
+        return ChatOpenAI(
+            model=_require_groq_model(settings.groq_model_name),
+            base_url=settings.groq_base_url,
+            api_key=_require_key(settings.groq_api_key, "GROQ_API_KEY"),
+            temperature=settings.llm_temperature,
+            callbacks=callbacks,
+            # CỐ Ý không truyền `reasoning_effort`, kể cả khi `fast=True`.
+            #
+            # Groq chỉ chấp nhận tham số này trên vài model suy luận (qwen3,
+            # gpt-oss); gửi nó tới `llama-3.3-70b` là 400 ngay — và 400 đó xảy
+            # ra ở ĐÚNG lớp trả lời cho người dùng, tức mọi câu trả lời hỏng.
+            #
+            # Mất mát gần như bằng không: `reasoning_effort="none"` sinh ra để
+            # cắt reasoning token của DeepSeek, còn tốc độ của Groq đến từ phần
+            # cứng chứ không từ việc tắt suy luận.
+        )
+
     if provider == "openai":
         return ChatOpenAI(
             model=settings.model_name,
@@ -187,7 +235,7 @@ def get_llm(
     # `Settings.llm_provider` là Literal nên Pydantic đã chặn giá trị lạ. Nhánh
     # này bắt trường hợp caller tự dựng một Settings-like object bỏ qua
     # validation — vẫn phải từ chối, không được đoán provider thay họ.
-    raise LLMConfigurationError("LLM_PROVIDER không hợp lệ; chỉ chấp nhận: openai, openrouter, deepseek.")
+    raise LLMConfigurationError(_INVALID_PROVIDER)
 
 
 def structured_output_method(settings: Settings | None = None) -> str | None:
@@ -209,6 +257,7 @@ def structured_output_method(settings: Settings | None = None) -> str | None:
     settings = settings or get_settings()
     if settings.llm_provider == "deepseek":
         return "json_mode"
-    # openai, openrouter: dùng function calling để tránh strict json_schema
-    # từ chối schema TaskPlan.
+    # openai, openrouter, groq: đều tương thích OpenAI. Dùng function calling
+    # để tránh strict json_schema từ chối schema TaskPlan (`Task.input` là dict
+    # tự do).
     return "function_calling"

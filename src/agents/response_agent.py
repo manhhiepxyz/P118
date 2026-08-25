@@ -79,6 +79,14 @@ class ReplyView(BaseModel):
     baseline_message: str
     steps: list[dict[str, str]] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
+    # Giá trị lần trước cho đúng những field đang hỏi — để câu hỏi gợi ý được
+    # thay vì hỏi trống. "Vẫn khu A như lần trước phải không?" hỏi đúng một lần
+    # và người dùng đáp một chữ; "Bạn cho mình biết khu vực đỗ xe" bắt họ nhớ
+    # lại hộ hệ thống.
+    #
+    # Đây là GỢI Ý, không phải câu trả lời: Planner vẫn coi field đó là thiếu,
+    # và người dùng vẫn phải xác nhận. Xem `Planner._fields_taken_from_recall`.
+    recalled_hints: dict[str, str] = Field(default_factory=dict)
     payment_quote: dict[str, Any] | None = None
     # Đã có bước `pay_fee` chạy xong THÀNH CÔNG hay chưa. Có `payment_quote`
     # KHÔNG đồng nghĩa đã trả tiền: báo giá xuất hiện ngay khi giữ chỗ, còn tiền

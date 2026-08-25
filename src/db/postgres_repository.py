@@ -278,14 +278,23 @@ class PostgreSQLWorkflowStateRepository:
     async def consume_clarification(self, workflow_id: str) -> dict | None:
         return await self.workflows.consume_clarification(workflow_id)
 
+    async def recent_turns_for_owner(self, **kwargs):
+        return await self.workflows.recent_turns_for_owner(**kwargs)
+
+    async def trim_history_for_owner(self, *, owner_user_id: str, keep: int) -> list[str]:
+        return await self.workflows.trim_history_for_owner(owner_user_id=owner_user_id, keep=keep)
+
     async def list_workflows(
         self,
         *,
         statuses: tuple[str, ...] | None = None,
         limit: int = 20,
         owner_user_id: str | None = None,
+        upcoming: bool | None = None,
     ) -> list[dict]:
-        return await self.workflows.list_workflows(statuses=statuses, limit=limit, owner_user_id=owner_user_id)
+        return await self.workflows.list_workflows(
+            statuses=statuses, limit=limit, owner_user_id=owner_user_id, upcoming=upcoming
+        )
 
     async def current_step_titles(self, workflow_ids: list[str]) -> dict[str, str]:
         return await self.workflows.current_step_titles(workflow_ids)

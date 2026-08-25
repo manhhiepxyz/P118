@@ -96,6 +96,41 @@ def _require_one_row(command_tag: str, workflow_id: str, task_id: str) -> None:
         raise TaskNotFoundError(workflow_id, task_id)
 
 
+# Workflow này còn việc gì SẼ diễn ra không?
+#
+# Không có bảng `events` chung, nên lịch nằm rải ở các bảng nghiệp vụ. Hai
+# nguồn có thật trong dữ liệu hiện tại:
+#
+#   - `workflow_tasks.result_data->>'booking_date'` — chỗ đỗ xe đã đặt.
+#   - `viewing_approvals.viewing_date` — lịch tham quan, nối bằng `workflow_id`.
+#
+# Khảo sát toàn bộ `result_data` cho thấy CHỈ `book_parking` sinh ra ngày; các
+# tool khác trả id hoặc trạng thái. Nên đây không phải là "quét mọi khoá trông
+# giống ngày" — nó là hai nguồn đã kiểm chứng, và mọi thứ khác rơi về "không có
+# sự kiện tương lai".
+#
+# Ngày lưu dạng chuỗi `YYYY-MM-DD`; so bằng `>= CURRENT_DATE` nên một lịch trong
+# hôm nay vẫn tính là sắp tới cho tới hết ngày. Đó là chủ ý: người dùng còn phải
+# đi, và đẩy nó sang "Đã xong" lúc 00:01 là nói sai.
+#
+# `~ '^\d{4}-\d{2}-\d{2}$'` chặn dữ liệu rác: một chuỗi không phải ngày mà đem
+# cast sẽ ném lỗi và làm hỏng cả truy vấn danh sách.
+_FUTURE_EVENT_SQL = r"""(
+    EXISTS (
+        SELECT 1 FROM workflow_tasks te
+        WHERE te.workflow_id = w.workflow_id
+          AND te.result_data ->> 'booking_date' ~ '^\d{4}-\d{2}-\d{2}$'
+          AND (te.result_data ->> 'booking_date')::date >= CURRENT_DATE
+    )
+    OR EXISTS (
+        SELECT 1 FROM viewing_approvals va
+        WHERE va.workflow_id = w.workflow_id
+          AND va.viewing_date::text ~ '^\d{4}-\d{2}-\d{2}$'
+          AND va.viewing_date::date >= CURRENT_DATE
+    )
+)"""
+
+
 class TaskNotFoundError(RuntimeError):
     """UPDATE nhắm vào một workflow_task không tồn tại.
 
@@ -329,6 +364,72 @@ class WorkflowRepository:
                     _uuid(workflow_id),
                 )
                 return {"deleted": True, "status": status}
+
+    async def trim_history_for_owner(self, *, owner_user_id: str, keep: int) -> list[str]:
+        """Giữ `keep` yêu cầu gần nhất của một người; cái cũ hơn thì ẩn đi.
+
+        Xoá MỀM bằng `archived_at`, không DELETE — cùng lý do đã ghi ở
+        `delete_workflow_for_owner`: `workflow_tasks`, `payments` và
+        `payment_approvals` là bằng chứng một khoản tiền đã đi. Danh sách gọn
+        lại đúng như người dùng muốn, nhưng dấu vết giao dịch của chính họ
+        không bốc hơi theo. Cần lấy lại thì `archived_at = NULL` là hết.
+
+        Chỉ MỘT thứ được miễn: `WAITING_APPROVAL`. Đó là yêu cầu đang giữ tiền
+        hoặc giữ chỗ của người dùng và chờ chính họ quyết. Giấu nó đi thì khoản
+        tiền vẫn treo, chỗ đỗ vẫn bị giữ, và họ không còn đường nào nhìn thấy
+        nó — mất mát thật, không phải màn hình gọn hơn.
+
+        Phần được miễn vẫn CHIẾM CHỖ trong hạn mức — nó đẩy việc cũ hơn ra
+        ngoài, còn bản thân nó ở lại. Không tính nó thì hạn mức thôi nói về thứ
+        người dùng NHÌN THẤY: đo trên dữ liệu thật, tài khoản có 12 PENDING + 5
+        WAITING_APPROVAL không bị cắt gì (12 ≤ 15) mà vẫn hiện 17 dòng.
+
+        Mọi thứ khác đều bị cắt, kể cả PENDING và NEEDS_INFORMATION.
+        Bản đầu chỉ cắt workflow ĐÃ KẾT THÚC, và trên dữ liệu thật nó gần như
+        không cắt gì: một tài khoản có 17 yêu cầu thì cả 17 đều dở dang — bỏ
+        giữa chừng, hỏi lại rồi không ai trả lời. Đó chính là loại rác mà lịch
+        sử cần dọn, mà luật cũ lại bảo vệ đúng nó.
+
+        Một bản nháp bỏ dở ba tuần trước không phải "việc đang chờ bạn"; nó là
+        thứ người dùng đã quên. Và vì đây là xoá MỀM, đoán sai thì `archived_at
+        = NULL` là lấy lại được — khác hẳn khoản tiền đang treo.
+
+        Trả về danh sách id vừa ẩn, để caller log được số lượng.
+        """
+        if keep < 0:
+            return []
+        protected = ("WAITING_APPROVAL",)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                -- Xếp hạng trên TOÀN BỘ danh sách đang hiện, kể cả phần được
+                -- miễn. Nếu chỉ xếp hạng phần cắt được thì hạn mức không còn
+                -- nói về thứ người dùng NHÌN THẤY: đo trên dữ liệu thật, một
+                -- tài khoản 12 PENDING + 5 WAITING_APPROVAL không bị cắt gì
+                -- (12 ≤ 15) và vẫn hiện 17 dòng.
+                --
+                -- Phần được miễn CHIẾM CHỖ nhưng không bao giờ bị ẩn: nó đẩy
+                -- những việc cũ hơn ra khỏi hạn mức, còn bản thân nó ở lại.
+                WITH ranked AS (
+                    SELECT workflow_id, status,
+                           row_number() OVER (ORDER BY created_at DESC) AS vi_tri
+                    FROM workflows
+                    WHERE owner_user_id = $1
+                      AND archived_at IS NULL
+                )
+                UPDATE workflows
+                SET archived_at = NOW(), updated_at = NOW()
+                WHERE workflow_id IN (
+                    SELECT workflow_id FROM ranked
+                    WHERE vi_tri > $3 AND status <> ALL($2::text[])
+                )
+                RETURNING workflow_id
+                """,
+                _uuid(owner_user_id),
+                list(protected),
+                keep,
+            )
+        return [str(row["workflow_id"]) for row in rows]
 
     async def cancel_workflow(self, workflow_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         """Huỷ workflow và mọi bước chưa kết thúc trong một transaction.
@@ -673,6 +774,7 @@ class WorkflowRepository:
         statuses: tuple[str, ...] | None,
         limit: int,
         owner_user_id: str | None = None,
+        upcoming: bool | None = None,
     ) -> list[dict]:
         """Liệt kê workflow kèm số task đã xong — đọc thẳng PostgreSQL.
 
@@ -689,6 +791,10 @@ class WorkflowRepository:
 
         Row legacy (`owner_user_id IS NULL`) KHÔNG khớp: dữ liệu cũ giữ lại để
         truy vết nhưng không hiện cho tài khoản nào.
+
+        `upcoming=True` chỉ lấy workflow còn một sự kiện CHƯA DIỄN RA;
+        `upcoming=False` lấy phần còn lại. None = không quan tâm. Xem
+        `_FUTURE_EVENT_SQL`.
         """
         where = ["w.archived_at IS NULL"]
         params: list[object] = []
@@ -698,6 +804,8 @@ class WorkflowRepository:
         if statuses:
             params.append(list(statuses))
             where.append(f"w.status = ANY(${len(params)}::varchar[])")
+        if upcoming is not None:
+            where.append(_FUTURE_EVENT_SQL if upcoming else f"NOT ({_FUTURE_EVENT_SQL})")
         params.append(limit)
 
         async with self._pool.acquire() as conn:
@@ -725,6 +833,67 @@ class WorkflowRepository:
                 LIMIT ${len(params)}
                 """,  # noqa: S608 - mệnh đề WHERE dựng từ literal nội bộ, giá trị luôn là tham số
                 *params,
+            )
+        return [dict(row) for row in rows]
+
+    async def recent_turns_for_owner(
+        self,
+        *,
+        owner_user_id: str,
+        exclude_workflow_id: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """N lượt hỏi–đáp gần nhất của một người, kèm dịch vụ mà mỗi lượt đã dùng.
+
+        KHÔNG lọc theo dịch vụ ở đây, và đó là một lựa chọn.
+
+        Lọc được thì tốt — ký ức về chỗ đỗ xe chỉ làm nhiễu khi đang lập lịch
+        tham quan. Nhưng muốn lọc thì phải biết yêu cầu MỚI thuộc dịch vụ nào,
+        mà lúc này Planner còn chưa chạy. Cách duy nhất là tự dựng một bộ phân
+        loại goal→dịch vụ bằng khớp chuỗi — đúng thứ đã sai hai lần trong chính
+        codebase này ("o dau" khớp vào giữa "chỗ đậu" và biến một câu đặt chỗ
+        thành câu hỏi cách làm).
+
+        Thay vào đó, mỗi lượt mang theo NHÃN dịch vụ dựng từ tool ĐÃ CHẠY THẬT
+        (`workflow_tasks.tool`) — dữ kiện chắc chắn, không phải suy đoán. Model
+        đọc nhãn rồi tự bỏ qua thứ không liên quan; nó vốn giỏi việc đó hơn một
+        bảng từ khoá. Và nếu nó lọc sai thì guard `_fields_taken_from_recall`
+        vẫn chặn: ký ức sai chỉ tốn token, không thành hành động sai.
+
+        `assistant_answer` có thể NULL (workflow chưa kịp trả lời) — vẫn lấy,
+        vì câu người dùng đã nói tự nó là ngữ cảnh.
+        """
+        if limit <= 0:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    w.goal,
+                    w.assistant_answer,
+                    w.created_at,
+                    array_remove(array_agg(DISTINCT t.tool), NULL) AS tools,
+                    -- Input ĐÃ CHẠY THẬT của các bước, gộp lại. Đây là nguồn
+                    -- duy nhất cho "lần trước bạn chọn gì": nó là giá trị đã
+                    -- được validate và đã đi vào provider, không phải một chuỗi
+                    -- moi lại từ câu người dùng gõ.
+                    COALESCE(
+                        jsonb_object_agg(t.task_id, t.input_data)
+                            FILTER (WHERE t.input_data IS NOT NULL),
+                        '{}'::jsonb
+                    ) AS inputs
+                FROM workflows w
+                LEFT JOIN workflow_tasks t ON t.workflow_id = w.workflow_id
+                WHERE w.owner_user_id = $1
+                  AND w.goal IS NOT NULL
+                  AND ($2::uuid IS NULL OR w.workflow_id <> $2::uuid)
+                GROUP BY w.workflow_id, w.goal, w.assistant_answer, w.created_at
+                ORDER BY w.created_at DESC
+                LIMIT $3
+                """,
+                _uuid(owner_user_id),
+                _uuid(exclude_workflow_id) if exclude_workflow_id else None,
+                limit,
             )
         return [dict(row) for row in rows]
 
