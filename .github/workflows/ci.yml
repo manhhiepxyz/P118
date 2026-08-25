@@ -53,6 +53,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Dựng .env cho docker compose config
+        # `docker-compose.yml` khai `env_file: .env` ở nhiều service — không
+        # phải auto-load tuỳ chọn, mà là bắt buộc PHẢI tồn tại, nếu không
+        # `docker compose config` (tests/test_migration_deployment.py dùng nó
+        # để đọc cấu hình ĐÃ RENDER) lỗi "env file ... not found" trước cả khi
+        # chạm tới nội dung biến. `.env` bị gitignore nên checkout không có
+        # sẵn — README cũng dạy đúng bước `cp .env.example .env` này cho local.
+        # `.env.example` chỉ chứa placeholder, không có secret thật.
+        run: cp .env.example .env
+
       - name: Đọc cổng Postgres thật
         # `job.services.postgres.ports['5432']` là cổng HOST thật Docker vừa
         # gán — chỉ biết được sau khi service đã khởi động, nên không đặt được
