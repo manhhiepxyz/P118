@@ -1258,7 +1258,7 @@ export function JourneyWorkspacePage() {
             Trạng thái là DỮ LIỆU, không phải cách trình bày. Bắt kiểm thử suy
             ngược nó từ tiếng Việt hiển thị là buộc chúng vào lớp dễ đổi nhất
             của sản phẩm. */}
-        <div className="flex min-h-0 flex-1" data-journey-state={live?.status ?? 'IDLE'}>
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row" data-journey-state={live?.status ?? 'IDLE'}>
           <div className="relative flex min-w-0 flex-1 flex-col">
             {/* Dải BÁO HOÀN TẤT — đứng trên cùng, không lẫn vào hội thoại.
                 Người vừa bấm Xác nhận thanh toán cần một tín hiệu dứt khoát là
@@ -1486,7 +1486,7 @@ export function JourneyWorkspacePage() {
               Chưa có hành trình thì cột vẫn ở đó và nói thẳng là chưa có. */}
           {(mode === 'journey' || talking) && (
             <aside
-              className="w-[360px] shrink-0 overflow-y-auto border-l border-[var(--border-subtle)] bg-[var(--surface-raised)]"
+              className="max-h-[45vh] w-full shrink-0 overflow-y-auto border-t border-[var(--border-subtle)] bg-[var(--surface-raised)] lg:max-h-none lg:w-[360px] lg:border-t-0 lg:border-l"
               aria-label="Chi tiết hành trình"
             >
               {pending && (
