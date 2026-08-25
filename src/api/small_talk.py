@@ -22,14 +22,14 @@ bị speech lane chặn. Đây là đường an toàn cho mọi prompt tấn cô
 
 from __future__ import annotations
 
-from src.common.projects import PROJECTS
-
 import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+from src.common.projects import PROJECTS
 
 
 class SpeechType(StrEnum):
@@ -442,8 +442,7 @@ _HOWTO_MARKERS = (
 )
 
 _HOWTO_MARKER_RE = {
-    marker: re.compile(r"(?<![a-z])" + re.escape(marker.strip()) + r"(?![a-z])")
-    for marker in _HOWTO_MARKERS
+    marker: re.compile(r"(?<![a-z])" + re.escape(marker.strip()) + r"(?![a-z])") for marker in _HOWTO_MARKERS
 }
 
 # Các bước cho từng việc. Khoá là cụm đã chuẩn hoá xuất hiện trong câu hỏi.
@@ -470,7 +469,10 @@ _HOWTO_STEPS: tuple[tuple[tuple[str, ...], str], ...] = (
         "Việc này không cần xác minh căn hộ.",
     ),
     (
-        ("tu van", "quan tam",),
+        (
+            "tu van",
+            "quan tam",
+        ),
         "Để nhận tư vấn: chọn “Đăng ký quan tâm / nhận tư vấn”, chọn dự án và hình thức "
         "bạn quan tâm, để lại giờ tiện liên hệ. Bộ phận tư vấn sẽ gọi lại.",
     ),

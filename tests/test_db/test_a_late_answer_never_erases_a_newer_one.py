@@ -72,8 +72,7 @@ async def test_the_slow_writer_does_not_clobber_the_finished_answer(client, db_p
 
     sau = await repository.get_assistant_response(workflow_id)
     assert sau["answer"] == xong, (
-        "câu của trạng thái đã rời khỏi ghi đè mất câu của trạng thái hiện tại: "
-        f"{sau['answer']!r}"
+        f"câu của trạng thái đã rời khỏi ghi đè mất câu của trạng thái hiện tại: {sau['answer']!r}"
     )
     assert sau["for_status"] == "SUCCESS"
 
@@ -92,7 +91,10 @@ async def test_the_user_is_not_left_with_an_empty_bubble(client, db_pool):
         workflow_id, answer="Đã xong.", suggestions=[], state="READY", for_status="SUCCESS"
     )
     await repository.save_assistant_response(
-        workflow_id, answer="Đang chờ.", suggestions=[], state="READY",
+        workflow_id,
+        answer="Đang chờ.",
+        suggestions=[],
+        state="READY",
         for_status="WAITING_APPROVAL:PROVIDER",
     )
 
@@ -101,8 +103,7 @@ async def test_the_user_is_not_left_with_an_empty_bubble(client, db_pool):
         workflow_id,
     )
     assert _key_status(row["assistant_for_status"]) == row["status"], (
-        "câu đã ghi mang dấu của một trạng thái khác, nên đường đọc sẽ giấu nó "
-        "và người dùng nhìn một ô rỗng"
+        "câu đã ghi mang dấu của một trạng thái khác, nên đường đọc sẽ giấu nó và người dùng nhìn một ô rỗng"
     )
 
 
@@ -121,7 +122,10 @@ async def test_a_chat_answer_is_always_stored(client, db_pool):
     workflow_id = await _workflow(db_pool, "lane_hoi_thoai", status="SUCCESS")
     repository = WorkflowRepository(db_pool)
     await repository.save_assistant_response(
-        workflow_id, answer="Hiện mình hỗ trợ các dự án…", suggestions=[], state="READY",
+        workflow_id,
+        answer="Hiện mình hỗ trợ các dự án…",
+        suggestions=[],
+        state="READY",
         for_status="CHAT",
     )
     sau = await repository.get_assistant_response(workflow_id)
@@ -138,7 +142,10 @@ async def test_the_answer_for_the_current_state_is_still_written(client, db_pool
     repository = WorkflowRepository(db_pool)
     for lan, cau in enumerate(("Đang chờ đơn vị.", "Vẫn đang chờ đơn vị."), start=1):
         await repository.save_assistant_response(
-            workflow_id, answer=cau, suggestions=[], state="READY",
+            workflow_id,
+            answer=cau,
+            suggestions=[],
+            state="READY",
             for_status="WAITING_APPROVAL:PROVIDER",
         )
         sau = await repository.get_assistant_response(workflow_id)

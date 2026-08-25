@@ -26,8 +26,7 @@ def _spec(tool: str, field: str):
 def test_the_shuttle_seat_count_has_the_same_ceiling_the_provider_enforces():
     spec = _spec("book_shuttle", "passenger_count")
     assert spec.maximum == 30, (
-        "provider chặn ở 30 (`BookShuttleRequest.le=30`); hợp đồng phải chặn cùng chỗ, "
-        f"đang là {spec.maximum!r}"
+        f"provider chặn ở 30 (`BookShuttleRequest.le=30`); hợp đồng phải chặn cùng chỗ, đang là {spec.maximum!r}"
     )
 
 
@@ -69,14 +68,13 @@ def test_two_tools_that_disagree_on_the_ceiling_have_no_single_rule():
 
     chat = FieldSpec(kind="integer", minimum=1, maximum=30)
     long = FieldSpec(kind="integer", minimum=1, maximum=1000)
+
     def _hop_dong(spec):
         return ToolContract(inputs={"so_cho": spec}, required=frozenset({"so_cho"}), outputs={})
 
     gia = {"tool_a": _hop_dong(chat), "tool_b": _hop_dong(long)}
     with patch.object(field_parsers, "TOOL_CONTRACTS", gia):
-        assert field_parsers._spec_for("so_cho") is None, (
-            "hai tool khai hai cận trên khác nhau mà vẫn coi là một luật"
-        )
+        assert field_parsers._spec_for("so_cho") is None, "hai tool khai hai cận trên khác nhau mà vẫn coi là một luật"
         # Cùng cận thì vẫn phải gộp được — nếu không, mọi field đều thành None.
         gia["tool_b"] = _hop_dong(chat)
         assert field_parsers._spec_for("so_cho") is not None

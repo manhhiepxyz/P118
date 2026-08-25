@@ -240,9 +240,7 @@ async def sweep_zombie_workflows(live_ids: set[str] | None = None) -> dict[str, 
         # Đóng cha đã bàn giao TRƯỚC, để sweeper không đánh chúng là thất bại.
         summary["archived_parents"] = await _archive_superseded_parents(pool)
         summary["swept_workflows"] = await _sweep_zombie_workflows(pool, settings.zombie_running_ttl_hours, live)
-        summary["released_abandoned"] = await _release_abandoned_repairs(
-            pool, settings.abandoned_repair_ttl_hours
-        )
+        summary["released_abandoned"] = await _release_abandoned_repairs(pool, settings.abandoned_repair_ttl_hours)
     except Exception:  # noqa: BLE001 - sweep không được làm vỡ poll
         logger.warning("zombie sweep failed", exc_info=True)
     finally:

@@ -1,4 +1,4 @@
-""""ngày 28" phải hiểu được KỂ CẢ khi chưa có bước nào để neo vào.
+""" "ngày 28" phải hiểu được KỂ CẢ khi chưa có bước nào để neo vào.
 
 Owner: Thành Bảo (Decision layer)
 File: tests/test_db/test_a_bare_day_works_before_any_step_exists.py
@@ -56,8 +56,7 @@ async def _cho_ngay_chuyen_nha(pool, owner) -> str:
     wid = uuid.uuid4()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO workflows (workflow_id, goal, status, owner_user_id) "
-            "VALUES ($1,$2,'PENDING',$3)",
+            "INSERT INTO workflows (workflow_id, goal, status, owner_user_id) VALUES ($1,$2,'PENDING',$3)",
             wid,
             "Đặt lịch chuyển nhà lúc 08:30 phương tiện Xe van cần thang máy",
             owner,

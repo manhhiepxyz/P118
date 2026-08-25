@@ -53,8 +53,9 @@ là nói nó đang mở: model sẽ mời họ dùng, họ gõ theo, và bị t�
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from src.common.projects import PROJECTS
 

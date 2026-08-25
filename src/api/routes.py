@@ -11,11 +11,10 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
+from src.agents.graph import needs_information_update
 from src.agents.pending_intent import PendingIntent, PendingIntentResolver
 from src.agents.planner import MISSING_FIELD_LABELS
-from src.agents.graph import needs_information_update
 from src.agents.response_agent import ReplyView, ResponseAgent
-from src.orchestration.snapshot import build_snapshot
 from src.agents.validator import TaskPlanValidator
 from src.api.deps import get_current_user
 from src.api.intent import AMENDABLE_FROM_TEXT, amend_summary, rewrite_relative_dates, wants_to_amend
@@ -97,6 +96,7 @@ from src.orchestration.service_approval import (
     pending_for_workflow,
     save_support_request,
 )
+from src.orchestration.snapshot import build_snapshot
 from src.orchestration.sweeper import sweep_zombie_workflows
 from src.services.llm import get_llm, structured_output_method
 from src.utils.display import goal_to_title
@@ -2245,9 +2245,7 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
 
         capabilities = await _capability_names_safely(job.get("owner_user_id"))
         # Tra dữ liệu TRƯỚC khi gọi model — MỘT chỗ gom mọi nguồn dữ kiện.
-        facts = await _facts_for(
-            workflow_id, goal=goal, response=current, owner_user_id=job.get("owner_user_id")
-        )
+        facts = await _facts_for(workflow_id, goal=goal, response=current, owner_user_id=job.get("owner_user_id"))
         spoken = await _speak(
             current,
             goal=goal,
@@ -2632,7 +2630,7 @@ async def _refresh_answer_from_db(job: dict[str, Any], workflow_id: str, current
 
 
 async def _trusted_state_safely(owner_user_id: Any) -> str:
-    """"resident" hay "prospect", đọc từ `user_resident_links` VERIFIED.
+    """ "resident" hay "prospect", đọc từ `user_resident_links` VERIFIED.
 
     Dùng chung nguồn với `_capability_names_safely` — hai đường trả lời câu
     "tài khoản này được dùng gì" mà đọc hai nguồn khác nhau là hai cách để
@@ -3785,7 +3783,7 @@ async def start_demo_workflow(
         chua_co_gi = (
             "Mình chưa thấy yêu cầu nào đang dừng để sửa trong cuộc trò chuyện này. "
             "Bạn cho mình biết bạn muốn đặt dịch vụ gì nhé — ví dụ "
-            "\"đặt lịch tham quan Vinhomes Hải Vân Bay ngày 30/8 lúc 10:00\"."
+            '"đặt lịch tham quan Vinhomes Hải Vân Bay ngày 30/8 lúc 10:00".'
         )
         trang_thai, ngu_canh = await _trusted_account_context(user)
         workflow_id = str(uuid4())
@@ -4355,10 +4353,7 @@ async def continue_demo_workflow(
         # THIẾU. Không tạo workflow con, không gọi Planner — nên một lượt trả
         # lời tốn 0 giây model thay vì 30–90 giây.
         da_tra_loi = {_canonical_field(name) for name in answers}
-        con_thieu = [
-            name for name in pending_missing_fields
-            if _canonical_field(name) not in da_tra_loi
-        ]
+        con_thieu = [name for name in pending_missing_fields if _canonical_field(name) not in da_tra_loi]
         # LƯỢT SỬA: trả lời một phần KHÔNG phải là trả lời thiếu.
         #
         # Nhánh trên được viết cho lượt hỏi ĐẦU, lúc chưa có kế hoạch nào:

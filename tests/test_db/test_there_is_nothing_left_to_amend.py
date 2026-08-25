@@ -188,9 +188,10 @@ async def test_the_start_route_answers_without_ever_planning(client, db_pool, mo
     payload = response.json()
     assert payload["status"] == "CHAT"
     assert "chưa thấy yêu cầu nào" in (payload.get("answer") or "")
-    assert await db_pool.fetchval(
-        "SELECT COUNT(*) FROM workflow_tasks WHERE workflow_id=$1::uuid", payload["workflow_id"]
-    ) == 0
+    assert (
+        await db_pool.fetchval("SELECT COUNT(*) FROM workflow_tasks WHERE workflow_id=$1::uuid", payload["workflow_id"])
+        == 0
+    )
 
 
 @pytest.mark.asyncio

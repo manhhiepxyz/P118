@@ -195,7 +195,7 @@ async def test_a_failed_workflow_keeps_its_untouched_steps_out_of_success(client
 
 
 @pytest.mark.asyncio
-async def test_a_failure_that_is_RETURNED_also_lands_in_postgresql(client, db_pool, monkeypatch):
+async def test_a_failure_that_is_RETURNED_also_lands_in_postgresql(client, db_pool, monkeypatch):  # noqa: N802 - RETURNED viết hoa có chủ đích, đối lập với "ném lỗi"
     """Cùng defect, nhánh khác: job KHÔNG ném lỗi, nó TRẢ VỀ một response lỗi.
 
     Mọi test phía trên đều làm `run_demo_workflow` ném exception, nên chỉ nhánh

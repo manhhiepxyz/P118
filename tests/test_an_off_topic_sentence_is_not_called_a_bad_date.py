@@ -15,7 +15,6 @@ sửa một thứ mình chưa hề nhập — và không biết hệ thống th�
 
 from src.api.routes import _follow_up_validation_message
 
-
 LAC_DE = [
     "hôm nay trời đẹp nhỉ",
     "ủa cái gì vậy",
@@ -49,9 +48,7 @@ def test_an_off_topic_sentence_does_not_get_a_bad_time_message():
     for cau in LAC_DE:
         for o in ("viewing_time", "preferred_time", "move_time", "preferred_contact_time"):
             noi = _follow_up_validation_message([o], cau)
-            assert "HH:MM" not in noi, (
-                f"{cau!r} không phải là giờ, mà {o} trả lời như thể sai định dạng: {noi!r}"
-            )
+            assert "HH:MM" not in noi, f"{cau!r} không phải là giờ, mà {o} trả lời như thể sai định dạng: {noi!r}"
 
 
 def test_a_real_attempt_still_gets_the_specific_rule():
@@ -59,14 +56,10 @@ def test_a_real_attempt_still_gets_the_specific_rule():
     for cau in CO_GANG_TRA_LOI:
         for o in ("viewing_date", "booking_date", "preferred_date", "move_date"):
             noi = _follow_up_validation_message([o], cau)
-            assert "chưa phù hợp" in noi, (
-                f"{cau!r} là một lần thử nhập ngày; {o} phải nói rõ luật, nhận được: {noi!r}"
-            )
+            assert "chưa phù hợp" in noi, f"{cau!r} là một lần thử nhập ngày; {o} phải nói rõ luật, nhận được: {noi!r}"
         for o in ("viewing_time", "preferred_time"):
             noi = _follow_up_validation_message([o], cau)
-            assert "HH:MM" in noi, (
-                f"{cau!r} là một lần thử nhập giờ; {o} phải nói rõ luật, nhận được: {noi!r}"
-            )
+            assert "HH:MM" in noi, f"{cau!r} là một lần thử nhập giờ; {o} phải nói rõ luật, nhận được: {noi!r}"
 
 
 def test_no_said_at_all_keeps_the_old_wording():

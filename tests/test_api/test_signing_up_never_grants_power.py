@@ -55,7 +55,7 @@ from tests.test_api.test_auth_routes import _register, auth_env  # noqa: F401 - 
         "admin",
     ],
 )
-async def test_a_username_never_buys_a_role(client, auth_env, username: str) -> None:
+async def test_a_username_never_buys_a_role(client, auth_env, username: str) -> None:  # noqa: F811 - fixture pytest, không phải định nghĩa lại
     """Tên người dùng không phải giấy uỷ quyền."""
     res = await _register(client, username=username)
     assert res.status_code in (201, 422), res.text

@@ -73,7 +73,6 @@ class TokenBucket:
         return False
 
 
-
 def _bucket_key(scope: dict) -> str:
     """Khoá giới hạn: PHIÊN nếu đã đăng nhập, IP nếu chưa.
 

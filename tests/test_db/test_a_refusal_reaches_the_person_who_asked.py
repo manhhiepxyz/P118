@@ -113,9 +113,7 @@ async def test_the_reason_the_provider_gave_is_handed_to_the_answer(client, db_p
     user_id, _ = await _a_user(db_pool)
     workflow_id = await _seed_refusal(db_pool, owner_user_id=user_id)
 
-    facts = await _facts_for(
-        workflow_id, goal="báo bảo trì", response=_view(), owner_user_id=user_id
-    )
+    facts = await _facts_for(workflow_id, goal="báo bảo trì", response=_view(), owner_user_id=user_id)
     assert facts is not None
     phang = json.dumps(facts, ensure_ascii=False)
     assert "Không có nhân viên rảnh vào giờ này" in phang
@@ -124,13 +122,11 @@ async def test_the_reason_the_provider_gave_is_handed_to_the_answer(client, db_p
 
 @pytest.mark.asyncio
 async def test_the_answer_layer_is_given_the_real_project_list(client, db_pool):
-    """"Khu A/B/C" là khu ĐỖ XE. Nó không bao giờ được là một dự án."""
+    """ "Khu A/B/C" là khu ĐỖ XE. Nó không bao giờ được là một dự án."""
     user_id, _ = await _a_user(db_pool)
     workflow_id = await _seed_refusal(db_pool, owner_user_id=user_id)
 
-    facts = await _facts_for(
-        workflow_id, goal="có những dự án nào", response=_view(), owner_user_id=user_id
-    )
+    facts = await _facts_for(workflow_id, goal="có những dự án nào", response=_view(), owner_user_id=user_id)
     phang = json.dumps(facts, ensure_ascii=False)
     assert "Vinhomes Pearl Bay" in phang
     assert "Khu C" not in phang
@@ -138,13 +134,11 @@ async def test_the_answer_layer_is_given_the_real_project_list(client, db_pool):
 
 @pytest.mark.asyncio
 async def test_the_steps_and_their_values_are_handed_over(client, db_pool):
-    """"xong chưa" / "đã đổi ngày chưa" trả lời được vì dữ kiện mang giá trị thật."""
+    """ "xong chưa" / "đã đổi ngày chưa" trả lời được vì dữ kiện mang giá trị thật."""
     user_id, _ = await _a_user(db_pool)
     workflow_id = await _seed_refusal(db_pool, owner_user_id=user_id)
 
-    facts = await _facts_for(
-        workflow_id, goal="xong chưa", response=_view(), owner_user_id=user_id
-    )
+    facts = await _facts_for(workflow_id, goal="xong chưa", response=_view(), owner_user_id=user_id)
     phang = json.dumps(facts, ensure_ascii=False)
     assert "2026-08-24 09:30" in phang
     assert "Đặt lịch tham quan" in phang
@@ -158,9 +152,7 @@ async def test_an_unverified_account_is_never_told_a_resident_service_is_open(cl
     user_id, _ = await _a_user(db_pool)
     workflow_id = await _seed_refusal(db_pool, owner_user_id=user_id)
 
-    facts = await _facts_for(
-        workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=user_id
-    )
+    facts = await _facts_for(workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=user_id)
     phang = json.dumps(facts, ensure_ascii=False)
     assert "Đăng ký phương tiện và chỗ đỗ xe" in phang, "dịch vụ khoá vẫn phải được nêu tên"
     assert "KHOÁ" in phang or "khoá" in phang
@@ -176,8 +168,7 @@ async def _verify(pool, user_id: str) -> None:
             resident_id,
         )
         await conn.execute(
-            "INSERT INTO user_resident_links (user_id, resident_id, verification_status) "
-            "VALUES ($1,$2,'VERIFIED')",
+            "INSERT INTO user_resident_links (user_id, resident_id, verification_status) VALUES ($1,$2,'VERIFIED')",
             uuid.UUID(user_id),
             resident_id,
         )
@@ -195,9 +186,7 @@ async def test_a_verified_resident_is_never_told_their_service_is_locked(client,
     await _verify(db_pool, user_id)
     workflow_id = await _seed_refusal(db_pool, owner_user_id=user_id)
 
-    facts = await _facts_for(
-        workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=user_id
-    )
+    facts = await _facts_for(workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=user_id)
     phang = json.dumps(facts, ensure_ascii=False)
     assert "Đăng ký phương tiện và chỗ đỗ xe (dùng được)" in phang
     assert "KHOÁ" not in phang
@@ -211,9 +200,7 @@ async def test_an_unreadable_permission_falls_back_to_the_narrower_answer(client
     dưới từ chối, đúng lỗi mà toàn bộ tầng này sinh ra để tránh.
     """
     workflow_id = await _seed_refusal(db_pool, owner_user_id=(await _a_user(db_pool))[0])
-    facts = await _facts_for(
-        workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=None
-    )
+    facts = await _facts_for(workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=None)
     phang = json.dumps(facts, ensure_ascii=False)
     assert "KHOÁ" in phang
 
@@ -248,8 +235,6 @@ async def test_a_failed_permission_read_is_never_guessed_as_verified(client, db_
         return await that(*args, **kwargs)
 
     monkeypatch.setattr(routes, "acquire_repository", _hong_lan_dau)
-    facts = await _facts_for(
-        workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=user_id
-    )
+    facts = await _facts_for(workflow_id, goal="tôi dùng được gì", response=_view(), owner_user_id=user_id)
     phang = json.dumps(facts, ensure_ascii=False)
     assert "KHOÁ" in phang, "lỗi đọc quyền bị đoán thành đã xác minh"

@@ -35,8 +35,6 @@ này thì câu mới được gửi đi.
 
 from __future__ import annotations
 
-import pytest
-
 from src.orchestration.snapshot import build_snapshot
 
 CATALOGUE = [
@@ -46,23 +44,29 @@ CATALOGUE = [
 
 
 class _Chi:
-    def __init__(self, label, value): self.label = label; self.value = value
+    def __init__(self, label, value):
+        self.label = label
+        self.value = value
 
 
 class _Buoc:
     def __init__(self, tool, title, status, details=(), message=""):
-        self.tool = tool; self.title = title; self.status = status
-        self.details = [_Chi(l, v) for l, v in details]; self.message = message
+        self.tool = tool
+        self.title = title
+        self.status = status
+        self.details = [_Chi(label, value) for label, value in details]
+        self.message = message
         self.task_id = "T1"
 
 
 class _View:
     def __init__(self, tasks, status="SUCCESS"):
-        self.tasks = tasks; self.status = status
+        self.tasks = tasks
+        self.status = status
 
 
 def test_the_project_list_comes_from_the_catalogue_not_from_memory():
-    """"Khu A" là khu đỗ xe. Nó không bao giờ được xuất hiện như một dự án."""
+    """ "Khu A" là khu đỗ xe. Nó không bao giờ được xuất hiện như một dự án."""
     snap = build_snapshot(account_state="prospect", capabilities=CATALOGUE)
     assert "Vinhomes Pearl Bay" in snap.projects
     assert len(snap.projects) == 7
@@ -98,12 +102,18 @@ def test_a_locked_service_is_still_named():
 
 
 def test_the_steps_carry_what_the_screen_already_shows():
-    """"xong chưa" trả lời được vì snapshot biết từng bước đang ở đâu."""
-    view = _View([
-        _Buoc("schedule_property_viewing", "Đặt lịch tham quan", "SUCCESS",
-              [("Thời gian", "2026-08-24 09:30"), ("Dự án", "Vinhomes Pearl Bay")]),
-        _Buoc("book_parking", "Đặt chỗ đỗ xe", "WAITING_APPROVAL", [("Số tiền", "150.000 VND")]),
-    ])
+    """ "xong chưa" trả lời được vì snapshot biết từng bước đang ở đâu."""
+    view = _View(
+        [
+            _Buoc(
+                "schedule_property_viewing",
+                "Đặt lịch tham quan",
+                "SUCCESS",
+                [("Thời gian", "2026-08-24 09:30"), ("Dự án", "Vinhomes Pearl Bay")],
+            ),
+            _Buoc("book_parking", "Đặt chỗ đỗ xe", "WAITING_APPROVAL", [("Số tiền", "150.000 VND")]),
+        ]
+    )
     snap = build_snapshot(account_state="resident", capabilities=CATALOGUE, view=view)
     theo_ten = {b.title: b for b in snap.steps}
     assert theo_ten["Đặt lịch tham quan"].status == "SUCCESS"
@@ -117,8 +127,9 @@ def test_a_refusal_carries_the_reason_the_provider_gave():
         account_state="resident",
         capabilities=CATALOGUE,
         view=_View([_Buoc("create_maintenance_request", "Yêu cầu bảo trì", "CANCELLED")]),
-        refusals=[{"title": "Yêu cầu bảo trì", "code": "NO_AVAILABILITY",
-                   "reason": "Không có nhân viên rảnh vào giờ này"}],
+        refusals=[
+            {"title": "Yêu cầu bảo trì", "code": "NO_AVAILABILITY", "reason": "Không có nhân viên rảnh vào giờ này"}
+        ],
     )
     (tu_choi,) = snap.refusals
     assert tu_choi.reason == "Không có nhân viên rảnh vào giờ này"
@@ -127,8 +138,9 @@ def test_a_refusal_carries_the_reason_the_provider_gave():
 
 
 def test_the_text_given_to_the_model_contains_every_fact():
-    view = _View([_Buoc("schedule_property_viewing", "Đặt lịch tham quan", "SUCCESS",
-                        [("Thời gian", "2026-08-24 09:30")])])
+    view = _View(
+        [_Buoc("schedule_property_viewing", "Đặt lịch tham quan", "SUCCESS", [("Thời gian", "2026-08-24 09:30")])]
+    )
     text = build_snapshot(account_state="prospect", capabilities=CATALOGUE, view=view).as_text()
     assert "Vinhomes Pearl Bay" in text
     assert "Đặt lịch tham quan" in text
@@ -138,9 +150,16 @@ def test_the_text_given_to_the_model_contains_every_fact():
 
 # Dành cho cổng kiểm ở chặng sau: bốn lớp giá trị gây hại thật khi sai.
 def test_known_values_holds_every_concrete_value_the_answer_may_cite():
-    view = _View([_Buoc("book_parking", "Đặt chỗ đỗ xe", "SUCCESS",
-                        [("Thời gian", "2026-08-24"), ("Số tiền", "150.000 VND"),
-                         ("Mã đơn", "BOOK-77")])])
+    view = _View(
+        [
+            _Buoc(
+                "book_parking",
+                "Đặt chỗ đỗ xe",
+                "SUCCESS",
+                [("Thời gian", "2026-08-24"), ("Số tiền", "150.000 VND"), ("Mã đơn", "BOOK-77")],
+            )
+        ]
+    )
     biet = build_snapshot(account_state="resident", capabilities=CATALOGUE, view=view).known_values()
     assert "2026-08-24" in biet
     assert "150.000 VND" in biet

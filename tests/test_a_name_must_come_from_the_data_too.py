@@ -30,8 +30,6 @@ nên snapshot (`src/orchestration/snapshot.py`) đã đưa bảy dự án thật
 
 from __future__ import annotations
 
-import pytest
-
 from src.agents.response_agent import AgentReply, ReplyView, _reject_reason
 
 
@@ -127,10 +125,7 @@ def test_without_any_data_a_project_name_is_still_rejected() -> None:
 # vẫn xanh — và xét cả đoạn sẽ chặn một câu hoàn toàn bình thường.
 def test_a_project_sentence_and_a_zone_sentence_can_live_together() -> None:
     ly_do = _reject_reason(
-        _reply(
-            "Lịch tham quan dự án Vinhomes Pearl Bay đã chốt. "
-            "Chỗ đỗ xe Khu A cũng đã giữ xong."
-        ),
+        _reply("Lịch tham quan dự án Vinhomes Pearl Bay đã chốt. Chỗ đỗ xe Khu A cũng đã giữ xong."),
         _view(status="SUCCESS", facts=DU_LIEU),
     )
     assert ly_do is None, ly_do

@@ -65,6 +65,4 @@ def test_the_horizon_comes_from_the_backend_rule() -> None:
     mẫu cho gõ những ngày backend vừa thôi nhận.
     """
     source = (_GOC / "lib" / "dateBounds.ts").read_text(encoding="utf-8")
-    assert str(MAX_HORIZON_DAYS) in source, (
-        f"frontend không dùng đúng chân trời {MAX_HORIZON_DAYS} ngày của backend"
-    )
+    assert str(MAX_HORIZON_DAYS) in source, f"frontend không dùng đúng chân trời {MAX_HORIZON_DAYS} ngày của backend"

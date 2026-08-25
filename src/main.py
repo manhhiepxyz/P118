@@ -17,8 +17,8 @@ from src.api.notification_routes import router as notification_router
 from src.api.observability import CorrelationIdMiddleware, setup_observability_logging
 from src.api.readiness import evaluate_readiness
 from src.api.routes import router
-from src.api.verification_routes import router as verification_router
 from src.api.service_approval_routes import router as service_approval_router
+from src.api.verification_routes import router as verification_router
 from src.api.viewing_approval_routes import router as viewing_approval_router
 from src.config import get_settings
 from src.monitoring.llm_trace import trace_enabled
@@ -41,7 +41,7 @@ async def _ready(repository):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_observability_logging()
-    
+
     settings = get_settings()
     logging.getLogger("p118.main").info(f"Starting {settings.app_name} in {settings.app_env} mode")
 

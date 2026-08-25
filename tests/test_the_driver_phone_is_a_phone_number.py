@@ -78,6 +78,4 @@ def test_a_free_text_field_is_still_checked_when_it_has_a_rule() -> None:
     source = _FORMS.read_text(encoding="utf-8")
     ham = re.search(r"if \(field\.freeText\)(.{0,400})", source, re.DOTALL)
     assert ham, "không tìm thấy nhánh `freeText` trong `missingFields`"
-    assert "pattern" in ham.group(1), (
-        "nhánh `freeText` thoát ra trước khi xét `pattern` — ô có luật vẫn nhận mọi thứ"
-    )
+    assert "pattern" in ham.group(1), "nhánh `freeText` thoát ra trước khi xét `pattern` — ô có luật vẫn nhận mọi thứ"

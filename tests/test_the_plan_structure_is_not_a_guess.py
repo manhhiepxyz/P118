@@ -97,9 +97,7 @@ def test_the_order_puts_every_producer_before_its_consumer():
 
 def test_every_reference_points_at_the_task_that_produces_the_field():
     """149/149 InputRef trong dữ liệu đã ghi đều theo đúng luật này."""
-    plan = assemble_plan(
-        "đỗ xe", ["register_vehicle", "book_parking", "pay_fee"], {}
-    )
+    plan = assemble_plan("đỗ xe", ["register_vehicle", "book_parking", "pay_fee"], {})
     theo_tool = {t.tool: t for t in plan.tasks}
     xe = theo_tool["register_vehicle"].task_id
     cho = theo_tool["book_parking"].task_id
@@ -149,8 +147,7 @@ def test_a_value_for_another_tool_is_not_smeared_onto_this_one():
     plan = assemble_plan(
         "tham quan",
         ["schedule_property_viewing"],
-        {"project_id": "PRJ-004", "viewing_date": "2026-09-10",
-         "viewing_time": "09:30", "parking_zone": "ZONE_A"},
+        {"project_id": "PRJ-004", "viewing_date": "2026-09-10", "viewing_time": "09:30", "parking_zone": "ZONE_A"},
     )
     (task,) = plan.tasks
     assert "parking_zone" not in task.input
@@ -172,8 +169,7 @@ def test_the_shuttle_goes_on_the_day_of_the_viewing():
     plan = assemble_plan(
         "tham quan và xe đưa đón",
         ["schedule_property_viewing", "book_shuttle"],
-        {"project_id": "PRJ-005", "viewing_date": "2026-08-27", "viewing_time": "11:30",
-         "passenger_count": 1},
+        {"project_id": "PRJ-005", "viewing_date": "2026-08-27", "viewing_time": "11:30", "passenger_count": 1},
     )
     xe = next(t for t in plan.tasks if t.tool == "book_shuttle")
     assert xe.input["tour_date"] == "2026-08-27"
@@ -184,8 +180,13 @@ def test_an_explicit_shuttle_date_is_not_overwritten():
     plan = assemble_plan(
         "tham quan và xe đưa đón",
         ["schedule_property_viewing", "book_shuttle"],
-        {"project_id": "PRJ-005", "viewing_date": "2026-08-27", "viewing_time": "11:30",
-         "tour_date": "2026-08-28", "passenger_count": 1},
+        {
+            "project_id": "PRJ-005",
+            "viewing_date": "2026-08-27",
+            "viewing_time": "11:30",
+            "tour_date": "2026-08-28",
+            "passenger_count": 1,
+        },
     )
     xe = next(t for t in plan.tasks if t.tool == "book_shuttle")
     assert xe.input["tour_date"] == "2026-08-28"

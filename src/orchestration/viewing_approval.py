@@ -32,15 +32,15 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from src.common.enums import TaskStatus
-
-# Bước đã kết thúc — không đổi trạng thái được nữa, và cũng không cần.
-_TERMINAL_TASK_STATUSES = frozenset({TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value})
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
 from src.orchestration.payment_approval import persist_full_plan, plan_without
 
 logger = logging.getLogger(__name__)
+
+# Bước đã kết thúc — không đổi trạng thái được nữa, và cũng không cần.
+_TERMINAL_TASK_STATUSES = frozenset({TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value})
 
 AWAITING = "AWAITING"
 APPROVED = "APPROVED"

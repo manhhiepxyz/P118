@@ -4,8 +4,8 @@ import re
 from collections import deque
 from datetime import date, time, timedelta
 
-from src.common.projects import project_name, resolve_project_id
 from src.common.field_parsers import extract_plate_number
+from src.common.projects import project_name, resolve_project_id
 from src.common.schedule_policy import MAX_HORIZON_DAYS as _MAX_HORIZON_DAYS
 from src.common.schedule_policy import TIME_INPUTS as _TIME_INPUTS
 from src.common.task_plan import InputRef, TaskPlan
@@ -460,9 +460,7 @@ class TaskPlanValidator:
                 # Trần tương lai không thừa: không có nó thì "2199-12-31" là ngày
                 # hợp lệ — không nằm trong quá khứ nên mọi lớp kiểm cho qua, và
                 # chỗ đỗ năm 2199 vẫn được giữ thật, chiếm capacity thật.
-                if parsed_date < date.today() or parsed_date > date.today() + timedelta(
-                    days=cls.MAX_HORIZON_DAYS
-                ):
+                if parsed_date < date.today() or parsed_date > date.today() + timedelta(days=cls.MAX_HORIZON_DAYS):
                     raise MissingRequiredInputError((date_field,))
 
         time_rule = cls.TIME_INPUTS.get(tool)

@@ -122,9 +122,7 @@ async def create_verification_record(
             proof_image_urls=payload.proof_image_urls,
             record_id=payload.record_id,
         )
-        match = await verification_service.compute_ownership_match(
-            pool, payload.record_type, payload.claimed_data
-        )
+        match = await verification_service.compute_ownership_match(pool, payload.record_type, payload.claimed_data)
     except BookingError as exc:
         raise as_api_error(exc) from exc
 
@@ -151,9 +149,7 @@ async def list_verification_records(
     return schemas.ApiEnvelope(success=True, data=data, message="Found")
 
 
-@apartment_ownership_app.get(
-    "/api/verification-records/{record_id}", summary="Đọc MỘT hồ sơ xác thực"
-)
+@apartment_ownership_app.get("/api/verification-records/{record_id}", summary="Đọc MỘT hồ sơ xác thực")
 async def get_verification_record(
     record_id: str,
     pool: asyncpg.Pool = Depends(get_pool),

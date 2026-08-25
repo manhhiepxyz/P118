@@ -7,9 +7,8 @@ sau khi LangGraph hoàn tất.
 
 from __future__ import annotations
 
-import os
-
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
@@ -17,8 +16,8 @@ from uuid import UUID, uuid4
 
 import httpx
 
-from src.agents.graph import _apply_user_answers, build_planner_graph
 from src.agents.fast_lane import FastLane
+from src.agents.graph import _apply_user_answers, build_planner_graph
 from src.agents.planner import Planner
 from src.agents.validator import TaskPlanValidator
 from src.common.enums import ErrorCode, TaskStatus, WorkflowStatus
@@ -1698,7 +1697,7 @@ async def _persist_repair_clarification(
         logger.warning("không ghim được lượt hỏi lại (%s)", type(exc).__name__)
 
 
-class RetryNotAllowed(Exception):
+class RetryNotAllowed(Exception):  # noqa: N818 - đổi tên đụng 37 chỗ dùng trên 6 file, không đáng ngay lúc này
     """Yêu cầu này không chạy lại được, kèm lý do nói cho người dùng."""
 
     def __init__(self, code: str, message: str) -> None:
@@ -1731,7 +1730,7 @@ AMENDABLE_STATUSES: frozenset[str] = frozenset({WorkflowStatus.CANCELLED.value, 
 AMENDABLE_WHILE_WAITING: frozenset[str] = AMENDABLE_STATUSES | {WorkflowStatus.WAITING_APPROVAL.value}
 
 
-class NotAmendable(Exception):
+class NotAmendable(Exception):  # noqa: N818 - đổi tên đụng nhiều chỗ dùng, không đáng ngay lúc này
     """Yêu cầu này không sửa-rồi-chạy-lại được. `message` viết cho người đọc."""
 
     def __init__(self, code: str, message: str) -> None:

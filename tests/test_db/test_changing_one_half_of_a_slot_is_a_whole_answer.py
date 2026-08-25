@@ -33,7 +33,6 @@ import pytest
 
 from tests.test_db.conftest import _register_and_login
 
-
 NGAY_MOI = "2026-08-28"
 
 
@@ -139,7 +138,9 @@ async def test_a_first_time_question_still_asks_for_everything(client, db_pool):
     token = await _register_and_login(client, ten)
     owner = await db_pool.fetchval("SELECT id FROM users WHERE username=$1", ten)
     wid = await _mo_cau_hoi(
-        db_pool, owner, "schedule_property_viewing",
+        db_pool,
+        owner,
+        "schedule_property_viewing",
         ["project_id", "viewing_date", "viewing_time"],
     )
     res = await client.post(
@@ -150,6 +151,4 @@ async def test_a_first_time_question_still_asks_for_everything(client, db_pool):
     assert res.status_code == 202, res.text
     body = res.json()
     assert body.get("status") == "NEEDS_INFORMATION"
-    assert "viewing_time" in list(body.get("missing_fields") or []), (
-        f"lượt hỏi đầu mà bỏ qua ô chưa ai trả lời: {body}"
-    )
+    assert "viewing_time" in list(body.get("missing_fields") or []), f"lượt hỏi đầu mà bỏ qua ô chưa ai trả lời: {body}"

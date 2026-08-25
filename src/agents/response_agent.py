@@ -361,7 +361,6 @@ def _fallback(view: ReplyView) -> AgentReply:
     return AgentReply(answer=view.baseline_message, suggestions=[])
 
 
-
 # Tên dự án thật đều mở đầu bằng "Vinhomes" — xem `src/common/projects.py`.
 _PROJECT_MENTION = re.compile(r"Vinhomes", re.IGNORECASE)
 # Khu ĐỖ XE. Chúng hợp lệ khi nói về chỗ đỗ xe, và chỉ sai khi được giới thiệu
@@ -408,7 +407,7 @@ def _name_at(text: str, start: int) -> str:
         if ten and not sach[0].isupper():
             break
         ten.append(sach)
-        if tho != sach and tho.rstrip('"\'').endswith((".", ",", ";", ":", "!", "?")):
+        if tho != sach and tho.rstrip("\"'").endswith((".", ",", ";", ":", "!", "?")):
             break
         if len(ten) > 6:
             break
@@ -432,7 +431,6 @@ def _reject_unknown_project(text: str, view: ReplyView) -> str | None:
         if ten and ten not in nguon:
             return f"nêu một dự án không có trong dữ liệu ({ten[:40]!r})"
     return None
-
 
 
 # Khối "Đơn vị đã từ chối" do `src/orchestration/snapshot.py` dựng, dạng:

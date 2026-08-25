@@ -29,9 +29,9 @@ với") đều trả tools rỗng — không câu nào bịa ra dịch vụ.
 
 from __future__ import annotations
 
-import pytest
-
 from datetime import date, timedelta
+
+import pytest
 
 from src.agents.fast_lane import FastLane, _DuDoan
 
@@ -128,7 +128,7 @@ async def test_a_project_name_that_is_not_in_the_catalogue_falls_back():
 
 @pytest.mark.asyncio
 async def test_a_request_with_no_service_falls_back():
-    """"thời tiết Hạ Long ngày mai thế nào" — 0 dịch vụ. Không phải việc của lane này."""
+    """ "thời tiết Hạ Long ngày mai thế nào" — 0 dịch vụ. Không phải việc của lane này."""
     lane = _lane(_DuDoan(tools=[]))
     assert await lane.plan("thời tiết Hạ Long ngày mai thế nào") is None
 

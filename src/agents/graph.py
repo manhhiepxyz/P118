@@ -24,8 +24,6 @@ from typing import Any, Protocol
 
 from langgraph.graph import END, StateGraph
 
-logger = logging.getLogger(__name__)
-
 from src.agents.nodes.example_node import analyze_node, respond_node
 from src.agents.planner import (
     PAYMENT_QUOTE_REQUIRED_FIELD,
@@ -40,6 +38,8 @@ from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_payment_is_offered(plan: Any) -> None:
@@ -522,9 +522,7 @@ def build_planner_graph(
         #
         # `None` ở mọi nhánh không chắc chắn, và ta rơi về Planner như hôm nay.
         if fast_lane is not None:
-            nhanh = await fast_lane.plan(
-                state.get("goal", ""), state.get("existing_context", {})
-            )
+            nhanh = await fast_lane.plan(state.get("goal", ""), state.get("existing_context", {}))
             if nhanh is not None:
                 _apply_user_answers(nhanh, state.get("user_answers") or {})
                 _inject_trusted_identity(nhanh, state.get("existing_context", {}))

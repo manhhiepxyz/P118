@@ -101,8 +101,7 @@ class UserRepository:
         try:
             async with self._pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    f"INSERT INTO users ({', '.join(columns)}) "
-                    f"VALUES ({placeholders}) RETURNING {returning}",
+                    f"INSERT INTO users ({', '.join(columns)}) VALUES ({placeholders}) RETURNING {returning}",
                     *values,
                 )
         except asyncpg.UniqueViolationError as exc:
@@ -186,9 +185,7 @@ class UserRepository:
     async def list_all_users(self) -> list[dict]:
         """Lấy danh sách tất cả người dùng (bao gồm cả bị khóa) cho Admin."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT {', '.join(self._PUBLIC_COLUMNS)} FROM users ORDER BY created_at DESC"
-            )
+            rows = await conn.fetch(f"SELECT {', '.join(self._PUBLIC_COLUMNS)} FROM users ORDER BY created_at DESC")
             return [dict(row) for row in rows]
 
     async def update_role(self, user_id: str, role: str) -> dict | None:

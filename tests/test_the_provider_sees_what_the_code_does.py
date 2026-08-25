@@ -73,9 +73,7 @@ def test_the_repairable_code_matches_the_backend() -> None:
     # Đúng MỘT mã được mô tả là mở lượt sửa, và nó phải là mã backend dùng.
     dong_sua = [d for d in text.splitlines() if "chọn lại" in d]
     assert len(dong_sua) == 1, f"có {len(dong_sua)} mã hứa cho khách sửa, backend chỉ nhận một"
-    assert _REPAIRABLE_REJECT_CODE in dong_sua[0], (
-        f"giao diện hứa cho sửa ở một mã khác {_REPAIRABLE_REJECT_CODE!r}"
-    )
+    assert _REPAIRABLE_REJECT_CODE in dong_sua[0], f"giao diện hứa cho sửa ở một mã khác {_REPAIRABLE_REJECT_CODE!r}"
 
 
 def test_the_consequence_is_shown_for_whatever_is_selected() -> None:

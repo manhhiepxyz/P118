@@ -66,9 +66,7 @@ async def test_the_reviewer_is_told_the_real_reason(monkeypatch, ma, phai_co):
             mod._DecideBody(decision="approve"),
             reviewer={"username": "don_vi_tour"},
         )
-    assert phai_co in loi.value.detail, (
-        f"{ma} mà người duyệt nghe: {loi.value.detail!r}"
-    )
+    assert phai_co in loi.value.detail, f"{ma} mà người duyệt nghe: {loi.value.detail!r}"
     assert "thử lại" not in loi.value.detail or ma is ErrorCode.SERVICE_UNAVAILABLE, (
         f"{ma} không thử lại được, mà câu vẫn bảo thử lại: {loi.value.detail!r}"
     )
@@ -97,8 +95,7 @@ async def test_the_resident_gets_a_fresh_answer_before_the_route_gives_up():
             )
 
     assert da_xin == ["22222222-2222-2222-2222-222222222222"], (
-        "route ném 502 mà không xin câu mới — khách ở lại với câu của trạng "
-        "thái cũ và không bao giờ biết việc đã hỏng"
+        "route ném 502 mà không xin câu mới — khách ở lại với câu của trạng thái cũ và không bao giờ biết việc đã hỏng"
     )
 
 

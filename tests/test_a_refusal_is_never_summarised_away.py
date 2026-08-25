@@ -37,15 +37,15 @@ _TIEN = "\n\n## Các bước của yêu cầu này\n- Thanh toán phí [WAITING_
 
 TU_CHOI = {
     "su_that_hien_co": (
-        "## Đơn vị đã từ chối\n"
-        "- Đăng ký nhận tư vấn: Chưa có nhân viên tư vấn khung giờ này (OTHER)" + _TIEN
+        "## Đơn vị đã từ chối\n- Đăng ký nhận tư vấn: Chưa có nhân viên tư vấn khung giờ này (OTHER)" + _TIEN
     )
 }
 
 
 def _view(**kw) -> ReplyView:
-    base = dict(goal="đăng ký tư vấn và giữ chỗ đỗ xe", status="WAITING_APPROVAL",
-                baseline_message="", steps=[], facts=TU_CHOI)
+    base = dict(
+        goal="đăng ký tư vấn và giữ chỗ đỗ xe", status="WAITING_APPROVAL", baseline_message="", steps=[], facts=TU_CHOI
+    )
     base.update(kw)
     return ReplyView(**base)
 
@@ -119,8 +119,7 @@ def test_mentioning_one_refusal_does_not_cover_the_other() -> None:
     }
     ly_do = _reject_reason(
         _reply(
-            "Đăng ký nhận tư vấn bị đơn vị từ chối. Khoản 150.000 VND cho chỗ đỗ xe "
-            "đang chờ bạn xác nhận thanh toán."
+            "Đăng ký nhận tư vấn bị đơn vị từ chối. Khoản 150.000 VND cho chỗ đỗ xe đang chờ bạn xác nhận thanh toán."
         ),
         _view(facts=hai),
     )

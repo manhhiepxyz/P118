@@ -38,9 +38,7 @@ from src.common.field_parsers import BOOLEAN_FIELDS, DATE_FIELDS, TIME_FIELDS
 from tests.test_db.conftest import _register_and_login
 
 # Ô do BƯỚC TRƯỚC sinh ra, hoặc do tài khoản cấp — người dùng không gõ chúng.
-KHONG_PHAI_NGUOI_DUNG_GO = frozenset(
-    {"vehicle_id", "booking_id", "viewing_id", "amount", "currency", "resident_id"}
-)
+KHONG_PHAI_NGUOI_DUNG_GO = frozenset({"vehicle_id", "booking_id", "viewing_id", "amount", "currency", "resident_id"})
 
 # Tool Planner được phép dùng. `cancel_*` và `change_parking_zone` bị cấm lập kế
 # hoạch (xem `AGENT_FORBIDDEN_TOOLS`), `search_properties`/`register_resident`
@@ -131,18 +129,14 @@ async def _mo_cau_hoi(pool, owner, tool: str, thieu: list[str]) -> str:
 
 @pytest.mark.parametrize("tool", DICH_VU)
 @pytest.mark.asyncio
-async def test_answering_one_field_at_a_time_never_loses_the_earlier_ones(
-    client, db_pool, monkeypatch, tool: str
-):
+async def test_answering_one_field_at_a_time_never_loses_the_earlier_ones(client, db_pool, monkeypatch, tool: str):
     """Gõ từng ô một. Ô đã nhận phải còn nguyên ở MỌI lượt sau."""
     from src.api import routes
 
     lap_ke_hoach: list[dict] = []
 
     async def _ghi_lai(workflow_id, goal, *_a, **_kw):
-        lap_ke_hoach.append(
-            dict((routes._DEMO_JOBS.get(workflow_id) or {}).get("existing_context") or {})
-        )
+        lap_ke_hoach.append(dict((routes._DEMO_JOBS.get(workflow_id) or {}).get("existing_context") or {}))
 
     monkeypatch.setattr(routes, "_run_demo_job", _ghi_lai)
 
@@ -267,9 +261,7 @@ async def test_the_cached_question_shrinks_too_not_just_the_stored_one(client, d
     ten = "cache_nong"
     token = await _register_and_login(client, ten)
     owner = await db_pool.fetchval("SELECT id FROM users WHERE username=$1", ten)
-    wid = await _mo_cau_hoi(
-        db_pool, owner, "schedule_property_viewing", ["project_id", "viewing_date", "viewing_time"]
-    )
+    wid = await _mo_cau_hoi(db_pool, owner, "schedule_property_viewing", ["project_id", "viewing_date", "viewing_time"])
 
     # LÀM NÓNG cache đúng như một lượt `/start` thật để lại.
     routes._DEMO_JOBS[wid] = {
@@ -287,8 +279,11 @@ async def test_the_cached_question_shrinks_too_not_just_the_stored_one(client, d
     }
     try:
         con_hoi = ["project_name", "viewing_date", "viewing_time"]
-        mau = {"project_name": "Vinhomes Ocean Park", "viewing_date": SAP_TOI.strftime("%d/%m/%Y"),
-               "viewing_time": "09:30"}
+        mau = {
+            "project_name": "Vinhomes Ocean Park",
+            "viewing_date": SAP_TOI.strftime("%d/%m/%Y"),
+            "viewing_time": "09:30",
+        }
         da_gui = []
         for _ in range(3):
             if not con_hoi:
@@ -308,8 +303,7 @@ async def test_the_cached_question_shrinks_too_not_just_the_stored_one(client, d
             con_hoi = list(body.get("missing_fields") or [])
             quay_lai = [f for f in da_gui if f in con_hoi]
             assert not quay_lai, (
-                f"sau khi trả lời {da_gui}, hệ thống hỏi lại {quay_lai} — "
-                f"cache trong RAM vẫn giữ danh sách gốc"
+                f"sau khi trả lời {da_gui}, hệ thống hỏi lại {quay_lai} — cache trong RAM vẫn giữ danh sách gốc"
             )
     finally:
         routes._DEMO_JOBS.pop(wid, None)
@@ -342,7 +336,9 @@ async def test_reloading_the_page_mid_conversation_shows_the_shrunken_question(c
     token = await _register_and_login(client, ten)
     owner = await db_pool.fetchval("SELECT id FROM users WHERE username=$1", ten)
     wid = await _mo_cau_hoi(
-        db_pool, owner, "create_maintenance_request",
+        db_pool,
+        owner,
+        "create_maintenance_request",
         ["issue_type", "description", "location", "preferred_date", "preferred_time"],
     )
     cau_goc = "Mình cần thêm thông tin để lập kế hoạch: hạng mục cần bảo trì, mô tả sự cố, vị trí cần sửa chữa, ngày muốn bảo trì và giờ muốn bảo trì."
@@ -362,14 +358,12 @@ async def test_reloading_the_page_mid_conversation_shows_the_shrunken_question(c
         ),
     }
     try:
-        H = {"Authorization": f"Bearer {token}"}
-        res = await client.post(
-            f"/api/v1/workflows/demo/{wid}/continue", json={"message": "Điều hoà"}, headers=H
-        )
+        headers = {"Authorization": f"Bearer {token}"}
+        res = await client.post(f"/api/v1/workflows/demo/{wid}/continue", json={"message": "Điều hoà"}, headers=headers)
         assert res.status_code == 202, res.text
         vua_nhan = res.json()
 
-        tai_lai = await client.get(f"/api/v1/workflows/demo/{wid}", headers=H)
+        tai_lai = await client.get(f"/api/v1/workflows/demo/{wid}", headers=headers)
         assert tai_lai.status_code == 200, tai_lai.text
         sau = tai_lai.json()
 
@@ -388,8 +382,6 @@ async def test_reloading_the_page_mid_conversation_shows_the_shrunken_question(c
                 f"  TẢI LẠI {sau.get(truong)!r}"
             )
         for truong in ("message", "answer", "question"):
-            assert "hạng mục" not in (sau.get(truong) or ""), (
-                f"{truong} hỏi lại ô đã trả lời: {sau.get(truong)!r}"
-            )
+            assert "hạng mục" not in (sau.get(truong) or ""), f"{truong} hỏi lại ô đã trả lời: {sau.get(truong)!r}"
     finally:
         routes._DEMO_JOBS.pop(wid, None)

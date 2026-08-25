@@ -55,19 +55,19 @@ thuộc về lane cũ.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from src.agents.plan_assembly import assemble_plan
+from src.agents.validator import TaskPlanValidator
+from src.common.projects import resolve_project_id
+from src.common.task_plan import TaskPlan
 from src.monitoring.usage_tracker import (
     current_usage_context,
     reset_usage_context,
     usage_context,
 )
-from src.agents.validator import TaskPlanValidator
-from src.common.projects import resolve_project_id
-from src.common.task_plan import TaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -89,28 +89,28 @@ class _DuDoan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tools: list[Literal[MENU]] = []
-    project_name: Optional[str] = None
-    viewing_date: Optional[str] = None
-    viewing_time: Optional[str] = None
-    plate_number: Optional[str] = None
-    vehicle_type: Optional[Literal["car", "motorcycle"]] = None
-    booking_date: Optional[str] = None
-    parking_zone: Optional[Literal["ZONE_A", "ZONE_B"]] = None
-    issue_type: Optional[Literal["air_conditioning", "plumbing", "electrical", "other"]] = None
-    description: Optional[str] = None
-    location: Optional[str] = None
-    preferred_date: Optional[str] = None
-    preferred_time: Optional[str] = None
-    interest_type: Optional[Literal["rent", "buy"]] = None
-    preferred_contact_time: Optional[str] = None
-    consent: Optional[bool] = None
-    move_date: Optional[str] = None
-    move_time: Optional[str] = None
-    move_vehicle: Optional[Literal["van", "truck"]] = None
-    needs_elevator: Optional[bool] = None
-    needs_loading_support: Optional[bool] = None
-    tour_date: Optional[str] = None
-    passenger_count: Optional[int] = None
+    project_name: str | None = None
+    viewing_date: str | None = None
+    viewing_time: str | None = None
+    plate_number: str | None = None
+    vehicle_type: Literal["car", "motorcycle"] | None = None
+    booking_date: str | None = None
+    parking_zone: Literal["ZONE_A", "ZONE_B"] | None = None
+    issue_type: Literal["air_conditioning", "plumbing", "electrical", "other"] | None = None
+    description: str | None = None
+    location: str | None = None
+    preferred_date: str | None = None
+    preferred_time: str | None = None
+    interest_type: Literal["rent", "buy"] | None = None
+    preferred_contact_time: str | None = None
+    consent: bool | None = None
+    move_date: str | None = None
+    move_time: str | None = None
+    move_vehicle: Literal["van", "truck"] | None = None
+    needs_elevator: bool | None = None
+    needs_loading_support: bool | None = None
+    tour_date: str | None = None
+    passenger_count: int | None = None
 
 
 # `json_mode` KHÔNG gửi schema cho model — chỉ nói "trả JSON". Đo được: bỏ
@@ -206,9 +206,7 @@ class FastLane:
         if not tools:
             return None
 
-        values: dict[str, Any] = {
-            k: v for k, v in du_doan.model_dump().items() if k != "tools" and v is not None
-        }
+        values: dict[str, Any] = {k: v for k, v in du_doan.model_dump().items() if k != "tools" and v is not None}
         ten_du_an = values.pop("project_name", None)
         if ten_du_an:
             ma = resolve_project_id(str(ten_du_an))

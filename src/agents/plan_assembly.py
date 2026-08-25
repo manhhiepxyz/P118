@@ -193,8 +193,7 @@ def assemble_plan(goal: str, tools: list[str], values: dict[str, Any]) -> TaskPl
                 phu_thuoc[field] = nguon[-1]
 
         dau_vao: dict[str, Any] = {
-            field: InputRef(from_task=nhan[nguon], field=field)
-            for field, nguon in phu_thuoc.items()
+            field: InputRef(from_task=nhan[nguon], field=field) for field, nguon in phu_thuoc.items()
         }
         for o in O_NGUOI_DUNG.get(tool, ()):
             if values.get(o) is not None:

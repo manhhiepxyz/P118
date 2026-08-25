@@ -215,7 +215,7 @@ async def _insert_rows(pool: Any, rows: list[dict[str, Any]]) -> None:
             for wf_id, updates in workflow_updates.items():
                 await conn.execute(
                     """
-                    UPDATE workflows 
+                    UPDATE workflows
                     SET total_tokens = total_tokens + $1,
                         total_cost = total_cost + $2,
                         latency_ms = COALESCE(latency_ms, 0) + $3
@@ -226,4 +226,3 @@ async def _insert_rows(pool: Any, rows: list[dict[str, Any]]) -> None:
                     updates["latency"],
                     wf_id,
                 )
-

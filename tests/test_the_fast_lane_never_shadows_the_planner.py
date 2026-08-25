@@ -66,14 +66,19 @@ class _PlannerDem:
 
 
 class _LaneCoKeHoach:
-    def __init__(self, plan): self._plan = plan; self.so_lan = 0
+    def __init__(self, plan):
+        self._plan = plan
+        self.so_lan = 0
+
     async def plan(self, goal, existing_context=None):
         self.so_lan += 1
         return self._plan
 
 
 class _LaneNhuong:
-    def __init__(self): self.so_lan = 0
+    def __init__(self):
+        self.so_lan = 0
+
     async def plan(self, goal, existing_context=None):
         self.so_lan += 1
         return None
@@ -81,9 +86,7 @@ class _LaneNhuong:
 
 async def _chay(planner, fast_lane, goal="đặt lịch tham quan Pearl Bay"):
     graph = build_planner_graph(planner, _KhongChay(), fast_lane=fast_lane)
-    return await graph.ainvoke(
-        {"goal": goal, "existing_context": {}, "user_answers": {}}
-    )
+    return await graph.ainvoke({"goal": goal, "existing_context": {}, "user_answers": {}})
 
 
 class _KhongChay:
@@ -120,9 +123,7 @@ async def test_with_no_fast_lane_nothing_changes_at_all():
     """Không cắm đường nhanh thì graph phải y hệt bản trước."""
     planner = _PlannerDem()
     graph = build_planner_graph(planner, _KhongChay())
-    state = await graph.ainvoke(
-        {"goal": "đặt lịch tham quan", "existing_context": {}, "user_answers": {}}
-    )
+    state = await graph.ainvoke({"goal": "đặt lịch tham quan", "existing_context": {}, "user_answers": {}})
     assert planner.so_lan == 1
     assert state.get("plan") is not None
 

@@ -29,7 +29,6 @@ import pytest
 
 from src.api.routes import _extract_follow_up_answers
 
-
 BA_O_CHUYEN_NHA = ["needs_elevator", "needs_loading_support", "move_vehicle"]
 
 
@@ -38,8 +37,7 @@ def test_a_bare_yes_does_not_fill_two_boolean_fields(cau):
     answers, unresolved = _extract_follow_up_answers(cau, list(BA_O_CHUYEN_NHA))
     da_bat = [o for o in ("needs_elevator", "needs_loading_support") if o in answers]
     assert len(da_bat) <= 1, (
-        f"{cau!r} là một câu trả lời, mà bật {da_bat} — "
-        f"ô thứ hai là một quyết định người dùng chưa đưa ra"
+        f"{cau!r} là một câu trả lời, mà bật {da_bat} — ô thứ hai là một quyết định người dùng chưa đưa ra"
     )
     assert "needs_loading_support" in unresolved, (
         f"{cau!r} chưa trả lời ô bốc dỡ, nên ô đó phải được hỏi lại; unresolved={unresolved}"
@@ -57,9 +55,7 @@ def test_a_bare_no_does_not_answer_two_boolean_fields_either(cau):
 
 def test_the_last_boolean_standing_alone_is_answered_normally():
     """Còn MỘT ô boolean thì "có" hết mơ hồ — phải nhận, nếu không sẽ kẹt vòng lặp."""
-    answers, unresolved = _extract_follow_up_answers(
-        "có", ["needs_loading_support", "move_vehicle"]
-    )
+    answers, unresolved = _extract_follow_up_answers("có", ["needs_loading_support", "move_vehicle"])
     assert answers.get("needs_loading_support") is True, (
         f"chỉ còn một ô boolean mà vẫn không nhận: answers={answers} unresolved={unresolved}"
     )
@@ -108,15 +104,12 @@ def test_a_bare_token_answers_exactly_one_field_whatever_its_type():
     for cau in CAU_TRONG_TRON:
         answers, _ = _extract_follow_up_answers(cau, ["needs_loading_support", "move_vehicle"])
         assert len(answers) <= 1, (
-            f"{cau!r} là một tiếng đáp, mà đóng {sorted(answers)} — "
-            f"ô thứ hai là quyết định người dùng chưa đưa ra"
+            f"{cau!r} là một tiếng đáp, mà đóng {sorted(answers)} — ô thứ hai là quyết định người dùng chưa đưa ra"
         )
 
 
 def test_the_moving_vehicle_is_never_decided_by_a_yes_or_no_meant_for_something_else():
-    answers, unresolved = _extract_follow_up_answers(
-        "không", ["needs_loading_support", "move_vehicle"]
-    )
+    answers, unresolved = _extract_follow_up_answers("không", ["needs_loading_support", "move_vehicle"])
     assert answers.get("needs_loading_support") is False
     assert "move_vehicle" not in answers, f"xe chuyển nhà bị chốt bằng {answers!r}"
     assert "move_vehicle" in unresolved

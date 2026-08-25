@@ -49,7 +49,7 @@ def test_json_mode_spells_out_every_field(ten: str) -> None:
     p = _prompt("json_mode")
     assert f'"{ten}"' in p, (
         f"`json_mode` không gửi schema, và prompt không nêu {ten!r} trong khung JSON — "
-        f"model phải đoán tên, và `extra=\"forbid\"` biến một lần đoán trượt thành "
+        f'model phải đoán tên, và `extra="forbid"` biến một lần đoán trượt thành '
         f"hỏng cả lượt phân loại"
     )
 
