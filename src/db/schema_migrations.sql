@@ -147,7 +147,11 @@ $$;
 -- là snapshot từ bảng `users` (đừng JOIN lúc sau — user có thể đổi họ tên).
 DO $$
 BEGIN
-    IF to_regclass('workflows') IS NOT NULL THEN
+    -- `viewing_approvals` giờ là KHUNG NHÌN trên `service_approvals` (xem
+    -- migration "GỘP hai hàng đợi duyệt" ở cuối file). Khối này chỉ còn có
+    -- nghĩa với database chưa từng chạy tới đó; chạm vào một view thì
+    -- `CREATE INDEX` đổ `WrongObjectTypeError` và cả file migration dừng lại.
+    IF to_regclass('workflows') IS NOT NULL AND to_regclass('viewing_approvals') IS NULL THEN
         CREATE TABLE IF NOT EXISTS viewing_approvals (
             workflow_id      UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
             task_id          VARCHAR(20)  NOT NULL,
@@ -707,11 +711,236 @@ $$;
 -- Chỉ NỚI ràng buộc, không xoá dòng nào: bằng chứng ai yêu cầu gì vẫn giữ.
 DO $$
 BEGIN
-    IF to_regclass('viewing_approvals') IS NOT NULL THEN
+    -- Chỉ khi nó còn là BẢNG. Sau khi gộp hàng đợi, `viewing_approvals` là
+    -- khung nhìn và `ALTER TABLE` trên view đổ `WrongObjectTypeError` — lỗi ấy
+    -- dừng CẢ file migration, nên mọi thay đổi sau nó cũng không chạy.
+    -- Ràng buộc tương ứng giờ nằm trên `service_approvals`.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+         WHERE table_name = 'viewing_approvals' AND table_type = 'BASE TABLE'
+    ) THEN
         ALTER TABLE viewing_approvals DROP CONSTRAINT IF EXISTS viewing_approvals_status_check;
         ALTER TABLE viewing_approvals
             ADD CONSTRAINT viewing_approvals_status_check
             CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED', 'EXPIRED'));
+    END IF;
+END
+$$;
+
+
+-- Sức chứa 0 phải hợp lệ: nó nghĩa là khu KHÔNG còn nhận đăng ký.
+--
+-- Ràng buộc cũ `CHECK (capacity > 0)` cấm đúng trạng thái ấy, nên muốn diễn lại
+-- luồng "khu A hết chỗ → đổi sang khu B" thì phải gieo booking giả cho từng
+-- ngày — vừa sai sự thật vừa không bao giờ phủ hết ngày.
+DO $$
+BEGIN
+    IF to_regclass('zone_capacity_config') IS NOT NULL THEN
+        ALTER TABLE zone_capacity_config DROP CONSTRAINT IF EXISTS zone_capacity_config_capacity_check;
+        ALTER TABLE zone_capacity_config ADD CONSTRAINT zone_capacity_config_capacity_check CHECK (capacity >= 0);
+    END IF;
+END
+$$;
+
+-- Ràng buộc THỨ HAI, dễ bỏ sót.
+--
+-- `parking_capacity` (bảng theo NGÀY) có check riêng, tách khỏi
+-- `zone_capacity_config` (bảng cấu hình). Nới mỗi bảng cấu hình thì seed chạy
+-- tới câu đồng bộ là đổ `CheckViolationError`, và vì migration dừng ở đó nên
+-- cả file seed không hoàn tất.
+DO $$
+BEGIN
+    IF to_regclass('parking_capacity') IS NOT NULL THEN
+        ALTER TABLE parking_capacity DROP CONSTRAINT IF EXISTS parking_capacity_capacity_check;
+        ALTER TABLE parking_capacity ADD CONSTRAINT parking_capacity_capacity_check CHECK (capacity >= 0);
+    END IF;
+END
+$$;
+
+-- Hàng đợi duyệt của ĐƠN VỊ CUNG CẤP, cho mọi dịch vụ.
+--
+-- `viewing_approvals` chỉ phục vụ lịch tham quan và mang cột riêng của nó
+-- (project_id, viewing_date...). Sáu dịch vụ còn lại — đăng ký xe, chỗ đỗ,
+-- bảo trì, chuyển nhà, xe đưa đón, đăng ký tư vấn — chạy thẳng, không ai duyệt.
+--
+-- Một dòng cho MỖI BƯỚC cần duyệt, không phải mỗi workflow: một yêu cầu có thể
+-- gồm nhiều dịch vụ của nhiều đơn vị khác nhau, và mỗi đơn vị chỉ quyết định
+-- phần của mình.
+--
+-- `details` là JSONB thay vì cột cứng: mỗi dịch vụ có dữ kiện khác nhau, và
+-- thêm một dịch vụ không được kéo theo một lần đổi schema.
+CREATE TABLE IF NOT EXISTS service_approvals (
+    workflow_id       UUID         NOT NULL,
+    task_id           VARCHAR(20)  NOT NULL,
+    tool              VARCHAR(64)  NOT NULL,
+    service_label     VARCHAR(120) NOT NULL,
+    details           JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    status            VARCHAR(20)  NOT NULL DEFAULT 'AWAITING'
+                      CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+    applicant_user_id UUID,
+    applicant_name    VARCHAR(200),
+    applicant_phone   VARCHAR(20),
+    reject_reason     VARCHAR(500),
+    decided_by        VARCHAR(100),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decided_at        TIMESTAMPTZ,
+    PRIMARY KEY (workflow_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_approvals_status
+    ON service_approvals (status, created_at);
+
+
+-- 2026-08 — GỘP hai hàng đợi duyệt thành MỘT.
+--
+-- `viewing_approvals` ra đời trước, phục vụ riêng lịch tham quan.
+-- `service_approvals` ra sau, phục vụ sáu dịch vụ còn lại. Hai bảng nghĩa là
+-- hai chỗ để lệch nhau, và người duyệt phải nhìn hai danh sách.
+--
+-- Gộp bằng cách giữ MỘT bảng vật lý (`service_approvals`) và biến
+-- `viewing_approvals` thành KHUNG NHÌN trên nó. 108 chỗ đọc trong mã nguồn
+-- không phải sửa dòng nào; chỉ 5 lệnh GHI được chuyển hướng — và cả 5 nằm
+-- trong cùng một file.
+--
+-- Dữ liệu cũ được chuyển sang trước khi bỏ bảng: một lịch tham quan đang chờ
+-- đơn vị duyệt mà biến mất giữa lúc nâng cấp là một khách bị bỏ rơi.
+DO $$
+BEGIN
+    -- Chỉ chạy khi `viewing_approvals` còn là BẢNG. Chạy lần hai thì nó đã là
+    -- view và khối này không làm gì.
+    IF to_regclass('viewing_approvals') IS NOT NULL
+       AND EXISTS (
+           SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'viewing_approvals' AND table_type = 'BASE TABLE'
+       )
+    THEN
+        INSERT INTO service_approvals
+            (workflow_id, task_id, tool, service_label, details, status,
+             applicant_user_id, applicant_name, applicant_phone,
+             reject_reason, decided_by, created_at, decided_at)
+        SELECT v.workflow_id, v.task_id, 'schedule_property_viewing',
+               'Đặt lịch tham quan',
+               jsonb_strip_nulls(jsonb_build_object(
+                   'project_id', v.project_id,
+                   'project_name', v.project_name,
+                   'viewing_date', to_char(v.viewing_date, 'YYYY-MM-DD'),
+                   'viewing_time', v.viewing_time,
+                   'passenger_count', v.passenger_count,
+                   'wants_shuttle', v.wants_shuttle
+               )),
+               v.status, v.applicant_user_id, v.applicant_name, v.applicant_phone,
+               v.reject_reason, v.decided_by, v.created_at, v.decided_at
+          FROM viewing_approvals v
+        ON CONFLICT (workflow_id, task_id) DO NOTHING;
+
+        -- ĐỔI TÊN, không xoá. Dữ liệu đã được chép sang bảng gộp ở trên,
+        -- nhưng "đã chép" chỉ đúng nếu câu INSERT chạy trọn — và một lệnh
+        -- `DROP TABLE` thì không có đường lùi. Bảng cũ nằm lại dưới tên
+        -- `_legacy` cho tới khi có người xác nhận bản gộp chạy ổn; xoá nó là
+        -- một quyết định riêng, có người bấm.
+        ALTER TABLE viewing_approvals RENAME TO viewing_approvals_legacy;
+    END IF;
+
+    IF to_regclass('viewing_approvals') IS NULL THEN
+        -- Cùng TÊN CỘT với bảng cũ: mọi truy vấn đọc giữ nguyên.
+        --
+        -- `wants_shuttle` có COALESCE vì bảng cũ khai NOT NULL DEFAULT FALSE,
+        -- còn `details` thì bỏ hẳn khoá khi giá trị là NULL — đọc ra NULL sẽ
+        -- làm mọi nhánh `if wants_shuttle` đổi nghĩa.
+        EXECUTE $view$
+            CREATE VIEW viewing_approvals AS
+            SELECT workflow_id, task_id, status,
+                   details->>'project_id'                        AS project_id,
+                   details->>'project_name'                      AS project_name,
+                   (details->>'viewing_date')::date              AS viewing_date,
+                   details->>'viewing_time'                      AS viewing_time,
+                   (details->>'passenger_count')::int            AS passenger_count,
+                   COALESCE((details->>'wants_shuttle')::boolean, FALSE) AS wants_shuttle,
+                   applicant_user_id, applicant_name, applicant_phone,
+                   reject_reason, decided_by, created_at, decided_at
+              FROM service_approvals
+             WHERE tool = 'schedule_property_viewing'
+        $view$;
+    END IF;
+END
+$$;
+
+
+-- Khung nhìn `viewing_approvals` GHI ĐƯỢC.
+--
+-- Gộp hàng đợi thì mọi chỗ ĐỌC giữ nguyên nhờ khung nhìn, nhưng chỗ GHI thì
+-- không: PostgreSQL từ chối `INSERT` vào một view có cột dẫn xuất
+-- (`details->>'project_id'` không phải cột của bảng gốc).
+--
+-- Đo được: 12 test đỏ ngay khi gộp, tất cả vì chúng seed dữ liệu bằng `INSERT
+-- INTO viewing_approvals`. Sửa từng test là bỏ sót — mã cũ, script vận hành và
+-- test chưa viết đều có thể ghi vào đây.
+--
+-- Trigger dịch ngược: cột riêng của tham quan gói lại thành `details`, phần
+-- còn lại đi thẳng. Sau đó bảng chỉ còn MỘT, mà giao diện cũ vẫn nguyên vẹn.
+CREATE OR REPLACE FUNCTION viewing_approvals_write() RETURNS trigger AS $fn$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO service_approvals (
+            workflow_id, task_id, tool, service_label, details, status,
+            applicant_user_id, applicant_name, applicant_phone,
+            reject_reason, decided_by, created_at, decided_at
+        ) VALUES (
+            NEW.workflow_id, NEW.task_id, 'schedule_property_viewing',
+            'Đặt lịch tham quan',
+            jsonb_strip_nulls(jsonb_build_object(
+                'project_id', NEW.project_id,
+                'project_name', NEW.project_name,
+                'viewing_date', to_char(NEW.viewing_date, 'YYYY-MM-DD'),
+                'viewing_time', NEW.viewing_time,
+                'passenger_count', NEW.passenger_count,
+                'wants_shuttle', NEW.wants_shuttle
+            )),
+            COALESCE(NEW.status, 'AWAITING'),
+            NEW.applicant_user_id, NEW.applicant_name, NEW.applicant_phone,
+            NEW.reject_reason, NEW.decided_by,
+            COALESCE(NEW.created_at, NOW()), NEW.decided_at
+        )
+        ON CONFLICT (workflow_id, task_id) DO NOTHING;
+        RETURN NEW;
+    END IF;
+
+    UPDATE service_approvals SET
+        status            = COALESCE(NEW.status, status),
+        reject_reason     = NEW.reject_reason,
+        decided_by        = NEW.decided_by,
+        decided_at        = NEW.decided_at,
+        applicant_name    = NEW.applicant_name,
+        applicant_phone   = NEW.applicant_phone,
+        details           = details || jsonb_strip_nulls(jsonb_build_object(
+                                'project_id', NEW.project_id,
+                                'project_name', NEW.project_name,
+                                'viewing_date', to_char(NEW.viewing_date, 'YYYY-MM-DD'),
+                                'viewing_time', NEW.viewing_time,
+                                'passenger_count', NEW.passenger_count,
+                                'wants_shuttle', NEW.wants_shuttle
+                            ))
+     WHERE workflow_id = OLD.workflow_id
+       AND task_id = OLD.task_id
+       AND tool = 'schedule_property_viewing';
+    RETURN NEW;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS viewing_approvals_write_trg ON viewing_approvals;
+CREATE TRIGGER viewing_approvals_write_trg
+    INSTEAD OF INSERT OR UPDATE ON viewing_approvals
+    FOR EACH ROW EXECUTE FUNCTION viewing_approvals_write();
+
+-- =============================================================
+-- 2026-08 — Observability Metrics
+-- =============================================================
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_cost NUMERIC(10, 4) NOT NULL DEFAULT 0.0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
     END IF;
 END
 $$;

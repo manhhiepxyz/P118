@@ -24,9 +24,16 @@ _AGENT_API = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "src"
 
 
 def _frontend_prefixes() -> list[str]:
+    """Chuỗi trong `SAFE_VALIDATION_MESSAGES`, KHÔNG phụ thuộc kiểu nháy.
+
+    Bản trước chỉ bắt nháy đơn. Một lần chạy formatter đổi cả file sang nháy
+    kép là danh sách đọc ra RỖNG, và mọi khẳng định phía dưới thành vô nghĩa
+    trong khi vẫn xanh — trừ đúng một test kiểm "đọc được không". Kiểu nháy là
+    chuyện style; nội dung mới là thứ test này nói về.
+    """
     source = _AGENT_API.read_text(encoding="utf-8")
     block = source.split("const SAFE_VALIDATION_MESSAGES = [", 1)[1].split("]", 1)[0]
-    return re.findall(r"'([^']+)'", block)
+    return [don or kep for don, kep in re.findall(r"'([^']+)'|\"([^\"]+)\"", block)]
 
 
 def test_the_frontend_allowlist_is_readable():

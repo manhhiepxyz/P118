@@ -76,7 +76,7 @@ def _full_flow_plan(
     apartment_code: str,
     plate_number: str,
     booking_date: str,
-    parking_zone: str = "ZONE_A",
+    parking_zone: str = "ZONE_B",
 ) -> TaskPlan:
     """TaskPlan 4 bước với chuỗi InputRef đầy đủ."""
     return TaskPlan(
@@ -279,14 +279,10 @@ async def test_e2e_no_availability_marks_workflow_and_task_failed(e2e_pool: asyn
     async with _real_connectors() as connectors:
         executor = Executor(connectors, repository)
 
-        # Đổ đầy ZONE_A bằng các workflow thật (ZONE_A_CAPACITY = 3).
-        for _ in range(3):
-            filler = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date)
-            _, filler_results = await executor.execute(filler)
-            assert filler_results["T3"].success is True, "bước đổ đầy đáng lẽ phải thành công"
-
-        # Workflow tiếp theo phải chạm NO_AVAILABILITY ở T3.
-        plan = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date)
+        # ZONE_A được CẤU HÌNH kín (sức chứa 0) — không cần đổ đầy bằng
+        # booking giả. Vòng lặp cũ phụ thuộc sức chứa đúng bằng 3 và hỏng ngay
+        # lần đầu cấu hình đó thay đổi.
+        plan = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date, parking_zone="ZONE_A")
         workflow_id, results = await executor.execute(plan)
 
     # --- T1, T2 vẫn thành công; T3 thất bại đúng mã lỗi ---

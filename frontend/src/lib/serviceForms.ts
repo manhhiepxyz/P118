@@ -38,6 +38,10 @@ export interface FieldSpec {
   kind: FieldKind
   options?: Option[]
   placeholder?: string
+  /** Luật định dạng cho ô chữ. Sai luật = ô chưa hợp lệ, chặn ngay tại chỗ. */
+  pattern?: RegExp
+  /** Câu chỉ dẫn khi sai luật — nói ĐỊNH DẠNG, không nói 'chưa nhập'. */
+  patternHint?: string
   hint?: string
   min?: number
   max?: number
@@ -303,6 +307,17 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
       tool: 'register_vehicle',
       phrase: 'biển số {v}',
       placeholder: '30A-123.45',
+      // Cùng LUẬT với `_extract_plate_number` phía backend.
+      //
+      // Không có nó, ô nhận mọi thứ rồi backend từ chối — người dùng gửi đi,
+      // chờ, và nhận về một câu ở tận khung chat cho một ô họ đang nhìn. Đo
+      // được: nhập "50A-82812312" (8 chữ số), biểu mẫu cho qua, backend trả
+      // "Vui lòng nhập biển số xe".
+      //
+      // Hai nơi giữ cùng một luật thì sớm muộn lệch nhau, nên
+      // `tests/test_plate_rule_matches_backend.py` đối chiếu chúng.
+      pattern: /^\d{2}[a-zA-Z]{1,2}[ .-]?\d{3,6}(?:[. ]\d{1,3})?$/,
+      patternHint: 'Biển số chưa đúng định dạng. Ví dụ: 59A-12345 — 2 chữ số đầu, 1–2 chữ cái, rồi 3–6 chữ số.',
     },
     {
       key: 'parking_zone',
@@ -424,7 +439,10 @@ export function missingFields(service: string, values: FormValues): FieldSpec[] 
     const value = values[field.key]
     // Ô đồng ý: bỏ trống và "không đồng ý" đều là chưa có sự đồng ý.
     if (field.mustBeTrue) return value !== 'true'
-    return !value || !value.trim()
+    if (!value || !value.trim()) return true
+    // Có chữ nhưng SAI LUẬT cũng là chưa xong — gửi đi chỉ để backend từ chối
+    // là bắt người dùng chờ một vòng mạng cho một lỗi thấy ngay được.
+    return field.pattern ? !field.pattern.test(value.trim()) : false
   })
 }
 
@@ -591,10 +609,19 @@ export function today(): string {
  * tới, rồi bị thay hoàn toàn. Nó trả lời "sắp làm những gì", không phải "đã
  * quyết làm những gì".
  */
-export function expectedTools(services: string[]): string[] {
+export function expectedTools(services: string[], values: Record<string, FormValues> = {}): string[] {
   const tools: string[] = []
   for (const service of services) {
+    const chosen = values[service] ?? {}
     for (const field of SERVICE_FIELDS[service] ?? []) {
+      // Bỏ qua ô đang ẨN. Ô ẩn là ô người dùng KHÔNG chọn, và tool của nó là
+      // một bước sẽ không chạy.
+      //
+      // Đo được: không tích "xe đưa đón", nhưng khung tạm vẫn vẽ "Đặt xe đưa
+      // đón" — vì `book_shuttle` khai trên một ô có `showIf`, và vòng lặp này
+      // đọc mọi ô bất kể điều kiện. Người dùng nhìn thấy một bước họ vừa từ
+      // chối, rồi hỏi vì sao nó ở đó.
+      if (field.showIf && chosen[field.showIf.key] !== field.showIf.equals) continue
       if (field.tool && !tools.includes(field.tool)) tools.push(field.tool)
     }
     // `pay_fee` không có ô nhập nào nên không khai được ở trên, nhưng mọi lần

@@ -109,7 +109,7 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
 
 
 # Nhãn công khai của khu đỗ xe. Người dùng không bao giờ nhìn thấy "ZONE_A".
-_ZONE_LABELS = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}
+ZONE_LABELS = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}
 
 # Giá trị chuẩn của contract ↔ cách người Việt thật sự nói ra nó.
 #
@@ -169,7 +169,7 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
             return f"Xe tham quan đã hết chỗ{when}. Bạn chọn ngày khác giúp mình nhé."
         if task_tool == "book_parking":
             zone = str(inputs.get("parking_zone") or "")
-            label = _ZONE_LABELS.get(zone, "Khu vực bạn chọn")
+            label = ZONE_LABELS.get(zone, "Khu vực bạn chọn")
             date = _text(inputs.get("booking_date"))
             when = f" ngày {date}" if date else ""
             alternative = _OTHER_ZONE.get(zone)
@@ -203,9 +203,27 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
         return f"{subject} đã được đăng ký trước đó. Bạn kiểm tra lại hoặc nhập biển số khác giúp mình nhé."
 
     if code == "BOOKING_ALREADY_EXISTS":
+        # Ràng buộc thật là UNIQUE (vehicle_id, booking_date): MỘT XE không thể
+        # có hai chỗ đỗ trong cùng một ngày.
+        #
+        # Câu cũ — "Bạn đã có chỗ đỗ xe ngày X rồi. Bạn chọn ngày khác giúp mình
+        # nhé" — đọc lên thành một nghịch lý: đã có chỗ rồi thì đổi ngày làm gì?
+        # Nó bỏ mất hai thứ quyết định nghĩa của câu:
+        #
+        #   * CHIẾC XE nào. Người dùng có thể có nhiều xe, và câu này nói về
+        #     đúng một chiếc.
+        #   * Rằng chỗ đỗ ấy VẪN CÒN. Không cần làm gì thêm cho ngày đó.
+        #
+        # Nói đủ hai thứ thì "chọn ngày khác" thôi vô lý: nó là lựa chọn dành
+        # cho người muốn thêm một ngày NỮA, không phải một mệnh lệnh sửa sai.
         date = _text(inputs.get("booking_date"))
-        when = f" ngày {date}" if date else ""
-        return f"Bạn đã có chỗ đỗ xe{when} rồi. Bạn chọn ngày khác giúp mình nhé."
+        plate = _text(inputs.get("plate_number"))
+        who = f"Xe {plate}" if plate else "Xe này"
+        when = f" ngày {date}" if date else " trong ngày được chọn"
+        return (
+            f"{who} đã có chỗ đỗ{when} rồi — chỗ đó vẫn được giữ, bạn không cần "
+            "đặt lại. Nếu muốn đặt thêm cho một ngày khác, bạn cho mình biết ngày nhé."
+        )
 
     if code == "RESIDENT_ALREADY_EXISTS":
         return "Căn hộ này đã được đăng ký. Bạn kiểm tra lại mã căn hộ giúp mình nhé."

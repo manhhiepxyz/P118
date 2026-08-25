@@ -1,7 +1,6 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,8 +21,19 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     # Rate limiter — CHỈ áp cho POST route tiêu thụ LLM; GET polling miễn trừ.
-    rate_limit_per_minute: int = Field(default=20, ge=1)
-    rate_limit_burst: int = Field(default=10, ge=1)
+    # Chặn BÙNG PHÁT, không chặn dung lượng — `daily_workflow_quota` mới làm
+    # việc đó, và nó là thứ giữ hoá đơn LLM.
+    #
+    # 20/phút + burst 10 được chọn khi bucket khoá theo IP, tức là dùng chung
+    # cho mọi người. Giờ nó khoá theo PHIÊN, nên cùng con số ấy trở thành trần
+    # của MỘT người — và nó chạm thật: sau 10 thao tác, người dùng bị hãm còn
+    # một thao tác mỗi 3 giây, giữa lúc đang gõ liên tục. Đo được 11 lần 429
+    # trong 25 phút dùng bình thường, tất cả ở `/workflows/demo/start`.
+    #
+    # 60/phút + burst 20 vẫn xa hơn tốc độ gõ của người thật, mà không hãm họ
+    # giữa chừng. Trần chi phí không đổi: vẫn 50 workflow/ngày/người.
+    rate_limit_per_minute: int = Field(default=60, ge=1)
+    rate_limit_burst: int = Field(default=20, ge=1)
     rate_limit_enabled: bool = True
 
     # LLM
@@ -142,9 +152,9 @@ class Settings(BaseSettings):
     history_keep_per_user: int = 15
     # Hạn ngạch NGÀY theo NGƯỜI DÙNG — thứ duy nhất thật sự chặn dùng vô hạn.
     #
-    # Rate limit 20/phút (`rate_limit_per_minute`) chặn bùng phát tức thời,
-    # nhưng nó khoá theo ĐỊA CHỈ IP: đổi mạng là reset, và 20/phút vẫn cho phép
-    # 28.800 request/ngày. Cắt lượt trong một cuộc trò chuyện cũng không chặn —
+    # `rate_limit_per_minute` chặn bùng phát tức thời, KHÔNG chặn dung lượng:
+    # 60/phút vẫn cho phép 86.400 request/ngày. Nó khoá theo phiên, mà phiên
+    # thì tạo mới được. Cắt lượt trong một cuộc trò chuyện cũng không chặn —
     # người dùng chỉ cần mở cuộc mới.
     #
     # Đo được: mỗi workflow ~12.264 token ≈ $0,00365. 50/ngày là trần
@@ -152,7 +162,16 @@ class Settings(BaseSettings):
     # TỔNG CỘNG từ đầu dự án, nên ngưỡng này không chạm ai.
     #
     # 0 = tắt.
-    daily_workflow_quota: int = 50
+    # Nâng từ 50 cho giai đoạn DEMO.
+    #
+    # 50 được chọn khi hạn ngạch còn đếm mọi dòng trong bảng; nó chạm thật —
+    # tài khoản `thanhbao` hết suất giữa buổi thử. Một buổi demo là hàng chục
+    # lượt thử đi thử lại, và hết suất giữa chừng thì không còn gì để trình bày.
+    #
+    # Chi phí: ~12.264 token mỗi tác vụ, nên 200/ngày là trần ~$0,73 mỗi người
+    # mỗi ngày. Hạ lại về 50 sau demo bằng biến môi trường
+    # `DAILY_WORKFLOW_QUOTA`, không cần build lại.
+    daily_workflow_quota: int = 200
     daily_quota_window_hours: int = 24
 
 

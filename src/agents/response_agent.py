@@ -87,6 +87,21 @@ class ReplyView(BaseModel):
     # Đây là GỢI Ý, không phải câu trả lời: Planner vẫn coi field đó là thiếu,
     # và người dùng vẫn phải xác nhận. Xem `Planner._fields_taken_from_recall`.
     recalled_hints: dict[str, str] = Field(default_factory=dict)
+    # Các lượt ĐÃ DIỄN RA của chính người này, cũ đến mới.
+    #
+    # `recalled_hints` ở trên bóp toàn bộ ký ức xuống thành `{field: giá trị}`
+    # cho riêng những ô đang thiếu — nội dung cuộc trò chuyện bị vứt đi. Nên
+    # tầng viết câu trả lời không hề biết người dùng vừa nói gì ở lượt trước,
+    # và một câu chỉ có nghĩa nhờ lượt trước sẽ không trả lời được:
+    #
+    #   khách  "tôi đã đặt lịch tham quan lúc nào"
+    #   P-118  "Lịch tham quan Ocean Park ngày 22/08 lúc 10:00."
+    #   khách  "tôi muốn biết đường đi đến đó"
+    #   P-118  "Bạn muốn biết đường đi đến ĐÂU vậy?"     ← không có "đó"
+    #
+    # Không phá cam kết ở đầu class: đây đúng là những gì người dùng đã nói và
+    # đã đọc, không thêm gì họ chưa thấy.
+    recent_turns: list[dict[str, str]] = Field(default_factory=list)
     payment_quote: dict[str, Any] | None = None
     # Đã có bước `pay_fee` chạy xong THÀNH CÔNG hay chưa. Có `payment_quote`
     # KHÔNG đồng nghĩa đã trả tiền: báo giá xuất hiện ngay khi giữ chỗ, còn tiền
@@ -128,6 +143,17 @@ class ReplyView(BaseModel):
     # khách gõ), nên số trong đây được coi là có thẩm quyền — xem
     # `_numbers_in_view`.
     viewing: dict[str, Any] | None = None
+    # Dữ liệu BACKEND vừa tra trong database để đáp đúng câu khách hỏi.
+    #
+    # `steps` chỉ có khi một kế hoạch đã CHẠY. Câu hỏi thuần tuý ("ngày nào còn
+    # trống chỗ đỗ xe") không sinh kế hoạch nào, nên trước đây view tới đây
+    # rỗng hoàn toàn: model được giao một câu hỏi dữ liệu mà không có dữ liệu.
+    # Nó buộc phải đoán, và guard chỉ quyết định lời đoán ấy có hiện ra hay
+    # không — trúng guard thì khách đọc câu nền, lọt guard thì khách đọc số bịa.
+    #
+    # Số trong đây do backend đọc thẳng từ database nên CÓ THẨM QUYỀN, y như
+    # `viewing` và báo giá — xem `_numbers_in_view`.
+    facts: dict[str, Any] | None = None
 
 
 class _StructuredLLM(Protocol):
@@ -180,7 +206,22 @@ _COMPLETION_CLAIMS: tuple[str, ...] = (
 )
 
 # Số tiền — "150.000 VND", "150000đ", "150.000 ₫".
-_MONEY = re.compile(r"\d[\d.,]*\s*(?:vnd|vnđ|đồng|đ|₫)", re.IGNORECASE)
+# `đ` viết tắt của "đồng" — nhưng `đ` cũng là chữ cái mở đầu vô số từ tiếng
+# Việt thường gặp: đã, đến, được, đó, đơn, đợt. Không có ranh giới từ thì
+# "ngày 25/09 đến" khớp `"09 đ"` và bị đọc là một khoản tiền.
+#
+# Hậu quả không nằm ở guard mà ở CÂU TRẢ LỜI: guard loại câu đó, tầng trả lời
+# lùi về câu deterministic, và người dùng đọc "Mình đã trả lời bạn ở trên."
+# cho một câu hỏi chưa hề được trả lời. Đo được 3/3 lượt gọi liên tiếp bị loại
+# với lý do "nêu số tiền như đã trả trong khi chưa thanh toán", cho một câu
+# hỏi đường đi không hề nhắc tới tiền.
+#
+# `(?![^\W\d_])` = không được theo sau bởi một CHỮ CÁI. `₫` tách riêng vì nó
+# không phải ký tự chữ, nên mọi ràng buộc ranh giới từ đều sai với nó.
+_MONEY = re.compile(
+    r"\d[\d.,]*\s*(?:₫|(?:vnd|vnđ|đồng|đ)(?![^\W\d_]))",
+    re.IGNORECASE,
+)
 
 # Chữ cho người đọc biết khoản tiền CHƯA được trả. Chỉ cần một trong số này.
 _UNPAID_MARKERS: tuple[str, ...] = (
@@ -197,10 +238,29 @@ _UNPAID_MARKERS: tuple[str, ...] = (
 
 # Con số, ngày, giờ, tỉ lệ — mọi thứ model có thể bịa ra và nghe như dữ liệu.
 #
-# Bản trước chỉ bắt `\d[\d.,]{2,}`, nên "12/09" và "10:30" lọt qua: dấu `/`
+# Bản đầu chỉ bắt `\d[\d.,]{2,}`, nên "12/09" và "10:30" lọt qua: dấu `/`
 # và `:` không nằm trong lớp ký tự, còn "12" thì quá ngắn. Một ngày bịa nghe
 # thuyết phục y hệt một số tiền bịa.
-_NUMBER = re.compile(r"\d+(?:[.,/:\-]\d+)+|\d{3,}")
+#
+# Bản thứ hai (`\d+(?:[.,/:\-]\d+)+|\d{3,}`) vẫn để lọt MỌI số một-hai chữ số
+# đứng riêng — vì nó đòi dấu phân cách nằm SÁT giữa hai chữ số. Đo được trên
+# stack thật: "Khu B hiện còn trống vào các ngày 25, 27 và 30 tháng 8" khớp
+# ĐÚNG KHÔNG con số nào (`findall` trả `[]`), nên một câu bịa hoàn toàn về chỗ
+# trống đi thẳng tới người dùng với `response_state = READY`. Dấu phẩy ở đây có
+# khoảng trắng theo sau nên không nối "25" với "27", và cả ba số đều dưới ba
+# chữ số.
+#
+# Giờ bắt mọi cụm chữ số. Đổi lại, phần đối chiếu phải rộng tương ứng: xem
+# `_number_keys` — "25/09" trong dữ liệu cũng cho phép model viết "ngày 25
+# tháng 9", vì đó là cùng một sự thật diễn đạt khác đi.
+_NUMBER = re.compile(r"\d+(?:[.,/:\-]\d+)*")
+
+# Tên sản phẩm có chữ số trong đó. Model tự xưng "P-118" ở nhiều câu, và với
+# `_NUMBER` mới thì "118" trở thành một con số phải chứng minh nguồn gốc —
+# không có nguồn nào cả, nên mọi câu tự giới thiệu sẽ bị loại. Gỡ tên ra trước
+# khi soi số, thay vì thêm "118" vào danh sách hợp lệ: thêm vào danh sách là
+# cho phép model dùng "118" ở bất kỳ đâu, kể cả "còn 118 chỗ trống".
+_PRODUCT_NAME = re.compile(r"P\s*-\s*118", re.IGNORECASE)
 
 # Cụm neo phải có mặt khi `ReplyView.next_step` được đặt. Đúng tên mục trên
 # thanh bên, để người dùng tìm thấy thứ mình được bảo đi tìm.
@@ -285,7 +345,12 @@ class ResponseAgent:
         if rejection is not None:
             # Ghi LÝ DO, không ghi nội dung bị loại: nội dung đó có thể chính là
             # thứ không nên nằm trong log.
-            logger.info("response agent bị loại (%s); dùng câu mặc định", rejection)
+            # `warning`, không phải `info`: log ứng dụng chạy trên mức INFO,
+            # nên dòng này vô hình đúng lúc cần nhất. Một câu bị loại nghĩa
+            # là người dùng nhận câu mặc định thay cho câu trả lời — im lặng
+            # về nó là để cả một lớp hỏng chạy ngầm. Đo được: guard loại 3/3
+            # lượt suốt nhiều ngày mà không dòng log nào hiện ra.
+            logger.warning("response agent bị loại (%s); dùng câu mặc định", rejection)
             return _fallback(view)
 
         return candidate
@@ -332,9 +397,20 @@ def _reject_reason(reply: AgentReply, view: ReplyView) -> str | None:
     # Con số phải đến từ dữ liệu, không phải từ model. Chỉ chấp nhận những số
     # đã có mặt trong view — số tiền, số bước, ngày giờ đã hiển thị.
     allowed_numbers = _numbers_in_view(view)
-    for found in _NUMBER.findall(text):
-        if _normalise_number(found) not in allowed_numbers:
-            return "nêu một con số không có trong dữ liệu"
+    for found in _NUMBER.findall(_PRODUCT_NAME.sub(" ", text)):
+        whole, parts = _number_keys(found)
+        if whole in allowed_numbers:
+            continue
+        # Cả cụm không khớp thì xét từng phần: dữ liệu ghi "25/09" mà model
+        # viết "ngày 25 tháng 9" là cùng một sự thật, chỉ khác cách đọc. Đòi
+        # khớp nguyên cụm sẽ loại đúng những câu tự nhiên nhất — và mỗi lần
+        # loại là một lần người dùng nhận câu nền thay cho câu trả lời.
+        #
+        # Vẫn chặt: từng phần đều phải có nguồn. Một ngày bịa hoàn toàn không
+        # có phần nào khớp, nên nó không đi qua được đường này.
+        if parts and all(part in allowed_numbers for part in parts):
+            continue
+        return "nêu một con số không có trong dữ liệu"
 
     for marker in _REASONING_MARKERS:
         if marker in lowered:
@@ -367,6 +443,16 @@ def _normalise_number(raw: str) -> str:
     return re.sub(r"[.,/:\-\s]", "", raw)
 
 
+def _number_keys(raw: str) -> tuple[str, list[str]]:
+    """Cụm số → (dạng chuẩn của cả cụm, các phần rời đã bỏ số 0 đứng đầu).
+
+    "25/09" → ("2509", ["25", "9"]). Bỏ số 0 đầu là cần thiết: dữ liệu viết
+    "09" còn người viết câu đọc là "tháng 9", và hai chuỗi đó không bằng nhau.
+    """
+    parts = [part.lstrip("0") or "0" for part in re.findall(r"\d+", raw)]
+    return _normalise_number(raw), parts
+
+
 def _grounded_suggestions(suggestions: list[str], view: ReplyView) -> list[str]:
     """Chỉ giữ gợi ý khớp CHÍNH XÁC một dịch vụ server-side đang mở.
 
@@ -386,6 +472,22 @@ def _grounded_suggestions(suggestions: list[str], view: ReplyView) -> list[str]:
 
 def _normalise_label(value: str) -> str:
     return " ".join((value or "").split()).casefold()
+
+
+def _flatten_facts(facts: Any) -> str:
+    """Mọi giá trị trong `facts`, ở dạng phẳng, để quét số.
+
+    `facts` là dict lồng (khu → danh sách ngày → số chỗ). Chỉ `str(facts)` cũng
+    đủ vì quét bằng regex, nhưng đi đệ quy thì không phụ thuộc vào cách `dict`
+    tự in ra — và không kéo theo tên khoá vào nguồn số.
+    """
+    if facts is None:
+        return ""
+    if isinstance(facts, dict):
+        return " ".join(_flatten_facts(v) for v in facts.values())
+    if isinstance(facts, (list, tuple)):
+        return " ".join(_flatten_facts(v) for v in facts)
+    return str(facts)
 
 
 def _numbers_in_view(view: ReplyView) -> set[str]:
@@ -413,10 +515,33 @@ def _numbers_in_view(view: ReplyView) -> set[str]:
             # 15/01/2029" và guard không có gì để đối chiếu. Kết quả: nhánh chờ
             # duyệt luôn rơi về câu mặc định, lần nào cũng y hệt.
             " ".join(str(v) for v in (view.viewing or {}).values()),
+            # Con số trong câu P-118 ĐÃ NÓI ở các lượt trước.
+            #
+            # Chỉ lấy `p118_dap`, KHÔNG lấy `khach_noi` — đúng lý do khiến
+            # `view.goal` bị loại khỏi danh sách này: chữ người dùng tự gõ có
+            # thể chứa con số sai, và coi nó là nguồn nghĩa là cho phép model
+            # nhắc lại con số sai ấy như một sự thật của hệ thống. Câu P-118 đã
+            # viết thì do backend dựng và người dùng đã đọc.
+            #
+            # Thiếu dòng này thì việc đưa hội thoại vào prompt tự phá chính nó:
+            # model trích đúng "10:00 ngày 25/09" từ câu nó vừa nói ở lượt
+            # trước, guard không có gì đối chiếu và loại cả câu. Đo được 3/3
+            # lượt gọi liên tiếp bị loại vì "nêu một con số không có trong dữ
+            # liệu", và người dùng nhận câu mặc định.
+            " ".join(turn.get("p118_dap", "") for turn in view.recent_turns),
+            # Dữ liệu backend vừa tra để đáp câu hỏi. Đọc thẳng từ database nên
+            # có thẩm quyền y như báo giá — và thiếu dòng này thì việc tra cứu
+            # tự vô hiệu hoá chính nó: model nhận đúng số chỗ trống rồi bị guard
+            # loại vì "nêu một con số không có trong dữ liệu".
+            _flatten_facts(view.facts),
             view.today or "",
         ]
     )
-    numbers = {_normalise_number(n) for n in _NUMBER.findall(source)}
+    numbers: set[str] = set()
+    for found in _NUMBER.findall(_PRODUCT_NAME.sub(" ", source)):
+        whole, parts = _number_keys(found)
+        numbers.add(whole)
+        numbers.update(parts)
     # Số bước là dữ liệu thật và hay được nhắc ("cả 3 bước đã xong").
     numbers.add(str(len(view.steps)))
     numbers |= _vietnamese_date_forms(source)

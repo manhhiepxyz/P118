@@ -16,7 +16,7 @@ import pytest_asyncio
 
 from src.common.enums import WorkflowStatus
 from src.common.task_plan import InputRef, Task, TaskPlan
-from src.db.parking_payment_repository import create_booking, create_resident, create_vehicle
+from src.db.parking_payment_repository import ZONE_PRICES, create_booking, create_resident, create_vehicle
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.orchestration.payment_approval import (
     APPROVED,
@@ -55,7 +55,7 @@ def _plan() -> TaskPlan:
                 input={
                     "vehicle_id": InputRef(from_task="T1", field="vehicle_id"),
                     "booking_date": _future_day(),
-                    "parking_zone": "ZONE_A",
+                    "parking_zone": "ZONE_B",
                 },
             ),
             Task(
@@ -86,7 +86,7 @@ async def awaiting(db_pool: asyncpg.Pool):
         db_pool, resident_id=resident.resident_id, plate_number="51P-11111", vehicle_type="car"
     )
     booking = await create_booking(
-        db_pool, vehicle_id=vehicle.vehicle_id, parking_zone="ZONE_A", booking_date=_future_day()
+        db_pool, vehicle_id=vehicle.vehicle_id, parking_zone="ZONE_B", booking_date=_future_day()
     )
 
     repository = PostgreSQLWorkflowStateRepository(db_pool)
@@ -145,7 +145,7 @@ async def test_quote_comes_from_the_persisted_booking(awaiting) -> None:
 
     quote = await quote_from_database(awaiting["pool"], awaiting["booking_id"])
     assert quote is not None
-    assert quote.amount == 150_000, "phải lấy giá của booking, không phải giá đã bị sửa"
+    assert quote.amount == ZONE_PRICES["ZONE_B"], "phải lấy giá của booking, không phải giá đã bị sửa"
 
 
 @pytest.mark.asyncio
@@ -168,7 +168,7 @@ async def test_resume_context_survives_a_simulated_restart(awaiting) -> None:
     assert pending.status == AWAITING
     assert pending.task_id == "T3"
     assert pending.quote.booking_id == awaiting["booking_id"]
-    assert pending.quote.amount == 150_000
+    assert pending.quote.amount == ZONE_PRICES["ZONE_B"]
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +283,7 @@ def _full_plan_with_downstream() -> TaskPlan:
                 input={
                     "vehicle_id": InputRef(from_task="T1", field="vehicle_id"),
                     "booking_date": _future_day(70),
-                    "parking_zone": "ZONE_A",
+                    "parking_zone": "ZONE_B",
                 },
             ),
             Task(
@@ -416,7 +416,7 @@ async def resumable(db_pool: asyncpg.Pool, monkeypatch):
         db_pool, resident_id=resident.resident_id, plate_number="51R-77001", vehicle_type="car"
     )
     booking = await create_booking(
-        db_pool, vehicle_id=vehicle.vehicle_id, parking_zone="ZONE_A", booking_date=_future_day(72)
+        db_pool, vehicle_id=vehicle.vehicle_id, parking_zone="ZONE_B", booking_date=_future_day(72)
     )
 
     repository = PostgreSQLWorkflowStateRepository(db_pool)

@@ -320,6 +320,9 @@ class PostgreSQLWorkflowStateRepository:
     async def list_workflows_by_session(self, session_id: str, *, owner_user_id: str | None = None) -> list[dict]:
         return await self.workflows.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
 
+    async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
+        return await self.workflows.list_all_workflows_history(page=page, limit=limit, search_user=search_user)
+
     async def append_events(self, workflow_id: str, events: list[dict]) -> None:
         """Ghim dòng thời gian giai đoạn."""
         await self.workflows.append_events(workflow_id, events)

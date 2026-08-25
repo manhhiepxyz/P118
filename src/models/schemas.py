@@ -177,6 +177,12 @@ class DemoWorkflowEvent(BaseModel):
         # mới. Đổi một câu chữ sai thành một endpoint hỏng, đúng thứ comment ở
         # `DemoWorkflowResponse` cảnh báo mà tôi vẫn sập.
         "WAITING_VIEWING_APPROVAL",
+        # Chờ ĐƠN VỊ duyệt một dịch vụ ngoài lịch tham quan (đăng ký xe, giữ
+        # chỗ đỗ, bảo trì...). Thiếu giá trị này thì `graph.py` rơi xuống nhánh
+        # `else` và phát ra `EXECUTION_FAILED` — workflow đang chờ duyệt được
+        # ghi thành FAILED / UNKNOWN_EXTERNAL_ERROR, và khách đọc "Yêu cầu đã
+        # dừng lại giữa chừng" trong khi hàng đợi duyệt đã có đủ hồ sơ.
+        "WAITING_SERVICE_APPROVAL",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",
@@ -320,6 +326,9 @@ class DemoWorkflowResponse(BaseModel):
             # làm một khiến người đặt lịch xem nhà được bảo đi xác nhận thanh
             # toán, và họ đi tìm một nút không tồn tại.
             "WAITING_VIEWING_APPROVAL",
+            # Chờ đơn vị duyệt dịch vụ khác lịch tham quan. Xem ghi chú cùng
+            # tên ở `DemoWorkflowEvent.stage` — giá trị này phải có ở CẢ HAI.
+            "WAITING_SERVICE_APPROVAL",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",

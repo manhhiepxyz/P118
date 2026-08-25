@@ -352,6 +352,36 @@ const FAILURE_TEXT: Record<string, string> = {
   ACTION_DENIED: 'Việc này cần quyền mà tài khoản của bạn chưa có.',
   DATABASE_UNAVAILABLE: 'Hệ thống đang bận, chưa ghi lại được. Bạn thử lại sau ít phút nhé.',
   LLM_CONFIGURATION_ERROR: 'Hệ thống chưa sẵn sàng xử lý yêu cầu. Bạn báo giúp ban quản lý nhé.',
+
+  // Lỗi NGHIỆP VỤ — mỗi mã một tình huống khác nhau, và người dùng cần biết
+  // ĐÚNG cái nào để biết phải làm gì.
+  //
+  // Trước đây 22/25 mã không có dòng nào ở đây, nên tất cả rơi vào cùng một
+  // câu "Yêu cầu này dừng giữa chừng." — "xe đã có chỗ rồi" và "khu đã hết
+  // chỗ" hiện ra y hệt nhau, dù một cái nghĩa là không cần làm gì, còn cái kia
+  // nghĩa là phải đổi khu.
+  NO_AVAILABILITY: 'Khu vực đỗ xe đã hết chỗ cho ngày này. Bạn chọn ngày hoặc khu khác nhé.',
+  BOOKING_ALREADY_EXISTS: 'Xe này đã có chỗ đỗ trong ngày được chọn — chỗ đó vẫn được giữ.',
+  VEHICLE_ALREADY_EXISTS: 'Xe này đã được đăng ký trước đó rồi.',
+  RESIDENT_ALREADY_EXISTS: 'Căn hộ này đã được đăng ký. Bạn kiểm tra lại mã căn hộ nhé.',
+  VIEWING_ALREADY_BOOKED: 'Khung giờ tham quan này đã có người đặt. Bạn chọn giờ khác nhé.',
+  SHUTTLE_ALREADY_BOOKED: 'Xe đưa đón cho lịch này đã được đặt rồi.',
+  INTEREST_ALREADY_EXISTS: 'Bạn đã đăng ký nhận tư vấn cho dự án này rồi.',
+  VEHICLE_NOT_FOUND: 'Không tìm thấy xe này trong hệ thống. Bạn đăng ký xe trước nhé.',
+  RESIDENT_NOT_FOUND: 'Chưa tìm thấy hồ sơ cư dân của bạn. Bạn xác minh căn hộ trước nhé.',
+  BOOKING_NOT_FOUND: 'Không tìm thấy chỗ đỗ đã đặt.',
+  PAYMENT_NOT_FOUND: 'Không tìm thấy khoản thanh toán này.',
+  VIEWING_NOT_FOUND: 'Không tìm thấy lịch tham quan này.',
+  PROJECT_NOT_FOUND: 'Dự án này chưa nằm trong danh sách được hỗ trợ.',
+  PAYMENT_FAILED: 'Thanh toán chưa thành công. Tiền chưa bị trừ, bạn thử lại nhé.',
+  MISSING_INFORMATION: 'Còn thiếu thông tin để thực hiện bước này.',
+  INVALID_INPUT: 'Thông tin của bước này chưa hợp lệ. Bạn kiểm tra lại giúp mình nhé.',
+  INVALID_TASK_PLAN: 'Kế hoạch cho yêu cầu này chưa hợp lệ.',
+  APPROVAL_REQUIRED: 'Bước này đang chờ được duyệt.',
+  DEPENDENCY_ERROR: 'Bước này chưa chạy vì bước trước đó chưa xong.',
+  SERVICE_TIMEOUT: 'Bên cung cấp dịch vụ phản hồi quá lâu. Bạn thử lại sau ít phút nhé.',
+  INTERNAL_SERVICE_ERROR: 'Bên cung cấp dịch vụ gặp sự cố. Bạn thử lại sau ít phút nhé.',
+  UNKNOWN_TOOL: 'Hệ thống chưa hỗ trợ việc này.',
 }
 
 /**
@@ -386,7 +416,18 @@ export function describeWorkflowFailure(
 }
 
 
-export function describeFailure(task: { error_code?: string | null; error_message?: string | null }): string {
+export function describeFailure(task: {
+  error_code?: string | null
+  error_message?: string | null
+  message?: string | null
+}): string {
+  // `message` TRƯỚC `error_message`.
+  //
+  // `message` là câu backend đã dựng cho người đọc, có tên bước và tình huống
+  // cụ thể. `error_message` là câu THÔ của provider — và provider nói tiếng
+  // Anh: "Vehicle already booked for that date". Ưu tiên ngược lại nghĩa là
+  // đẩy nguyên văn tiếng Anh ra trước mặt khách hàng.
+  if (task.message) return task.message
   if (task.error_message) return task.error_message
   const code = task.error_code
   if (!code) return 'Bước này chưa hoàn thành được.'

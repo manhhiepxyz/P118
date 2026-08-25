@@ -19,7 +19,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from src.db.parking_payment_repository import payment_idempotency_key
+from src.db.parking_payment_repository import ZONE_PRICES, payment_idempotency_key
 from src.services.mock.db_pool import override_pool
 from src.services.mock.payment import payment_app
 from src.services.mock.transport import transport_app
@@ -77,7 +77,7 @@ async def _register_vehicle(client: httpx.AsyncClient, plate: str) -> str:
     return response.json()["data"]["vehicle_id"]
 
 
-async def _book(client: httpx.AsyncClient, vehicle_id: str, day: str, zone: str = "ZONE_A") -> dict:
+async def _book(client: httpx.AsyncClient, vehicle_id: str, day: str, zone: str = "ZONE_B") -> dict:
     response = await client.post(
         "/api/parking/bookings",
         json={"vehicle_id": vehicle_id, "booking_date": day, "parking_zone": zone},
@@ -102,7 +102,7 @@ async def test_full_chain_persists_exactly_one_vehicle_booking_and_payment(trans
     assert row["resident_id"] == SEEDED_RESIDENT
 
     quote = await _book(transport, vehicle_id, day)
-    assert quote["amount"] == 150_000  # báo giá ZONE_A do server quyết định
+    assert quote["amount"] == ZONE_PRICES["ZONE_B"]  # báo giá do server quyết định
     assert quote["currency"] == "VND"
 
     async with seeded_pool.acquire() as conn:
@@ -187,7 +187,7 @@ async def test_duplicate_plate_from_another_resident_is_rejected(transport, seed
 async def test_booking_rejects_an_unknown_vehicle(transport) -> None:
     response = await transport.post(
         "/api/parking/bookings",
-        json={"vehicle_id": "VEH-NOBODY", "booking_date": _future_day(), "parking_zone": "ZONE_A"},
+        json={"vehicle_id": "VEH-NOBODY", "booking_date": _future_day(), "parking_zone": "ZONE_B"},
     )
     assert response.status_code == 404
     assert response.json()["error_code"] == "VEHICLE_NOT_FOUND"
@@ -201,7 +201,7 @@ async def test_same_vehicle_cannot_book_the_same_day_twice(transport, seeded_poo
 
     response = await transport.post(
         "/api/parking/bookings",
-        json={"vehicle_id": vehicle_id, "booking_date": day, "parking_zone": "ZONE_A"},
+        json={"vehicle_id": vehicle_id, "booking_date": day, "parking_zone": "ZONE_B"},
     )
     assert response.status_code == 409
     assert response.json()["error_code"] == "BOOKING_ALREADY_EXISTS"

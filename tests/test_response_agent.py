@@ -536,3 +536,121 @@ def test_the_prompt_actually_asks_for_a_voice() -> None:
     assert "mắc kẹt" in RESPONSE_SYSTEM_PROMPT
     # Ranh giới không đổi: sáng tạo ở CÁCH NÓI, không ở nội dung.
     assert "CHỈ nói những gì có trong dữ liệu" in RESPONSE_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Câu hỏi dữ liệu: tra cứu thật, và bịa số thì phải bị chặn
+#
+# Sự cố thật, tài khoản đã xác minh căn hộ, hỏi "ngày nào còn trống chỗ đỗ xe":
+#
+#   lượt 1  "ngày nào còn trống chỗ đỗ xe"  → FALLBACK, log ghi
+#           "response agent bị loại (nêu một con số không có trong dữ liệu)"
+#   lượt 2  "khu B còn trống ngày nào?"     → READY, và câu trả lời là
+#           "Khu B hiện còn trống vào các ngày 25, 27 và 30 tháng 8."
+#
+# Lượt 2 nguy hiểm hơn lượt 1: nó LỌT guard. `_NUMBER` bản cũ đòi dấu phân cách
+# nằm sát giữa hai chữ số, nên "25, 27 và 30" không khớp con số nào — một câu
+# bịa hoàn toàn về chỗ trống đi thẳng tới khách như dữ liệu thật.
+#
+# Gốc chung của cả hai: câu hỏi thuần tuý không sinh kế hoạch, nên `steps` rỗng
+# và model không có dữ liệu nào để dựa vào. Nó buộc phải đoán; guard chỉ quyết
+# định lời đoán ấy có hiện ra hay không.
+# ---------------------------------------------------------------------------
+
+_PARKING_FACTS = {
+    "cho_do_xe_con_trong": {
+        "tu_ngay": "2026-08-21",
+        "trong_vong_ngay": 14,
+        "theo_khu": [
+            {"khu": "Khu A", "cac_ngay_con_cho": []},
+            {
+                "khu": "Khu B",
+                "cac_ngay_con_cho": [
+                    {"ngay": "2026-08-22", "so_cho_con_lai": 100},
+                    {"ngay": "2026-08-25", "so_cho_con_lai": 98},
+                ],
+            },
+        ],
+    }
+}
+
+
+def _question_view(**overrides) -> ReplyView:
+    base = {
+        "goal": "ngày nào còn trống chỗ đỗ xe",
+        "status": "CHAT",
+        "baseline_message": "Mình chưa tra được thông tin này.",
+        "steps": [],
+        "answering_question": True,
+        "today": "2026-08-21",
+    }
+    base.update(overrides)
+    return ReplyView(**base)
+
+
+@pytest.mark.asyncio
+async def test_invented_availability_dates_are_refused_even_as_bare_numbers():
+    """Đúng câu đã lọt ra ngoài. Không có test này thì nó lọt lại."""
+    agent = ResponseAgent(
+        _FakeLLM(AgentReply(answer="Khu B hiện còn trống vào các ngày 25, 27 và 30 tháng 8."))
+    )
+    reply = await agent.reply(_question_view(facts=_PARKING_FACTS))
+    assert reply.answer == "Mình chưa tra được thông tin này."
+
+
+@pytest.mark.asyncio
+async def test_availability_read_from_the_database_may_be_quoted():
+    """Tra cứu mà vẫn bị guard loại thì việc tra cứu tự vô hiệu hoá chính nó."""
+    answer = "Khu B còn chỗ ngày 22/08 (100 chỗ) và 25/08 (98 chỗ). Khu A đã kín rồi bạn nhé."
+    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(
+        _question_view(facts=_PARKING_FACTS)
+    )
+    assert reply.answer == answer
+
+
+@pytest.mark.asyncio
+async def test_a_date_in_the_data_may_be_read_out_loud_the_vietnamese_way():
+    """Dữ liệu ghi "2026-08-22"; người ta nói "ngày 22 tháng 8".
+
+    Đòi khớp nguyên cụm sẽ loại đúng những câu tự nhiên nhất — và mỗi lần loại
+    là một lần khách nhận câu nền thay cho câu trả lời.
+    """
+    answer = "Khu B còn chỗ vào ngày 22 tháng 8 và ngày 25 tháng 8 bạn nhé."
+    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(
+        _question_view(facts=_PARKING_FACTS)
+    )
+    assert reply.answer == answer
+
+
+@pytest.mark.asyncio
+async def test_saying_its_own_name_is_not_an_invented_number():
+    """`_NUMBER` mới bắt mọi cụm chữ số, và "P-118" có ba chữ số trong đó.
+
+    Không gỡ tên sản phẩm ra trước khi soi, mọi câu tự giới thiệu đều bị loại.
+    """
+    answer = "Mình là P-118 đây. Khu A đã kín, Khu B còn 100 chỗ ngày 22/08 nhé."
+    reply = await ResponseAgent(_FakeLLM(AgentReply(answer=answer))).reply(
+        _question_view(facts=_PARKING_FACTS)
+    )
+    assert reply.answer == answer
+
+
+@pytest.mark.asyncio
+async def test_without_a_lookup_every_date_is_still_an_invention():
+    """Không tra được thì không có gì để đối chiếu — guard phải chặt như cũ."""
+    reply = await ResponseAgent(
+        _FakeLLM(AgentReply(answer="Khu B còn chỗ ngày 22/08 và 25/08 bạn nhé."))
+    ).reply(_question_view())
+    assert reply.answer == "Mình chưa tra được thông tin này."
+
+
+def test_the_lookup_is_handed_to_the_model():
+    """Tra xong mà không gửi đi thì model vẫn phải đoán."""
+    from src.agents.prompts.response_prompt import build_response_user_message
+
+    message = build_response_user_message(_question_view(facts=_PARKING_FACTS))
+    assert "du_lieu_tra_cuu" in message
+    assert "2026-08-22" in message
+    # Khu đã kín phải đi kèm danh sách RỖNG chứ không bị bỏ khỏi payload: vắng
+    # mặt đọc là "không biết", rỗng đọc là "hết chỗ".
+    assert "Khu A" in message

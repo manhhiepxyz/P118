@@ -8,8 +8,8 @@ Sức chứa: 30 khách/ngày.
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from src.services.mock.shuttle import SHUTTLE_DAILY_CAPACITY, shuttle_app
 from src.services.mock import shuttle as shuttle_module
+from src.services.mock.shuttle import SHUTTLE_DAILY_CAPACITY, shuttle_app
 
 SHUTTLE = {"viewing_id": "VIEW-001", "tour_date": "2026-08-20", "passenger_count": 4}
 

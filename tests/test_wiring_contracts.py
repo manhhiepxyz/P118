@@ -26,7 +26,6 @@ import typing
 
 import pytest
 
-
 # --- 1. Chuỗi dựng connector -------------------------------------------------
 
 

@@ -1,8 +1,12 @@
 """Hạn ngạch ngày theo NGƯỜI DÙNG — thứ duy nhất thật sự chặn dùng vô hạn.
 
-Rate limit 20/phút chặn bùng phát tức thời, nhưng nó khoá theo ĐỊA CHỈ IP: đổi
-mạng là reset, và 20/phút vẫn cho phép 28.800 request/ngày. Cắt lượt trong một
+Giới hạn phút chặn bùng phát tức thời, nhưng nó khoá theo PHIÊN, mà phiên thì
+tạo mới được; và 60/phút vẫn cho phép 86.400 request/ngày. Cắt lượt trong một
 cuộc trò chuyện cũng không chặn — người dùng chỉ cần mở cuộc mới.
+
+Hạn ngạch đếm thứ TỐN TIỀN, không đếm mọi dòng trong bảng `workflows`: từ khi
+mỗi lượt trò chuyện cũng được ghi thành một dòng, `count(*)` sẽ gộp cả lời
+chào. Xem `tests/test_db/test_quota_counts_what_costs_money.py`.
 """
 
 from __future__ import annotations
@@ -16,8 +20,13 @@ from tests.test_db.conftest import _register_and_login
 async def _seed(db_pool, owner, n: int, hours_ago: float = 1) -> None:
     for i in range(n):
         await db_pool.execute(
-            "INSERT INTO workflows (goal, status, owner_user_id, created_at) "
-            "VALUES ($1,'SUCCESS',$2, NOW() - make_interval(hours => $3))",
+            # `task_plan` PHẢI có nội dung: hạn ngạch đếm thứ tốn tiền, và một
+            # dòng không kế hoạch, không gọi mô hình là một lượt trò chuyện —
+            # nó cố ý KHÔNG tính. Seed rỗng thì test dựng ra ba lượt chào rồi
+            # đòi chúng chạm trần.
+            "INSERT INTO workflows (goal, status, owner_user_id, created_at, task_plan) "
+            "VALUES ($1,'SUCCESS',$2, NOW() - make_interval(hours => $3), "
+            "'[{\"task_id\":\"T1\",\"tool\":\"book_parking\"}]'::jsonb)",
             f"việc {i}",
             owner,
             hours_ago,

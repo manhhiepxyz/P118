@@ -11,11 +11,15 @@ Provider giờ dùng PostgreSQL làm nguồn sự thật, nên deviation cũ kh�
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.db.parking_payment_repository import ZONE_PRICES
 from src.services.mock.transport import transport_app
 
 SEEDED_RESIDENT = "RES-MOCK"
 VEHICLE = {"resident_id": SEEDED_RESIDENT, "plate_number": "51A-12345", "vehicle_type": "car"}
-BOOKING = {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"}
+# ZONE_B là khu ĐANG MỞ theo cấu hình sản phẩm. ZONE_A được cấu hình kín (sức
+# chứa 0) để dựng sẵn kịch bản "hết chỗ → đổi khu", nên đặt chỗ ở đó luôn 409
+# và không dùng được cho các test nói về chuyện khác.
+BOOKING = {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_B"}
 
 
 async def _register_vehicle(ac, plate: str = "51A-12345") -> str:
@@ -100,9 +104,10 @@ async def test_book_parking_success(seed_resident):
     assert body["success"] is True
     data = body["data"]
     assert data["booking_id"].startswith("BOOK-")
-    assert data["parking_zone"] == "ZONE_A"
+    assert data["parking_zone"] == "ZONE_B"
     assert data["booking_date"] == "2026-12-10"
-    assert data["amount"] == 150_000
+    # Giá lấy từ bảng giá thật, không chép lại con số: đổi khu là đổi giá.
+    assert data["amount"] == ZONE_PRICES["ZONE_B"]
     assert data["currency"] == "VND"
 
 
@@ -118,21 +123,40 @@ async def test_fail_injection_no_availability():
 
 
 @pytest.mark.asyncio
-async def test_book_parking_capacity_real(seed_resident):
-    """ZONE_A sức chứa 3/ngày — lần thứ 4 cùng ngày → 409 NO_AVAILABILITY."""
+async def test_book_parking_capacity_real(seed_resident, wire_provider_pool):
+    """Đầy sức chứa của một ngày → lần kế tiếp 409 NO_AVAILABILITY.
+
+    Sức chứa được ĐẶT ngay trong test thay vì mượn số từ seed. Bản trước dựa
+    vào "ZONE_A có đúng 3 chỗ": một thay đổi cấu hình sản phẩm — khu A chuyển
+    sang kín để dựng kịch bản đổi khu — làm test đỏ dù cơ chế đếm không hề sai.
+    Test này nói về CƠ CHẾ đếm, nên nó phải tự nắm con số.
+    """
+    day = "2026-12-11"
+    async with wire_provider_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO parking_capacity (parking_zone, booking_date, capacity) "
+            "VALUES ('ZONE_B', $1, 3) "
+            "ON CONFLICT (parking_zone, booking_date) DO UPDATE SET capacity = 3",
+            __import__("datetime").date.fromisoformat(day),
+        )
+        await conn.execute(
+            "DELETE FROM parking_bookings WHERE parking_zone = 'ZONE_B' AND booking_date = $1",
+            __import__("datetime").date.fromisoformat(day),
+        )
+
     async with AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://test") as ac:
         for i in range(3):
             vid = await _register_vehicle(ac, plate=f"51A-000{i + 1}")
             r = await ac.post(
                 "/api/parking/bookings",
-                json={"vehicle_id": vid, "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
+                json={"vehicle_id": vid, "booking_date": day, "parking_zone": "ZONE_B"},
             )
             assert r.status_code == 201
 
         fourth = await _register_vehicle(ac, plate="51A-9999")
         response = await ac.post(
             "/api/parking/bookings",
-            json={"vehicle_id": fourth, "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
+            json={"vehicle_id": fourth, "booking_date": day, "parking_zone": "ZONE_B"},
         )
     assert response.status_code == 409
     body = response.json()

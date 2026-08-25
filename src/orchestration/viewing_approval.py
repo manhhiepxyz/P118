@@ -32,6 +32,11 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from src.common.enums import TaskStatus
+
+# Bước đã kết thúc — không đổi trạng thái được nữa, và cũng không cần.
+_TERMINAL_TASK_STATUSES = frozenset(
+    {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}
+)
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
@@ -133,27 +138,37 @@ async def save_pending_viewing_approval(
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO viewing_approvals (
-                workflow_id, task_id, status, project_id, project_name,
-                viewing_date, viewing_time, passenger_count, wants_shuttle,
+            -- MỘT bảng vật lý cho mọi hàng đợi duyệt. `viewing_approvals`
+            -- giờ là khung nhìn trên nó, nên mọi chỗ ĐỌC giữ nguyên; chỉ năm
+            -- lệnh GHI — tất cả trong file này — phải trỏ vào bảng thật.
+            --
+            -- Dữ kiện riêng của tham quan nằm trong `details` (JSONB). Khung
+            -- nhìn tách chúng trở lại thành cột, nên truy vấn cũ không đổi.
+            INSERT INTO service_approvals (
+                workflow_id, task_id, tool, service_label, details, status,
                 applicant_user_id, applicant_name, applicant_phone
             )
-            VALUES ($1, $2, 'AWAITING', $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ON CONFLICT (workflow_id) DO UPDATE
-                SET task_id = EXCLUDED.task_id,
-                    project_id = EXCLUDED.project_id,
-                    project_name = EXCLUDED.project_name,
-                    viewing_date = EXCLUDED.viewing_date,
-                    viewing_time = EXCLUDED.viewing_time,
-                    passenger_count = EXCLUDED.passenger_count,
-                    wants_shuttle = EXCLUDED.wants_shuttle,
+            VALUES (
+                $1, $2, 'schedule_property_viewing', 'Đặt lịch tham quan',
+                jsonb_strip_nulls(jsonb_build_object(
+                    'project_id', $3::text,
+                    'project_name', $4::text,
+                    'viewing_date', to_char($5::date, 'YYYY-MM-DD'),
+                    'viewing_time', $6::text,
+                    'passenger_count', $7::int,
+                    'wants_shuttle', $8::boolean
+                )),
+                'AWAITING', $9, $10, $11
+            )
+            ON CONFLICT (workflow_id, task_id) DO UPDATE
+                SET details = EXCLUDED.details,
                     applicant_user_id = EXCLUDED.applicant_user_id,
                     applicant_name = EXCLUDED.applicant_name,
                     applicant_phone = EXCLUDED.applicant_phone,
                     reject_reason = NULL,
                     decided_by = NULL,
                     decided_at = NULL
-            WHERE viewing_approvals.status = 'AWAITING'
+            WHERE service_approvals.status = 'AWAITING'
             """,
             _uuid(workflow_id),
             task_id,
@@ -255,12 +270,15 @@ async def expire_stale_viewing_approvals(pool: asyncpg.Pool) -> int:
     """
     rows = await pool.fetch(
         """
-        UPDATE viewing_approvals
+        UPDATE service_approvals
         SET status = $1,
             reject_reason = $2,
             decided_at = NOW()
         WHERE status = $3
-          AND viewing_date < CURRENT_DATE
+          AND tool = 'schedule_property_viewing'
+          -- Ngày xem nằm trong `details` sau khi gộp hàng đợi. Đọc qua khung
+          -- nhìn thì không UPDATE được, nên ép kiểu ngay tại đây.
+          AND (details->>'viewing_date')::date < CURRENT_DATE
         RETURNING workflow_id
         """,
         EXPIRED,
@@ -288,9 +306,15 @@ async def record_viewing_decision(
     async with pool.acquire() as conn:
         result = await conn.execute(
             """
-            UPDATE viewing_approvals
+            -- GIỚI HẠN theo tool. Bảng cũ khoá theo `workflow_id` nên mệnh
+            -- đề này đủ; bảng gộp khoá theo `(workflow_id, task_id)`, và một
+            -- yêu cầu có thể chứa cả lịch tham quan lẫn chỗ đỗ xe của hai đơn
+            -- vị khác nhau. Thiếu dòng này, đơn vị tour bấm duyệt là duyệt luôn
+            -- phần của đơn vị kia.
+            UPDATE service_approvals
                SET status = $2, decided_at = NOW(), decided_by = COALESCE($3, decided_by)
              WHERE workflow_id = $1 AND status = 'AWAITING'
+               AND tool = 'schedule_property_viewing'
             """,
             _uuid(workflow_id),
             decision,
@@ -305,7 +329,8 @@ async def save_viewing_reject_reason(pool: asyncpg.Pool, workflow_id: str, reaso
     dữ liệu nửa vời."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE viewing_approvals SET reject_reason = $2 WHERE workflow_id = $1",
+            "UPDATE service_approvals SET reject_reason = $2 "
+            "WHERE workflow_id = $1 AND tool = 'schedule_property_viewing'",
             _uuid(workflow_id),
             reason,
         )
@@ -366,6 +391,18 @@ class ViewingApprovalBoundary:
         seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         viewing_task_ids = {task.task_id for task in plan.tasks if task.tool == "schedule_property_viewing"}
+        # Bước ĐÃ chạy xong không được ghim lại. Cổng dịch vụ có đúng dòng này;
+        # cổng tham quan thì không, và hệ quả đo được:
+        #
+        #   duyệt lịch  → T1 SUCCESS, lịch VIEW-001 có thật trong hệ thống tour
+        #   duyệt tiếp  → lượt resume dựng lại cổng ở trạng thái chặn và ghim
+        #                 T1 về WAITING_APPROVAL lần nữa
+        #
+        # Bước đã xong quay ngược về "đang chờ duyệt": màn hình nói lịch chưa
+        # được xác nhận trong khi nó đã đặt xong, và `_final_status` đọc nó là
+        # còn-chờ nên workflow không bao giờ tới SUCCESS kể cả sau khi trả tiền.
+        already_done = {tid for tid, status in (seed_statuses or {}).items() if status is TaskStatus.SUCCESS}
+        viewing_task_ids -= already_done
         if not viewing_task_ids or self._viewing_approved:
             return await self._boundary.execute(
                 plan,
@@ -419,6 +456,20 @@ class ViewingApprovalBoundary:
 
             resolved_workflow_id = resolved_workflow_id or executed_id
             if any(not result.success for result in partial_results.values()):
+                # Phần trước HỎNG → không nhờ đơn vị duyệt nữa, và cũng KHÔNG
+                # để bước tham quan nằm lại `PENDING`.
+                #
+                # Bản cũ chỉ `return`. Bước tham quan giữ nguyên PENDING, không
+                # dòng nào vào hàng đợi, nhưng giao diện suy ra "đang chờ đơn vị
+                # xác nhận lịch tham quan" — một lời chờ mà KHÔNG AI được hỏi.
+                #
+                # Đo được trên 957e39e6 và 4289ea67: `schedule_property_viewing`
+                # PENDING, `service_approvals` 0 dòng AWAITING, màn hình vẫn báo
+                # chờ duyệt. Người dùng ngồi đợi một quyết định không tồn tại.
+                #
+                # `CANCELLED`, không `FAILED`: bước này chưa từng chạy nên nó
+                # không hỏng — nó bị bỏ vì việc trước nó hỏng.
+                await self._cancel_viewing_tasks(resolved_workflow_id, viewing_task_ids)
                 return resolved_workflow_id, partial_results
 
         await self._park_viewing_tasks(resolved_workflow_id, viewing_task_ids)
@@ -429,6 +480,24 @@ class ViewingApprovalBoundary:
             partial_results=partial_results,
         )
 
+
+    async def _cancel_viewing_tasks(self, workflow_id: str | None, task_ids: set[str]) -> None:
+        """Bỏ các bước tham quan khi phần trước đã hỏng.
+
+        Chỉ đụng bước CHƯA kết thúc: một bước đã SUCCESS ở lượt chạy trước
+        không được viết đè thành CANCELLED chỉ vì lượt này hỏng.
+        """
+        if workflow_id is None or self._repository is None:
+            return
+        try:
+            rows = {r["task_id"]: str(r.get("status")) for r in await self._repository.list_tasks(workflow_id)}
+        except Exception:  # noqa: BLE001 - đọc hỏng thì cứ đánh dấu, hơn là để treo
+            rows = {}
+        for task_id in task_ids:
+            if rows.get(task_id) in _TERMINAL_TASK_STATUSES:
+                continue
+            await self._repository.update_task_status(workflow_id, task_id, TaskStatus.CANCELLED)
+
     async def _park_viewing_tasks(self, workflow_id: str | None, task_ids: set[str]) -> None:
         """Đưa các bước tham quan về WAITING_APPROVAL.
 
@@ -438,5 +507,42 @@ class ViewingApprovalBoundary:
         """
         if self._repository is None or workflow_id is None:
             return
+        # Bỏ qua bước ĐÃ kết thúc.
+        #
+        # `update_task_status` đòi đúng một dòng khớp và raise khi không có —
+        # nên đưa một bước đã `CANCELLED` (hoặc `SUCCESS`) về `WAITING_APPROVAL`
+        # làm cả request đổ 500. Đo được: sau khi bước tham quan bị huỷ vì phần
+        # trước hỏng, người dùng trả lời câu hỏi lại và nhận "Đã có lỗi xảy ra.
+        # Vui lòng thử lại." — một lỗi hệ thống, không phải lỗi của họ.
+        #
+        # Một bước đã kết thúc thì không còn gì để chờ duyệt.
+        try:
+            rows = {r["task_id"]: str(r.get("status")) for r in await self._repository.list_tasks(workflow_id)}
+        except Exception:  # noqa: BLE001 - đọc hỏng thì cứ thử đánh dấu
+            rows = {}
         for task_id in sorted(task_ids):
+            if rows.get(task_id) in _TERMINAL_TASK_STATUSES:
+                continue
             await self._repository.update_task_status(workflow_id, task_id, TaskStatus.WAITING_APPROVAL)
+
+async def expire_pending_viewing_approval(pool: asyncpg.Pool, workflow_id: str) -> bool:
+    """Rút lời nhờ duyệt khi người dùng huỷ yêu cầu. Trả True nếu có rút.
+
+    `EXPIRED` chứ không phải `REJECTED`: từ chối là quyết định của ĐƠN VỊ tour,
+    và ghi nó vào đây là gán cho họ một việc họ chưa từng làm — rồi mọi báo cáo
+    "tỉ lệ đơn vị từ chối" đều sai theo.
+
+    Chỉ đụng hàng còn AWAITING. Đơn vị đã quyết rồi thì quyết định của họ là
+    dữ kiện, không được viết đè.
+    """
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE service_approvals
+               SET status = 'EXPIRED', decided_at = NOW()
+             WHERE workflow_id = $1 AND status = 'AWAITING'
+               AND tool = 'schedule_property_viewing'
+            """,
+            _uuid(workflow_id),
+        )
+    return result.endswith(" 1")

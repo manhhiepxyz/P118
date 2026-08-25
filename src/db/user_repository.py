@@ -14,7 +14,7 @@ phần hash/verify. Giống các repository khác:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import datetime
 
 import asyncpg
 
@@ -183,4 +183,30 @@ class UserRepository:
             row = await conn.fetchrow(sql, *params)
         return dict(row) if row is not None else None
 
-    # Alias trả về khớp với kỳ vọng của schema API (đọc qua `repository.users`)
+    async def list_all_users(self) -> list[dict]:
+        """Lấy danh sách tất cả người dùng (bao gồm cả bị khóa) cho Admin."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT {', '.join(self._PUBLIC_COLUMNS)} FROM users ORDER BY created_at DESC"
+            )
+            return [dict(row) for row in rows]
+
+    async def update_role(self, user_id: str, role: str) -> dict | None:
+        """Cập nhật quyền (role) của người dùng."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 RETURNING {', '.join(self._PUBLIC_COLUMNS)}",
+                role,
+                user_id,
+            )
+            return dict(row) if row is not None else None
+
+    async def update_status(self, user_id: str, is_archived: bool) -> dict | None:
+        """Khóa/Mở khóa người dùng."""
+        archive_val = "NOW()" if is_archived else "NULL"
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE users SET archived_at = {archive_val}, updated_at = NOW() WHERE id = $1 RETURNING {', '.join(self._PUBLIC_COLUMNS)}",
+                user_id,
+            )
+            return dict(row) if row is not None else None

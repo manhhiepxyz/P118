@@ -336,6 +336,24 @@ export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction |
   const workflowId = res.workflow_id
   if (!workflowId) return null
 
+  // Yêu cầu ĐÃ DỪNG thì không còn gì đang chờ.
+  //
+  // `NEEDS_INFORMATION`/`WAITING_APPROVAL` được suy ra từ câu hỏi và thẻ duyệt
+  // còn treo trên bản ghi, mà huỷ KHÔNG xoá chúng — nên sau khi dừng, thẻ chờ
+  // vẫn còn đó. Câu tiếp theo người dùng gõ bị đọc là CÂU TRẢ LỜI cho thẻ ấy,
+  // và nó chạy lại đúng yêu cầu vừa bị dừng.
+  //
+  // Đo được nguyên văn:
+  //
+  //   Bạn:   đặt lịch tham quan Vinhomes Green Paradise…
+  //   P-118: Mình đã dừng yêu cầu này.
+  //   Bạn:   a
+  //          → chạy lại chính lịch tham quan vừa dừng
+  //
+  // Người dùng gõ một ký tự vô nghĩa và nhận lại một việc họ vừa chủ động huỷ.
+  // Dừng phải có nghĩa là dừng.
+  if (res.status === 'CANCELLED') return null
+
   if (res.status === 'WAITING_APPROVAL' && res.approval_actor === 'USER' && res.payment_quote) {
     const quote = res.payment_quote
     return {

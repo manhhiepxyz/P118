@@ -13,8 +13,6 @@ from pathlib import Path
 
 import pytest
 
-from tests._dbcheck import require_running_app_database
-
 from src.orchestration import runtime_provider
 from src.orchestration.runtime_provider import (
     RepositoryNotConfiguredError,
@@ -22,6 +20,7 @@ from src.orchestration.runtime_provider import (
     clear_repository_provider,
     set_repository_provider,
 )
+from tests._dbcheck import require_running_app_database
 
 REPO_ROOT = Path(__file__).parents[1]
 

@@ -276,7 +276,6 @@ async def test_a_decided_viewing_approval_never_drags_back_to_waiting(client, db
     token = await _register_and_login(client, "nn_wa_viewing_done")
     seeded = await _seed_waiting_viewing_workflow(db_pool, "nn_wa_viewing_done")
 
-    from datetime import date as _date
 
     await db_pool.execute(
         "UPDATE viewing_approvals SET status = 'APPROVED', decided_at = NOW() "

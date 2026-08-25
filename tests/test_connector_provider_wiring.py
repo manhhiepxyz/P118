@@ -25,12 +25,12 @@ from src.connectors.property import PropertyConnector
 from src.connectors.resident_services import ResidentServicesConnector
 from src.connectors.shuttle import ShuttleConnector
 from src.connectors.tour import TourConnector
+from src.services.mock import shuttle as shuttle_module
 from src.services.mock.consultation import consultation_app
 from src.services.mock.property import property_app
 from src.services.mock.resident_services import resident_services_app
 from src.services.mock.shuttle import shuttle_app
 from src.services.mock.tour import tour_app
-from src.services.mock import shuttle as shuttle_module
 
 # Ngày trong tương lai: provider từ chối ngày quá khứ, và một hằng số ngày cứng
 # sẽ biến test thành quả bom hẹn giờ.

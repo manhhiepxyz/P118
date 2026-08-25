@@ -116,7 +116,7 @@ class _FakeExecutor:
     thành FAILED — một thất bại của ĐỒ GIẢ, không phải của sản phẩm.
     """
 
-    instances: list["_FakeExecutor"] = []
+    instances: list[_FakeExecutor] = []
 
     def __init__(self, connectors, repository, on_failure=None) -> None:
         self.connectors = connectors
@@ -134,6 +134,12 @@ class _FakeExecutor:
         workflow_id: str,
         *,
         finalize: bool = True,
+        # Hợp đồng của `Executor.execute` có CẢ HAI tham số này, và
+        # `ValidatedExecutionBoundary` chuyển tiếp chúng xuống. Đồ giả hẹp hơn
+        # đồ thật thì mọi lớp bọc mới đều làm test đỏ vì `TypeError` — một thất
+        # bại của ĐỒ GIẢ trông y hệt thất bại của sản phẩm.
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
         seed_statuses: dict | None = None,
         seed_results: dict | None = None,
     ):

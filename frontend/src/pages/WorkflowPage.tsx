@@ -1,13 +1,25 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, ChevronDown, Clock3, Info, XCircle } from 'lucide-react'
 
 import { ClarificationReply } from '../components/ClarificationReply'
+import { InspectorPanel } from '../components/workspace/InspectorPanel'
+import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 import { ResultSummary } from '../components/workspace/ResultSummary'
 import { StepList } from '../components/workspace/StepList'
+import { journeyFromWorkflow } from '../lib/liveJourney'
 import { describeFailure, describeWorkflowFailure } from '../lib/status'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
-import { cancelWorkflow, continueWorkflow, decidePayment, retryWorkflow, startWorkflow } from '../lib/agentApi'
+import {
+  cancelWorkflow,
+  continueWorkflow,
+  decidePayment,
+  getWorkflow,
+  listSessionWorkflows,
+  retryWorkflow,
+  startWorkflow,
+} from '../lib/agentApi'
+import type { AgentWorkflowListItem } from '../lib/types'
 import { useWorkflowPolling } from '../lib/useWorkflowPolling'
 
 /**
@@ -20,6 +32,12 @@ import { useWorkflowPolling } from '../lib/useWorkflowPolling'
  * KHÔNG hiển thị: suy luận của mô hình, output thô của LLM, InputRef, tên
  * Planner/Validator/Executor, SQL/DSN, hay enum thô khi đã có nhãn tiếng Việt.
  */
+
+/* Chờ backend ngã ngũ sau khi gõ tiếp: có bước (việc mới) hay có câu trả lời
+   (chỉ là một câu). Trần 30 giây — quá đó thì coi như một câu và ở lại, hơn là
+   treo người dùng trong một khoảng chờ không có điểm dừng. */
+const FOLLOW_UP_POLL_MS = 1500
+const FOLLOW_UP_MAX_POLLS = 20
 
 const TONE: Record<string, { label: string; token: string }> = {
   PENDING: { label: 'Đang chờ', token: 'var(--text-muted)' },
@@ -76,7 +94,89 @@ export function WorkflowPage() {
   // Vòng poll dùng CHUNG với thẻ workflow trong hội thoại. Hai bản chép tay
   // thì một bản được sửa còn bản kia giữ nguyên lỗi — và vòng lặp này đã từng
   // hỏng theo một cách rất khó thấy.
-  const { data, error, loading, refresh: load } = useWorkflowPolling(workflowId)
+  /*
+   * `waitForAnswer`: đừng dừng poll ở lúc workflow kết thúc.
+   *
+   * Backend công bố KẾT QUẢ trước rồi mới sinh câu trả lời ở tác vụ nền — cố ý,
+   * để không cộng một lượt gọi mô hình vào thời gian người dùng phải chờ. Với
+   * một lượt chat thì `status` về `CHAT` gần như tức thì, mà `CHAT` nằm trong
+   * `TERMINAL_STATUSES`: trang ngừng hỏi lại NGAY, đúng vào khoảnh khắc câu
+   * trả lời còn chưa được viết.
+   *
+   * Kết quả người dùng thấy: gửi xong, hội thoại chỉ có lời của chính mình, và
+   * phải thoát ra vào lại mới đọc được câu đáp — nó vẫn ở đó, chỉ là không ai
+   * đi lấy. Thẻ workflow trong màn hội thoại đã bật cờ này từ trước; trang chi
+   * tiết thì không, nên cùng một lỗi chỉ xuất hiện ở một trong hai nơi.
+   */
+  const { data, error, loading, refresh: load } = useWorkflowPolling(workflowId, 1500, {
+    waitForAnswer: true,
+  })
+
+  /*
+   * Cùng MỘT hàm dựng hành trình mà màn đang-chạy dùng.
+   *
+   * Trang chi tiết trước đây chỉ có danh sách bước dọc, nên mở lại một yêu cầu
+   * cũ là mất hẳn hình dạng của nó: cái gì chạy song song, cái gì chờ cái gì.
+   * Dựng lại một cách vẽ thứ hai ở đây thì hai màn sẽ trôi khỏi nhau — bước
+   * hiện ở màn này mà thiếu ở màn kia. Nên gọi thẳng `journeyFromWorkflow`.
+   */
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const journey = useMemo(() => (data ? journeyFromWorkflow(data) : null), [data])
+  const selectedStep = journey?.steps.find((step) => step.id === selectedId) ?? null
+
+  /*
+   * Cuộc hội thoại KHÔNG nằm trên một workflow.
+   *
+   * Mỗi câu người dùng gõ tiếp sinh ra một workflow riêng — plan riêng, id
+   * riêng — rồi trang điều hướng sang id mới. Dựng khung chat từ mỗi
+   * `data.goal`/`data.answer` nghĩa là mọi lượt trước biến mất ngay khi gửi
+   * câu thứ hai: người dùng thấy một hội thoại chỉ có đúng lượt vừa rồi.
+   *
+   * Thứ giữ các lượt lại với nhau là `session_id`, nên hội thoại phải đọc từ
+   * đó. Workflow đang mở vẫn lấy nội dung từ `data` (mới hơn một nhịp poll so
+   * với danh sách phiên), các lượt còn lại lấy từ phiên.
+   */
+  const sessionId = data?.session_id ?? null
+  const [sessionTurns, setSessionTurns] = useState<AgentWorkflowListItem[]>([])
+
+  useEffect(() => {
+    if (!sessionId) {
+      setSessionTurns([])
+      return
+    }
+    let alive = true
+    listSessionWorkflows(sessionId)
+      .then((res) => {
+        if (alive) setSessionTurns(res.workflows)
+      })
+      // Hội thoại là phần phụ trợ: mất nó thì trang vẫn dùng được với lượt
+      // hiện tại. Không dựng thêm một thông báo lỗi nữa cho việc đó.
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+    // `data?.answer` nằm trong deps để lượt vừa xong xuất hiện luôn ở các
+    // lượt sau, không phải chờ tới lần vào trang kế tiếp.
+  }, [sessionId, data?.status, data?.answer])
+
+  const turns = useMemo(() => {
+    if (!data) return []
+    const current = {
+      id: workflowId,
+      goal: data.goal,
+      answer: data.answer,
+      isCurrent: true,
+    }
+    const others = sessionTurns
+      .filter((item) => item.workflow_id !== workflowId)
+      .map((item) => ({ id: item.workflow_id, goal: item.goal, answer: item.answer, isCurrent: false }))
+    // Chèn lượt hiện tại đúng vị trí thời gian của nó: phiên trả về theo
+    // `created_at` tăng dần, và lượt đang mở KHÔNG chắc là lượt cuối — người
+    // dùng mở lại một yêu cầu cũ từ Lịch sử thì nó nằm ở giữa.
+    const index = sessionTurns.findIndex((item) => item.workflow_id === workflowId)
+    if (index < 0) return [...others, current]
+    return [...others.slice(0, index), current, ...others.slice(index)]
+  }, [data, sessionTurns, workflowId])
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState<string | null>(null)
   const [retrying, setRetrying] = useState(false)
@@ -140,9 +240,42 @@ export function WorkflowPage() {
    * một cuộc mới và toàn bộ ngữ cảnh người dùng vừa đọc trên màn hình không đi
    * theo — họ phải kể lại từ đầu đúng thứ đang hiện trước mắt.
    */
+  /**
+   * Gõ tiếp ở khung chat.
+   *
+   * KHÔNG nhảy trang vô điều kiện. Bản trước gọi `startWorkflow` rồi
+   * `navigate` ngay, nên mọi câu — kể cả "hôm nay là ngày mấy" hay "cảm ơn" —
+   * đều đá người dùng khỏi yêu cầu họ đang xem. Đo được: đang xem một hành
+   * trình có bước, gõ một câu hỏi, màn hình nhảy sang một yêu cầu 0 bước và
+   * hành trình cũ biến mất.
+   *
+   * Chỉ hai kết cục, và chúng cần hai hành vi khác nhau:
+   *
+   *   có kế hoạch  → đây là VIỆC MỚI. Sang trang của nó để theo dõi, vì nó có
+   *                  thể cần duyệt hoặc cần bổ sung thông tin.
+   *   không có     → đây là một CÂU. Ở nguyên đây; hội thoại vốn hiển thị mọi
+   *                  lượt của phiên nên câu trả lời tự xuất hiện đúng chỗ.
+   *
+   * Không quyết định được ngay lúc gửi: `/start` trả 202 và `plan` còn rỗng
+   * cho cả hai. Nên chờ tới khi backend ngã ngũ — có bước, hoặc có câu trả lời.
+   */
   async function handleFollowUp(message: string) {
     const next = await startWorkflow(message, undefined, data?.session_id ?? null)
-    if (next.workflow_id) navigate(`/workflow/${next.workflow_id}`)
+    const id = next.workflow_id
+    if (!id) return
+
+    for (let attempt = 0; attempt < FOLLOW_UP_MAX_POLLS; attempt += 1) {
+      const seen = await getWorkflow(id).catch(() => null)
+      if (seen && seen.plan.length > 0) {
+        navigate(`/workflow/${id}`)
+        return
+      }
+      if (seen?.answer) break
+      await new Promise((resolve) => setTimeout(resolve, FOLLOW_UP_POLL_MS))
+    }
+
+    // Câu hỏi (hoặc hết giờ chờ): ở lại, và kéo lượt mới vào hội thoại.
+    setSessionTurns(await listSessionWorkflows(sessionId ?? id).then((r) => r.workflows).catch(() => sessionTurns))
   }
 
   async function handleClarification(message: string) {
@@ -358,7 +491,7 @@ export function WorkflowPage() {
                   <p className="mb-2 text-[13.5px] text-[var(--text-secondary)]">
                     Hoặc nói cho mình biết muốn đổi gì — mình chạy lại phần còn thiếu.
                   </p>
-                  <ClarificationReply onSubmit={handleFollowUp} />
+                  <ClarificationReply onSubmit={handleFollowUp} busy={running} onStop={handleCancel} />
                 </div>
               )}
             </section>
@@ -400,41 +533,51 @@ export function WorkflowPage() {
 
               Cuộc trao đổi THUỘC VỀ workflow. Đặt nó ở đây là bỏ được một mục
               rời rạc, và câu hỏi lẫn câu trả lời cuối cùng cũng ở cùng chỗ. */}
-          {(data.goal || data.answer) && (
+          {turns.some((turn) => turn.goal || turn.answer) && (
             <section className="rise mt-9" aria-label="Trao đổi">
               <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
                 Trao đổi
               </h2>
               <div className="mt-4 space-y-3">
-                {data.goal && (
-                  <div className="flex justify-end" data-turn="user">
-                    <p className="max-w-[80%] whitespace-pre-line rounded-[var(--r-sm)] bg-[var(--surface-overlay)] px-4 py-3 text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                      {data.goal}
-                    </p>
+                {/* MỌI lượt của phiên, cũ đến mới — không chỉ lượt đang mở. */}
+                {turns.map((turn) => (
+                  <div key={turn.id} className="space-y-3" data-session-turn={turn.id}>
+                    {turn.goal && (
+                      <div className="flex justify-end" data-turn="user">
+                        <p className="max-w-[80%] whitespace-pre-line rounded-[var(--r-sm)] bg-[var(--surface-overlay)] px-4 py-3 text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                          {turn.goal}
+                        </p>
+                      </div>
+                    )}
+                    {(turn.answer || (turn.isCurrent && needsInfo && data.question)) && (
+                      <div className="flex gap-3" data-turn="agent">
+                        <span
+                          aria-hidden
+                          className="mt-[3px] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--r-xs)] font-mono text-[11px] font-bold"
+                          style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
+                        >
+                          P
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="whitespace-pre-line text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                            {turn.answer || data.question}
+                          </p>
+                          {/* Lượt trước có hành trình RIÊNG của nó. Không có
+                              lối sang đó thì các bước của những lượt cũ nằm
+                              sau một URL người dùng không còn cách nào đoán. */}
+                          {!turn.isCurrent && (
+                            <Link
+                              to={`/workflow/${turn.id}`}
+                              className="mt-1.5 inline-block text-[13px] font-medium text-[var(--agent)] hover:underline"
+                            >
+                              Xem các bước của lượt này
+                            </Link>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-                {/* Câu trả lời hiện TRONG hội thoại, kể cả khi P-118 đang
-                    hỏi lại. Trước đây nó bị nhốt ở khối "Cần bạn bổ sung" phía
-                    dưới, nên khung chat chỉ có lời của người dùng — họ gửi câu
-                    mới rồi nhìn một cuộc trò chuyện một chiều và tưởng hệ thống
-                    không trả lời.
-
-                    `question` là phương án dự phòng: ở nhánh hỏi lại, `answer`
-                    có thể chưa kịp sinh. */}
-                {(data.answer || (needsInfo && data.question)) && (
-                  <div className="flex gap-3" data-turn="agent">
-                    <span
-                      aria-hidden
-                      className="mt-[3px] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--r-xs)] font-mono text-[11px] font-bold"
-                      style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
-                    >
-                      P
-                    </span>
-                    <p className="min-w-0 flex-1 whitespace-pre-line text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                      {data.answer || data.question}
-                    </p>
-                  </div>
-                )}
+                ))}
 
                 {/* P-118 ĐANG SOẠN.
                     Không có dòng này, người dùng gửi câu mới rồi nhìn một khung
@@ -481,7 +624,7 @@ export function WorkflowPage() {
                   cuối, nên chỗ gõ cũng phải ở cuối. */}
               {!needsInfo && (
                 <div className="mt-6">
-                  <ClarificationReply onSubmit={handleFollowUp} />
+                  <ClarificationReply onSubmit={handleFollowUp} busy={running} onStop={handleCancel} />
                 </div>
               )}
             </section>
@@ -494,7 +637,7 @@ export function WorkflowPage() {
                   in lại ở đây là bắt người dùng đọc hai lần cùng một câu, và
                   hai bản đó có thể lệch nhau khi một bên cập nhật trước. */}
               <div>
-                <ClarificationReply onSubmit={handleClarification} />
+                <ClarificationReply onSubmit={handleClarification} busy={running} onStop={handleCancel} />
               </div>
             </section>
           )}
@@ -602,6 +745,40 @@ export function WorkflowPage() {
             <div className="mt-11">
               <ResultSummary task={resultTask} journeyTitle={headline} />
             </div>
+          )}
+
+          {/* ── Sơ đồ tiến trình ────────────────────────────────────── */}
+          {/* `plan` chứ không phải `tasks`: kế hoạch có đủ mọi bước kể cả bước
+              chưa chạy, còn `tasks` chỉ có bước đã khởi động. Vẽ theo `tasks`
+              thì sơ đồ mọc dần từng node và không bao giờ cho thấy toàn cảnh. */}
+          {(journey?.steps.length ?? 0) > 0 && (
+            <section className="mt-12">
+              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                Sơ đồ tiến trình
+              </h2>
+              <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+                {/* ReactFlow đo theo phần tử cha; cha cao 0 thì canvas rỗng
+                    hoàn toàn mà không báo lỗi gì. Nên chiều cao đặt cứng ở
+                    đây, không để nó phụ thuộc nội dung. */}
+                <div className="h-[420px] overflow-hidden rounded-[var(--r-md)] border border-[var(--border-subtle)]">
+                  <JourneyCanvas
+                    selectedId={selectedId}
+                    onSelect={setSelectedId}
+                    steps={journey!.steps}
+                    edges={journey!.edges}
+                  />
+                </div>
+                {selectedStep ? (
+                  <div className="overflow-hidden rounded-[var(--r-md)] border border-[var(--border-subtle)]">
+                    <InspectorPanel step={selectedStep} />
+                  </div>
+                ) : (
+                  <p className="flex items-center justify-center rounded-[var(--r-md)] border border-dashed border-[var(--border-subtle)] px-6 py-8 text-center text-[13px] leading-[1.6] text-[var(--text-muted)]">
+                    Bấm vào một bước để xem chi tiết của bước đó.
+                  </p>
+                )}
+              </div>
+            </section>
           )}
 
           {/* ── Các bước ────────────────────────────────────────────── */}
