@@ -103,7 +103,11 @@ _NO_AVAILABILITY_FIELDS: dict[str, list[str]] = {
     "schedule_property_viewing": ["viewing_date", "viewing_time"],
     "book_shuttle": ["tour_date"],
     "create_maintenance_request": ["preferred_date", "preferred_time"],
+    # Alias lịch sử còn xuất hiện trong plan/test cũ. Canonical mới là
+    # ``schedule_move``; giữ alias chỉ để đọc dữ liệu đã persist, không sinh
+    # tool này trong plan mới.
     "create_moving_request": ["move_date", "move_time"],
+    "schedule_move": ["move_date", "move_time"],
     "book_parking": ["parking_zone"],
 }
 
@@ -135,7 +139,10 @@ def repair_missing_fields(task_tool: str, error_code: ErrorCode, task_input: dic
         #
         # Người dùng được bảo đổi NGÀY rồi đưa cho một ô chọn KHU ĐỖ XE. Bảo
         # trì và chuyển nhà còn tệ hơn: không có câu nào, và vẫn hỏi khu đỗ xe.
-        return _NO_AVAILABILITY_FIELDS.get(task_tool, ["parking_zone"])
+        # Không có mapping nghĩa là mã này KHÔNG áp dụng cho tool. Mặc định về
+        # parking_zone đã biến một lời từ chối đăng ký xe thành form đổi khu,
+        # rồi huỷ dependency mà lần giữ chỗ mới cần dùng.
+        return _NO_AVAILABILITY_FIELDS.get(task_tool, [])
     if error_code == ErrorCode.RESIDENT_ALREADY_EXISTS:
         return ["apartment_code"]
     if error_code == ErrorCode.VEHICLE_ALREADY_EXISTS:

@@ -29,17 +29,26 @@ _MAU = [
     ("30A-123.45", True),
     ("51F 6789", True),
     ("29AB-1234", True),
-    ("50A-82812312", False),   # 8 chữ số — chính ca người dùng gặp
-    ("A-12345", False),        # thiếu số đầu
-    ("5912345", False),        # không có chữ cái
-    ("59A-12", False),         # quá ngắn
+    ("50A-82812312", False),  # 8 chữ số — chính ca người dùng gặp
+    ("A-12345", False),  # thiếu số đầu
+    ("5912345", False),  # không có chữ cái
+    ("59A-12", False),  # quá ngắn
     ("", False),
 ]
 
 
 def _frontend_pattern() -> re.Pattern[str]:
     source = _FORMS.read_text(encoding="utf-8")
-    match = re.search(r"pattern:\s*/\^(.+?)\$/", source)
+    # KHOANH ĐÚNG Ô trước khi đọc luật.
+    #
+    # Bản trước lấy `pattern:` ĐẦU TIÊN trong cả file — đúng khi biểu mẫu chỉ
+    # có một luật, và sai ngay khi có ô thứ hai. Thêm luật số điện thoại cho ô
+    # "Số điện thoại cho tài xế" (nằm phía trên) làm bài kiểm này đọc nhầm luật
+    # ấy rồi báo biển số hợp lệ là sai — một bài kiểm đỏ vì lý do không liên
+    # quan gì tới thứ nó canh.
+    khoi = re.search(r"key:\s*'plate_number'.*?\n    \}", source, re.DOTALL)
+    assert khoi, "không tìm thấy ô `plate_number` trong biểu mẫu"
+    match = re.search(r"pattern:\s*/\^(.+?)\$/", khoi.group(0))
     assert match, "biểu mẫu không còn luật định dạng cho biển số"
     # `\d`, `{n,m}` giống nhau ở JS và Python; chỉ cần bỏ escape của dấu `/`.
     return re.compile("^" + match.group(1).replace("\\/", "/") + "$")
@@ -85,7 +94,7 @@ def test_the_form_explains_the_format_at_the_field() -> None:
 
 
 def test_a_wrong_format_is_not_reported_as_an_empty_field() -> None:
-    """"Chưa chọn X" chỉ đúng khi ô RỖNG.
+    """ "Chưa chọn X" chỉ đúng khi ô RỖNG.
 
     Đo được: gõ "2A-42343" — thiếu một chữ số đầu, biển Việt Nam có 2 chữ số mã
     tỉnh — và nhận "Chưa chọn biển số xe." Người dùng đi tìm chỗ mình quên
@@ -93,8 +102,7 @@ def test_a_wrong_format_is_not_reported_as_an_empty_field() -> None:
     còn sót ở biểu mẫu.
     """
     form = (
-        Path(__file__).resolve().parents[1]
-        / "frontend" / "src" / "components" / "workspace" / "InlineServiceForm.tsx"
+        Path(__file__).resolve().parents[1] / "frontend" / "src" / "components" / "workspace" / "InlineServiceForm.tsx"
     )
     source = form.read_text(encoding="utf-8")
     assert "(value ?? '').trim()" in source, "câu lỗi không phân biệt ô rỗng với ô sai định dạng"
@@ -102,6 +110,6 @@ def test_a_wrong_format_is_not_reported_as_an_empty_field() -> None:
 
 
 def test_a_one_digit_prefix_is_rejected_by_both_sides() -> None:
-    """"2A-42343" phải bị từ chối ở CẢ HAI phía, không chỉ một."""
+    """ "2A-42343" phải bị từ chối ở CẢ HAI phía, không chỉ một."""
     assert _extract_plate_number("2A-42343") is None
     assert _frontend_pattern().match("2A-42343") is None

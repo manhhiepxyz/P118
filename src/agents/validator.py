@@ -5,6 +5,7 @@ from collections import deque
 from datetime import date, time, timedelta
 
 from src.common.projects import project_name, resolve_project_id
+from src.common.field_parsers import extract_plate_number
 from src.common.schedule_policy import MAX_HORIZON_DAYS as _MAX_HORIZON_DAYS
 from src.common.schedule_policy import TIME_INPUTS as _TIME_INPUTS
 from src.common.task_plan import InputRef, TaskPlan
@@ -34,6 +35,12 @@ class TaskPlanValidator:
     ALLOWED_TOOLS: frozenset[str] = frozenset(
         {
             "search_properties",
+            "change_parking_zone",
+            "cancel_property_viewing",
+            "cancel_parking",
+            "cancel_maintenance",
+            "cancel_move",
+            "cancel_shuttle",
             "schedule_property_viewing",
             "register_property_interest",
             "create_maintenance_request",
@@ -60,6 +67,14 @@ class TaskPlanValidator:
         "register_vehicle": frozenset({"resident_id", "plate_number", "vehicle_type"}),
         "book_parking": frozenset({"vehicle_id", "booking_date", "parking_zone"}),
         "pay_fee": frozenset({"booking_id", "amount", "currency"}),
+        # Đổi khu cho một chỗ ĐÃ GIỮ. `amount` KHÔNG phải input: giá do bên bán
+        # tính lại theo khu, y như lúc đặt mới.
+        "change_parking_zone": frozenset({"booking_id", "parking_zone"}),
+        "cancel_property_viewing": frozenset({"viewing_id"}),
+        "cancel_parking": frozenset({"booking_id"}),
+        "cancel_maintenance": frozenset({"maintenance_id"}),
+        "cancel_move": frozenset({"move_request_id"}),
+        "cancel_shuttle": frozenset({"shuttle_id"}),
         "book_shuttle": frozenset({"viewing_id", "tour_date", "passenger_count"}),
     }
 
@@ -379,6 +394,23 @@ class TaskPlanValidator:
     @classmethod
     def _validate_schedule_values(cls, tool: str, input_data: dict) -> None:
         """Chặn literal ngày/giờ sai trước execution; InputRef để runtime resolve."""
+        # BIỂN SỐ: luật đã có ở hai nơi, thiếu ở đây — và đây là nơi duy nhất
+        # mọi đường đi qua.
+        #
+        # Đo được trên stack demo: gõ "…Xe máy biển số ABCXYZ chỗ đỗ Khu A" cho
+        # ra một kế hoạch 3 bước với `plate_number: "ABCXYZ"`, đã vào hàng đợi
+        # đơn vị. Bộ đọc tất định BIẾT luật (`_extract_plate_number("ABCXYZ")`
+        # trả None) và biểu mẫu cũng có `pattern` — nhưng đường nhanh trích giá
+        # trị bằng model, không qua bộ đọc, nên không lớp nào chặn.
+        #
+        # Dùng CHÍNH bộ đọc ấy thay vì chép lại mẫu: hai bản sao của một luật
+        # thì sớm muộn lệch nhau, và `tests/test_plate_rule_matches_backend.py`
+        # đã tồn tại vì đúng nỗi lo đó.
+        bien_so = input_data.get("plate_number")
+        if bien_so is not None:
+            if not isinstance(bien_so, str) or extract_plate_number(bien_so) is None:
+                raise ValueError(f"Tool '{tool}' has an invalid plate_number")
+
         date_field = cls.DATE_INPUTS.get(tool)
         if date_field is not None:
             raw_date = input_data.get(date_field)
@@ -387,13 +419,29 @@ class TaskPlanValidator:
                     parsed_date = date.fromisoformat(raw_date)
                 except ValueError:
                     raise ValueError(f"Tool '{tool}' has invalid {date_field} format") from None
-                if parsed_date < date.today():
-                    raise ValueError(f"Tool '{tool}' has {date_field} in the past")
-                # Trần tương lai. Không có nó thì "2199-12-31" là ngày hợp lệ:
-                # nó không nằm trong quá khứ nên mọi lớp kiểm đều cho qua, và
+                # NGÀY SAI LÀ NGÀY HỎI LẠI ĐƯỢC — cả hai lớp, một kết cục.
+                #
+                # Đo được trên stack demo, cùng một loại sai cho hai đường ra:
+                #
+                #     ngày quá khứ  → NEEDS_INFORMATION · 0 bước   hỏi lại
+                #     ngày quá xa   → VALIDATION_ERROR  · 1 bước   ngõ cụt
+                #
+                # Khác biệt KHÔNG nằm ở đây — cả hai vốn ném `ValueError` — mà ở
+                # Planner: nó từ chối ngày quá khứ nhưng vui vẻ lập kế hoạch cho
+                # một ngày năm 2037. Để kết cục phụ thuộc việc model có nhớ luật
+                # hay không là để nó đổi theo từng lượt.
+                #
+                # `MissingRequiredInputError` là tín hiệu "hỏi lại ô này" mà
+                # `validate_node` đọc. Ném nó ở đây thì Planner nhớ hay quên đều
+                # ra cùng một chỗ: khách được mời chọn ngày khác.
+                #
+                # Trần tương lai không thừa: không có nó thì "2199-12-31" là ngày
+                # hợp lệ — không nằm trong quá khứ nên mọi lớp kiểm cho qua, và
                 # chỗ đỗ năm 2199 vẫn được giữ thật, chiếm capacity thật.
-                if parsed_date > date.today() + timedelta(days=cls.MAX_HORIZON_DAYS):
-                    raise ValueError(f"Tool '{tool}' has {date_field} too far in the future")
+                if parsed_date < date.today() or parsed_date > date.today() + timedelta(
+                    days=cls.MAX_HORIZON_DAYS
+                ):
+                    raise MissingRequiredInputError((date_field,))
 
         time_rule = cls.TIME_INPUTS.get(tool)
         if time_rule is None:

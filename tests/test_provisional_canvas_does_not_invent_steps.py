@@ -22,8 +22,7 @@ def test_hidden_fields_do_not_contribute_a_step() -> None:
     body = source[source.index("export function expectedTools(") :]
     body = body[: body.index("\n}")]
     assert "field.showIf" in body, (
-        "phép đoán bước đọc mọi ô bất kể điều kiện — nó sẽ vẽ bước của một ô "
-        "người dùng chưa mở"
+        "phép đoán bước đọc mọi ô bất kể điều kiện — nó sẽ vẽ bước của một ô người dùng chưa mở"
     )
     assert "continue" in body, "có kiểm điều kiện nhưng không bỏ qua ô ẩn"
 
@@ -44,6 +43,4 @@ def test_shuttle_is_declared_behind_a_condition() -> None:
     # Soi khối khai báo của CHÍNH ô đó: `showIf` đứng SAU `tool`, nên nhìn
     # ngược lên chỉ thấy ô liền trước và test xanh/đỏ vì nhầm ô.
     khoi = source[i : source.index("},", i)]
-    assert "showIf" in khoi, (
-        "ô xe đưa đón không còn điều kiện hiển thị — nó sẽ luôn được đoán là có"
-    )
+    assert "showIf" in khoi, "ô xe đưa đón không còn điều kiện hiển thị — nó sẽ luôn được đoán là có"

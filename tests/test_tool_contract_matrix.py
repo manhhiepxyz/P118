@@ -23,6 +23,19 @@ from src.orchestration.deps import build_connectors
 # Một input hợp lệ tối thiểu cho từng tool. Ngày đặt xa để không bao giờ rơi
 # vào quá khứ khi suite chạy lại sau này.
 VALID_INPUTS: dict[str, dict] = {
+    "change_parking_zone": {
+        "booking_id": "BOOK-001",
+        "parking_zone": "ZONE_B",
+    },
+    "cancel_property_viewing": {
+        "viewing_id": "VIEW-001",
+    },
+    "cancel_parking": {
+        "booking_id": "BOOK-001",
+    },
+    "cancel_maintenance": {"maintenance_id": "MAINT-001"},
+    "cancel_move": {"move_request_id": "MOVE-001"},
+    "cancel_shuttle": {"shuttle_id": "SHUTTLE-001"},
     "search_properties": {
         "transaction_type": "rent",
         "property_type": "apartment",
@@ -89,8 +102,8 @@ def _plan(tool: str, input_data: dict) -> TaskPlan:
 # ---------------------------------------------------------------------------
 
 
-def test_contract_covers_exactly_the_ten_shared_tools() -> None:
-    assert len(ALL_TOOLS) == 10
+def test_contract_covers_exactly_the_shared_tools() -> None:
+    assert len(ALL_TOOLS) == 16
     assert set(ALL_TOOLS) == TaskPlanValidator.ALLOWED_TOOLS
 
 
@@ -164,10 +177,16 @@ def test_connector_output_fields_match_the_contract() -> None:
 EXPECTED_OWNERS: dict[str, str] = {
     "search_properties": "PropertyConnector",
     "schedule_property_viewing": "TourConnector",
+    "cancel_property_viewing": "TourConnector",
+    "cancel_parking": "TransportConnector",
+    "cancel_maintenance": "ResidentServicesConnector",
+    "cancel_move": "ResidentServicesConnector",
+    "cancel_shuttle": "ShuttleConnector",
     "register_property_interest": "ConsultationConnector",
     "register_resident": "ResidentConnector",
     "register_vehicle": "TransportConnector",
     "book_parking": "TransportConnector",
+    "change_parking_zone": "TransportConnector",
     "pay_fee": "PaymentConnector",
     "create_maintenance_request": "ResidentServicesConnector",
     "schedule_move": "ResidentServicesConnector",
@@ -206,7 +225,7 @@ def test_runtime_exposes_exactly_the_ten_canonical_tools() -> None:
 
     registered = [tool for connector in connectors for tool in connector.tool_names]
 
-    assert len(registered) == 10, f"số tool đăng ký lệch: {sorted(registered)}"
+    assert len(registered) == 16, f"số tool đăng ký lệch: {sorted(registered)}"
     assert set(registered) == set(ALL_TOOLS)
 
 

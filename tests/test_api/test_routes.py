@@ -139,15 +139,21 @@ def test_book_shuttle_presentation_shows_driver_details() -> None:
     assert by_label["Tài xế"] == "Anh Tuấn"
     assert by_label["Biển số xe"] == "29A-456.78"
     assert by_label["Loại xe"] == "Ô tô 7 chỗ"
-    assert by_label["Giờ đón"] == "07:30"
+    # Ngày và giờ đón gộp thành MỘT mốc `Thời gian` — cùng tên với mọi dịch vụ
+    # có hẹn. Giao diện chọn bố cục theo nhãn này; hai ô rời thì nó không nhận
+    # ra đây là một buổi hẹn. Xem `tests/test_every_appointment_says_when.py`.
+    assert by_label["Thời gian"] == "2026-08-20 07:30"
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("22/8/2026", "2026-08-22"),
-        ("2026-08-22", "2026-08-22"),
-        ("31/2/2026", None),
+        # Ngày tương lai cố định, đủ xa để không hết hạn: `_extract_date` từ
+        # chối ngày quá khứ, nên một ngày ghim cứng gần hôm nay sẽ biến test
+        # này thành bom hẹn giờ.
+        ("22/8/2030", "2030-08-22"),
+        ("2030-08-22", "2030-08-22"),
+        ("31/2/2030", None),
     ],
 )
 def test_follow_up_date_is_parsed_deterministically(value, expected) -> None:
@@ -170,12 +176,22 @@ def test_follow_up_time_does_not_truncate_an_invalid_hour_or_minute(value) -> No
 
 
 def test_follow_up_extracts_the_exact_viewing_answer_used_in_terminal() -> None:
+    """Ngày phải là ngày TƯƠNG LAI, tính từ hôm nay.
+
+    Bản trước ghim cứng "22/8/2026". `_extract_date` từ chối ngày quá khứ, nên
+    test này xanh cho tới đúng 23/08/2026 rồi đỏ mãi mãi — hỏng vì thời gian
+    trôi, không vì mã nguồn đổi. Một test như thế không nói được điều gì về
+    lần sửa vừa rồi, và người đọc nó sẽ đi tìm lỗi ở nhầm chỗ.
+    """
+    from datetime import date, timedelta
+
+    mai = date.today() + timedelta(days=30)
     answers, unresolved = routes._extract_follow_up_answers(
-        "22/8/2026,12h",
+        f"{mai.day}/{mai.month}/{mai.year},12h",
         ["viewing_date", "viewing_time"],
     )
 
-    assert answers == {"viewing_date": "2026-08-22", "viewing_time": "12:00"}
+    assert answers == {"viewing_date": mai.isoformat(), "viewing_time": "12:00"}
     assert unresolved == []
 
 
@@ -424,7 +440,10 @@ async def test_continue_workflow_maps_answer_into_context_without_rewriting_goal
 
     assert response.status_code == 202
     assert captured["goal"] == original_goal
-    assert captured["context"] == {"project_id": "PRJ-001", "viewing_time": "13:40"}
+    # Ngữ cảnh mang thêm DANH TÍNH do server tra ở mỗi lượt; bài kiểm này nói
+    # về việc câu trả lời có vào đúng chỗ mà không viết lại `goal` hay không.
+    assert captured["context"]["project_id"] == "PRJ-001"
+    assert captured["context"]["viewing_time"] == "13:40"
     assert "Thông tin người dùng bổ sung" not in captured["goal"]
 
 
@@ -456,12 +475,35 @@ async def test_continue_workflow_accepts_partial_answer_then_planner_can_ask_rem
     monkeypatch.setattr(routes, "_run_demo_job", _fake_run)
     response = await client.post(
         f"/api/v1/workflows/demo/{original_id}/continue",
-        json={"message": "22/8/2026"},
+        json={"message": "22/8/2030"},
     )
     await asyncio.sleep(0)
 
     assert response.status_code == 202
-    assert captured == {"project_id": "PRJ-001", "viewing_date": "2026-08-22"}
+    body = response.json()
+
+    # HỢP ĐỒNG ĐÃ ĐỔI, và tên hàm giữ nguyên để lịch sử đọc được.
+    #
+    # Bản trước: trả lời một phần → consume clarification → tạo workflow con →
+    # Planner chạy lại và hỏi nốt ô còn thiếu. Nó CHẠY, nhưng mỗi lượt trả lời
+    # tốn một lần lập kế hoạch. Đo được trên stack demo, phiên e88a96e1: năm
+    # lượt để nhập ba ô, ~112 giây gọi model, và mỗi lượt là một workflow mới.
+    #
+    # Tệ hơn: đường ấy consume hồ sơ câu hỏi, nên câu trả lời THỨ HAI nhận 409
+    # — tái hiện được ở CẢ BẢY dịch vụ. Người dùng thấy nó "quên", thật ra
+    # không còn chỗ nào để nhớ.
+    #
+    # Bản này: giữ hồ sơ mở, gộp ô vừa nhận, hỏi ĐÚNG phần còn thiếu, KHÔNG gọi
+    # Planner. Xem `tests/test_db/test_every_service_keeps_what_you_already_told_it.py`
+    # — nó chạy vòng qua mọi dịch vụ để không dịch vụ nào bị bỏ sót.
+    assert not captured, "trả lời một phần mà vẫn lập kế hoạch lại"
+    assert body["status"] == "NEEDS_INFORMATION"
+    assert body["missing_fields"] == ["viewing_time"], body["missing_fields"]
+
+    # Ô vừa nhận VÀ ô đã biết từ trước đều còn nguyên trong hồ sơ đang mở.
+    con_lai = routes._DEMO_JOBS[original_id]["existing_context"]
+    assert con_lai["project_id"] == "PRJ-001"
+    assert con_lai["viewing_date"] == "2030-08-22"
 
 
 @pytest.mark.asyncio
@@ -569,6 +611,61 @@ async def test_demo_start_maps_public_project_name_to_trusted_internal_id(client
     job = routes._DEMO_JOBS[response.json()["workflow_id"]]
     assert job["existing_context"]["project_id"] == "PRJ-007"
     assert "project_name" not in job["existing_context"]
+
+
+@pytest.mark.asyncio
+async def test_demo_start_keeps_boolean_values_selected_in_the_service_form(client, monkeypatch) -> None:
+    """Dữ liệu đã chọn trong form không được phụ thuộc Planner nhớ trích lại.
+
+    Đây là lỗi production đã đo được: goal có ``tôi đồng ý được liên hệ``
+    nhưng model bỏ ``consent`` khỏi ``explicit_facts`` rồi hỏi lại đúng ô người
+    dùng vừa chọn. Ba boolean là dữ liệu người dùng, không phải danh tính/quyền,
+    nên route nhận chúng qua một object đóng và đưa vào context của Planner.
+    """
+    routes._DEMO_JOBS.clear()
+
+    async def _fake_job(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(routes, "_run_demo_job", _fake_job)
+    response = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={
+            "goal": "Đăng ký nhận tư vấn; tôi đồng ý được liên hệ.",
+            "form_fields": {
+                "consent": True,
+                "needs_elevator": False,
+                "needs_loading_support": True,
+            },
+        },
+    )
+    await asyncio.sleep(0)
+
+    assert response.status_code == 202
+    job = routes._DEMO_JOBS[response.json()["workflow_id"]]
+    assert (
+        job["existing_context"]
+        | {
+            "consent": True,
+            "needs_elevator": False,
+            "needs_loading_support": True,
+        }
+        == job["existing_context"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_demo_start_rejects_privileged_or_unknown_form_fields(client) -> None:
+    for form_fields in (
+        {"resident_id": "RES-FORGED"},
+        {"owner_user_id": "USER-FORGED"},
+        {"consent": "true"},
+    ):
+        response = await client.post(
+            "/api/v1/workflows/demo/start",
+            json={"goal": "Đăng ký nhận tư vấn.", "form_fields": form_fields},
+        )
+        assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -800,7 +897,7 @@ def test_demo_response_presents_four_business_steps_in_vietnamese() -> None:
                 task_id="T2",
                 tool="register_vehicle",
                 depends_on=["T1"],
-                input={"resident_id": "RES-001", "plate_number": "TEST-123", "vehicle_type": "car"},
+                input={"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"},
             ),
             Task(
                 task_id="T3",
@@ -840,7 +937,7 @@ def test_demo_response_presents_four_business_steps_in_vietnamese() -> None:
     assert response.status == "SUCCESS"
     assert response.summary == (
         "Đã đăng ký hồ sơ cư dân cho A1201 tại Ocean Park. "
-        "Đã đăng ký phương tiện biển số TEST-123. "
+        "Đã đăng ký phương tiện biển số 51A-12345. "
         "Đã đặt chỗ đỗ xe (Khu A · 2026-08-20). Phí đặt chỗ: 150.000 VND. "
         "Đã thanh toán phí đặt chỗ thành công."
     )
@@ -851,13 +948,13 @@ def test_demo_response_presents_four_business_steps_in_vietnamese() -> None:
         "Thanh toán phí",
     ]
     assert response.tasks[0].message == "Đã đăng ký hồ sơ cư dân cho A1201 tại Ocean Park."
-    assert response.tasks[1].message == "Đã đăng ký phương tiện biển số TEST-123."
+    assert response.tasks[1].message == "Đã đăng ký phương tiện biển số 51A-12345."
     assert response.tasks[2].message == ("Đã đặt chỗ đỗ xe (Khu A · 2026-08-20). Phí đặt chỗ: 150.000 VND.")
     assert response.tasks[3].message == "Đã thanh toán phí đặt chỗ thành công."
     assert {item.label: item.value for item in response.tasks[2].details} == {
         "Mã đặt chỗ": "BOOK-001",
         "Khu vực": "Khu A",
-        "Ngày đặt": "2026-08-20",
+        "Thời gian": "2026-08-20",
         "Phí đặt chỗ": "150.000 VND",
     }
 

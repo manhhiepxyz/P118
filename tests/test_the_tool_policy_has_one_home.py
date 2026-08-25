@@ -30,8 +30,23 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def test_the_three_sets_are_consistent():
-    assert len(PROVIDER_TOOLS) == 10
-    assert AGENT_FORBIDDEN_TOOLS == frozenset({"register_resident", "search_properties"})
+    assert len(PROVIDER_TOOLS) == 16
+    assert AGENT_FORBIDDEN_TOOLS == frozenset(
+        {
+            "register_resident",
+            "search_properties",
+            # Hai tool "sửa thứ đã tồn tại". Cả hai chỉ có nghĩa khi mang một mã
+            # do provider cấp từ một bước ĐÃ CHẠY; cho Planner lập kế hoạch với
+            # chúng là cho model tự viết ra mã ấy — và mã ấy có thể là của người
+            # khác. Đường sửa lỗi dựng chúng từ kết quả đã chạy, không từ câu chữ.
+            "change_parking_zone",
+            "cancel_property_viewing",
+            "cancel_parking",
+            "cancel_maintenance",
+            "cancel_move",
+            "cancel_shuttle",
+        }
+    )
     assert AGENT_REACHABLE_TOOLS == PROVIDER_TOOLS - AGENT_FORBIDDEN_TOOLS
     assert len(AGENT_REACHABLE_TOOLS) == 8
 

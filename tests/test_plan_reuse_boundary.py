@@ -46,20 +46,29 @@ def test_the_fast_path_reuses_the_seeding_helper() -> None:
     assert "on_failure=repair_manager" in source, "hỏng lần nữa thì không sinh được câu hỏi lại"
 
 
-def test_the_route_requires_structured_fields_and_a_prior_plan() -> None:
-    """Ba điều kiện, thiếu một là đi đường cũ.
+def test_the_route_requires_a_parsed_answer_and_a_prior_plan() -> None:
+    """Hai điều kiện, thiếu một là đi đường cũ.
 
-    `request.fields` — câu chữ tự do có thể mang ý đổi hình dạng kế hoạch.
-    `answers`        — không map được sang field nào thì không có gì để vá.
-    repair hint      — không có nghĩa là chưa từng có kế hoạch chạy hỏng, tức
-                       đây là lần hỏi ĐẦU và không có gì để tái dùng.
+    `answers`   — câu ĐÃ ĐƯỢC PHÂN TÍCH thành giá trị canonical cho đúng những
+                  ô đang hỏi. Không map được ô nào thì không có gì để vá.
+    repair hint — không có nghĩa là chưa từng có kế hoạch chạy hỏng, tức đây là
+                  lần hỏi ĐẦU và không có gì để tái dùng.
+
+    `request.fields` KHÔNG còn là điều kiện. Nó từng có, với lý lẽ "câu chữ tự
+    do có thể mang ý đổi hình dạng kế hoạch" — đúng với CHUỖI THÔ, nhưng thứ đi
+    tiếp là `answers`, đã qua `_extract_follow_up_answers`: chỉ rút giá trị cho
+    đúng những ô đang hỏi, dạng canonical, không thêm hay bớt dịch vụ nào.
+
+    Đo được khi còn đòi `fields`: khách gõ "đổi qua ngày 25" thì cả ba yêu cầu
+    được gửi lại, và `book_parking` — đã SUCCESS từ trước — hỏng với
+    `BOOKING_ALREADY_EXISTS` cho một ngày khách không nhắc tới.
     """
     from src.api import routes
 
     source = inspect.getsource(routes.continue_demo_workflow)
 
-    assert "request.fields and answers and await _read_repair_hints(workflow_id)" in source, (
-        "điều kiện vào đường nhanh đã đổi — kiểm lại xem nó còn hẹp không"
+    assert "if answers and await _read_repair_hints(workflow_id):" in source, (
+        "điều kiện vào đường nhanh đã đổi — kiểm lại xem nó còn đúng không"
     )
     assert "rerun_with_answers(" in source
 
@@ -120,7 +129,7 @@ def _plan_with(tools: list[str]):
 
     return TaskPlan(
         goal="đăng ký xe và đặt chỗ đỗ",
-        tasks=[Task(task_id=f"T{i+1}", tool=tool, input={}, depends_on=[]) for i, tool in enumerate(tools)],
+        tasks=[Task(task_id=f"T{i + 1}", tool=tool, input={}, depends_on=[]) for i, tool in enumerate(tools)],
     )
 
 

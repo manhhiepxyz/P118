@@ -279,10 +279,19 @@ async def _seed_awaiting_workflow(harness, *, owner_user_id: str) -> str:
     return workflow_id
 
 
-async def _decide(client, reviewer: dict, workflow_id: str, decision: str, reason: str | None = None):
+async def _decide(
+    client,
+    reviewer: dict,
+    workflow_id: str,
+    decision: str,
+    reason: str | None = None,
+    code: str | None = None,
+):
     body: dict = {"decision": decision}
     if reason is not None:
         body["reject_reason"] = reason
+    if code is not None:
+        body["reject_code"] = code
     return await client.post(
         f"/api/v1/viewing-approvals/{workflow_id}/decide",
         headers=_headers(reviewer),
@@ -468,7 +477,6 @@ async def test_reject_without_reason_is_422(viewing_env, viewing_client):
     res = await _decide(viewing_client, provider, workflow_id, "reject")
 
     assert res.status_code == 422
-    assert "lý do" in res.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -477,7 +485,17 @@ async def test_reject_fails_chain_and_records_reason(viewing_env, viewing_client
     provider = await _make_provider(viewing_env.repo)
     workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
 
-    res = await _decide(viewing_client, provider, workflow_id, "reject", reason="Lịch đã kín giờ tuần này")
+    # Từ chối DỨT KHOÁT: không phải hết khung giờ, nên chuỗi hỏng hẳn.
+    # `NO_AVAILABILITY` đi đường khác — nó mở một lượt hỏi lại giờ, xem
+    # `tests/test_db/test_a_refused_viewing_still_speaks.py`.
+    res = await _decide(
+        viewing_client,
+        provider,
+        workflow_id,
+        "reject",
+        reason="Lịch đã kín giờ tuần này",
+        code="INVALID_REQUEST",
+    )
 
     assert res.status_code == 200, res.text
     assert res.json()["status"] == "REJECTED"

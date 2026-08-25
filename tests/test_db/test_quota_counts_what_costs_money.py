@@ -27,7 +27,9 @@ async def _wf(conn, owner: uuid.UUID, *, plan: str, usage: bool) -> None:
     await conn.execute(
         "INSERT INTO workflows (workflow_id, goal, status, owner_user_id, task_plan) "
         "VALUES ($1, 'x', 'SUCCESS', $2, $3::jsonb)",
-        wid, owner, plan,
+        wid,
+        owner,
+        plan,
     )
     if usage:
         await conn.execute(
@@ -44,7 +46,9 @@ async def test_a_greeting_does_not_eat_a_booking_slot(db_pool) -> None:
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO users (id, username, email, password_hash, role) VALUES ($1,$2,$3,'x','customer')",
-            owner, f"quota_{owner.hex[:8]}", f"{owner.hex[:8]}@t.test",
+            owner,
+            f"quota_{owner.hex[:8]}",
+            f"{owner.hex[:8]}@t.test",
         )
         # Lời chào: không kế hoạch, không gọi mô hình.
         for _ in range(5):
@@ -62,7 +66,9 @@ async def test_a_question_through_the_planner_does_count(db_pool) -> None:
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO users (id, username, email, password_hash, role) VALUES ($1,$2,$3,'x','customer')",
-            owner, f"quota_{owner.hex[:8]}", f"{owner.hex[:8]}@t.test",
+            owner,
+            f"quota_{owner.hex[:8]}",
+            f"{owner.hex[:8]}@t.test",
         )
         await _wf(conn, owner, plan="null", usage=True)
 
@@ -82,7 +88,9 @@ async def test_a_real_task_counts_even_if_usage_logging_failed(db_pool) -> None:
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO users (id, username, email, password_hash, role) VALUES ($1,$2,$3,'x','customer')",
-            owner, f"quota_{owner.hex[:8]}", f"{owner.hex[:8]}@t.test",
+            owner,
+            f"quota_{owner.hex[:8]}",
+            f"{owner.hex[:8]}@t.test",
         )
         await _wf(conn, owner, plan='[{"task_id":"T1"}]', usage=False)
 

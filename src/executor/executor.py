@@ -366,7 +366,21 @@ class Executor:
         #
         # Task status vẫn được cập nhật đầy đủ: chỉ trạng thái TỔNG THỂ của
         # workflow là thứ caller giữ quyền quyết định.
-        all_success = all(task_statuses[t.task_id] == TaskStatus.SUCCESS for t in plan.tasks)
+        # "Xong" gồm cả bước ĐÃ HUỶ, không chỉ bước SUCCESS.
+        #
+        # Một bước huỷ là một bước không còn gì để chờ: nó bị người dùng dừng,
+        # bị đơn vị từ chối, hoặc bị THAY THẾ bởi một lần thử mới (xem
+        # `src/orchestration/repair_attempt.py`). Không cái nào là một thất bại.
+        #
+        # Đây đúng là luật mà `_final_status` (demo_service) đã viết —
+        # `{SUCCESS, CANCELLED}` → SUCCESS. Hai bản của cùng một luật thì sẽ
+        # lệch nhau, và bản ở đây đã lệch: sau khi Khu A được thay bằng Khu B,
+        # kế hoạch mang theo bước Khu A đã huỷ, `all_success` đọc nó là chưa
+        # xong và chốt cả workflow thành FAILED — trong khi Khu B đã đặt xong.
+        # `save_pending_approval` từ chối ghim thẻ thanh toán cho một workflow
+        # FAILED, nên khách không bao giờ thấy nút trả tiền.
+        settled = {TaskStatus.SUCCESS, TaskStatus.CANCELLED}
+        all_success = all(task_statuses[t.task_id] in settled for t in plan.tasks)
         if finalize:
             final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
             await self.repository.update_workflow_status(workflow_id, final_status)

@@ -102,12 +102,34 @@ def _as_date(value: str) -> object:
         return value
 
 
-def viewing_task(plan: TaskPlan) -> Task | None:
-    """Task `schedule_property_viewing` trong plan, hoặc None."""
+def viewing_task(plan: TaskPlan | None) -> Task | None:
+    """Lần thử tham quan MỚI NHẤT trong plan, hoặc None.
+
+    MỚI NHẤT chứ không phải đầu tiên. Sau khi `open_new_attempts` cấp danh tính
+    cho một yêu cầu đã đổi giá trị, kế hoạch chứa CẢ HAI bước: bước cũ ở lại làm
+    bản ghi kiểm toán (`CANCELLED`), bước mới nằm ngay sau nó.
+
+    Đo được trên workflow f8b8e457:
+
+        workflow_tasks     T1   CANCELLED         26/08   ← đã bị thay thế
+                           T1R2 WAITING_APPROVAL  27/08   ← khách vừa chọn
+        service_approvals  T1   REJECTED
+                           (không có dòng nào cho T1R2)
+
+    Khách đổi sang 27/08, trả tiền xong, và đơn vị tham quan chưa từng nhận yêu
+    cầu nào cho ngày ấy — vì mọi thứ dựng từ helper này đều nói về lần đã chết.
+
+    "Mới nhất" đọc theo THỨ TỰ trong plan, và thứ tự ấy đáng tin ở cả hai đường
+    dựng: `_rewrite` chèn bước mới ngay sau bước bị thay thế, còn
+    `_plan_from_task_rows` đọc `workflow_tasks` theo thứ tự tạo.
+    """
+    if plan is None:
+        return None
+    moi_nhat = None
     for task in plan.tasks:
         if task.tool == "schedule_property_viewing":
-            return task
-    return None
+            moi_nhat = task
+    return moi_nhat
 
 
 def wants_shuttle_in_plan(plan: TaskPlan) -> bool:
@@ -245,10 +267,32 @@ async def get_pending_viewing_approval(
     pool: asyncpg.Pool,
     workflow_id: str,
 ) -> PendingViewingApproval | None:
-    """Record chờ duyệt của workflow (bất kể status — để phân biệt đã quyết định)."""
+    """Hồ sơ tham quan ĐANG CHỜ của workflow; không có thì hồ sơ MỚI NHẤT.
+
+    Trả về cả hồ sơ đã quyết định (chứ không chỉ `AWAITING`) là có chủ ý: người
+    gọi cần phân biệt "chưa từng có yêu cầu nào" với "đã xử lý rồi", và hai
+    trường hợp ấy cần hai câu khác nhau.
+
+    Nhưng MỘT workflow có thể có NHIỀU lượt gửi. `open_new_attempts` cấp `T1R2`
+    cho lần thử mới bên cạnh `T1` đã bị từ chối, và hàng đợi giữ cả hai —
+    `(workflow_id, task_id)` là khoá chính, mỗi lượt một hồ sơ riêng.
+
+    Câu truy vấn cũ không nêu `task_id` và không có `ORDER BY`, nên PostgreSQL
+    trả về dòng nào cũng hợp lệ. Đo được: nó trả `T1` (`REJECTED`), và cổng
+    duyệt báo "Yêu cầu tham quan này đã được xử lý" cho một hồ sơ chưa ai đụng.
+
+    Thứ tự đúng: lượt ĐANG CHỜ trước, rồi tới lượt mới nhất. Nhờ vậy câu "đã
+    được xử lý" nói về quyết định gần nhất, không phải một quyết định từ ba lượt
+    trước.
+    """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM viewing_approvals WHERE workflow_id = $1",
+            """
+            SELECT * FROM viewing_approvals
+             WHERE workflow_id = $1
+             ORDER BY (status = 'AWAITING') DESC, created_at DESC, task_id DESC
+             LIMIT 1
+            """,
             _uuid(workflow_id),
         )
     return _row_to_pending(row) if row is not None else None
@@ -360,16 +404,19 @@ async def record_viewing_decision(
     return result.endswith(" 1")
 
 
-async def save_viewing_reject_reason(pool: asyncpg.Pool, workflow_id: str, reason: str | None) -> None:
+async def save_viewing_reject_reason(
+    pool: asyncpg.Pool, workflow_id: str, reason: str | None, *, reject_code: str | None = None
+) -> None:
     """Ghi lý do từ chối. Gọi SAU `record_viewing_decision(REJECTED)` — cột này
     chỉ có nghĩa khi quyết định đã được khoá; AWAITING mà có lý do từ chối là
     dữ liệu nửa vời."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE service_approvals SET reject_reason = $2 "
+            "UPDATE service_approvals SET reject_reason = $2, reject_code = COALESCE($3, reject_code) "
             "WHERE workflow_id = $1 AND tool = 'schedule_property_viewing'",
             _uuid(workflow_id),
             reason,
+            reject_code,
         )
 
 

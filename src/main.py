@@ -107,9 +107,24 @@ async def lifespan(app: FastAPI):
 
     clear_repository_provider()
     app.state.runtime = None
-    # Đóng pool THẬT đúng một lần, ở đúng nơi đã tạo ra nó.
-    await repository._pool._inner.close()  # noqa: SLF001 - composition root sở hữu pool
 
+    # Việc đang chạy phải xong TRƯỚC khi pool đóng.
+    #
+    # `request_fresh_answer` và đường chạy workflow đều `create_task` rồi trả về
+    # ngay — đúng, người dùng không nên chờ một câu trả lời họ chưa hỏi. Nhưng
+    # thứ tự cũ đóng pool trước rồi mới dọn, nên một lượt deploy giữa chừng giật
+    # connection khỏi tay chúng: câu chốt không bao giờ được ghi, và workflow
+    # nằm lại đúng trạng thái nó đang dở.
+    #
+    # `drain_demo_tasks` có hạn giờ và huỷ phần quá hạn, nên một tác vụ treo
+    # không giữ được tiến trình khi đang tắt.
+    from src.api.routes import drain_demo_tasks
+
+    da_cho = await drain_demo_tasks()
+    if da_cho:
+        logging.getLogger("p118.main").info(f"Chờ {da_cho} tác vụ nền chạy nốt trước khi tắt")
+
+    # Vòng lặp nền dừng trước pool, cùng lý do: chúng đọc/ghi qua chính pool ấy.
     for task in (sweep_task, auto_task):
         if task is None:
             continue
@@ -118,6 +133,9 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+
+    # Đóng pool THẬT đúng một lần, ở đúng nơi đã tạo ra nó — và SAU CÙNG.
+    await repository._pool._inner.close()  # noqa: SLF001 - composition root sở hữu pool
     logging.getLogger("p118.main").info("Shutting down...")
 
 

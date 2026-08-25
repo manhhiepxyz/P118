@@ -167,7 +167,7 @@ def test_the_retired_tools_still_exist_for_the_provider():
 
     provider = set(typing.get_args(AllowedTool))
     assert {"search_properties", "register_resident"} <= provider
-    assert len(provider) == 10
+    assert len(provider) == 16
     assert len(PLANNER_ALLOWED_TOOLS) == 8
 
 

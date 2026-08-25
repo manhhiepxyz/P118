@@ -73,12 +73,8 @@ async def verif_env(e2e_pool, tmp_path):
     repo._pool = SharedPool(repo._pool)  # noqa: SLF001 - route close() = no-op
     set_repository_provider(lambda: _ready(repo))
 
-    ownership_client = AsyncClient(
-        transport=ASGITransport(app=apartment_ownership_app), base_url="http://ownership"
-    )
-    transport_client = AsyncClient(
-        transport=ASGITransport(app=transport_app), base_url="http://transport"
-    )
+    ownership_client = AsyncClient(transport=ASGITransport(app=apartment_ownership_app), base_url="http://ownership")
+    transport_client = AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://transport")
 
     app.dependency_overrides[get_user_repository] = lambda: repo.users
     app.dependency_overrides[_ownership_connector] = lambda: OwnershipConnector(
@@ -127,9 +123,7 @@ async def _register_customer(client) -> dict:
 
 
 async def _make_provider(repo) -> dict:
-    user = await repo.users.create_user(
-        _unique("provider"), hash_password("matkhau123"), role="provider"
-    )
+    user = await repo.users.create_user(_unique("provider"), hash_password("matkhau123"), role="provider")
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
@@ -202,15 +196,11 @@ async def test_customer_cannot_list_or_decide(verif_env, verif_client):
     await _create_record(verif_client, customer, "apartment", OWNER_CLAIM)
 
     # Danh sách hồ sơ cho người duyệt — customer bị chặn 403.
-    listed = await verif_client.get(
-        "/api/v1/verification-records", headers=_headers(customer)
-    )
+    listed = await verif_client.get("/api/v1/verification-records", headers=_headers(customer))
     assert listed.status_code == 403
 
     # Duyệt — customer bị chặn 403.
-    records = await verif_client.get(
-        "/api/v1/verification-records/my", headers=_headers(customer)
-    )
+    records = await verif_client.get("/api/v1/verification-records/my", headers=_headers(customer))
     record_id = records.json()["items"][0]["record_id"]
     decided = await _decide(verif_client, customer, record_id, "approve")
     assert decided.status_code == 403
@@ -236,12 +226,8 @@ async def test_my_records_isolated_per_user(verif_env, verif_client):
     bob = await _register_customer(verif_client)
     await _create_record(verif_client, alice, "apartment", OWNER_CLAIM)
 
-    alice_mine = await verif_client.get(
-        "/api/v1/verification-records/my", headers=_headers(alice)
-    )
-    bob_mine = await verif_client.get(
-        "/api/v1/verification-records/my", headers=_headers(bob)
-    )
+    alice_mine = await verif_client.get("/api/v1/verification-records/my", headers=_headers(alice))
+    bob_mine = await verif_client.get("/api/v1/verification-records/my", headers=_headers(bob))
 
     # Không dò được đơn của người khác — đây là danh sách theo JWT, không nhận user_id.
     assert len(alice_mine.json()["items"]) == 1
@@ -280,9 +266,7 @@ async def test_approve_apartment_opens_resident_services(verif_env, verif_client
             customer["id"],
         )
         assert link is not None
-        resident = await conn.fetchrow(
-            "SELECT resident_id FROM residents WHERE apartment_code = 'A1201'"
-        )
+        resident = await conn.fetchrow("SELECT resident_id FROM residents WHERE apartment_code = 'A1201'")
         assert resident is not None
 
 
@@ -300,7 +284,7 @@ async def test_approve_vehicle_creates_vehicle(verif_env, verif_client):
         full_name="Lâm Thành Bảo",
     )
 
-    plate = f"51F-{uuid.uuid4().hex[:5].upper()}"
+    plate = f"51F-{uuid.uuid4().int % 100000:05d}"
     created = await _create_record(
         verif_client,
         customer,
@@ -350,7 +334,7 @@ async def test_approve_vehicle_fails_when_link_revoked(verif_env, verif_client):
         verif_client,
         customer,
         "vehicle",
-        {"plate_number": f"51F-{uuid.uuid4().hex[:5].upper()}", "vehicle_type": "car"},
+        {"plate_number": f"51F-{uuid.uuid4().int % 100000:05d}", "vehicle_type": "car"},
     )
     record_id = created.json()["item"]["record_id"]
 

@@ -33,14 +33,24 @@ Ranh giới tin cậy:
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.api.deps import require_roles
 from src.api.routes import _DEMO_JOBS, request_fresh_answer
+
+# Dùng CHUNG bảng mã và bộ làm sạch với hàng đợi dịch vụ. Hai bản sao của cùng
+# một danh sách sẽ lệch nhau, và lệch ở đây nghĩa là một mã hợp lệ bên này bị
+# từ chối bên kia.
+from src.api.service_approval_routes import REJECT_CODES, _sach
 from src.config import get_settings
-from src.orchestration.demo_service import reject_viewing, resume_viewing_after_approval
+from src.orchestration.demo_service import (
+    _viewing_materialize_error_message,
+    reject_viewing,
+    resume_viewing_after_approval,
+)
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.viewing_approval import expire_stale_viewing_approvals, list_viewing_approvals
 
@@ -52,8 +62,41 @@ _STATUSES = {"AWAITING", "APPROVED", "REJECTED", "EXPIRED"}
 
 
 class _DecideBody(BaseModel):
+    """Cùng hợp đồng với hàng đợi dịch vụ (`service_approval_routes`).
+
+    Lịch tham quan đi đường riêng, nên nó KHÔNG tự thừa hưởng gì từ bên kia —
+    và khoảng cách ấy đo được: đỗ xe hết chỗ thì khách được mời chọn khu khác,
+    còn tham quan hết giờ thì yêu cầu dừng hẳn trong im lặng. Cùng một hậu quả
+    nghiệp vụ phải có cùng một hợp đồng.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     decision: str = Field(..., pattern="^(approve|reject)$")
-    reject_reason: str | None = Field(default=None, max_length=500)
+    reject_code: Literal[REJECT_CODES] | None = Field(default=None)  # type: ignore[valid-type]
+    reject_reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def _mot_quyet_dinh_khong_mang_ca_hai_nghia(self) -> _DecideBody:
+        if self.decision == "approve":
+            if self.reject_code is not None or self.reject_reason is not None:
+                raise ValueError("Quyết định duyệt không mang lý do từ chối.")
+            return self
+        if self.reject_code is None:
+            raise ValueError("Từ chối cần một nguyên nhân trong danh sách.")
+        reason = _sach(self.reject_reason or "")
+        if not reason:
+            raise ValueError("Từ chối cần lý do cho người dùng đọc.")
+        object.__setattr__(self, "reject_reason", reason)
+        return self
+
+
+# `_mot_quyet_dinh_khong_mang_ca_hai_nghia` trả về chính `_DecideBody`, và tên
+# ấy chưa tồn tại lúc thân class được dựng. Không rebuild thì FastAPI dựng
+# TypeAdapter cho một schema chưa đầy đủ và MỌI request tới route này nổ 500 —
+# kể cả request hợp lệ. File này không bật `from __future__ import annotations`
+# nên phải gọi tay; đừng thay bằng cách bỏ annotation, nó là thứ giữ hợp đồng.
+_DecideBody.model_rebuild()
 
 
 def _pending_to_dict(pending) -> dict:
@@ -131,13 +174,19 @@ async def decide_viewing_approval(
         job["response"] = None
 
     if body.decision == "reject":
-        if not body.reject_reason:
-            raise HTTPException(status_code=422, detail="Từ chối cần lý do.")
         try:
-            await reject_viewing(workflow_id, body.reject_reason, decided_by=reviewer["username"])
+            outcome = await reject_viewing(
+                workflow_id,
+                body.reject_reason,
+                decided_by=reviewer["username"],
+                reject_code=body.reject_code,
+            )
         except Exception as exc:  # noqa: BLE001 - lỗi map ra HTTP bên dưới
             raise _to_http(exc) from exc
-        request_fresh_answer(workflow_id, job=job)
+        # Vòng sửa lỗi tự viết câu chốt từ lý do đơn vị vừa gõ — nhờ mô hình
+        # viết lại nó là thay lời chứng bằng một bản diễn giải.
+        if not (outcome or {}).get("repair_pending"):
+            request_fresh_answer(workflow_id, job=job)
         return {
             "workflow_id": workflow_id,
             "decision": "reject",
@@ -164,10 +213,31 @@ async def decide_viewing_approval(
     viewing_result = outcome["viewing_result"]
     if not viewing_result.success:
         # Materialize đã thất bại → workflow đã bị đánh FAILED bên trong
-        # `_materialize_and_run_remaining`; báo cho người duyệt lỗi an toàn.
+        # `_materialize_and_run_remaining`.
+        #
+        # Đo được trên stack demo: khung giờ bị người khác đặt trong lúc chờ
+        # duyệt, tour provider trả 409, và cả hai phía đều không biết vì sao.
+        #
+        # Người duyệt nghe "Vui lòng thử lại" cho một xung đột mà thử lại không
+        # bao giờ qua được. `_viewing_materialize_error_message` đã biết nói
+        # đúng từng nguyên nhân; câu chép sẵn ở đây chính là nhánh CUỐI của hàm
+        # ấy, tức nhánh "không rõ nguyên nhân" — dùng nó cho mọi nguyên nhân là
+        # vứt đi thứ duy nhất giúp người duyệt quyết định làm gì tiếp.
+        #
+        # Còn khách thì không nhận được gì cả: lệnh ném này đứng TRƯỚC mọi lần
+        # xin câu mới, nên câu của trạng thái cũ ở lại vĩnh viễn —
+        #
+        #     workflow          FAILED
+        #     assistant_answer  "…Hiện đang chờ đơn vị cung cấp dịch vụ…"
+        #     for_status        WAITING_APPROVAL:PROVIDER
+        #     khách nhìn thấy   answer = None, bong bóng cuối vẫn là "đang chờ"
+        #
+        # — và bộ lọc chống-câu-cũ giấu nó đi. Việc đã hỏng, màn hình vẫn nói
+        # đang chờ, không có đường nào thoát. Xin câu mới TRƯỚC khi bỏ cuộc.
+        request_fresh_answer(workflow_id, job=job)
         raise HTTPException(
             status_code=502,
-            detail="Xác nhận lịch tham quan thất bại khi hoàn tất duyệt. Vui lòng thử lại.",
+            detail=_viewing_materialize_error_message(viewing_result),
         )
 
     shuttle_results = [r for r in outcome["task_results"].values() if r.data]

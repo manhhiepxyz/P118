@@ -51,14 +51,10 @@ async def test_list_actionable_workflows_chỉ_trả_workflow_chủ_sở_hữu_�
 
     # A: một workflow chờ duyệt, một đang chờ bổ sung thông tin (open
     # clarification), một đã xong, một chờ duyệt NHƯNG đã archive.
-    waiting_id = await repo.create_workflow(
-        {"goal": "Đặt chỗ đỗ xe cho tôi", "owner_user_id": owner_a}
-    )
+    waiting_id = await repo.create_workflow({"goal": "Đặt chỗ đỗ xe cho tôi", "owner_user_id": owner_a})
     await repo.update_workflow_status(waiting_id, WorkflowStatus.WAITING_APPROVAL)
 
-    clarifying_id = await repo.create_workflow(
-        {"goal": "Đăng ký cư dân nhưng thiếu ngày", "owner_user_id": owner_a}
-    )
+    clarifying_id = await repo.create_workflow({"goal": "Đăng ký cư dân nhưng thiếu ngày", "owner_user_id": owner_a})
     await repo.update_workflow_status(clarifying_id, WorkflowStatus.RUNNING)
     await repo.save_clarification(
         clarifying_id,
@@ -70,14 +66,10 @@ async def test_list_actionable_workflows_chỉ_trả_workflow_chủ_sở_hữu_�
         existing_context={},
     )
 
-    done_id = await repo.create_workflow(
-        {"goal": "Báo hỏng điều hoà", "owner_user_id": owner_a}
-    )
+    done_id = await repo.create_workflow({"goal": "Báo hỏng điều hoà", "owner_user_id": owner_a})
     await repo.update_workflow_status(done_id, WorkflowStatus.SUCCESS)
 
-    archived_waiting_id = await repo.create_workflow(
-        {"goal": "Yêu cầu đã archive", "owner_user_id": owner_a}
-    )
+    archived_waiting_id = await repo.create_workflow({"goal": "Yêu cầu đã archive", "owner_user_id": owner_a})
     await repo.update_workflow_status(archived_waiting_id, WorkflowStatus.WAITING_APPROVAL)
     await db_pool.execute(
         "UPDATE workflows SET archived_at = NOW() WHERE workflow_id = $1",
@@ -85,9 +77,7 @@ async def test_list_actionable_workflows_chỉ_trả_workflow_chủ_sở_hữu_�
     )
 
     # B: workflow chờ duyệt — KHÔNG được lọt vào danh sách của A.
-    other_id = await repo.create_workflow(
-        {"goal": "Yêu cầu của người khác", "owner_user_id": owner_b}
-    )
+    other_id = await repo.create_workflow({"goal": "Yêu cầu của người khác", "owner_user_id": owner_b})
     await repo.update_workflow_status(other_id, WorkflowStatus.WAITING_APPROVAL)
 
     items = await list_actionable_workflows(db_pool, owner_a)
@@ -109,9 +99,7 @@ async def test_list_actionable_workflows_chỉ_trả_workflow_chủ_sở_hữu_�
 async def test_clarification_đã_trả_lời_không_còn_actionable(db_pool: asyncpg.Pool) -> None:
     repo = PostgreSQLWorkflowStateRepository(db_pool)
     owner = await _seed_user(db_pool, "notif_owner_resolved")
-    wf_id = await repo.create_workflow(
-        {"goal": "Đăng ký cư dân thiếu ngày", "owner_user_id": owner}
-    )
+    wf_id = await repo.create_workflow({"goal": "Đăng ký cư dân thiếu ngày", "owner_user_id": owner})
     await repo.update_workflow_status(wf_id, WorkflowStatus.RUNNING)
     await repo.save_clarification(
         wf_id,
@@ -139,7 +127,7 @@ async def test_count_pending_verification_records_đếm_đúng_số_đang_chờ
         INSERT INTO verification_records (record_type, status, applicant_user_id, claimed_data)
         VALUES
             ('apartment', 'PENDING', $1, '{"apartment_code": "A101"}'),
-            ('vehicle',   'PENDING', $1, '{"plate_number": "51F-1"}'),
+            ('vehicle',   'PENDING', $1, '{"plate_number": "51F-10001"}'),
             ('apartment', 'APPROVED', $1, '{"apartment_code": "A102"}')
         """,
         applicant,

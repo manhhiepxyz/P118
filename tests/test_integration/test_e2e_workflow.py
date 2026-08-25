@@ -47,6 +47,11 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+def _unique_plate() -> str:
+    """Biển số riêng nhưng HỢP LỆ — `TaskPlanValidator` giờ áp luật biển số."""
+    return f"51A-{uuid.uuid4().int % 1000000:06d}"
+
+
 def _unique_booking_date() -> str:
     """Ngày đặt chỗ riêng cho mỗi test.
 
@@ -135,7 +140,7 @@ def _full_flow_plan(
 async def test_e2e_full_flow_succeeds_and_persists(e2e_pool: asyncpg.Pool) -> None:
     """4 task SUCCESS, InputRef truyền đúng, DB lưu đủ kết quả canonical."""
     repository = PostgreSQLWorkflowStateRepository(e2e_pool)
-    plan = _full_flow_plan(_unique("APT"), _unique("51A"), _unique_booking_date())
+    plan = _full_flow_plan(_unique("APT"), _unique_plate(), _unique_booking_date())
 
     # Plan phải qua Validator trước khi Executor chạy.
     assert TaskPlanValidator.validate(plan) is plan
@@ -201,7 +206,7 @@ async def test_e2e_input_ref_chain_reaches_real_providers(e2e_pool: asyncpg.Pool
     nên nới rộng response chỉ để phục vụ test.
     """
     repository = PostgreSQLWorkflowStateRepository(e2e_pool)
-    plan = _full_flow_plan(_unique("APT"), _unique("51A"), _unique_booking_date())
+    plan = _full_flow_plan(_unique("APT"), _unique_plate(), _unique_booking_date())
 
     async with _real_connectors() as connectors:
         executor = Executor(connectors, repository)
@@ -245,7 +250,7 @@ async def test_e2e_persisted_input_keeps_unresolved_input_ref(e2e_pool: asyncpg.
     audit "đã gửi gì cho provider" thì phải persist payload đã resolve.
     """
     repository = PostgreSQLWorkflowStateRepository(e2e_pool)
-    plan = _full_flow_plan(_unique("APT"), _unique("51A"), _unique_booking_date())
+    plan = _full_flow_plan(_unique("APT"), _unique_plate(), _unique_booking_date())
 
     async with _real_connectors() as connectors:
         executor = Executor(connectors, repository)
@@ -282,7 +287,7 @@ async def test_e2e_no_availability_marks_workflow_and_task_failed(e2e_pool: asyn
         # ZONE_A được CẤU HÌNH kín (sức chứa 0) — không cần đổ đầy bằng
         # booking giả. Vòng lặp cũ phụ thuộc sức chứa đúng bằng 3 và hỏng ngay
         # lần đầu cấu hình đó thay đổi.
-        plan = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date, parking_zone="ZONE_A")
+        plan = _full_flow_plan(_unique("APT"), _unique_plate(), booking_date, parking_zone="ZONE_A")
         workflow_id, results = await executor.execute(plan)
 
     # --- T1, T2 vẫn thành công; T3 thất bại đúng mã lỗi ---

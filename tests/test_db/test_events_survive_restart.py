@@ -35,9 +35,27 @@ async def _seed_workflow(pool) -> str:
 
 def _events() -> list[dict]:
     return [
-        {"sequence": 1, "stage": "PLANNING", "message": "Đang chuẩn bị kế hoạch thực hiện.", "task_id": None, "task_status": None},
-        {"sequence": 2, "stage": "EXECUTING", "message": "Đang thực hiện yêu cầu.", "task_id": None, "task_status": None},
-        {"sequence": 3, "stage": "TASK_SUCCESS", "message": "Đã đặt lịch tham quan.", "task_id": "T1", "task_status": "SUCCESS"},
+        {
+            "sequence": 1,
+            "stage": "PLANNING",
+            "message": "Đang chuẩn bị kế hoạch thực hiện.",
+            "task_id": None,
+            "task_status": None,
+        },
+        {
+            "sequence": 2,
+            "stage": "EXECUTING",
+            "message": "Đang thực hiện yêu cầu.",
+            "task_id": None,
+            "task_status": None,
+        },
+        {
+            "sequence": 3,
+            "stage": "TASK_SUCCESS",
+            "message": "Đã đặt lịch tham quan.",
+            "task_id": "T1",
+            "task_status": "SUCCESS",
+        },
     ]
 
 

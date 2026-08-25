@@ -23,8 +23,7 @@ from src.api import routes
 def test_stage_is_derived_from_the_database_when_the_job_is_gone() -> None:
     source = inspect.getsource(routes)
     assert 'stage = job["stage"] if job is not None else "FINISHED"' not in source, (
-        "job mất khỏi RAM lại được coi là đã hoàn tất — sau restart, mọi yêu "
-        "cầu đang chạy đều báo xong"
+        "job mất khỏi RAM lại được coi là đã hoàn tất — sau restart, mọi yêu cầu đang chạy đều báo xong"
     )
     assert 'stage = "FINISHED" if status in {"SUCCESS", "CANCELLED", "FAILED"} else "EXECUTING"' in source, (
         "stage dự phòng không còn đọc theo trạng thái đã ghi trong database"

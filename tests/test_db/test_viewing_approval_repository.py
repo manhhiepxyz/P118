@@ -108,9 +108,7 @@ async def test_saving_twice_while_awaiting_updates_in_place(db_pool) -> None:
     )
 
     async with db_pool.acquire() as conn:
-        count = await conn.fetchval(
-            "SELECT COUNT(*) FROM viewing_approvals WHERE workflow_id = $1::uuid", workflow_id
-        )
+        count = await conn.fetchval("SELECT COUNT(*) FROM viewing_approvals WHERE workflow_id = $1::uuid", workflow_id)
         row = await conn.fetchrow(
             "SELECT viewing_time, passenger_count FROM viewing_approvals WHERE workflow_id = $1::uuid",
             workflow_id,
@@ -133,9 +131,7 @@ async def test_only_the_first_decision_wins(db_pool) -> None:
 async def test_concurrent_decisions_elect_exactly_one_winner(db_pool) -> None:
     ctx = await _create_awaiting(db_pool)
 
-    results = await asyncio.gather(
-        *[record_viewing_decision(db_pool, ctx["workflow_id"], APPROVED) for _ in range(5)]
-    )
+    results = await asyncio.gather(*[record_viewing_decision(db_pool, ctx["workflow_id"], APPROVED) for _ in range(5)])
 
     assert sum(1 for won in results if won) == 1
 

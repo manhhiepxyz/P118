@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { AlertCircle } from 'lucide-react'
 
 import type { PendingAction } from '../../lib/pendingAction'
+import { maxDate, minDate } from '../../lib/dateBounds'
 
 interface Props {
   action: PendingAction
@@ -121,8 +122,8 @@ export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
                 <input
                   id={index === 0 ? 'pending-field' : `pending-field-${field.key}`}
                   type={field.kind === 'date' ? 'date' : field.kind === 'time' ? 'time' : field.kind === 'number' ? 'number' : 'text'}
-                  min={field.kind === 'date' ? field.minDate : field.min}
-                  max={field.max}
+                  min={field.kind === 'date' ? (field.minDate ?? minDate()) : field.min}
+                  max={field.kind === 'date' ? maxDate() : field.max}
                   value={draft[field.key] ?? ''}
                   onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}
                   placeholder={field.placeholder}

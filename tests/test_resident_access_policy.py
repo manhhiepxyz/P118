@@ -90,12 +90,24 @@ PUBLIC_TOOL_TASKS = {
         "tour_date": "2030-05-05",
         "passenger_count": 2,
     },
+    # Huỷ một lịch tham quan CÔNG KHAI như lúc đặt: khách chưa là cư dân vẫn đặt
+    # được, nên họ cũng phải huỷ được. Quyền thật nằm ở chỗ khác — `viewing_id`
+    # chỉ đến từ kết quả một bước của CHÍNH yêu cầu này.
+    "cancel_property_viewing": {"viewing_id": "VIEW-001"},
+    # Xe đưa đón đi kèm buổi tham quan — công khai như chính buổi ấy.
+    "cancel_shuttle": {"shuttle_id": "SHUTTLE-001"},
 }
 
 RESIDENT_TOOL_TASKS = {
+    # Đổi khu chạm vào một chỗ đỗ ĐÃ GIỮ của cư dân — quyền y như lúc đặt.
+    "change_parking_zone": {"booking_id": "BOOK-001", "parking_zone": "ZONE_B"},
     "register_vehicle": {"resident_id": TRUSTED_RESIDENT, "plate_number": "30A-11111", "vehicle_type": "car"},
     "book_parking": {"vehicle_id": _Ownership.OWNED_VEHICLE, "booking_date": "2030-05-05", "parking_zone": "ZONE_A"},
     "pay_fee": {"booking_id": _Ownership.OWNED_BOOKING, "amount": 120_000, "currency": "VND"},
+    # Huỷ một chỗ đỗ chạm vào tài sản của cư dân — quyền y như lúc đặt.
+    "cancel_parking": {"booking_id": _Ownership.OWNED_BOOKING},
+    "cancel_maintenance": {"maintenance_id": "MAINT-001"},
+    "cancel_move": {"move_request_id": "MOVE-001"},
     "create_maintenance_request": {
         "issue_type": "plumbing",
         "description": "Vòi nước rò rỉ",

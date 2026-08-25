@@ -27,8 +27,13 @@ export function ClarificationReply({ onSubmit, busy = false, onStop }: Props) {
   const [stopping, setStopping] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Đang chạy (hoặc đang gửi) thì nút là nút DỪNG.
-  const canStop = Boolean(onStop) && (busy || submitting)
+  // Chỉ một WORKFLOW đang chạy mới biến nút thành DỪNG.
+  //
+  // `submitting` chỉ nghĩa là POST của chính tin nhắn này còn đang bay. Bản cũ
+  // gộp hai trạng thái, nên vừa bấm Gửi thì nút lập tức đổi thành Dừng và nút
+  // ấy lại trỏ tới workflow đang mở (thường đã SUCCESS), không phải request
+  // follow-up vừa tạo. Người dùng nhìn đúng như tin nhắn chưa được gửi.
+  const canStop = Boolean(onStop) && busy
 
   async function stop() {
     if (!onStop || stopping) return
@@ -74,10 +79,14 @@ export function ClarificationReply({ onSubmit, busy = false, onStop }: Props) {
     if (!text || submitting) return
     setSubmitting(true)
     setError(null)
+    // Đưa lời người dùng ra khỏi composer ngay như một khung chat thật. Parent
+    // render optimistic turn trước khi promise này chờ Planner/Response Agent.
+    // Nếu request hỏng, khôi phục để họ không phải gõ lại.
+    setMessage('')
     try {
       await onSubmit(text)
-      setMessage('')
     } catch (reason) {
+      setMessage(text)
       setError(reason instanceof Error ? reason.message : 'Chưa gửi được. Vui lòng thử lại.')
     } finally {
       setSubmitting(false)
@@ -126,7 +135,7 @@ export function ClarificationReply({ onSubmit, busy = false, onStop }: Props) {
             disabled={submitting || !message.trim()}
             className="h-11 shrink-0 rounded-xl bg-teal-700 px-4 text-sm font-medium text-white disabled:opacity-60"
           >
-            Gửi
+            {submitting ? 'Đang gửi…' : 'Gửi'}
           </button>
         )}
       </div>

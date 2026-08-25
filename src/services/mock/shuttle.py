@@ -26,6 +26,7 @@ KHÁC với src/mock/ (single app, có cross-check): provider này KHÔNG check
 from __future__ import annotations
 
 import asyncio
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,8 +60,16 @@ new_shuttle_id = make_generator("SHUTTLE")
 # Sức chứa xe tham quan tối đa mỗi ngày (giả lập).
 SHUTTLE_DAILY_CAPACITY = 30
 
-# Đặt xe "xử lý" ~30 giây trước khi đặt thành công. Test monkeypatch về 0.
-SHUTTLE_BOOKING_DELAY_SECONDS = 30
+# Đặt xe "xử lý" một lúc trước khi thành công — mô phỏng việc điều phối xe thật.
+#
+# Con số cũ là 30 giây cứng. Nó đúng về mặt mô phỏng và SAI về mặt dùng được:
+# trong một buổi demo, ba mươi giây nhìn màn hình đứng im là ba mươi giây không
+# ai biết hệ thống còn sống hay đã treo. Chính nó cũng làm một bài kiểm của
+# tôi chờ vô ích 30 giây cho thứ nó không hề kiểm.
+#
+# Để lại làm biến môi trường: bản demo chạy 1 giây, ai muốn xem hành vi chờ
+# thật thì đặt `SHUTTLE_DELAY=30`. Test vẫn monkeypatch về 0 như cũ.
+SHUTTLE_BOOKING_DELAY_SECONDS = float(os.getenv("SHUTTLE_DELAY", "1"))
 
 # Roster tài xế deterministic: xe nào về tay tài xế nào được xoay vòng theo
 # shuttle_id, không phụ thuộc LLM. `driver_name` là TÊN RÚT GỌN cho màn demo —
@@ -122,7 +131,11 @@ async def book_shuttle(
             f"Shuttle capacity exceeded on {tour_date} ({SHUTTLE_DAILY_CAPACITY} passengers/day)",
         )
 
-    if any(b["viewing_id"] == payload.viewing_id for b in store.shuttle_bookings.values()):
+    # Xe ĐÃ HUỶ không còn giữ buổi tham quan nào.
+    if any(
+        b["viewing_id"] == payload.viewing_id and b.get("shuttle_status") != "CANCELLED"
+        for b in store.shuttle_bookings.values()
+    ):
         raise conflict(
             "SHUTTLE_ALREADY_BOOKED",
             f"Shuttle already booked for viewing {payload.viewing_id}",
@@ -156,6 +169,23 @@ async def book_shuttle(
         },
         message="Created",
     )
+
+
+@shuttle_app.post("/api/shuttles/bookings/{shuttle_id}/cancel", summary="Huỷ xe tham quan")
+def cancel_shuttle(shuttle_id: str) -> schemas.ApiEnvelope:
+    """Đánh dấu đã huỷ, và trả lại ràng buộc "một lịch một xe".
+
+    `shuttle_bookings` chống trùng theo `viewing_id`. Huỷ mà không loại dòng ấy
+    khỏi phép kiểm thì khách không đặt lại được xe cho chính buổi tham quan vừa
+    huỷ — và đặt lại là lý do phổ biến nhất người ta bấm huỷ.
+    """
+    with store._lock:
+        booking = store.shuttle_bookings.get(shuttle_id)
+        if booking is None:
+            raise not_found("SHUTTLE_NOT_FOUND", f"Không tìm thấy xe {shuttle_id}")
+        booking["shuttle_status"] = "CANCELLED"
+        ket_qua = dict(booking)
+    return schemas.ApiEnvelope(success=True, data=ket_qua, message="Cancelled")
 
 
 @shuttle_app.get("/api/shuttles/bookings/{shuttle_id}", summary="Tra cứu xe tham quan")

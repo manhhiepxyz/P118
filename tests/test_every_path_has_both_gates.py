@@ -51,10 +51,7 @@ def test_no_path_stops_at_the_payment_gate() -> None:
         for name, body in builders.items()
         if "PaymentApprovalBoundary" in body and "ViewingApprovalBoundary" not in body
     ]
-    assert not missing, (
-        "các đường này chỉ dừng ở cổng thanh toán, lịch tham quan sẽ tự xác "
-        f"nhận trên đó: {missing}"
-    )
+    assert not missing, f"các đường này chỉ dừng ở cổng thanh toán, lịch tham quan sẽ tự xác nhận trên đó: {missing}"
 
 
 def test_the_viewing_gate_is_outside_the_payment_gate() -> None:
@@ -88,7 +85,6 @@ def test_a_viewing_pause_is_written_to_the_viewing_table() -> None:
     """
     source = inspect.getsource(demo_service)
     assert "isinstance(pause, ViewingApprovalRequiredError)" in source, (
-        "đường tắt không phân biệt hai loại chờ — mọi lần dừng đều ghim vào "
-        "bảng thanh toán"
+        "đường tắt không phân biệt hai loại chờ — mọi lần dừng đều ghim vào bảng thanh toán"
     )
     assert "_persist_viewing_pause" in source, "không có đường ghim yêu cầu duyệt lịch cho đường tắt"

@@ -139,9 +139,7 @@ async def test_every_workflow_lands_in_exactly_one_tab(client, db_pool):
     )
 
     async def ids(statuses, upcoming):
-        rows = await repo.list_workflows(
-            statuses=statuses, limit=100, owner_user_id=str(owner), upcoming=upcoming
-        )
+        rows = await repo.list_workflows(statuses=statuses, limit=100, owner_user_id=str(owner), upcoming=upcoming)
         return {str(r["workflow_id"]) for r in rows}
 
     in_progress = await ids(_IN_PROGRESS_STATUSES, None)

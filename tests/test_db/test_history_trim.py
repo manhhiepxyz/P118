@@ -95,9 +95,7 @@ async def test_abandoned_drafts_are_trimmed_too(client, db_pool):
 
     assert len(archived) == 5, f"nháp bỏ dở không bị cắt: {archived}"
     assert (
-        await db_pool.fetchval(
-            "SELECT count(*) FROM workflows WHERE owner_user_id = $1 AND archived_at IS NULL", owner
-        )
+        await db_pool.fetchval("SELECT count(*) FROM workflows WHERE owner_user_id = $1 AND archived_at IS NULL", owner)
         == 15
     )
 

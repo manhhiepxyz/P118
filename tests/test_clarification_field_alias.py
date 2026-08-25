@@ -33,18 +33,14 @@ def test_the_api_accepts_either_name_for_the_project_field(sent_key):
 
 
 def test_a_missing_s_in_vinhomes_still_resolves():
-    """"Vinhome" thiếu "s" là lỗi gõ phổ biến nhất với bộ tên này."""
-    answers, unresolved = _extract_structured_follow_up_answers(
-        {"project_id": "Vinhome Ocean Park"}, ["project_id"]
-    )
+    """ "Vinhome" thiếu "s" là lỗi gõ phổ biến nhất với bộ tên này."""
+    answers, unresolved = _extract_structured_follow_up_answers({"project_id": "Vinhome Ocean Park"}, ["project_id"])
     assert unresolved == []
     assert answers["project_id"] == "PRJ-007"
 
 
 def test_a_genuinely_unknown_project_is_still_refused():
     """Chốt ngược: nới lỏng tên field KHÔNG được nới lỏng danh mục dự án."""
-    answers, unresolved = _extract_structured_follow_up_answers(
-        {"project_id": "Vinhomes Sao Hoa"}, ["project_id"]
-    )
+    answers, unresolved = _extract_structured_follow_up_answers({"project_id": "Vinhomes Sao Hoa"}, ["project_id"])
     assert unresolved == ["project_id"]
     assert "danh sách được hỗ trợ" in _follow_up_validation_message(unresolved)

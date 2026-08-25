@@ -224,6 +224,11 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
       showIf: { key: 'needs_shuttle', equals: 'true' },
       placeholder: '09xx xxx xxx',
       hint: 'Để tài xế gọi được khi tới điểm đón',
+      // Cùng luật với backend (`ContactProfile.phone`). Hai nơi giữ một luật
+      // thì sớm muộn lệch nhau, nên
+      // `tests/test_the_driver_phone_is_a_phone_number.py` đối chiếu chúng.
+      pattern: /^\+?[0-9 ]{9,15}$/,
+      patternHint: 'Số điện thoại chưa đúng. Ví dụ: 0901234567 — 9–15 chữ số, có thể có +84.',
     },
   ],
 
@@ -435,7 +440,18 @@ export function missingFields(service: string, values: FormValues): FieldSpec[] 
     // Field đang ẩn không phải field còn thiếu.
     if (field.showIf && values[field.showIf.key] !== field.showIf.equals) return false
     // Ghi chú tự do luôn là tuỳ chọn.
-    if (field.freeText) return false
+    // `freeText` nói về LUỒNG DỮ LIỆU — giá trị chảy vào CÂU gửi Planner chứ
+    // không vào ô của một tool. Nó KHÔNG có nghĩa "miễn kiểm".
+    //
+    // Lỗi đã báo: gõ bừa chữ vào "Số điện thoại cho tài xế" vẫn gửi được. Số ấy
+    // đi tiếp vào câu gửi đơn vị vận chuyển, và tài xế nhận một số không gọi
+    // được — người dùng đứng ở điểm đón chờ một cuộc gọi không bao giờ tới.
+    //
+    // Vẫn KHÔNG bắt buộc điền: bỏ trống là hợp lệ, chỉ khi CÓ gõ mới xét luật.
+    if (field.freeText) {
+      const tuDo = values[field.key]?.trim()
+      return !!tuDo && !!field.pattern && !field.pattern.test(tuDo)
+    }
     const value = values[field.key]
     // Ô đồng ý: bỏ trống và "không đồng ý" đều là chưa có sự đồng ý.
     if (field.mustBeTrue) return value !== 'true'

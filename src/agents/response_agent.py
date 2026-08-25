@@ -361,6 +361,97 @@ def _fallback(view: ReplyView) -> AgentReply:
     return AgentReply(answer=view.baseline_message, suggestions=[])
 
 
+
+# Tên dự án thật đều mở đầu bằng "Vinhomes" — xem `src/common/projects.py`.
+_PROJECT_MENTION = re.compile(r"Vinhomes", re.IGNORECASE)
+# Khu ĐỖ XE. Chúng hợp lệ khi nói về chỗ đỗ xe, và chỉ sai khi được giới thiệu
+# NHƯ một dự án.
+_ZONE_MENTION = re.compile(r"\b(?:khu\s+[a-dA-D]|ZONE_[A-D])\b", re.IGNORECASE)
+_SENTENCE = re.compile(r"[.!?\n]+")
+
+
+def _authoritative_text(view: ReplyView) -> str:
+    """Chữ từ nguồn CÓ THẨM QUYỀN, để đối chiếu tên.
+
+    Cùng những nguồn `_numbers_in_view` dùng, TRỪ `view.goal`. Bỏ goal là có
+    chủ ý và khác với tập số: nhắc lại một con số người dùng vừa gõ là việc trợ
+    lý phải làm, còn khẳng định một DỰ ÁN tồn tại vì họ đã gõ tên nó thì không
+    — tên lạ đã có `_UNSUPPORTED_PROJECT_MESSAGE` lo.
+    """
+    return " ".join(
+        [
+            _flatten_facts(view.facts),
+            " ".join(view.capabilities or ()),
+            " ".join(f"{s.get('title', '')} {s.get('message', '')}" for s in view.steps),
+            " ".join(str(v) for v in (view.viewing or {}).values()),
+            " ".join(turn.get("p118_dap", "") for turn in view.recent_turns),
+            view.baseline_message or "",
+        ]
+    )
+
+
+def _name_at(text: str, start: int) -> str:
+    """Tên riêng bắt đầu tại `start`: các từ VIẾT HOA liên tiếp.
+
+    Cắt theo chữ hoa chứ không theo dấu câu cố định, vì tên dự án dài ngắn khác
+    nhau ("Vinhomes Pearl Bay" và "Vinhomes Global Gate Hạ Long") và chữ đứng
+    sau tên luôn là thường ("... Vinhomes Ocean Park lúc 08:00").
+
+    Dừng ngay khi một từ kết thúc bằng dấu ngắt: không có nó thì hai dự án nằm
+    liền nhau trong danh sách bị dính thành một tên không tồn tại.
+    """
+    ten: list[str] = []
+    for tho in re.split(r"\s+", text[start:]):
+        sach = tho.strip(".,;:!?()[]\"'")
+        if not sach:
+            break
+        if ten and not sach[0].isupper():
+            break
+        ten.append(sach)
+        if tho != sach and tho.rstrip('"\'').endswith((".", ",", ";", ":", "!", "?")):
+            break
+        if len(ten) > 6:
+            break
+    return " ".join(ten)
+
+
+def _reject_unknown_project(text: str, view: ReplyView) -> str | None:
+    """None nghĩa là không có tên dự án nào bịa ra."""
+    # Khu đỗ xe được giới thiệu như một dự án — đúng câu đã hiện ra.
+    #
+    # Xét theo TỪNG CÂU, không theo cả đoạn: "Lịch tham quan Vinhomes Pearl Bay
+    # đã chốt. Chỗ đỗ xe Khu A cũng đã giữ xong." là hoàn toàn bình thường, và
+    # chặn nó là làm hỏng luồng đặt chỗ đỗ xe.
+    for cau in _SENTENCE.split(text):
+        if "dự án" in cau.casefold() and _ZONE_MENTION.search(cau):
+            return "giới thiệu khu đỗ xe như một dự án"
+
+    nguon = _authoritative_text(view).casefold()
+    for khop in _PROJECT_MENTION.finditer(text):
+        ten = _name_at(text, khop.start()).casefold()
+        if ten and ten not in nguon:
+            return f"nêu một dự án không có trong dữ liệu ({ten[:40]!r})"
+    return None
+
+
+
+# Khối "Đơn vị đã từ chối" do `src/orchestration/snapshot.py` dựng, dạng:
+#     - <tên dịch vụ>: <lý do> (<mã>)
+_DONG_TU_CHOI = re.compile(r"^\s*-\s*([^:]+):", re.MULTILINE)
+
+
+def _refused_service_names(view: ReplyView) -> set[str]:
+    """Tên các dịch vụ đơn vị đã từ chối, đọc từ chính dữ kiện đưa cho model."""
+    text = _flatten_facts(view.facts)
+    dau = text.find("Đơn vị đã từ chối")
+    if dau < 0:
+        return set()
+    # Chỉ đọc tới khối kế tiếp: `##` mở đầu một mục khác.
+    ket = text.find("##", dau + 1)
+    khoi = text[dau : ket if ket > 0 else len(text)]
+    return {m.group(1).strip() for m in _DONG_TU_CHOI.finditer(khoi) if m.group(1).strip()}
+
+
 def _reject_reason(reply: AgentReply, view: ReplyView) -> str | None:
     """None nghĩa là câu này dùng được. Ngược lại trả lý do ngắn để ghi log."""
     text = f"{reply.answer} {' '.join(reply.suggestions)}"
@@ -396,6 +487,24 @@ def _reject_reason(reply: AgentReply, view: ReplyView) -> str | None:
 
     # Con số phải đến từ dữ liệu, không phải từ model. Chỉ chấp nhận những số
     # đã có mặt trong view — số tiền, số bước, ngày giờ đã hiển thị.
+    # TÊN cũng phải đến từ dữ liệu, không chỉ con số.
+    #
+    # Guard này soi số rất kỹ, và câu dưới đây vẫn lọt trọn vẹn vì trong nó
+    # không có con số nào sai — workflow a39d6ebc, hiện ra cho người dùng:
+    #
+    #     Bạn:    có những dự án nào
+    #     P-118:  Hiện tại mình có các dự án: Khu A, Khu B, Khu C.
+    #
+    # "Khu A/B/C" là tên KHU ĐỖ XE. Bảy dự án thật đều bắt đầu bằng "Vinhomes".
+    #
+    # Hai luật, cố ý HẸP. Guard này có tiền sử chặn nhầm — xem chú thích trong
+    # `_numbers_in_view` về 3/3 lượt liên tiếp bị loại vì model trích đúng một
+    # con số từ câu chính nó vừa nói. Một guard hay chặn nhầm sẽ bị gỡ, và khi
+    # đó nó không còn bảo vệ gì.
+    ten_sai = _reject_unknown_project(text, view)
+    if ten_sai is not None:
+        return ten_sai
+
     allowed_numbers = _numbers_in_view(view)
     for found in _NUMBER.findall(_PRODUCT_NAME.sub(" ", text)):
         whole, parts = _number_keys(found)
@@ -428,6 +537,34 @@ def _reject_reason(reply: AgentReply, view: ReplyView) -> str | None:
     # câu nền có đủ hướng dẫn, nên người dùng không bao giờ mất thông tin.
     if view.next_step and _ACTION_ANCHOR.casefold() not in lowered:
         return "bỏ mất hướng dẫn người dùng cần làm gì tiếp"
+
+    # ĐƠN VỊ TỪ CHỐI thì câu trả lời BẮT BUỘC nhắc tới.
+    #
+    # Nguyên văn, workflow 4956721e trên stack demo:
+    #
+    #     service_approvals T1  REJECTED · "Chưa có nhân viên tư vấn khung giờ này"
+    #     P-118: "Mọi thứ đã sẵn sàng trừ một bước cuối: bạn cần xác nhận
+    #             thanh toán 150.000 VND cho chỗ đỗ xe Khu A."
+    #
+    # Bốn dịch vụ kia độc lập nên chạy tiếp — phần ấy đúng. Sai là câu tổng
+    # kết: một dịch vụ vừa bị từ chối, và người dùng được mời trả tiền kèm lời
+    # đảm bảo mọi thứ đã sẵn sàng.
+    #
+    # Lý do từ chối ĐÃ nằm trong `view.facts` lúc ấy (`_refused_services`).
+    # Đưa thêm dữ liệu chỉ GIẢM khả năng bỏ sót; muốn hết thì phải cưỡng chế —
+    # cùng khuôn với `next_step` ngay trên.
+    #
+    # Chỉ đòi nêu ĐÚNG TÊN dịch vụ bị từ chối, không đòi chép nguyên văn lý do:
+    # bắt chép nguyên văn là biến Response Agent thành máy dán chuỗi, và guard
+    # sẽ loại cả những câu diễn đạt lại hoàn toàn đúng.
+    #
+    # Đòi nêu ĐỦ, không phải "ít nhất một": hai dịch vụ bị từ chối mà câu trả
+    # lời chỉ nhắc một thì vẫn giấu một — và người dùng đọc xong tin rằng phần
+    # còn lại ổn.
+    bi_tu_choi = _refused_service_names(view)
+    thieu = [ten for ten in bi_tu_choi if ten.casefold() not in lowered]
+    if thieu:
+        return f"giấu mất việc đơn vị đã từ chối ({sorted(thieu)[0]!r})"
 
     if len(reply.answer.strip()) > _MAX_ANSWER_CHARS:
         return f"câu trả lời dài {len(reply.answer.strip())} ký tự, quá mức cần thiết"
@@ -491,18 +628,34 @@ def _flatten_facts(facts: Any) -> str:
 
 
 def _numbers_in_view(view: ReplyView) -> set[str]:
-    """Con số model được phép nhắc lại — CHỈ từ nguồn có thẩm quyền.
+    """Con số model được phép nhắc lại — từ nguồn có thẩm quyền, CỘNG yêu cầu
+    của chính người dùng sau khi đã cắt bỏ mọi khoản tiền.
 
-    `view.goal` cố ý KHÔNG nằm trong danh sách này. Goal là chữ người dùng tự
-    gõ: họ có thể viết "phí 100.000" trong khi booking thật là 150.000, và nếu
-    coi goal là nguồn thì model được phép nhắc lại con số sai đó như một sự
-    thật của hệ thống.
+    Bản trước loại `view.goal` HOÀN TOÀN, với lý do đúng nhưng quá rộng: người
+    dùng có thể viết "phí 100.000" trong khi booking thật là 150.000, và coi
+    goal là nguồn thì model được nhắc lại con số sai ấy như một sự thật.
 
-    Nguồn hợp lệ: kết quả bước đã chạy, câu deterministic, báo giá authoritative
-    — tất cả đều do backend dựng.
+    Rủi ro đó là RỦI RO VỀ TIỀN, và nó đã có hai lớp riêng lo:
+
+        `_MONEY` + `_UNPAID_MARKERS`     nhắc tiền thì phải nói rõ chưa trả
+        `_reject_untrusted_payment_values`  plan không lấy tiền từ goal
+
+    Còn ngày, giờ, số khách, biển số thì không mang rủi ro ấy: chúng là điều
+    người dùng YÊU CẦU, và nhắc lại đúng lời họ là việc một trợ lý phải làm.
+
+    Loại cả goal tạo ra một mâu thuẫn nội tại: `goal` NẰM TRONG prompt — model
+    được cho đọc — rồi bị phạt vì đã dùng. Đo được trên stack thật: một yêu cầu
+    hai dịch vụ chờ duyệt có đúng MỘT con số hợp lệ (số bước), nên 14/14 lượt
+    bị loại. Khách luôn nhận câu nền, và mỗi lượt tốn thêm hai lời gọi model
+    (~3s) để rồi vứt cả hai.
+
+    Nên goal được nhận, nhưng `_MONEY.sub` cắt sạch mọi cụm tiền trước đã: cửa
+    mở đúng bằng phần không có rủi ro, không rộng hơn.
     """
     source = " ".join(
         [
+            # Yêu cầu của người dùng, ĐÃ CẮT mọi khoản tiền.
+            _MONEY.sub(" ", view.goal or ""),
             view.baseline_message,
             " ".join(f"{s.get('title', '')} {s.get('status', '')} {s.get('message', '')}" for s in view.steps),
             " ".join(str(v) for v in (view.payment_quote or {}).values()),

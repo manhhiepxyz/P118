@@ -6,8 +6,8 @@ def test_hints_come_from_the_most_recent_turn_that_has_the_field():
     gợi ý SAI — và người dùng gật đầu theo thói quen thì hệ thống vừa đặt lại
     đúng cái họ đã bỏ."""
     recalled = [
-        {"ban_da_chon": {"parking_zone": "ZONE_B"}},   # gần nhất
-        {"ban_da_chon": {"parking_zone": "ZONE_A"}},   # cũ hơn
+        {"ban_da_chon": {"parking_zone": "ZONE_B"}},  # gần nhất
+        {"ban_da_chon": {"parking_zone": "ZONE_A"}},  # cũ hơn
     ]
     assert _recalled_hints(recalled, ["parking_zone"]) == {"parking_zone": "ZONE_B"}
 
@@ -18,7 +18,7 @@ def test_only_fields_currently_being_asked():
 
 
 def test_dates_are_never_recalled():
-    """"Ngày 01/07" của lần trước gần như chắc chắn không phải ngày lần này."""
+    """ "Ngày 01/07" của lần trước gần như chắc chắn không phải ngày lần này."""
     flat = _flatten_task_inputs({"T1": {"parking_zone": "ZONE_A", "booking_date": "2030-07-01"}})
     assert flat == {"parking_zone": "ZONE_A"}
 

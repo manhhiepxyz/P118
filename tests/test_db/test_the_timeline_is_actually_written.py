@@ -25,9 +25,7 @@ from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 async def _workflow(pool) -> str:
     wid = uuid.uuid4()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO workflows (workflow_id, goal, status) VALUES ($1,'x','SUCCESS')", wid
-        )
+        await conn.execute("INSERT INTO workflows (workflow_id, goal, status) VALUES ($1,'x','SUCCESS')", wid)
     return str(wid)
 
 

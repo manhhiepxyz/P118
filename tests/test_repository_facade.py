@@ -42,8 +42,7 @@ def _required_keywords(func) -> set[str]:
         for name, param in params.items()
         if name != "self"
         and param.default is inspect.Parameter.empty
-        and param.kind
-        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        and param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
     }
 
 

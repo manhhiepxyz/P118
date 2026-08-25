@@ -45,4 +45,6 @@ async def test_both_halves_of_the_day_are_offered(db_pool):
         theo_khu.setdefault(row["residential_area"], set()).add(row["tour_slot"])
     for project in PROJECTS:
         slots = theo_khu.get(project["project_name"], set())
-        assert {"MORNING", "AFTERNOON"} <= slots, f"{project['project_name']} thiếu khung {sorted({'MORNING','AFTERNOON'} - slots)}"
+        assert {"MORNING", "AFTERNOON"} <= slots, (
+            f"{project['project_name']} thiếu khung {sorted({'MORNING', 'AFTERNOON'} - slots)}"
+        )

@@ -63,6 +63,4 @@ async def test_a_fresh_future_date_inherits_the_scenario(db_pool) -> None:
     far_future = (date.today() + timedelta(days=900)).isoformat()
 
     with pytest.raises(NoAvailabilityError):
-        await repository.check_and_reserve_capacity(
-            "ZONE_A", far_future, "BOOK-scenario", "VEH-scenario", 150_000
-        )
+        await repository.check_and_reserve_capacity("ZONE_A", far_future, "BOOK-scenario", "VEH-scenario", 150_000)

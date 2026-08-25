@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 
 import {
   adminRequestDetail,
@@ -75,13 +76,23 @@ function Chip({ text, tone }: { text: string; tone: string }) {
 }
 
 export function AdminWorkflowsPage() {
+  const location = useLocation();
   const toast = useToast();
   const [items, setItems] = useState<AdminRequestListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState(() => new URLSearchParams(location.search).get("status") || "");
+
+  useEffect(() => {
+    const queryStatus = new URLSearchParams(location.search).get("status");
+    if (queryStatus && queryStatus !== status) {
+      setStatus(queryStatus);
+      setPage(1);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search]);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [loading, setLoading] = useState(false);

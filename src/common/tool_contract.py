@@ -61,6 +61,18 @@ class FieldSpec:
     # phải một giao dịch, cũng không phải một truy vấn tìm kiếm.
     minimum: int | None = None
     exclusive_minimum: bool = False
+    # Chặn trên. Có mặt khi provider đã có một cận cứng — và chỉ khi đó, để hai
+    # tầng không nói hai con số khác nhau.
+    #
+    # Đo được trên stack demo: "xe đưa đón cho 9999 khách" lập được kế hoạch và
+    # đi trọn một vòng duyệt, rồi mới hỏng ở `BookShuttleRequest` (`le=30`).
+    # Người duyệt xem một yêu cầu không bao giờ thực hiện được; người đặt đợi
+    # hết vòng đó để nghe một lỗi lẽ ra biết ngay lúc lập kế hoạch.
+    #
+    # Tầng contract là tầng DUY NHẤT chạy trước khi tiêu thời gian của người
+    # khác — nên cận trên của provider phải được nhắc lại ở đây, không được để
+    # nguyên là "luật tầng dưới".
+    maximum: int | None = None
     # `consent` phải đúng literal True; False là từ chối, không phải một lựa chọn.
     must_be_true: bool = False
 
@@ -75,7 +87,12 @@ class FieldSpec:
         if self.enum is not None:
             return "phải thuộc: " + ", ".join(sorted(self.enum))
         if self.kind == "integer" and self.minimum is not None:
-            return f"phải là số nguyên {'lớn hơn' if self.exclusive_minimum else 'không nhỏ hơn'} {self.minimum}"
+            can_duoi = f"{'lớn hơn' if self.exclusive_minimum else 'không nhỏ hơn'} {self.minimum}"
+            if self.maximum is not None:
+                return f"phải là số nguyên {can_duoi} và không lớn hơn {self.maximum}"
+            return f"phải là số nguyên {can_duoi}"
+        if self.kind == "integer" and self.maximum is not None:
+            return f"phải là số nguyên không lớn hơn {self.maximum}"
         return {
             "string": "phải là chuỗi không rỗng",
             "integer": "phải là số nguyên",
@@ -102,6 +119,8 @@ class FieldSpec:
                 too_small = value <= self.minimum if self.exclusive_minimum else value < self.minimum
                 if too_small:
                     return self.describe()
+            if self.maximum is not None and value > self.maximum:
+                return self.describe()
             return None
 
         if self.kind == "enum":
@@ -209,6 +228,48 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
                 "reception_time": _TIME,
             },
         ),
+        # Huỷ một lịch ĐÃ ĐẶT. Chỉ `viewing_id` — mã do provider cấp, đọc từ
+        # kết quả bước đã chạy. Không ô nào người dùng gõ được, và đó là chủ ý:
+        # nhận thêm bất kỳ ô nào ở đây là mở đường cho một mã lịch bịa ra.
+        # Huỷ một chỗ đỗ ĐÃ GIỮ. `refunded_amount` do provider quyết theo luật
+        # 24 giờ; tầng trên chỉ NÓI LẠI con số ấy, không tính lại.
+        "cancel_maintenance": _contract(
+            inputs={"maintenance_id": _STRING},
+            outputs={
+                "maintenance_id": _STRING,
+                "maintenance_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
+        "cancel_move": _contract(
+            inputs={"move_request_id": _STRING},
+            outputs={
+                "move_request_id": _STRING,
+                "move_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
+        "cancel_shuttle": _contract(
+            inputs={"shuttle_id": _STRING},
+            outputs={
+                "shuttle_id": _STRING,
+                "shuttle_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
+        "cancel_parking": _contract(
+            inputs={"booking_id": _STRING},
+            outputs={
+                "booking_id": _STRING,
+                "booking_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+                "refunded_amount": FieldSpec(kind="int"),
+                "refund_denied": FieldSpec(kind="bool"),
+            },
+        ),
+        "cancel_property_viewing": _contract(
+            inputs={"viewing_id": _STRING},
+            outputs={
+                "viewing_id": _STRING,
+                "viewing_status": FieldSpec(kind="enum", enum=frozenset({"CANCELLED"})),
+            },
+        ),
         "register_property_interest": _contract(
             inputs={
                 "project_id": _STRING,
@@ -295,6 +356,26 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
                 "currency": _CURRENCY,
             },
         ),
+        # Đổi khu cho một chỗ ĐÃ GIỮ. Một thao tác, không phải huỷ-rồi-đặt:
+        # hai lời gọi tách rời để lại khoảng trống, và trong khoảng ấy chỗ ở
+        # khu mới có thể bị người khác lấy — khách vào có chỗ, ra tay trắng.
+        #
+        # `amount` là ĐẦU RA, y như `book_parking`: giá do bên bán quyết theo
+        # khu (`ZONE_A` 150.000 / `ZONE_B` 100.000). Cho caller khai giá là cho
+        # caller tự định giá dịch vụ.
+        "change_parking_zone": _contract(
+            inputs={
+                "booking_id": _STRING,
+                "parking_zone": FieldSpec(kind="enum", enum=frozenset({"ZONE_A", "ZONE_B"})),
+            },
+            outputs={
+                "booking_id": _STRING,
+                "parking_zone": FieldSpec(kind="enum", enum=frozenset({"ZONE_A", "ZONE_B"})),
+                "booking_date": _DATE,
+                "amount": FieldSpec(kind="integer", minimum=0, exclusive_minimum=True),
+                "currency": _CURRENCY,
+            },
+        ),
         "pay_fee": _contract(
             inputs={
                 "booking_id": _STRING,
@@ -316,16 +397,19 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
                 # — id nội bộ do provider cấp, KHÔNG phải field người dùng khai.
                 "viewing_id": _STRING,
                 "tour_date": _DATE,
-                # Sức chứa xe tham quan: tối thiểu 1 người. Cận trên 30 ép ở
-                # provider (`BookShuttleRequest.ge=30`); FieldSpec không có
-                # maximum nên đây là luật tầng dưới, không phải tầng contract.
-                "passenger_count": FieldSpec(kind="integer", minimum=1),
+                # Sức chứa xe tham quan: 1–30 người, cùng con số provider ép
+                # (`BookShuttleRequest`). Hai tầng cùng một cận, nên kế hoạch
+                # quá chỗ bị chặn TRƯỚC khi ai đó bỏ công duyệt nó.
+                "passenger_count": FieldSpec(kind="integer", minimum=1, maximum=30),
             },
             outputs={
                 "shuttle_id": _STRING,
                 "viewing_id": _STRING,
                 "tour_date": _DATE,
-                "passenger_count": FieldSpec(kind="integer", minimum=1),
+                # Provider chỉ vọng lại con số nó đã nhận, nên output mang đúng
+                # cận của input. Để lỏng ở đây là mở một đường vòng: một phản
+                # hồi méo mó vẫn qua được contract rồi chảy tiếp vào bước sau.
+                "passenger_count": FieldSpec(kind="integer", minimum=1, maximum=30),
                 # 4 thông tin tài xế deterministic do provider tự sinh (roster
                 # theo shuttle_id) — xác nhận xe phải hiện rõ cho người đặt.
                 "driver_name": _STRING,

@@ -1032,11 +1032,27 @@ async def test_a_question_stops_before_validation_and_never_executes() -> None:
 def test_the_planner_cannot_smuggle_prose_through_the_question_status() -> None:
     """Ranh giới cũ được giữ nguyên: planner không soạn chữ cho người dùng.
 
-    `_PlannerResponse` cố ý không có field văn bản. Nếu một ngày ai đó thêm vào
-    để "tiện", LLM sẽ nói thẳng ra ngoài mà không đi qua guard của Response
-    Agent — test này đỏ trước khi điều đó kịp xảy ra.
+    `_PlannerResponse` cố ý không có field văn bản tự do. Nếu một ngày ai đó
+    thêm vào để "tiện", LLM sẽ nói thẳng ra ngoài mà không đi qua guard của
+    Response Agent — test này đỏ trước khi điều đó kịp xảy ra.
+
+    `explicit_facts` được thêm vào có chủ ý, và nó CÓ mang một chuỗi do LLM
+    viết (`evidence`). Vì vậy ranh giới được phát biểu lại cho chính xác thay
+    vì nới ra: chuỗi ấy chỉ sống trong tầng kiểm của Planner — nó được đem đi
+    đối chiếu với goal rồi bỏ đi. Kiểu vượt biên giới là `ExplicitFact`, và nó
+    KHÔNG có chỗ nào để chứa văn bản.
+
+    Hai assertion dưới đây phải cùng đúng; giữ mỗi cái đầu thì một `evidence`
+    lọt ra ngoài vẫn xanh.
     """
-    from src.agents.planner import _PlannerResponse
+    from src.agents.planner import ExplicitFact, _PlannerResponse
 
     fields = set(_PlannerResponse.model_fields)
-    assert fields == {"status", "plan", "missing_fields"}, fields
+    assert fields == {"status", "plan", "missing_fields", "explicit_facts"}, fields
+
+    # Thứ RỜI KHỎI Planner chỉ có tên ô và một boolean. Không chuỗi nào.
+    import dataclasses
+
+    ra_ngoai = {f.name: f.type for f in dataclasses.fields(ExplicitFact)}
+    assert set(ra_ngoai) == {"field", "value"}, ra_ngoai
+    assert "evidence" not in ra_ngoai, "nguyên văn lời người dùng rời khỏi tầng kiểm"

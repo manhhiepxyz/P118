@@ -42,6 +42,8 @@ TODAY = date(2026, 8, 21)
         "dời sang 10 giờ",
         "cập nhật biển số thành 30A-123.45",
         "change sang ngày 30",
+        "đăng ký lại vào khu B",
+        "tôi chỉ muốn đăng ký phương tiện và chỗ đỗ xe khu B",
     ],
 )
 def test_an_explicit_change_is_recognised(said):
@@ -58,6 +60,7 @@ def test_an_explicit_change_is_recognised(said):
         "đăng ký xe máy biển số 77N-91284",
         # "lại" một mình KHÔNG phải ý sửa: đây là một việc mới cho tháng sau.
         "đặt lại chỗ đỗ xe cho tháng sau",
+        "tôi chỉ muốn đặt lịch tham quan dự án khu B",
     ],
 )
 def test_a_new_request_is_not_mistaken_for_a_change(said):

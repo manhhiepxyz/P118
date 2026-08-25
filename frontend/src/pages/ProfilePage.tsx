@@ -292,7 +292,7 @@ export function ProfilePage() {
                       </p>
                       <p className="mt-3 text-[12.5px] text-[var(--text-muted)]">
                         Đã gửi {formatSubmitted(latestRecord.created_at)} ·{' '}
-                        {latestRecord.proof_image_urls.length} ảnh giấy tờ
+                        {latestRecord.proof_image_urls?.length ?? 0} ảnh giấy tờ
                       </p>
                     </div>
                   </div>
@@ -522,7 +522,7 @@ export function ProfilePage() {
 
 function claimedApartment(record: VerificationRecord): string {
   const claim = record.claimed_data
-  if ('apartment_code' in claim) {
+  if (claim && 'apartment_code' in claim) {
     return claim.residential_area ? `${claim.apartment_code} · ${claim.residential_area}` : claim.apartment_code
   }
   return 'Hồ sơ căn hộ'

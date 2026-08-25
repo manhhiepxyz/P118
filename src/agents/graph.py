@@ -30,6 +30,7 @@ from src.agents.nodes.example_node import analyze_node, respond_node
 from src.agents.planner import (
     PAYMENT_QUOTE_REQUIRED_FIELD,
     UNSUPPORTED_GOAL_FIELD,
+    ExplicitFact,
     Planner,
     PlannerError,
     build_question,
@@ -95,6 +96,21 @@ def _ensure_payment_is_offered(plan: Any) -> None:
                 },
             )
         )
+
+
+def _facts_as_context(facts: tuple) -> dict[str, bool]:
+    """`ExplicitFact` đã qua kiểm → dict để merge vào ngữ cảnh.
+
+    Chỉ nhận đúng kiểu `ExplicitFact`. Một dict thô đi tới đây nghĩa là có
+    đường nào đó vòng qua `Planner._accept_explicit_facts`, và chấp nhận nó sẽ
+    biến lớp kiểm kia thành tuỳ chọn.
+
+    Người gọi dùng `getattr(result, "explicit_facts", ())`: Graph là lớp phòng
+    thủ trước một Planner có thể là bản khác hoặc bản refactor sau này, và một
+    result không mang field ấy nghĩa là KHÔNG CÓ fact nào — mặc định an toàn.
+    Đổ vỡ ở đây sẽ biến một thiếu sót vô hại thành lỗi lập kế hoạch.
+    """
+    return {f.field: f.value for f in facts if isinstance(f, ExplicitFact)}
 
 
 def _inject_trusted_identity(plan: Any, existing_context: dict[str, Any]) -> None:
@@ -368,6 +384,37 @@ def needs_information_update(
             "plan_validated": False,
         }
 
+    # NGOÀI PHẠM VI thì NÓI THẲNG, không hỏi lại.
+    #
+    # `supported_goal` mô tả TÌNH HUỐNG, không phải một ô dữ liệu. Để nó ở
+    # NEEDS_INFORMATION nghĩa là giao diện dựng thẻ "Cần thêm thông tin" với
+    # một ô nhập cho thứ không tồn tại — người dùng trả lời, hệ thống hỏi lại
+    # đúng câu ấy.
+    #
+    # Đo được trên stack demo, ba lượt liên tiếp cùng một phiên:
+    #
+    #     "Vinhomes Ocean Park"  → thiếu: supported_goal
+    #     "đổi qua khu B"        → thiếu: supported_goal
+    #     "đặt chỗ đỗ xe"        → thiếu: supported_goal
+    #
+    # Bốn lượt như vậy trong dữ liệu, và 14 lượt người dùng gõ lại y hệt (689
+    # giây) — không có lối thoát.
+    #
+    # Đi vào nhánh `QUESTION` vốn có: nói một câu, không tạo việc, không dựng
+    # thẻ. Câu từ chối KHÔNG viết mới — `build_question` đã liệt kê đúng những
+    # dịch vụ có hỗ trợ, tức đã chỉ được lối đi tiếp.
+    #
+    # Lẫn với ô thật thì vẫn từ chối: hỏi ngày cho một việc không làm được là
+    # bắt người ta điền xong rồi mới nói không.
+    if UNSUPPORTED_GOAL_FIELD in public_fields:
+        return {
+            "planner_status": "QUESTION",
+            "missing_fields": (),
+            "question": None,
+            "refusal": build_question([UNSUPPORTED_GOAL_FIELD]),
+            "plan_validated": False,
+        }
+
     return {
         "planner_status": "NEEDS_INFORMATION",
         "missing_fields": public_fields,
@@ -438,6 +485,7 @@ def build_planner_graph(
     *,
     parent_workflow_id: str | None = None,
     session_id: str | None = None,
+    fast_lane: Any = None,
 ) -> StateGraph:
     """Dựng graph Planner → Validator → Execution.
 
@@ -457,6 +505,39 @@ def build_planner_graph(
     async def plan_node(state: AgentState) -> dict:
         """Gọi Planner. Không log goal hay existing_context."""
         await emit("PLANNING")
+
+        # Đường nhanh đứng TRƯỚC, nhưng không có đặc quyền nào.
+        #
+        # Đo trên `llm_usage` của stack demo: Planner chiếm 89% toàn bộ thời
+        # gian gọi model (trung vị 32,98s, p90 78,28s, 86 lượt thật), và một
+        # workflow 5 dịch vụ mất 101 giây riêng cho lượt lập kế hoạch. Phần cấu
+        # trúc của kết quả ấy là cơ học — `plan_assembly` dựng lại 38/38 đồ thị
+        # và 149/149 InputRef của các kế hoạch đã ghi.
+        #
+        # Kế hoạch nó trả về đi tiếp qua ĐÚNG những bước mà kế hoạch Planner đi
+        # qua: `_apply_user_answers`, `_inject_trusted_identity`,
+        # `_ensure_payment_is_offered`, rồi `validate_node`. Không đường tắt
+        # nào — đó là điều kiện để đường này an toàn, vì cổng chung là thứ duy
+        # nhất chặn được ca đo được "từ 5/9" → "2023-09-05".
+        #
+        # `None` ở mọi nhánh không chắc chắn, và ta rơi về Planner như hôm nay.
+        if fast_lane is not None:
+            nhanh = await fast_lane.plan(
+                state.get("goal", ""), state.get("existing_context", {})
+            )
+            if nhanh is not None:
+                _apply_user_answers(nhanh, state.get("user_answers") or {})
+                _inject_trusted_identity(nhanh, state.get("existing_context", {}))
+                _ensure_payment_is_offered(nhanh)
+                await emit("PLANNED", {"plan": nhanh})
+                return {
+                    "planner_status": "READY",
+                    "plan": nhanh,
+                    "missing_fields": (),
+                    "plan_validated": False,
+                    "explicit_facts": {},
+                }
+
         try:
             result = await planner.plan(
                 state.get("goal", ""),
@@ -495,6 +576,10 @@ def build_planner_graph(
                 "plan": result.plan,
                 "missing_fields": (),
                 "plan_validated": False,
+                # Fact đi kèm cả READY. Nó KHÔNG đụng vào plan — plan đã qua
+                # Validator và là thứ duy nhất quyết định điều gì sẽ chạy. Fact
+                # chỉ là ngữ cảnh cho lượt sau của cùng hội thoại.
+                "explicit_facts": _facts_as_context(getattr(result, "explicit_facts", ())),
             }
 
         if result.status == "QUESTION":
@@ -510,6 +595,7 @@ def build_planner_graph(
                 "planner_status": "QUESTION",
                 "missing_fields": (),
                 "plan_validated": False,
+                "explicit_facts": _facts_as_context(getattr(result, "explicit_facts", ())),
             }
 
         # NEEDS_INFORMATION: không đưa `plan` vào state, tránh mọi khả năng một
@@ -522,6 +608,10 @@ def build_planner_graph(
             result.missing_fields,
             state.get("existing_context", {}),
         )
+        # Đây là nhánh mà fact quan trọng nhất: lượt sau sẽ chạy với ngữ cảnh
+        # được ghim từ đây, và thiếu chúng thì lượt ấy hỏi lại đúng điều người
+        # dùng đã nói trong câu đầu tiên.
+        update["explicit_facts"] = _facts_as_context(getattr(result, "explicit_facts", ()))
         if update.get("clarification_error"):
             await emit("VALIDATION_FAILED")
         else:

@@ -63,6 +63,9 @@ export interface WorkflowPolling {
  */
 const ANSWER_TIMEOUT_MS = 30_000
 
+/** Nhịp đọc đầu tiên. Thay đổi hay xảy ra nhất ngay sau một hành động. */
+const FIRST_INTERVAL_MS = 250
+
 export function useWorkflowPolling(
   workflowId: string,
   intervalMs = 1500,
@@ -96,6 +99,8 @@ export function useWorkflowPolling(
   /** Câu trả lời đã xong chưa, và mốc bắt đầu chờ nó. */
   const responseStateRef = useRef<string | null>(null)
   const waitingSince = useRef<number | null>(null)
+  /** Nhịp đọc hiện tại; tăng dần từ `FIRST_INTERVAL_MS` lên `intervalMs`. */
+  const nhip = useRef<number>(FIRST_INTERVAL_MS)
   /**
    * Vô hiệu response của request đã bắt đầu trước một mutation hoặc trước khi
    * chuyển sang workflow khác. Nếu không, GET cũ có thể về muộn và ghi đè
@@ -168,6 +173,10 @@ export function useWorkflowPolling(
     responseStateRef.current = null
     waitingSince.current = null
 
+    // Mỗi lượt bắt đầu lại từ nhịp nhanh nhất: một workflow mới, hoặc một thay
+    // đổi vừa xảy ra, là lúc đáng đọc dày nhất.
+    nhip.current = FIRST_INTERVAL_MS
+
     async function tick() {
       await load()
       if (cancelled) return
@@ -194,7 +203,22 @@ export function useWorkflowPolling(
       const stillWaitingForAnswer = waitForAnswer && answerPending && withinTimeout
 
       if (!finished || stillWaitingForAnswer) {
-        timer = setTimeout(tick, intervalMs)
+        // Nhịp poll TĂNG DẦN, không cố định.
+        //
+        // 1500 ms cố định nghĩa là MỌI thay đổi trạng thái đều đến muộn trung
+        // bình 750 ms, tệ nhất 1500 ms — kể cả những thay đổi backend trả về
+        // gần như tức thì (đơn vị vừa duyệt, câu trả lời vừa ghi xong). Với một
+        // lượt chỉ mất vài trăm mili-giây, phần lớn thời gian người dùng nhìn
+        // màn hình đứng im là do NHỊP ĐỌC, không do hệ thống.
+        //
+        // Nhưng đọc dày suốt lượt cũng sai: Planner mất hàng chục giây, và nhồi
+        // request trong lúc ấy chỉ tốn CPU của một máy chủ 0,1 CPU.
+        //
+        // Nên: đọc dày lúc ĐẦU (khi thay đổi hay xảy ra nhất), thưa dần về mức
+        // cũ. Tổng số request trong 30 giây gần như không đổi so với nhịp cố
+        // định, nhưng những giây đầu — nơi người dùng đang nhìn — dày hơn nhiều.
+        nhip.current = Math.min(intervalMs, Math.round(nhip.current * 1.6))
+        timer = setTimeout(tick, nhip.current)
       }
     }
 

@@ -70,8 +70,7 @@ def test_a_small_talk_turn_is_written_to_the_database() -> None:
     source = inspect.getsource(routes)
     assert "_persist_chat_turn(" in source, "lượt trò chuyện không được ghim xuống database"
     assert source.count("await _persist_chat_turn(") >= 2, (
-        "chỉ một trong hai lane small-talk được ghim — lane kia vẫn trả về một "
-        "id không đọc lại được"
+        "chỉ một trong hai lane small-talk được ghim — lane kia vẫn trả về một id không đọc lại được"
     )
 
 
@@ -97,9 +96,7 @@ def test_a_chat_turn_is_not_listed_as_a_request() -> None:
     from src.db import workflow_repository
 
     source = inspect.getsource(workflow_repository.WorkflowRepository.list_workflows)
-    assert "assistant_for_status IS DISTINCT FROM 'CHAT'" in source, (
-        "danh sách yêu cầu vẫn đếm cả lượt trò chuyện"
-    )
+    assert "assistant_for_status IS DISTINCT FROM 'CHAT'" in source, "danh sách yêu cầu vẫn đếm cả lượt trò chuyện"
     assert "FROM workflow_tasks ct" in source, (
         "thiếu điều kiện an toàn: lượt CÓ bước là việc chạy thật và phải hiện "
         "trong danh sách bất kể câu trả lời được đóng dấu gì"
@@ -118,6 +115,5 @@ def test_an_answered_question_does_not_stay_pending() -> None:
     assert "_finish_chat_workflow" in source, "đường planner không chốt trạng thái cho lượt hỏi"
     finisher = inspect.getsource(routes._finish_chat_workflow)
     assert "list_tasks" in finisher, (
-        "thiếu điều kiện 'không có bước nào' — lệnh sẽ chốt SUCCESS cho cả "
-        "workflow đang chạy thật"
+        "thiếu điều kiện 'không có bước nào' — lệnh sẽ chốt SUCCESS cho cả workflow đang chạy thật"
     )

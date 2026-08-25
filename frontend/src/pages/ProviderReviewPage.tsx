@@ -53,14 +53,66 @@ const TABS: { key: TabKey; label: string; icon: typeof Home }[] = [
  */
 type RejectTarget =
   | { kind: 'verification'; record: VerificationRecord; reason: string }
-  | { kind: 'service'; record: ServiceApprovalRecord; reason: string }
+  | { kind: 'service'; record: ServiceApprovalRecord; reason: string; code: RejectCode | null }
+
+/** Nguyên nhân canonical. Backend đọc MÃ này để quyết định hậu quả — hết chỗ
+ *  thì khách được hỏi lại khu/ngày, các lý do khác thì yêu cầu dừng hẳn.
+ *  Câu chữ chỉ để người đọc; không tầng nào phân tích nó. */
+const REJECT_CODES = [
+  ['NO_AVAILABILITY', 'Hết chỗ / không còn lịch trống'],
+  ['INVALID_REQUEST', 'Yêu cầu không hợp lệ'],
+  ['SERVICE_UNAVAILABLE', 'Dịch vụ đang tạm ngừng'],
+  ['OTHER', 'Lý do khác'],
+] as const
+
+type RejectCode = (typeof REJECT_CODES)[number][0]
+
+const REJECT_CODE_LABELS: Record<string, string> = Object.fromEntries(REJECT_CODES)
+
+/** Mã này gây ra chuyện gì cho người yêu cầu — nói ra NGAY LÚC CHỌN.
+ *
+ *  Backend đọc mã để quyết định khách có được sửa hay không, nhưng trước đây
+ *  chỉ `NO_AVAILABILITY` có một dòng giải thích. Ba mã kia im lặng, nên người
+ *  duyệt đọc danh sách như bốn cái nhãn phân loại — không biết mình đang quyết
+ *  định khách còn lối đi tiếp hay không.
+ *
+ *  Đo được trên 12 lượt từ chối thật: 3 lượt mã nói một đằng, lý do viết một
+ *  nẻo. Rõ nhất là `SERVICE_UNAVAILABLE` kèm lý do "Yêu cầu đổi thời gian" —
+ *  người duyệt viết thẳng ra là muốn đổi giờ, mà mã lại dừng hẳn yêu cầu.
+ *
+ *  `tests/test_the_provider_sees_what_the_code_does.py` đối chiếu bảng này với
+ *  `_REPAIRABLE_REJECT_CODE` của backend: hứa cho sửa ở một mã backend không
+ *  nhận là nói dối người duyệt. */
+const REJECT_CONSEQUENCE: Record<string, string> = {
+  NO_AVAILABILITY: 'Người yêu cầu sẽ được mời chọn lại ngày hoặc khu khác.',
+  INVALID_REQUEST: 'Yêu cầu dừng hẳn. Người yêu cầu không sửa lại được, chỉ có thể gửi yêu cầu mới.',
+  SERVICE_UNAVAILABLE: 'Yêu cầu dừng hẳn. Người yêu cầu không sửa lại được, chỉ có thể gửi yêu cầu mới.',
+  OTHER: 'Yêu cầu dừng hẳn. Người yêu cầu không sửa lại được, chỉ có thể gửi yêu cầu mới.',
+}
+
+function rejectCodesFor(record: ServiceApprovalRecord): ReadonlyArray<(typeof REJECT_CODES)[number]> {
+  const allowed = new Set(record.allowed_reject_codes ?? [])
+  return REJECT_CODES.filter(([code]) => allowed.has(code))
+}
+
+/** Gợi ý cho ô lý do, theo nguyên nhân đã chọn.
+ *  Không nhắc tên khu cụ thể: đơn vị đỗ xe, tour, bảo trì và chuyển nhà dùng
+ *  chung màn này, và một placeholder nói về "Khu A" là sai với bốn trong năm. */
+function reasonHint(code: RejectCode | null): string {
+  if (code === 'NO_AVAILABILITY') {
+    return 'Nêu rõ phần nào đã hết và gợi ý lựa chọn thay thế (khu khác, ngày khác, khung giờ khác)…'
+  }
+  if (code === 'INVALID_REQUEST') return 'Nêu thông tin nào chưa đúng để người yêu cầu sửa lại…'
+  if (code === 'SERVICE_UNAVAILABLE') return 'Nêu thời gian dự kiến hoạt động trở lại nếu biết…'
+  return 'Nêu lý do để người yêu cầu hiểu…'
+}
 
 function claimLabel(record: VerificationRecord): string {
   const c = record.claimed_data
-  if (record.record_type === 'apartment' && 'apartment_code' in c) {
+  if (c && record.record_type === 'apartment' && 'apartment_code' in c) {
     return `${c.apartment_code} · ${c.residential_area ?? ''}`
   }
-  if (record.record_type === 'vehicle' && 'plate_number' in c) {
+  if (c && record.record_type === 'vehicle' && 'plate_number' in c) {
     return c.plate_number ?? '—'
   }
   return record.record_id
@@ -68,7 +120,7 @@ function claimLabel(record: VerificationRecord): string {
 
 function claimantName(record: VerificationRecord): string {
   const c = record.claimed_data
-  if (record.record_type === 'apartment' && 'full_name' in c) {
+  if (c && record.record_type === 'apartment' && 'full_name' in c) {
     return c.full_name ?? ''
   }
   return ''
@@ -113,6 +165,7 @@ const SERVICE_TAB_LABELS: Record<string, string> = {
   create_maintenance_request: 'Bảo trì',
   schedule_move: 'Chuyển nhà',
   register_property_interest: 'Nhận tư vấn',
+  change_parking_zone: 'Đổi khu đỗ xe',
 }
 
 const SERVICE_ORDER = [
@@ -123,6 +176,9 @@ const SERVICE_ORDER = [
   'create_maintenance_request',
   'schedule_move',
   'register_property_interest',
+  // Đổi khu đứng NGAY SAU chỗ đỗ xe thì hợp lý hơn, nhưng thứ tự này là thứ tự
+  // người duyệt đã quen. Thêm vào cuối để không đẩy sáu tab kia sang chỗ khác.
+  'change_parking_zone',
 ]
 
 function detailText(value: string | number | boolean | null): string {
@@ -227,15 +283,32 @@ export function ProviderReviewPage() {
     record: ServiceApprovalRecord,
     decision: 'approve' | 'reject',
     reason?: string,
+    code?: RejectCode,
   ) {
     if (busy) return
     setBusy(`service:${record.workflow_id}:${record.task_id}`)
     setError(null)
     setDone(null)
-    const body = { decision, ...(decision === 'reject' ? { reject_reason: reason } : {}) }
+    const body = {
+      decision,
+      ...(decision === 'reject' ? { reject_reason: reason, reject_code: code } : {}),
+    }
     try {
       if (record.tool === 'schedule_property_viewing') {
-        await decideViewingApproval(record.workflow_id, body)
+        // Hàng đợi THAM QUAN có route RIÊNG — nó chạy `reject_viewing`, viết
+        // câu chốt từ lý do đơn vị vừa gõ và mở vòng hỏi lại. Route dịch vụ
+        // không làm những việc đó, nên vẫn gửi vào đúng đường của nó.
+        //
+        // Nhưng hợp đồng thì GIỐNG NHAU: từ chối phải kèm nguyên nhân
+        // canonical. Bản trước cắt `reject_code` đi ở đúng nhánh này — theo
+        // một ghi chú đã cũ, viết từ lúc route ấy chưa nhận mã. Hậu quả đo
+        // được: đơn vị chọn nguyên nhân trong hộp thoại, bấm xác nhận, và
+        // nhận lại 422 "Yêu cầu chưa hợp lệ" cho một lời từ chối hợp lệ —
+        // lịch tham quan là dịch vụ DUY NHẤT từ chối không được.
+        await decideViewingApproval(record.workflow_id, {
+          decision,
+          ...(decision === 'reject' ? { reject_reason: reason, reject_code: code } : {}),
+        })
       } else {
         await decideServiceApproval(record.workflow_id, record.task_id, body)
       }
@@ -268,9 +341,12 @@ export function ProviderReviewPage() {
   async function confirmReject() {
     if (!rejectTarget || busy) return
     const reason = rejectTarget.reason.trim()
+    // Dịch vụ BẮT BUỘC có nguyên nhân canonical. Gửi thiếu thì backend trả 422
+    // — chặn ở đây để đơn vị biết ngay thay vì nhận một lỗi khó hiểu.
+    if (rejectTarget.kind === 'service' && !rejectTarget.code) return
     if (!reason) return
     if (rejectTarget.kind === 'service') {
-      await decideService(rejectTarget.record, 'reject', reason)
+      await decideService(rejectTarget.record, 'reject', reason, rejectTarget.code ?? undefined)
     } else {
       await decideVerification(rejectTarget.record, 'reject', reason)
     }
@@ -384,7 +460,7 @@ export function ProviderReviewPage() {
                     Gửi lúc {new Date(record.created_at).toLocaleString('vi-VN')}
                   </p>
 
-                  {record.proof_image_urls.length > 0 && (
+                  {(record.proof_image_urls?.length ?? 0) > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
                       {record.proof_image_urls.map((url) => (
                         <a
@@ -559,6 +635,11 @@ export function ProviderReviewPage() {
                         {record.decided_by ?? '—'}
                         {record.decided_at ? ` · ${record.decided_at.slice(0, 16).replace('T', ' ')}` : ''}
                       </p>
+                      {record.reject_code && (
+                        <p className="mt-1 text-xs font-medium text-gray-600 dark:text-gray-300">
+                          {REJECT_CODE_LABELS[record.reject_code] ?? record.reject_code}
+                        </p>
+                      )}
                       {record.reject_reason && (
                         <p className="mt-1 max-w-[220px] text-xs text-gray-500">{record.reject_reason}</p>
                       )}
@@ -580,7 +661,7 @@ export function ProviderReviewPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setRejectTarget({ kind: 'service', record, reason: '' })}
+                      onClick={() => setRejectTarget({ kind: 'service', record, reason: '', code: null })}
                       disabled={busy !== null}
                       className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:text-gray-200"
                     >
@@ -623,13 +704,56 @@ export function ProviderReviewPage() {
             <p className="mt-1 text-sm text-gray-500">
               {rejectLabel(rejectTarget)} — vui lòng nêu lý do để người yêu cầu biết.
             </p>
+            {rejectTarget.kind === 'service' && (
+              <div className="mt-3">
+                <label
+                  htmlFor="reject-code"
+                  className="block text-xs font-medium text-gray-700 dark:text-gray-300"
+                >
+                  Nguyên nhân
+                </label>
+                <select
+                  id="reject-code"
+                  value={rejectTarget.code ?? ''}
+                  onChange={(e) =>
+                    setRejectTarget({
+                      ...rejectTarget,
+                      code: (e.target.value || null) as RejectCode | null,
+                    })
+                  }
+                  className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
+                >
+                  <option value="">— Chọn nguyên nhân —</option>
+                  {rejectCodesFor(rejectTarget.record).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                {rejectTarget.code && REJECT_CONSEQUENCE[rejectTarget.code] && (
+                  <p
+                    className={`mt-1 text-xs ${
+                      rejectTarget.code === 'NO_AVAILABILITY'
+                        ? 'text-gray-500'
+                        : 'text-amber-700 dark:text-amber-500'
+                    }`}
+                  >
+                    {REJECT_CONSEQUENCE[rejectTarget.code]}
+                  </p>
+                )}
+              </div>
+            )}
             <textarea
               value={rejectTarget.reason}
               onChange={(e) =>
                 setRejectTarget({ ...rejectTarget, reason: e.target.value })
               }
               rows={3}
-              placeholder="Ví dụ: ảnh giấy tờ mờ, chưa đối chiếu được…"
+              placeholder={
+                rejectTarget.kind === 'service'
+                  ? reasonHint(rejectTarget.code)
+                  : 'Ví dụ: ảnh giấy tờ mờ, chưa đối chiếu được…'
+              }
               className="mt-3 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
             />
             <div className="mt-4 flex justify-end gap-2">
@@ -642,7 +766,11 @@ export function ProviderReviewPage() {
               </button>
               <button
                 type="button"
-                disabled={!rejectTarget.reason.trim() || busy !== null}
+                disabled={
+                  !rejectTarget.reason.trim() ||
+                  (rejectTarget.kind === 'service' && !rejectTarget.code) ||
+                  busy !== null
+                }
                 onClick={() => void confirmReject()}
                 className="inline-flex items-center gap-2 rounded-xl bg-red-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
               >

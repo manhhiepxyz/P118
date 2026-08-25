@@ -44,6 +44,7 @@ from src.db.migrations import run_migrations
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.executor.executor import Executor
 from src.orchestration.boundary import ValidatedExecutionBoundary
+from src.orchestration.runtime_provider import acquire_repository
 
 
 def build_connectors(
@@ -175,5 +176,20 @@ async def build_runtime(
         contact_profile=contact_profile,
         workflow_id=workflow_id,
     )
-    repository = await build_repository()
+    # Repository lấy từ COMPOSITION ROOT, không tự dựng.
+    #
+    # `build_repository()` mở một `asyncpg.create_pool()` mới rồi chạy lại toàn
+    # bộ migration — mỗi lần một workflow chạy. Đo được trên log Docker: mỗi
+    # yêu cầu của người dùng kéo theo `schema.sql` + `schema_migrations.sql` +
+    # `seed.sql`, 21 lượt trong một phiên.
+    #
+    # Cái giá không chỉ là ~0,2s và một bắt tay TCP. Pool ấy đọc thẳng
+    # `settings.database_url` — đúng đường mà `runtime_provider` sinh ra để
+    # bịt, vì nó là cách test lặng lẽ kết nối tới database phát triển trong khi
+    # phần còn lại chạy trên database test.
+    #
+    # Lifespan đã dựng sẵn một `SharedPool` dùng chung cho cả tiến trình;
+    # `close()` trên nó là no-op, nên người gọi vẫn giữ nguyên khuôn
+    # try/finally cũ mà không đóng nhầm pool của người khác.
+    repository = await acquire_repository()
     return connectors, repository

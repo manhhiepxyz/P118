@@ -87,6 +87,4 @@ def test_volume_is_still_capped_somewhere() -> None:
     # Trần cụ thể do `test_two_limits_two_messages.py` giữ; ở đây chỉ khẳng
     # định nó CÒN TỒN TẠI. Hai test cùng khoá một con số thì đổi trần là phải
     # sửa hai chỗ, và chỗ bị quên sẽ đỏ mà không nói được vì sao.
-    assert s.daily_workflow_quota > 0, (
-        "mất trần theo ngày — giới hạn phút một mình không chặn được chi phí"
-    )
+    assert s.daily_workflow_quota > 0, "mất trần theo ngày — giới hạn phút một mình không chặn được chi phí"

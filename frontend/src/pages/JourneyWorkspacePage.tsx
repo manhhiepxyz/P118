@@ -3,6 +3,7 @@ import { CheckCircle2, ChevronRight, FileText, Home } from 'lucide-react'
 
 import { ActivityFeed } from '../components/workspace/ActivityFeed'
 import { CommandRail } from '../components/workspace/CommandRail'
+import { DragDivider } from '../components/workspace/DragDivider'
 import { InspectorPanel } from '../components/workspace/InspectorPanel'
 import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 
@@ -36,6 +37,9 @@ import {
 import type { AgentWorkflowResponse } from '../lib/types'
 
 /** Trạng thái không còn chuyển nữa — ngừng poll. */
+/** Tham số URL giữ yêu cầu đang mở, để F5 không làm mất nó. */
+const WORKFLOW_PARAM = 'w'
+
 const TERMINAL = new Set([
   'SUCCESS',
   'FAILED',
@@ -103,8 +107,21 @@ function waitingAhead(res: AgentWorkflowResponse): string | null {
 function goalFromForms(
   picked: string[],
   values: Record<string, Record<string, string>>,
-): { goal: string; projectName?: string } {
+): {
+  goal: string
+  projectName?: string
+  formFields: {
+    consent?: boolean
+    needs_elevator?: boolean
+    needs_loading_support?: boolean
+  }
+} {
   let projectName: string | undefined
+  const formFields: {
+    consent?: boolean
+    needs_elevator?: boolean
+    needs_loading_support?: boolean
+  } = {}
 
   const parts = picked.map((service) => {
     const fields = SERVICE_FIELDS[service] ?? []
@@ -129,6 +146,17 @@ function goalFromForms(
       if (!raw) continue
       const label = field.options?.find((option) => option.value === raw)?.label ?? raw
 
+      if (
+        field.key === 'consent' ||
+        field.key === 'needs_elevator' ||
+        field.key === 'needs_loading_support'
+      ) {
+        // Đây là lựa chọn có cấu trúc từ form, không phải câu cần model hiểu.
+        // Giữ cả false: bỏ nó khỏi goal từng khiến Planner hỏi lại một ô đang
+        // hiện rõ "Không" trên màn hình.
+        formFields[field.key] = raw === 'true'
+      }
+
       if (field.key === 'project') {
         projectName = label
         bits.push(label)
@@ -149,7 +177,7 @@ function goalFromForms(
     return bits.length > 0 ? `${verb} ${bits.join(' ')}` : verb
   })
 
-  return { goal: parts.join('. '), projectName }
+  return { goal: parts.join('. '), projectName, formFields }
 
 }
 
@@ -342,6 +370,21 @@ export function JourneyWorkspacePage() {
   const [turns, setTurns] = useState<ChatTurn[]>([])
   const [pending, setPending] = useState<PendingAction | null>(null)
   /**
+   * Tỉ lệ chiều cao dành cho sơ đồ; phần còn lại là hội thoại.
+   *
+   * Nhớ lại qua các lần mở: người dùng kéo một lần cho vừa mắt, và bắt họ kéo
+   * lại sau mỗi lần tải trang là biến một tiện ích thành một việc vặt.
+   */
+  const [tiLeCanvas, setTiLeCanvas] = useState(() => {
+    const luu = Number(localStorage.getItem('p118.split'))
+    return Number.isFinite(luu) && luu >= 0.25 && luu <= 0.75 ? luu : 0.55
+  })
+  useEffect(() => {
+    localStorage.setItem('p118.split', String(tiLeCanvas))
+  }, [tiLeCanvas])
+  /** Khoản còn phải trả — ghép vào cuối câu trả lời của lượt đang đi tiếp. */
+  const nhacTraTien = useRef<string | null>(null)
+  /**
    * Cuộc trò chuyện đang mở.
    *
    * Không có nó, mỗi câu người dùng gõ là một cuộc riêng: không hỏi tiếp được,
@@ -409,6 +452,20 @@ export function JourneyWorkspacePage() {
 
   function say(from: ChatTurn['from'], text: string) {
     turnId.current += 1
+    // Câu của AGENT được ghi vào bộ nhớ chống lặp, dù nói bằng đường nào.
+    //
+    // `sayOnce` có bộ nhớ ấy, `say` thì không — nên một câu nói qua `say` rồi
+    // được `sayOnce` nói lại y nguyên ở nhịp poll sau. Đo được nguyên văn:
+    //
+    //     P-118: Ngày tham quan chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.
+    //     P-118: Ngày tham quan chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.
+    //
+    // Câu lỗi 422 đi qua `say`, rồi backend ghim đúng câu ấy vào `question` và
+    // nhịp poll kế tiếp đọc lên. Hai đường, một câu, hai bong bóng.
+    //
+    // Lời của NGƯỜI DÙNG thì không: họ có quyền nói cùng một câu hai lần, và
+    // bóp nó đi là làm mất lời họ đã gõ.
+    if (from === 'agent') said.current.add(text)
     setTurns((current) => [...current, { id: `t${turnId.current}`, from, text }])
   }
 
@@ -418,6 +475,14 @@ export function JourneyWorkspacePage() {
     if (said.current.has(text)) return
     said.current.add(text)
     say('agent', text)
+    // Còn khoản chưa trả thì NHẮC, không chặn. Ghép vào cuối câu trả lời của
+    // chính lượt vừa đi tiếp, rồi xoá — lần sau có việc mới thì nhắc lại từ
+    // trạng thái mới, không phải từ một biến còn sót.
+    const con_no = nhacTraTien.current
+    nhacTraTien.current = null
+    if (con_no) {
+      say('agent', `Nhắc bạn: khoản ${con_no} cho chỗ đỗ xe vẫn đang chờ bạn xác nhận thanh toán.`)
+    }
   }
 
   /**
@@ -427,8 +492,60 @@ export function JourneyWorkspacePage() {
    * về của mọi mutation. Ba đường đó mà tự cập nhật riêng thì sớm muộn canvas
    * nói một đằng còn thẻ chờ nói một nẻo.
    */
+  /**
+   * Ghim `workflow_id` vào URL để một lần F5 không xoá mất yêu cầu đang chạy.
+   *
+   * Đo được trên trình duyệt thật: khách gửi yêu cầu, nó vào hàng đợi chờ đơn
+   * vị duyệt, khách bấm F5 — màn hình trở về "P-118 làm được gì cho bạn?"
+   * trong khi backend vẫn giữ nguyên `WAITING_APPROVAL`. Yêu cầu không mất,
+   * chỉ là client không còn biết id để hỏi lại. Người dùng tưởng hỏng và gửi
+   * lại, thành hai yêu cầu cho cùng một việc.
+   *
+   * `replaceState` chứ không `pushState`: đây không phải một bước điều hướng
+   * mới, và đẩy vào history sẽ khiến nút Back đi ngược qua từng nhịp poll.
+   */
+  function rememberInUrl(id: string | null | undefined) {
+    if (!id || typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (url.searchParams.get(WORKFLOW_PARAM) === id) return
+    url.searchParams.set(WORKFLOW_PARAM, id)
+    window.history.replaceState(null, '', url)
+  }
+
+  /**
+   * Khôi phục yêu cầu đang chạy sau F5 / mở lại tab.
+   *
+   * Backend đã dựng lại được toàn bộ trạng thái từ PostgreSQL
+   * (`_public_view_from_db`) và tự kiểm chủ sở hữu — id lạ hoặc của người khác
+   * trả 404. Nên ở đây chỉ cần hỏi, và im lặng gỡ tham số nếu không đọc được:
+   * một màn hình trống vẫn tốt hơn một thông báo lỗi cho thứ người dùng không
+   * làm gì sai.
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const id = new URL(window.location.href).searchParams.get(WORKFLOW_PARAM)
+    if (!id) return
+    let alive = true
+    getWorkflow(id)
+      .then((res) => {
+        if (alive) absorb(res)
+      })
+      .catch(() => {
+        if (!alive) return
+        const url = new URL(window.location.href)
+        url.searchParams.delete(WORKFLOW_PARAM)
+        window.history.replaceState(null, '', url)
+      })
+    return () => {
+      alive = false
+    }
+    // Chỉ chạy MỘT lần lúc mount: đây là khôi phục, không phải đồng bộ liên tục.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   function absorb(res: AgentWorkflowResponse) {
     setLive(res)
+    rememberInUrl(res.workflow_id)
     // Kế hoạch có thật → giờ mới có hành trình để xem.
     if (res.plan.length > 0) setMode('journey')
     if (res.session_id) sessionRef.current = res.session_id
@@ -508,7 +625,19 @@ export function JourneyWorkspacePage() {
     // Chờ `answer` nghĩa là người vừa bấm Xác nhận thanh toán nhìn ba chấm
     // quay tiếp — tiền đã trừ, việc đã xong, mà màn hình vẫn nói "đang thực
     // hiện". `sayOnce` đảm bảo câu của model tới sau không bị nói trùng.
-    if (res.status === 'SUCCESS') sayOnce(res.summary)
+    // Điểm DỪNG nào cũng phải nói ra, không riêng điểm dừng tốt đẹp.
+    //
+    // Trước đây chỉ SUCCESS được nói `summary`, nên khi đơn vị tour TỪ CHỐI
+    // lịch tham quan, yêu cầu dừng trong im lặng: backend đã dựng đúng câu
+    // ("Lý do: Khung giờ 10:00 ngày 15/01 đã kín lịch.") và không ai đọc nó.
+    // Hội thoại chỉ trông vào `answer`, mà `answer` tới sau một lượt gọi LLM
+    // và còn có thể bị guard loại — hai lần chờ cho một tin đã sẵn sàng.
+    //
+    // `summary` do backend dựng từ dữ liệu thật, có mặt NGAY. `sayOnce` dedupe
+    // theo nội dung nên câu của model tới sau không bị nói trùng.
+    if (res.status === 'SUCCESS' || res.status === 'FAILED' || res.status === 'CANCELLED') {
+      sayOnce(res.summary)
+    }
 
     // Lời kết nói SAU cùng, và chỉ khi thật sự xong. `sayOnce` lo phần không
     // lặp lại ở những nhịp poll tiếp theo.
@@ -774,7 +903,37 @@ export function JourneyWorkspacePage() {
    * chỉ chuyển sang canvas mẫu.
    */
   async function execute() {
-    if (mode === 'journey') {
+    /**
+     * Định tuyến theo TRẠNG THÁI, không theo chế độ hiển thị.
+     *
+     * Điều kiện cũ là `mode === 'journey'`, mà `mode` chỉ thành `'journey'` khi
+     * `res.plan.length > 0`. Một workflow đang CHỜ NGƯỜI DÙNG TRẢ LỜI thì chưa
+     * có kế hoạch — nên nó ở lại `'launcher'`, và mọi câu gõ vào ô chat rơi
+     * vào nhánh "yêu cầu mới".
+     *
+     * Đo được, phiên e88a96e1 trên stack demo — năm lượt, năm workflow, cùng
+     * một phiên, không cái nào có cha:
+     *
+     *     "đặt lịch tham quan"   thiếu: project, ngày, giờ
+     *     "Vinhomes Ocean Park"  thiếu: ngày, giờ
+     *     "ngày 23/8/2026"       thiếu: project, ngày, giờ
+     *     "12:00"                thiếu: project, ngày
+     *     "27/8/2026"            thiếu: project, giờ
+     *
+     * ~112 giây gọi model để nhập ba ô. Và 13/14 hồ sơ câu hỏi trong dữ liệu
+     * ghi được đều `resolved=false`: đúng một cái được giải quyết, và đó là
+     * lượt đi qua BIỂU MẪU. Thẻ "Cần thêm thông tin" vẫn hiện vì nó không phụ
+     * thuộc `mode`, và nó còn mời "trả lời bằng lời ở ô bên dưới" — cái ô ở
+     * chế độ ấy không biết trả lời.
+     *
+     * `picked.length === 0` để không cướp đường của biểu mẫu: đang chọn dịch
+     * vụ thì câu gõ thuộc về yêu cầu mới, không phải câu trả lời.
+     *
+     * KHÔNG đọc `pending` để quyết định gửi đi đâu — nhánh dưới đọc lại
+     * workflow ngay trước khi gửi, đúng như nó vốn làm. `pending` chỉ dùng để
+     * biết CÓ nên vào nhánh ấy hay không.
+     */
+    if (mode === 'journey' || (pending?.kind === 'missing_info' && picked.length === 0)) {
       const text = draft.trim()
       if (!text) return
       say('user', text)
@@ -810,8 +969,34 @@ export function JourneyWorkspacePage() {
       const waiting = snapshot ? pendingFromWorkflow(snapshot) : null
       if (waiting) {
         // LLM (ở luồng thật) chỉ phân loại ý định; quyết định vẫn do `resolve`.
-        respondTo(waiting, normalizeIntent(text, waiting), text)
-        return
+        const intent = normalizeIntent(text, waiting)
+
+        // TIỀN là bước CUỐI, không phải cái cổng.
+        //
+        // Thẻ thanh toán từng NUỐT mọi câu: bất kỳ thứ gì không phải đồng ý hay
+        // từ chối đều nhận lại "Khoản này cần bạn xác nhận rõ ràng". Đo được
+        // nguyên văn, trên một yêu cầu vừa có câu hỏi đổi ngày vừa có khoản
+        // chờ trả:
+        //
+        //     Bạn:    ok vậy đổi qua ngày 25
+        //     P-118:  Khoản này cần bạn xác nhận rõ ràng…
+        //     Bạn:    tôi muốn đổi ngày trước rồi sẽ thanh toán sau
+        //     P-118:  Mình chưa rõ ý bạn. Bạn muốn tiếp tục hay dừng lại?
+        //
+        // Câu hoàn toàn hợp lệ, và không có đường nào nhận nó.
+        //
+        // Nên khoản chờ trả chỉ giữ lại câu NÓI VỀ NÓ — đồng ý, từ chối, hoặc
+        // hỏi về chính nó. Còn lại đi tiếp như một câu bình thường, và lời nhắc
+        // trả tiền được ghép vào cuối câu trả lời.
+        //
+        // Cổng tiền KHÔNG đổi: `resolve` vẫn đòi bấm đúng nút hoặc nói thẳng
+        // "đồng ý thanh toán". Chỗ này chỉ thôi bắt giữ câu, không nới quyền.
+        const laVeTien = intent === 'APPROVE' || intent === 'REJECT' || intent === 'QUESTION'
+        if (waiting.kind !== 'approval' || waiting.title !== 'Thanh toán' || laVeTien) {
+          respondTo(waiting, intent, text)
+          return
+        }
+        nhacTraTien.current = waiting.details.find((d) => d.label === 'Số tiền')?.value ?? null
       }
 
       // Yêu cầu trước CÒN ĐANG CHẠY thì câu này không phải yêu cầu mới.
@@ -937,7 +1122,7 @@ export function JourneyWorkspacePage() {
       setPicked([])
       setInvalid({})
       try {
-        absorb(await startWorkflow(goal, built.projectName, sessionRef.current))
+        absorb(await startWorkflow(goal, built.projectName, sessionRef.current, built.formFields))
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         setFault(detail)
@@ -1046,6 +1231,9 @@ export function JourneyWorkspacePage() {
     // thái; `summary` đã được nói ngay ở trên rồi.
     live.status !== 'SUCCESS' &&
     (!TERMINAL.has(live.status) || live.response_state === 'PENDING')
+
+  /** Có gì để chia hay không — `ConversationStream` trả null khi cả hai rỗng. */
+  const coHoiThoai = turns.length > 0 || thinking
 
   return (
     <WorkspaceShell>
@@ -1185,7 +1373,15 @@ export function JourneyWorkspacePage() {
                 Ở trạng thái đang-nói, cả bảng dịch vụ lẫn canvas đều không vẽ
                 — giữ `flex-1` thì ô này nuốt hết chiều cao và đẩy hội thoại
                 xuống sát đáy, để lại một khoảng trống bằng nửa màn hình. */}
-            <div className={mode === 'journey' || !talking ? 'min-h-0 flex-1' : ''}>
+            <div
+              className={mode === 'journey' || !talking ? 'min-h-0 flex-1 overflow-hidden' : ''}
+              /* Ở chế độ hành trình, chiều cao do thanh chia quyết định — không
+                 để `flex-1` tự chia, vì khi ấy hội thoại không có trần và nó nở
+                 ra theo số lượt rồi bị cắt ngang. `ConversationStream` vốn đã
+                 có `overflow-y-auto`; nó chỉ chưa bao giờ cuộn được vì cha
+                 không giới hạn gì. */
+              style={mode === 'journey' && coHoiThoai ? { flex: `${tiLeCanvas} 1 0%` } : undefined}
+            >
               {/* Ba trạng thái, không phải hai.
                     chưa nói gì   → bảng dịch vụ
                     đang nói      → hội thoại (bảng dịch vụ LÙI đi)
@@ -1228,9 +1424,38 @@ export function JourneyWorkspacePage() {
                 không thấy gì cả — cả câu của họ lẫn câu trả lời đều nằm trong
                 `turns` mà không được vẽ. Đo được: gõ "tôi muốn đổi dịch vụ",
                 40 giây sau trên màn hình vẫn không có chữ nào của lượt đó. */}
+            {/* Chỉ chia khi CÓ hội thoại để chia.
+                Ngay sau khi kế hoạch hiện ra mà chưa ai nói gì, thanh chia vẫn
+                dựng một khung rỗng chiếm 45% chiều cao — người dùng nhìn thấy
+                nửa màn hình trắng và một đường kẻ không giải thích được. */}
+            {mode === 'journey' && coHoiThoai && (
+              <DragDivider value={tiLeCanvas} onChange={setTiLeCanvas} />
+            )}
+
             {(mode === 'journey' || talking) && (
-              <div className={mode === 'journey' ? '' : 'flex min-h-0 flex-1 flex-col justify-end'}>
-                <ConversationStream turns={turns} thinking={thinking} stage={stageLine} />
+              <div
+                className={
+                  mode === 'journey'
+                    ? 'flex min-h-0 flex-col overflow-hidden'
+                    : 'flex min-h-0 flex-1 flex-col justify-end'
+                }
+                style={mode === 'journey' && coHoiThoai ? { flex: `${1 - tiLeCanvas} 1 0%` } : undefined}
+              >
+                {/* Nhãn của khung hội thoại. Ở chế độ hành trình, sơ đồ và hội
+                    thoại nằm cạnh nhau trong cùng một cột — không có gì nói cho
+                    người đọc biết phần dưới là cuộc trao đổi về CHÍNH việc ở
+                    trên. */}
+                {mode === 'journey' && (
+                  <p className="shrink-0 px-12 pb-1 pt-2 text-[12.5px] text-[var(--text-muted)]">
+                    P-118{title ? ` · ${title}` : ''}
+                  </p>
+                )}
+                <ConversationStream
+                  turns={turns}
+                  thinking={thinking}
+                  stage={stageLine}
+                  fill={mode === 'journey' && coHoiThoai}
+                />
               </div>
             )}
 

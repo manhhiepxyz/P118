@@ -67,9 +67,7 @@ async def test_every_status_lands_in_exactly_one_bucket(client, db_pool):
             owner,
         )
 
-    body = (
-        await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {token}"})
-    ).json()
+    body = (await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {token}"})).json()
 
     buckets = body["running"] + body["waiting_approval"] + body["success"] + body["failed"] + body["cancelled"]
     assert buckets == body["total"], f"trạng thái rơi ra ngoài mọi ô: {body}"
@@ -83,9 +81,7 @@ async def test_metrics_never_leak_what_residents_asked_for(client, db_pool):
     admin_token = await _register_and_login(client, "nn_metrics_privacy")
     await db_pool.execute("UPDATE users SET role = 'admin' WHERE username = $1", "nn_metrics_privacy")
 
-    body = (
-        await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {admin_token}"})
-    ).json()
+    body = (await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {admin_token}"})).json()
 
     # SỐ, không phải chữ. `total_cost` và `avg_latency_ms` là float (tiền và
     # mili-giây trung bình không tròn được); phần còn lại là số đếm nguyên.
@@ -135,18 +131,14 @@ async def test_a_workflow_waiting_for_the_user_is_not_counted_as_orphaned(client
         "INSERT INTO workflow_clarifications (workflow_id, goal, missing_fields, resolved_at) "
         "VALUES ($1, $2, $3::jsonb, NULL)",
         workflow_id,
-        'Đặt lịch nhưng thiếu ngày',
+        "Đặt lịch nhưng thiếu ngày",
         '["ngay_gio"]',
     )
 
-    body = (
-        await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {token}"})
-    ).json()
+    body = (await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {token}"})).json()
 
     assert body["awaiting_user"] >= 1, f"không đếm được workflow đang chờ người dùng: {body}"
-    assert body["orphaned"] == 0, (
-        f"workflow đang chờ người dùng bị đếm là mồ côi — đúng lỗi báo động giả cũ: {body}"
-    )
+    assert body["orphaned"] == 0, f"workflow đang chờ người dùng bị đếm là mồ côi — đúng lỗi báo động giả cũ: {body}"
 
 
 @pytest.mark.asyncio
@@ -167,8 +159,6 @@ async def test_a_workflow_nobody_is_working_on_is_counted_as_orphaned(client, db
         owner,
     )
 
-    body = (
-        await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {token}"})
-    ).json()
+    body = (await client.get("/api/v1/admin/metrics", headers={"Authorization": f"Bearer {token}"})).json()
 
     assert body["orphaned"] >= 1, f"mồ côi thật mà không đếm: {body}"

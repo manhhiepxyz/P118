@@ -156,13 +156,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           })}
         </ul>
 
-        <div className="flex items-center justify-between border-t border-[var(--border-subtle)] px-4 py-3">
-          <Link
-            to="/"
-            className="text-[13px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
-          >
-            ← Ứng dụng
-          </Link>
+        <div className="flex items-center justify-end border-t border-[var(--border-subtle)] px-4 py-3">
           <button
             type="button"
             onClick={toggle}

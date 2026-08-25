@@ -236,7 +236,7 @@ export function VehicleRegistrationPage() {
                         {claim.vehicle_type === 'car' ? 'Ô tô' : 'Xe máy'}
                         {r.reject_reason ? ` · Lý do: ${r.reject_reason}` : ''}
                       </p>
-                      {r.proof_image_urls.length > 0 && (
+                      {(r.proof_image_urls?.length ?? 0) > 0 && (
                         <div className="mt-2 flex flex-wrap gap-2">
                           {r.proof_image_urls.map((url) => (
                             <a

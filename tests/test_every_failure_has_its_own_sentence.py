@@ -34,8 +34,7 @@ def _failure_text() -> dict[str, str]:
 @pytest.mark.parametrize("code", sorted(c.value for c in ErrorCode))
 def test_every_backend_code_has_user_facing_text(code: str) -> None:
     assert code in _failure_text(), (
-        f"{code} không có câu nào — nó sẽ hiện ra giống hệt mọi lỗi khác, và "
-        "người dùng không biết phải làm gì"
+        f"{code} không có câu nào — nó sẽ hiện ra giống hệt mọi lỗi khác, và người dùng không biết phải làm gì"
     )
 
 
@@ -61,6 +60,4 @@ def test_the_raw_provider_message_is_not_shown_first() -> None:
     source = _STATUS.read_text(encoding="utf-8")
     uu_tien = source.index("if (task.message) return task.message")
     tho = source.index("if (task.error_message) return task.error_message")
-    assert uu_tien < tho, (
-        "câu thô của provider được ưu tiên hơn câu backend đã dựng cho người đọc"
-    )
+    assert uu_tien < tho, "câu thô của provider được ưu tiên hơn câu backend đã dựng cho người đọc"

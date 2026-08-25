@@ -75,8 +75,7 @@ def test_the_ui_shows_nothing_pending_for_a_cancelled_request() -> None:
     body = source[source.index("export function pendingFromWorkflow") :]
     body = body[: body.index("\nexport ", 1) if "\nexport " in body[1:] else len(body)]
     assert "if (res.status === 'CANCELLED') return null" in body, (
-        "yêu cầu đã huỷ vẫn hiện thẻ chờ; câu tiếp theo người dùng gõ sẽ bị "
-        "đọc là câu TRẢ LỜI cho thẻ đó"
+        "yêu cầu đã huỷ vẫn hiện thẻ chờ; câu tiếp theo người dùng gõ sẽ bị đọc là câu TRẢ LỜI cho thẻ đó"
     )
 
 
@@ -107,8 +106,7 @@ def test_the_answer_layer_still_knows_what_was_being_discussed() -> None:
     turns = _recent_turns_view(ky_uc, phien)
     assert turns, "lượt đã huỷ bị loại khỏi hội thoại — model mất ngữ cảnh vừa nói"
     assert "huỷ" in turns[0].get("ghi_chu", ""), (
-        "giữ mà không nói rõ đã huỷ thì model đọc nó như việc đang chạy và đi "
-        "tiếp theo hướng đó"
+        "giữ mà không nói rõ đã huỷ thì model đọc nó như việc đang chạy và đi tiếp theo hướng đó"
     )
 
     # Và không chỉ CANCELLED: model cần biết việc nào ĐANG DỞ, nếu không nó
@@ -126,6 +124,5 @@ def test_the_answer_layer_still_knows_what_was_being_discussed() -> None:
 def test_the_planner_never_sees_a_cancelled_turn() -> None:
     source = inspect.getsource(__import__("src.api.routes", fromlist=["x"]))
     assert 'if not turn.get("_da_huy")' in source, (
-        "Planner vẫn nhận lượt đã huỷ — nó sẽ dựng lại yêu cầu ấy từ một câu "
-        "nói cụt bất kỳ"
+        "Planner vẫn nhận lượt đã huỷ — nó sẽ dựng lại yêu cầu ấy từ một câu nói cụt bất kỳ"
     )

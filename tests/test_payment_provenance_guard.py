@@ -62,7 +62,7 @@ def test_a_payment_pointing_at_a_non_booking_task_is_rejected() -> None:
         task_id="T0",
         tool="register_vehicle",
         depends_on=[],
-        input={"resident_id": "RES-1", "plate_number": "30A-1", "vehicle_type": "car"},
+        input={"resident_id": "RES-1", "plate_number": "30A-10001", "vehicle_type": "car"},
     )
 
     with pytest.raises(ValueError):

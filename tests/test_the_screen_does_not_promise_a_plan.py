@@ -25,8 +25,7 @@ _PAGE = Path(__file__).resolve().parents[1] / "frontend" / "src" / "pages" / "Jo
 def test_free_text_does_not_switch_screens_on_its_own() -> None:
     page = _PAGE.read_text(encoding="utf-8")
     assert "if (provisional.current.length > 0) setMode('journey')" in page, (
-        "vẫn đổi màn ngay khi gửi — câu hỏi nào cũng bị trình bày như một "
-        "hành trình đang được chuẩn bị"
+        "vẫn đổi màn ngay khi gửi — câu hỏi nào cũng bị trình bày như một hành trình đang được chuẩn bị"
     )
 
 
@@ -76,9 +75,7 @@ def test_the_service_menu_does_not_come_back_mid_conversation() -> None:
         có kế hoạch  → canvas hành trình
     """
     page = _PAGE.read_text(encoding="utf-8")
-    assert "{mode === 'journey' || talking ? null : (" in page, (
-        "bảng dịch vụ vẫn hiện khi đang có hội thoại"
-    )
+    assert "{mode === 'journey' || talking ? null : (" in page, "bảng dịch vụ vẫn hiện khi đang có hội thoại"
     assert "{mode === 'journey' && (\n                <JourneyCanvas" in page, (
         "canvas hành trình không còn gắn với đúng trạng thái của nó"
     )
@@ -119,7 +116,11 @@ def test_nothing_in_the_frame_depends_on_mode_alone() -> None:
 
     # Những nơi được phép chỉ đọc `mode`: chính sân khấu, và nhãn của nó.
     duoc_phep = {
-        "if (mode === 'journey') {",                 # rẽ nhánh trong execute()
+        # Rẽ nhánh trong `execute()`. Nó KHÔNG còn đọc mình `mode`: một workflow
+        # đang chờ người dùng trả lời thì chưa có kế hoạch, nên `mode` ở lại
+        # `'launcher'` và mọi câu gõ rơi vào nhánh "yêu cầu mới". Đo được: năm
+        # lượt gõ tạo năm workflow trong cùng một phiên.
+        "if (mode === 'journey' || (pending?.kind === 'missing_info' && picked.length === 0)) {",
         "mode === 'journey' && live?.status === 'SUCCESS' && live.summary && (",
         "{mode === 'journey' && (\n                <JourneyCanvas",
         "journeyLabel={mode === 'journey' ? title : undefined}",
@@ -131,13 +132,34 @@ def test_nothing_in_the_frame_depends_on_mode_alone() -> None:
     for dong in page.splitlines():
         if "mode === 'journey'" not in dong:
             continue
+        # Chú thích không phải mã. Bắt cả chúng thì mọi lời giải thích về chính
+        # luật này đều làm luật đỏ — và người sau sẽ gỡ lời giải thích.
+        if dong.lstrip().startswith(("*", "//", "/*")):
+            continue
+        # `style=` đặt TỈ LỆ, không đặt SỰ TỒN TẠI.
+        #
+        # Luật này canh một thứ: khung trang không được biến mất khi gõ một câu
+        # chat. Thứ quyết định có-hay-không là `className` và các nhánh JSX —
+        # chúng vẫn bị soi. Một dòng chia chiều cao giữa sơ đồ và hội thoại
+        # (`flex: <tỉ lệ>`) chỉ chạy KHI đã ở chế độ hành trình, và ở chế độ kia
+        # nó trả `undefined` để lớp cũ lo.
+        #
+        # Ghi thành luật chứ không thêm hai chuỗi vào danh sách cho phép: chính
+        # docstring của bài kiểm này nói phải hỏi "còn chỗ nào nữa không" thay
+        # vì vá từng chỗ.
+        if dong.lstrip().startswith("style={"):
+            continue
         if any(mau in dong or dong.strip() in mau for mau in duoc_phep):
             continue
-        if "talking" in dong:
+        # `talking` và `coHoiThoai` là CÙNG một khái niệm: có cuộc trao đổi hay
+        # không. Dòng ghép `mode` với một trong hai thì không còn phụ thuộc mình
+        # `mode` — đúng thứ luật này canh.
+        #
+        # Đây là ngoại lệ CÓ TÊN, không phải luật tổng quát: một quy tắc kiểu
+        # "hễ có && thì cho qua" sẽ nuốt luôn `{mode === 'journey' && (` — dòng
+        # dựng canvas, vốn phụ thuộc mình `mode` thật.
+        if "talking" in dong or "coHoiThoai" in dong:
             continue
         con_lai.append(dong.strip())
 
-    assert not con_lai, (
-        "còn chỗ buộc khung trang vào mình `mode` — gõ một câu chat sẽ làm nó "
-        f"biến mất: {con_lai}"
-    )
+    assert not con_lai, f"còn chỗ buộc khung trang vào mình `mode` — gõ một câu chat sẽ làm nó biến mất: {con_lai}"

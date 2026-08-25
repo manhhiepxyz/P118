@@ -15,6 +15,7 @@ exception / payload / connection detail ra ngoài.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.common.projects import PROJECTS
@@ -138,9 +139,57 @@ SPOKEN_FORMS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Mã dự án `PRJ-003` và ngày ISO `2026-08-30` là dạng CANONICAL — không ai gõ
+# chúng. Bảng `SPOKEN_FORMS` ở trên là tra tĩnh, không phủ được hai loại này vì
+# chúng sinh ra từ dữ liệu (danh mục dự án) và từ định dạng (ngày).
+_PROJECT_ID = re.compile(r"^PRJ-[A-Z0-9]+$")
+_ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
 def spoken_forms(value: str) -> tuple[str, ...]:
-    """Mọi cách một giá trị chuẩn có thể đã được NÓI RA, kèm chính nó."""
-    return (value,) + SPOKEN_FORMS.get(value, ())
+    """Mọi cách một giá trị chuẩn có thể đã được NÓI RA, kèm chính nó.
+
+    Đây là cầu nối giữa giá trị canonical và lời người dùng. Nơi dùng nó nhiều
+    nhất là `_fields_taken_from_recall`: guard ấy hỏi *"giá trị này có trong
+    câu người dùng vừa nói không"* — và câu hỏi đó chỉ trả lời đúng khi mọi
+    cách nói đều được liệt kê.
+
+    Thiếu cầu nối thì guard bắt nhầm điều người dùng VỪA GÕ. Đo được: khách gõ
+    "Vinhomes Green Paradise", model điền `PRJ-003`, guard không nối được hai
+    thứ nên kết luận giá trị lấy từ ký ức và hỏi lại đúng tên dự án vừa gõ.
+    Nghịch lý đo được: giữ nguyên field nào thì field đó bị hỏi lại.
+
+    Hai loại dưới đây suy ra từ chính giá trị, không tra bảng tĩnh:
+
+      PRJ-003      → tên dự án trong danh mục
+      2026-08-30   → "30/08", "30/08/2026", "30-08", "30 tháng 8"
+
+    KHÔNG nới độ chặt của guard: một giá trị chỉ có trong ký ức mà không có
+    trong câu người dùng vẫn bị bắt như cũ.
+    """
+    forms: tuple[str, ...] = (value,) + SPOKEN_FORMS.get(value, ())
+
+    if _PROJECT_ID.match(value):
+        from src.common.projects import project_name
+
+        ten = project_name(value)
+        if ten:
+            forms += (ten,)
+        return forms
+
+    ngay = _ISO_DAY.match(value)
+    if ngay:
+        nam, thang, ngay_ = ngay.groups()
+        forms += (
+            f"{ngay_}/{thang}",
+            f"{ngay_}/{thang}/{nam}",
+            f"{ngay_}-{thang}",
+            f"{ngay_} tháng {int(thang)}",
+            f"{int(ngay_)}/{int(thang)}",
+        )
+    return forms
+
+
 _OTHER_ZONE = {"ZONE_A": "Khu B", "ZONE_B": "Khu A"}
 
 

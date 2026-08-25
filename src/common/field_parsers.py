@@ -99,11 +99,23 @@ def _spec_for(field: str) -> Any | None:
         return None
     first = specs[0]
     for other in specs[1:]:
-        if (other.kind, other.enum, other.minimum, other.exclusive_minimum) != (
+        # Liệt kê từng thuộc tính, nên mỗi thuộc tính MỚI của `FieldSpec` phải
+        # được thêm vào đây bằng tay. Quên một cái thì hai luật khác nhau trông
+        # y hệt nhau, và bộ đọc câu trả lời áp bừa một trong hai.
+        if (
+            other.kind,
+            other.enum,
+            other.minimum,
+            other.exclusive_minimum,
+            other.maximum,
+            other.must_be_true,
+        ) != (
             first.kind,
             first.enum,
             first.minimum,
             first.exclusive_minimum,
+            first.maximum,
+            first.must_be_true,
         ):
             return None
     return first
@@ -182,6 +194,11 @@ def _unknown_zone(text: str | None) -> str | None:
 
 def _unknown_zone_message(zone: str) -> str:
     return f"Bãi xe chỉ có Khu A và Khu B, không có Khu {zone}. Bạn chọn giúp mình một trong hai khu đó nhé."
+
+
+def extract_plate_number(text: str) -> str | None:
+    """Bản công khai —  dùng CHÍNH luật này, không chép lại."""
+    return _extract_plate_number(text)
 
 
 def _extract_plate_number(text: str) -> str | None:
@@ -424,6 +441,39 @@ def _is_tag_question(folded: str) -> bool:
     if match is None:
         return False
     return bool(re.findall(r"[a-z0-9]+", folded[: match.start()]))
+
+
+# Tiểu từ lịch sự và đệm câu. Chúng không mang nội dung, nên một câu chỉ gồm
+# chúng cộng một tiếng có/không vẫn là một tiếng có/không.
+_PARTICLES = frozenset({"a", "vay", "nhi", "the", "nhe", "minh", "ban", "ban oi", "di", "day", "ha"})
+
+
+def is_bare_yes_no(text: str) -> bool:
+    """Cả câu này có KHÔNG CÓ GÌ ngoài một tiếng có/không hay không.
+
+    Một tiếng như vậy nói được GIÁ TRỊ nhưng không nói được nó thuộc về Ô NÀO.
+    Khi nhiều ô cùng nhận được nó — `needs_loading_support` nhận `False`, còn
+    `move_vehicle` có một giá trị đánh vần đúng bằng từ ấy (`"khong"` →
+    `"none"`) — thì một tiếng đáp đóng luôn hai câu hỏi.
+
+    Đo được trên stack demo, dịch vụ chuyển nhà:
+
+        P-118: …có cần hỗ trợ bốc dỡ hay không và phương tiện chuyển nhà?
+        Bạn:   không
+        →      "needs_loading_support": false,
+               "move_vehicle": "none"      ← chưa bao giờ được nói ra
+
+    Câu CÓ nội dung thật ("đi xe tải", "ngày 31 lúc 8h") không rơi vào đây:
+    nội dung ấy chỉ ra ô, nên rút nhiều ô từ một câu vẫn đúng.
+    """
+    folded = _strip_compounds(text)
+    words = re.findall(r"[a-z0-9]+", folded)
+    if not words:
+        return False
+    con_lai = [w for w in words if w not in _PARTICLES]
+    if not con_lai:
+        return False
+    return all(w in _NO_WORDS or w in _YES_WORDS for w in con_lai)
 
 
 def _parse_boolean(text: str) -> bool | None:

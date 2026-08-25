@@ -46,9 +46,7 @@ CASES = [
 
 
 @pytest.mark.parametrize(("tool", "inputs", "expected", "keyword"), CASES)
-def test_the_field_belongs_to_the_tool_that_failed(
-    tool: str, inputs: dict, expected: list[str], keyword: str
-) -> None:
+def test_the_field_belongs_to_the_tool_that_failed(tool: str, inputs: dict, expected: list[str], keyword: str) -> None:
     assert repair_missing_fields(tool, ErrorCode.NO_AVAILABILITY, inputs) == expected
 
 

@@ -53,9 +53,7 @@ async def test_the_row_still_exists_for_tracing(client, db_pool):
 
     await routes._archive_unsupported_workflow(workflow_id)
 
-    assert await db_pool.fetchval(
-        "SELECT goal FROM workflows WHERE workflow_id = $1::uuid", workflow_id
-    ) == "asdkj"
+    assert await db_pool.fetchval("SELECT goal FROM workflows WHERE workflow_id = $1::uuid", workflow_id) == "asdkj"
 
 
 @pytest.mark.asyncio

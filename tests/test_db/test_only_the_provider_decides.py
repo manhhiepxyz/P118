@@ -278,7 +278,13 @@ async def test_the_provider_decision_changes_the_right_row(client, db_pool):
 
     response = await client.post(
         f"{SERVICE}/{workflow_id}/{task_id}/decide",
-        json={"decision": "reject", "reject_reason": "Đơn vị đang bảo trì hệ thống"},
+        # Nguyên nhân canonical là bắt buộc: main app đọc MÃ để biết lời từ
+        # chối này khách có sửa được hay không.
+        json={
+            "decision": "reject",
+            "reject_code": "SERVICE_UNAVAILABLE",
+            "reject_reason": "Đơn vị đang bảo trì hệ thống",
+        },
         headers=_auth(token),
     )
 

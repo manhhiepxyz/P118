@@ -45,9 +45,7 @@ def test_the_spinner_is_a_circle_and_the_square_stays_still() -> None:
     spinner = rail[rail.index('aria-label="Dừng việc đang chạy"') :]
     spinner = spinner[: spinner.index("</button>")]
 
-    assert "animate-spin rounded-full" in spinner, (
-        "vòng xoay không phải hình tròn — quay khung bo góc trông như rung"
-    )
+    assert "animate-spin rounded-full" in spinner, "vòng xoay không phải hình tròn — quay khung bo góc trông như rung"
     assert "animate-spin rounded-[var(--r-sm)]" not in spinner, "vẫn đang quay chính khung vuông của nút"
 
     square = spinner[spinner.index("<Square") :]
@@ -80,9 +78,7 @@ def test_a_cancellation_is_announced_once_per_request() -> None:
     """
     page = _WORKSPACE.read_text(encoding="utf-8")
     assert "stopAnnouncedFor" in page, "không có cơ chế chặn câu huỷ lặp"
-    assert "res.workflow_id === stopAnnouncedFor.current" in page, (
-        "chặn theo cờ chung thay vì theo đúng yêu cầu đã huỷ"
-    )
+    assert "res.workflow_id === stopAnnouncedFor.current" in page, "chặn theo cờ chung thay vì theo đúng yêu cầu đã huỷ"
     assert "stopAnnounced.current = false" not in page, (
         "vẫn còn chỗ mở lại cờ — đó chính là kẽ hở khiến câu huỷ thứ hai lọt ra"
     )

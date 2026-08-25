@@ -41,6 +41,18 @@ AllowedTool = Literal[
     "register_resident",
     "register_vehicle",
     "book_parking",
+    # Đổi khu cho một chỗ ĐÃ GIỮ. Planner KHÔNG được lập kế hoạch với nó (xem
+    # `AGENT_FORBIDDEN_TOOLS`): nó chỉ có nghĩa khi đã có `booking_id` thật từ
+    # một bước trước, và đường sửa lỗi dựng task này từ kết quả đã chạy.
+    "change_parking_zone",
+    # Huỷ một lịch ĐÃ ĐẶT. Cùng lý do với `change_parking_zone`: Planner không
+    # được chạm (`AGENT_FORBIDDEN_TOOLS`), vì `viewing_id` chỉ có thật khi đến
+    # từ một bước đã chạy — để model tự viết ra là để nó huỷ lịch của người khác.
+    "cancel_property_viewing",
+    "cancel_parking",
+    "cancel_maintenance",
+    "cancel_move",
+    "cancel_shuttle",
     "pay_fee",
     "book_shuttle",
 ]

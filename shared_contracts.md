@@ -274,6 +274,13 @@ chạy song song và không tự tạo `pay_fee` trong MVP.
 
 ### book_parking
 
+Availability của luồng demo do đơn vị cung cấp quyết định tại hàng đợi
+`/review`. `NO_AVAILABILITY` là mã từ chối hợp lệ cho `book_parking`, không
+phải cho `register_vehicle`. Sau khi đơn vị đã duyệt, mock Transport chỉ
+materialize booking và không được dùng capacity seed trong main DB để phủ
+quyết định ấy. Primitive repository vẫn kiểm capacity mặc định cho caller
+không đi qua hàng đợi duyệt.
+
 ```json
 // Input
 {

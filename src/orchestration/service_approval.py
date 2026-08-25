@@ -53,6 +53,10 @@ SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
     {
         "register_vehicle",
         "book_parking",
+        # Đổi khu là một YÊU CẦU gửi đơn vị, không phải một lệnh: họ có thể
+        # từ chối (khu kia hết chỗ, quá hạn đổi, chính sách phí). Cùng cổng,
+        # cùng `reject_code`, cùng vòng sửa lỗi với lúc đặt mới.
+        "change_parking_zone",
         "create_maintenance_request",
         "schedule_move",
         "book_shuttle",
@@ -62,13 +66,52 @@ SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
 
 # Tên dịch vụ cho người duyệt đọc. Đơn vị nhìn hàng đợi, không nhìn tên tool.
 SERVICE_LABELS: dict[str, str] = {
+    # `schedule_property_viewing` có mặt ở đây dù KHÔNG nằm trong
+    # `SERVICE_GATED_TOOLS` — nó đi qua cổng duyệt riêng của đơn vị tour. Bảng
+    # này trả lời câu "gọi dịch vụ này là gì cho người đọc", và câu ấy cần một
+    # câu trả lời cho MỌI dịch vụ, kể cả dịch vụ đi cổng khác. Thiếu nó thì hồ
+    # sơ liên hệ hiện lên hàng đợi dưới cái tên `schedule_property_viewing`.
+    "schedule_property_viewing": "Đặt lịch tham quan",
     "register_vehicle": "Đăng ký phương tiện",
     "book_parking": "Giữ chỗ đỗ xe",
+    "change_parking_zone": "Đổi khu đỗ xe",
     "create_maintenance_request": "Yêu cầu bảo trì",
     "schedule_move": "Đăng ký chuyển nhà",
     "book_shuttle": "Xe đưa đón tham quan",
     "register_property_interest": "Đăng ký nhận tư vấn",
 }
+
+# Mã từ chối là policy theo TỪNG tool, không phải một danh sách chung cho mọi
+# hàng đợi. ``NO_AVAILABILITY`` chỉ hợp lệ khi tool có một ô thời gian/khu vực
+# mà khách thật sự có thể đổi. Gán mã ấy cho ``register_vehicle`` đã huỷ bước
+# tạo vehicle; lần giữ chỗ Khu B sau đó chết dependency trước khi gọi provider.
+REJECT_CODES: tuple[str, ...] = (
+    "NO_AVAILABILITY",
+    "INVALID_REQUEST",
+    "SERVICE_UNAVAILABLE",
+    "OTHER",
+)
+_AVAILABILITY_TOOLS: frozenset[str] = frozenset(
+    {
+        "schedule_property_viewing",
+        "book_parking",
+        "book_shuttle",
+        "create_maintenance_request",
+        "schedule_move",
+    }
+)
+
+
+def allowed_reject_codes(tool: str) -> tuple[str, ...]:
+    """Mã mà đơn vị được ký cho ``tool``.
+
+    Backend trả allowlist này cho UI và vẫn kiểm lại khi POST. UI chỉ là lớp
+    hướng dẫn; request tự chế không được mở lại mã sai nghiệp vụ.
+    """
+    if tool in _AVAILABILITY_TOOLS:
+        return REJECT_CODES
+    return tuple(code for code in REJECT_CODES if code != "NO_AVAILABILITY")
+
 
 # Dữ kiện KHÔNG đưa cho người duyệt: định danh nội bộ, không giúp họ quyết định
 # và là dữ liệu cá nhân không cần thiết cho việc duyệt.
@@ -160,9 +203,17 @@ class ServiceApprovalBoundary:
         seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         gated = gated_tasks(plan)
-        # Bước ĐÃ chạy xong ở lượt trước không cần duyệt lại — nếu không, mỗi
+        # Bước ĐÃ KẾT THÚC ở lượt trước không cần duyệt lại — nếu không, mỗi
         # lần chạy tiếp lại dựng một hàng đợi cho việc đã làm.
-        already = {tid for tid, status in (seed_statuses or {}).items() if status is TaskStatus.SUCCESS}
+        #
+        # `CANCELLED` cũng nằm ở đây, không chỉ `SUCCESS`. Một lần thử BỊ THAY
+        # THẾ (xem `repair_attempt.py`) vẫn có mặt trong kế hoạch dựng lại từ
+        # `workflow_tasks`, nhưng nó thuộc về quá khứ. Ghim nó vào hàng đợi
+        # nghĩa là bắt đơn vị duyệt một yêu cầu đã bị bỏ, và `_park` gọi
+        # `update_task_status` trên một dòng `CANCELLED` — lệnh đó khớp 0 dòng
+        # và ném `TaskNotFoundError` giữa lúc sửa lỗi.
+        ket_thuc = {TaskStatus.SUCCESS, TaskStatus.CANCELLED}
+        already = {tid for tid, status in (seed_statuses or {}).items() if status in ket_thuc}
         gated = {tid: tool for tid, tool in gated.items() if tid not in already}
 
         if not gated or self._approved:
@@ -346,6 +397,7 @@ async def record_service_decision(
     *,
     decided_by: str | None = None,
     reason: str | None = None,
+    reject_code: str | None = None,
 ) -> bool:
     """Chốt một quyết định. `False` nếu bước này đã được quyết trước đó.
 
@@ -359,7 +411,8 @@ async def record_service_decision(
             UPDATE service_approvals
                SET status = $3, decided_at = NOW(),
                    decided_by = COALESCE($4, decided_by),
-                   reject_reason = COALESCE($5, reject_reason)
+                   reject_reason = COALESCE($5, reject_reason),
+                   reject_code = COALESCE($6, reject_code)
              WHERE workflow_id = $1 AND task_id = $2 AND status = 'AWAITING'
             """,
             UUID(workflow_id),
@@ -367,6 +420,7 @@ async def record_service_decision(
             decision,
             decided_by,
             reason,
+            reject_code,
         )
     return result.endswith(" 1")
 
@@ -386,11 +440,86 @@ async def expire_pending_service_approvals(pool: asyncpg.Pool, workflow_id: str)
     return int(result.rsplit(" ", 1)[-1] or 0)
 
 
+# Nhãn cho hàng đợi của đơn vị. Họ nhìn TÊN VIỆC, không nhìn mã.
+_REQUEST_LABELS: dict[str, str] = {
+    "AMEND": "Xin đổi lịch",
+    "CANCEL": "Xin huỷ lịch",
+}
+
+
+async def save_support_request(
+    pool: asyncpg.Pool,
+    *,
+    workflow_id: str,
+    task_id: str,
+    kind: str,
+    note: str | None = None,
+) -> str:
+    """Ghim một LỜI NHỜ vào hàng đợi đơn vị. Trả mã hồ sơ vừa tạo.
+
+    Khách bấm "Đổi lịch" hoặc "Huỷ lịch" trên một việc ĐÃ XONG. Hệ thống không
+    tự làm thay: nó chuyển lời nhờ tới đơn vị, và đơn vị quyết.
+
+    Vì sao dùng lại chính bảng này thay vì dựng một kênh riêng: đơn vị đã có một
+    màn hình duyệt, có phân quyền, có mã từ chối, có đường báo lại cho khách.
+    Một kênh thứ hai là dựng lại cả bốn thứ ấy, rồi giữ cho chúng không lệch nhau.
+
+    `kind='REQUEST'` là thứ giữ cho lời nhờ không bị đọc thành mệnh lệnh — xem
+    ghi chú tại cột `kind` trong `schema.sql`.
+
+    Mã hồ sơ KHÔNG bao giờ đụng một `task_id` có thật: khoá chính là
+    `(workflow_id, task_id)`, và một lần đụng nghĩa là hồ sơ này ghi đè bằng
+    chứng của một bước. Bước mang tên `T5`, `T5R2`, `T5Z2`; hồ sơ mang tên `YC1`,
+    `YC2`… — hai không gian tên rời nhau.
+
+    `task_id` gốc đi vào `details`, không vào khoá: nhiều lời nhờ có thể cùng
+    nói về một bước, và lời nhờ thứ hai không được xoá lời nhờ thứ nhất.
+    """
+    if kind not in _REQUEST_LABELS:
+        raise ValueError("Loại yêu cầu không nằm trong danh sách.")
+    dich_vu = ""
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock_workflow_row(conn, workflow_id)
+        row = await conn.fetchrow(
+            "SELECT tool FROM workflow_tasks WHERE workflow_id = $1 AND task_id = $2",
+            UUID(workflow_id),
+            task_id,
+        )
+        if row is None:
+            raise ValueError("Không tìm thấy bước này trong yêu cầu.")
+        dich_vu = str(row["tool"])
+        # Đánh số trong CÙNG transaction đang giữ khoá workflow, nên hai lần
+        # bấm đồng thời không thể cùng nhận một mã.
+        dang_co = await conn.fetchval(
+            "SELECT COUNT(*) FROM service_approvals WHERE workflow_id = $1 AND kind = 'REQUEST'",
+            UUID(workflow_id),
+        )
+        ma = f"YC{int(dang_co) + 1}"
+        await conn.execute(
+            """
+            INSERT INTO service_approvals
+                (workflow_id, task_id, tool, service_label, details, kind,
+                 applicant_user_id, applicant_name, applicant_phone)
+            SELECT $1, $2, $3, $4, $5::jsonb, 'REQUEST', w.owner_user_id, u.full_name, u.phone
+              FROM workflows w
+              LEFT JOIN users u ON u.id = w.owner_user_id
+             WHERE w.workflow_id = $1
+            """,
+            UUID(workflow_id),
+            ma,
+            dich_vu,
+            f"{_REQUEST_LABELS[kind]} — {SERVICE_LABELS.get(dich_vu, dich_vu)}",
+            json.dumps({"loai": kind, "task_id": task_id, "ghi_chu": note or ""}, ensure_ascii=False),
+        )
+    return ma
+
+
 async def pending_for_workflow(pool: asyncpg.Pool, workflow_id: str) -> list[dict[str, Any]]:
     """Các bước của workflow này còn chờ đơn vị quyết."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT task_id, tool, service_label, details, status FROM service_approvals "
+            "SELECT task_id, tool, service_label, details, status, kind, reject_code, reject_reason "
+            "FROM service_approvals "
             "WHERE workflow_id = $1 ORDER BY task_id",
             UUID(workflow_id),
         )
@@ -426,7 +555,7 @@ async def list_by_status(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT workflow_id, task_id, tool, service_label, details, status,
+            SELECT workflow_id, task_id, tool, service_label, details, status, reject_code, reject_reason,
                    applicant_name, applicant_phone, created_at,
                    decided_by, decided_at, reject_reason
               FROM service_approvals

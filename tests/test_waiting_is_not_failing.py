@@ -45,13 +45,9 @@ def test_a_step_waiting_on_someone_is_a_pause() -> None:
     """Đây là ca đã hỏng: `pay_fee` chờ người dùng bấm duyệt."""
     statuses = {"T1": "SUCCESS", "T2": "SUCCESS", "T3": "SUCCESS", "T4": TaskStatus.PENDING.value}
     assert _final_status(statuses) is WorkflowStatus.WAITING_APPROVAL, (
-        "bước đang chờ bị đọc là bước hỏng — người dùng thấy 'chưa hoàn tất' "
-        "cho một yêu cầu không có gì vướng"
+        "bước đang chờ bị đọc là bước hỏng — người dùng thấy 'chưa hoàn tất' cho một yêu cầu không có gì vướng"
     )
-    assert (
-        _final_status({"T1": "SUCCESS", "T2": TaskStatus.WAITING_APPROVAL.value})
-        is WorkflowStatus.WAITING_APPROVAL
-    )
+    assert _final_status({"T1": "SUCCESS", "T2": TaskStatus.WAITING_APPROVAL.value}) is WorkflowStatus.WAITING_APPROVAL
 
 
 def test_every_resume_path_uses_the_same_rule() -> None:
@@ -63,8 +59,7 @@ def test_every_resume_path_uses_the_same_rule() -> None:
         "còn nơi tự tính trạng thái cuối theo luật cũ — nó sẽ gọi 'đang chờ' là 'hỏng'"
     )
     assert source.count("_final_status(statuses)") >= 4, (
-        f"chỉ {source.count('_final_status(statuses)')} nơi dùng luật chung; "
-        "các nơi còn lại vẫn theo luật riêng"
+        f"chỉ {source.count('_final_status(statuses)')} nơi dùng luật chung; các nơi còn lại vẫn theo luật riêng"
     )
 
 
@@ -76,9 +71,5 @@ def test_pausing_for_payment_leaves_a_button_to_press() -> None:
     source = inspect.getsource(demo_service)
     assert "_ensure_payment_card(" in source, "dừng vì chờ tiền mà không ghim thẻ duyệt"
     body = inspect.getsource(demo_service._ensure_payment_card)
-    assert "_load_pending_payment_row" in body, (
-        "ghim không kiểm trùng — hai thẻ cho cùng một khoản tiền"
-    )
-    assert "TaskStatus.PENDING.value" in body, (
-        "ghim cho cả bước đã chạy xong; thẻ duyệt hiện lại sau khi đã trả tiền"
-    )
+    assert "_load_pending_payment_row" in body, "ghim không kiểm trùng — hai thẻ cho cùng một khoản tiền"
+    assert "TaskStatus.PENDING.value" in body, "ghim cho cả bước đã chạy xong; thẻ duyệt hiện lại sau khi đã trả tiền"

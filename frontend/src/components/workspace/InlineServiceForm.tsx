@@ -1,6 +1,7 @@
 import { Minus, Plus } from 'lucide-react'
 
 import { today, type FieldSpec, type FormValues } from '../../lib/serviceForms'
+import { maxDate, minDate } from '../../lib/dateBounds'
 
 interface Props {
   fields: FieldSpec[]
@@ -93,6 +94,11 @@ export function InlineServiceForm({ fields, values, onChange, invalid }: Props) 
               <input
                 id={id}
                 type={field.kind === 'date' ? 'date' : field.kind === 'time' ? 'time' : 'text'}
+                /* Khoá quá khứ và ngày quá xa ngay tại ô nhập — backend sẽ từ
+                   chối chúng, và từ chối sau một lượt lập kế hoạch là bắt người
+                   dùng trả giá cho thứ trình duyệt nói ngay được. */
+                min={field.kind === 'date' ? minDate() : undefined}
+                max={field.kind === 'date' ? maxDate() : undefined}
                 // Hiện đúng giá trị SẼ ĐƯỢC GỬI. Để trống một ô có mặc định là
                 // nói dối: người dùng nhìn ô rỗng rồi ngạc nhiên khi yêu cầu
                 // mang theo một ngày họ không gõ.

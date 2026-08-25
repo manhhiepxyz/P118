@@ -95,7 +95,11 @@ async def call_provider(
         result = await connector.execute(
             call.tool,
             call.input_data,
-            context=ProviderCallContext(idempotency_key=permit.effective_key),
+            context=ProviderCallContext(
+                idempotency_key=permit.effective_key,
+                workflow_id=call.workflow_id,
+                task_id=call.task_id,
+            ),
         )
     except Exception:  # noqa: BLE001 - cô lập lỗi của một nhánh
         result = StandardResult.fail(

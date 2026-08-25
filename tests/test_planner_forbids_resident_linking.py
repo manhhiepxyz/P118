@@ -177,11 +177,26 @@ def test_the_planner_tool_space_excludes_resident_linking() -> None:
 
     provider_tools = set(typing.get_args(AllowedTool))
 
-    # Hai tool bị loại, vì hai lý do khác nhau:
-    #   `register_resident`   — onboarding xảy ra NGOÀI Agent (đường admin/provider)
-    #   `search_properties`   — tìm kiếm / listing là chức năng marketplace
-    # Cả hai vẫn nằm trong contract provider; chỉ đường TỚI chúng bị đóng.
-    outside_the_agent = {"register_resident", "search_properties"}
+    # Ba tool bị loại, vì ba lý do khác nhau:
+    #   `register_resident`    — onboarding xảy ra NGOÀI Agent (đường admin/provider)
+    #   `search_properties`    — tìm kiếm / listing là chức năng marketplace
+    #   `change_parking_zone`  — thao tác SỬA trên một chỗ đã giữ, chỉ có nghĩa
+    #                            khi đã có `booking_id` thật từ bước trước. Cho
+    #                            Planner lập kế hoạch với nó là cho model tự
+    #                            viết ra một `booking_id` literal.
+    # Cả ba vẫn nằm trong contract provider; chỉ đường TỚI chúng bị đóng.
+    outside_the_agent = {
+        "register_resident",
+        "search_properties",
+        "change_parking_zone",
+        # Huỷ một lịch ĐÃ ĐẶT: cùng lý do, `viewing_id` chỉ có thật khi đến từ
+        # một bước đã chạy.
+        "cancel_property_viewing",
+        "cancel_parking",
+        "cancel_maintenance",
+        "cancel_move",
+        "cancel_shuttle",
+    }
     assert outside_the_agent <= provider_tools, "contract provider không được thu hẹp"
     assert not (outside_the_agent & PLANNER_ALLOWED_TOOLS)
     assert PLANNER_ALLOWED_TOOLS == provider_tools - outside_the_agent
