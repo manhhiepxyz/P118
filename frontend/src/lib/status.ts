@@ -366,6 +366,14 @@ export function describeWorkflowFailure(
   retryable: boolean | null | undefined,
 ): string {
   const why = errorCode ? (FAILURE_TEXT[errorCode] ?? 'Yêu cầu này dừng giữa chừng.') : 'Yêu cầu này dừng giữa chừng.'
+  // `retryable` có BA giá trị, không phải hai.
+  //
+  // `null`/`undefined` nghĩa là hệ thống KHÔNG BIẾT — mã lỗi nghiệp vụ do
+  // connector trả về không nằm trong sổ phân loại hạ tầng. Gộp nó vào nhánh
+  // `false` thì người gặp "đã có chỗ đỗ trong ngày này" bị bảo "gửi lại cũng
+  // sẽ hỏng như cũ", trong khi chỉ cần đổi ngày là chạy. Một câu khuyên bỏ
+  // cuộc, phát cho đúng người sửa được.
+  if (retryable === null || retryable === undefined) return why
   const next = retryable
     ? 'Bạn gửi lại yêu cầu này là mình chạy tiếp được.'
     : 'Việc này cần được xử lý lại từ phía hệ thống, bạn gửi lại cũng sẽ hỏng như cũ.'

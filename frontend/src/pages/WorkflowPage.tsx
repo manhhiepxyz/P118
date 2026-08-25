@@ -165,6 +165,15 @@ export function WorkflowPage() {
   const tone = TONE[data.status] ?? { label: 'Đang cập nhật', token: 'var(--text-muted)' }
   const finished = data.status === 'SUCCESS'
   /**
+   * Còn đang chạy THẬT — khác `!finished`.
+   *
+   * `finished` chỉ đúng với SUCCESS, nên `!finished` bao gồm cả FAILED,
+   * CANCELLED và các trạng thái chờ người dùng. Dùng nó cho chỉ báo "đang xử
+   * lý" thì một yêu cầu đã hỏng sẽ quay mãi mãi — nói dối theo hướng nguy hiểm
+   * hơn im lặng, vì người dùng ngồi đợi một thứ không bao giờ tới.
+   */
+  const running = data.status === 'PENDING' || data.status === 'RUNNING'
+  /**
    * Diễn biến người dùng còn quan tâm SAU KHI việc đã xong.
    *
    * "Đang chuẩn bị kế hoạch", "Kế hoạch đã sẵn sàng", "Đang thực hiện yêu cầu"
@@ -256,11 +265,19 @@ export function WorkflowPage() {
               style={{ backgroundColor: 'color-mix(in srgb, var(--danger) 7%, transparent)' }}
               aria-label="Vì sao chưa xong"
             >
-              <p className="text-[13px] font-semibold" style={{ color: 'var(--danger)' }}>
-                Vì sao chưa xong
-              </p>
-              <p className="mt-2 text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                {describeWorkflowFailure(data.error_code, data.retryable)}
+              {/* KHÔNG lặp lại tiêu đề "Vì sao chưa xong".
+                  Nhãn trạng thái ngay phía trên đã nói "Chưa xong"; một tiêu đề
+                  nhắc lại đúng chữ đó rồi mới tới nội dung là bắt người đọc đi
+                  qua hai lần cùng một thông tin để tới câu họ cần. `aria-label`
+                  giữ lại cho trình đọc màn hình, vốn không thấy vị trí. */}
+              <p className="text-[15px] leading-[1.6] text-[var(--text-primary)]">
+                {/* Câu của BACKEND đi trước — nó biết bước nào hỏng và vì
+                    sao, kèm cả dữ liệu của bước ấy ("ngày 2026-08-19"). Bảng
+                    `FAILURE_TEXT` ở đây chỉ có mã hạ tầng, nên với lỗi nghiệp
+                    vụ nó chỉ nói được "Yêu cầu này dừng giữa chừng". */}
+                {data.summary && data.status === 'FAILED'
+                  ? data.summary
+                  : describeWorkflowFailure(data.error_code, data.retryable)}
               </p>
               {failedStep && (
                 <p className="mt-2.5 text-[13.5px] text-[var(--text-secondary)]">
@@ -270,20 +287,6 @@ export function WorkflowPage() {
             </section>
           )}
 
-          {/* Nói tiếp — chỉ hiện khi KHÔNG còn câu hỏi treo.
-              Đang có câu hỏi thì ô trả lời của `ClarificationReply` mới là chỗ
-              đúng; dựng hai ô nhập cạnh nhau cho hai việc khác nhau là bắt
-              người dùng đoán cái nào gửi đi đâu. */}
-          {!needsInfo && (
-            <section className="rise mt-9" aria-label="Nói tiếp">
-              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
-                Cần gì thêm không?
-              </h2>
-              <div className="mt-4">
-                <ClarificationReply onSubmit={handleFollowUp} />
-              </div>
-            </section>
-          )}
 
           {/* ── Trao đổi ─────────────────────────────────────────────
               Câu người dùng đã nói + câu P-118 trả lời, đặt cạnh nhau.
@@ -296,7 +299,7 @@ export function WorkflowPage() {
 
               Cuộc trao đổi THUỘC VỀ workflow. Đặt nó ở đây là bỏ được một mục
               rời rạc, và câu hỏi lẫn câu trả lời cuối cùng cũng ở cùng chỗ. */}
-          {(data.goal || (!needsInfo && data.answer)) && (
+          {(data.goal || data.answer) && (
             <section className="rise mt-9" aria-label="Trao đổi">
               <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">
                 Trao đổi
@@ -309,7 +312,15 @@ export function WorkflowPage() {
                     </p>
                   </div>
                 )}
-                {!needsInfo && data.answer && (
+                {/* Câu trả lời hiện TRONG hội thoại, kể cả khi P-118 đang
+                    hỏi lại. Trước đây nó bị nhốt ở khối "Cần bạn bổ sung" phía
+                    dưới, nên khung chat chỉ có lời của người dùng — họ gửi câu
+                    mới rồi nhìn một cuộc trò chuyện một chiều và tưởng hệ thống
+                    không trả lời.
+
+                    `question` là phương án dự phòng: ở nhánh hỏi lại, `answer`
+                    có thể chưa kịp sinh. */}
+                {(data.answer || (needsInfo && data.question)) && (
                   <div className="flex gap-3" data-turn="agent">
                     <span
                       aria-hidden
@@ -319,21 +330,69 @@ export function WorkflowPage() {
                       P
                     </span>
                     <p className="min-w-0 flex-1 whitespace-pre-line text-[15px] leading-[1.6] text-[var(--text-primary)]">
-                      {data.answer}
+                      {data.answer || data.question}
                     </p>
                   </div>
                 )}
+
+                {/* P-118 ĐANG SOẠN.
+                    Không có dòng này, người dùng gửi câu mới rồi nhìn một khung
+                    chỉ có lời của chính mình — không biết hệ thống đã nhận
+                    chưa, có đang chạy không, hay đã chết. Họ gửi lại, và lần
+                    gửi lại tạo thêm một workflow nữa.
+
+                    Điều kiện là "chưa kết thúc VÀ chưa có câu trả lời": xong
+                    rồi mà vẫn quay là nói dối theo hướng ngược lại. */}
+                {running && !data.answer && (
+                  <div className="flex items-center gap-3" data-turn="agent-pending">
+                    <span
+                      aria-hidden
+                      className="mt-[3px] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--r-xs)] font-mono text-[11px] font-bold"
+                      style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
+                    >
+                      P
+                    </span>
+                    <span
+                      className="inline-flex items-center gap-2 text-[14.5px]"
+                      style={{ color: 'var(--text-muted)' }}
+                      aria-live="polite"
+                    >
+                      P-118 đang xử lý
+                      {/* Ba chấm nhấp nháy dùng lại `think-dot` của hội thoại
+                          workspace — cùng một nhịp cho cùng một ý nghĩa. */}
+                      <span className="inline-flex items-center gap-1" aria-hidden>
+                        {[0, 1, 2].map((i) => (
+                          <span
+                            key={i}
+                            className="think-dot h-[5px] w-[5px] rounded-full bg-current"
+                            style={{ animationDelay: `${i * 160}ms` }}
+                          />
+                        ))}
+                      </span>
+                    </span>
+                  </div>
+                )}
               </div>
+
+              {/* Ô nhập nằm DƯỚI hội thoại, như mọi khung chat.
+                  Trước đây nó ở TRÊN: người dùng gõ ở đầu trang rồi phải cuộn
+                  xuống mới thấy thứ mình vừa nói. Câu mới luôn xuất hiện ở
+                  cuối, nên chỗ gõ cũng phải ở cuối. */}
+              {!needsInfo && (
+                <div className="mt-6">
+                  <ClarificationReply onSubmit={handleFollowUp} />
+                </div>
+              )}
             </section>
           )}
 
           {/* ── Cần bạn bổ sung ─────────────────────────────────────── */}
           {needsInfo && data.question && (
-            <section className="rise mt-9">
-              <p className="mat-raised rounded-[var(--r-sm)] px-5 py-4 text-[15px] leading-[1.6] text-[var(--text-secondary)]">
-                {data.answer || data.question}
-              </p>
-              <div className="mt-4">
+            <section className="rise mt-6">
+              {/* CHỈ còn ô trả lời. Câu hỏi đã nằm trong hội thoại phía trên —
+                  in lại ở đây là bắt người dùng đọc hai lần cùng một câu, và
+                  hai bản đó có thể lệch nhau khi một bên cập nhật trước. */}
+              <div>
                 <ClarificationReply onSubmit={handleClarification} />
               </div>
             </section>

@@ -72,8 +72,18 @@ export function useWorkflowPolling(
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
-  // Chống chồng request: một lần fetch chưa xong thì lần kế tiếp không bắn đi.
-  const inFlight = useRef(false)
+  // Chống chồng request — nhưng CHỈ trong cùng một thế hệ.
+  //
+  // Bản trước là một boolean: "đang có request bay thì đừng bắn thêm". Nó chặn
+  // nhầm đúng lúc quan trọng nhất — khi đổi sang workflow khác. Request của
+  // workflow CŨ còn bay thì lượt fetch của workflow MỚI bị bỏ qua, rồi request
+  // cũ về và bị loại vì sai thế hệ. Không ai fetch nữa, và màn hình đứng đó tới
+  // nhịp poll kế tiếp.
+  //
+  // Giữ THẾ HỆ của request đang bay thay vì một cờ bật/tắt: cùng thế hệ thì bỏ
+  // qua (đúng mục đích ban đầu), khác thế hệ thì phải bắn — dữ liệu đang cần là
+  // của thế hệ mới.
+  const inFlight = useRef<number | null>(null)
 
   /**
    * Trạng thái mới nhất, giữ ngoài state.
@@ -110,17 +120,35 @@ export function useWorkflowPolling(
   )
 
   const load = useCallback(async () => {
-    if (!workflowId || inFlight.current) return
+    if (!workflowId) return
     const generation = generationRef.current
-    inFlight.current = true
+    if (inFlight.current === generation) return
+    inFlight.current = generation
     try {
       const next = await getWorkflow(workflowId)
       if (generation === generationRef.current) applySnapshot(next)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Không tải được yêu cầu.')
+      // Lỗi của một request ĐÃ CŨ không được ghi đè lên trạng thái hiện tại.
+      if (generation === generationRef.current) {
+        setError(e instanceof Error ? e.message : 'Không tải được yêu cầu.')
+      }
     } finally {
-      inFlight.current = false
-      setLoading(false)
+      if (inFlight.current === generation) inFlight.current = null
+      // CHỈ tắt cờ tải khi response này còn thuộc về thế hệ hiện tại.
+      //
+      // Bản trước tắt vô điều kiện, và đó là lý do bấm vào một yêu cầu trong
+      // Lịch sử thì thấy "Không tìm thấy yêu cầu này" hơn một giây rồi mới
+      // load ra.
+      //
+      // Cơ chế: StrictMode chạy effect hai lần. Lượt một gọi `load()` và bắt
+      // đầu fetch; lượt hai tăng `generationRef` rồi gọi `load()`, nhưng
+      // `inFlight` còn true nên nó return sớm. Fetch của lượt một về, bị loại
+      // vì sai thế hệ — `applySnapshot` không chạy, `data` vẫn null — nhưng
+      // `finally` vẫn tắt `loading`.
+      //
+      // Kết quả là `loading=false` cùng `data=null`, tức đúng điều kiện của
+      // nhánh "không tìm thấy". Nó đứng đó tới nhịp poll kế tiếp.
+      if (generation === generationRef.current) setLoading(false)
     }
   }, [workflowId, applySnapshot])
 

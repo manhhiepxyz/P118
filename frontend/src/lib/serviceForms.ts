@@ -55,6 +55,18 @@ export interface FieldSpec {
    */
   hidden?: boolean
   /**
+   * Ô HIỆN RA nhưng điền sẵn ngày hôm nay, người dùng sửa được.
+   *
+   * Khác `hidden`: giá trị vẫn nằm trước mắt người dùng, nên không có chuyện
+   * yêu cầu mang theo một ngày họ chưa từng thấy.
+   *
+   * Dùng cho đăng ký chỗ đỗ: cư dân đăng ký chỗ cho căn hộ của mình — đó là
+   * một đăng ký đang có hiệu lực, không phải giữ chỗ cho một ngày nào đó. Bắt
+   * họ chọn "ngày mấy" là bắt họ tự dịch nhu cầu sang mô hình của hệ thống,
+   * còn để trống thì `book_parking` thiếu `booking_date` theo contract.
+   */
+  defaultToday?: boolean
+  /**
    * Chỉ `true` mới là câu trả lời hợp lệ (contract: `must_be_true`).
    * `consent=false` KHÔNG phải "đã trả lời là không" — nó nghĩa là chưa có sự
    * đồng ý, và plan không được phép chạy.
@@ -89,16 +101,6 @@ export interface FieldSpec {
 }
 
 /**
- * Trường dùng chung, hiện ở khối "Thông tin hành trình".
- *
- * Ba dịch vụ cùng diễn ra trong một ngày thì hỏi ngày ba lần là bắt người dùng
- * làm việc của hệ thống.
- */
-export const SHARED_FIELDS: FieldSpec[] = [
-  { key: 'date', label: 'Ngày', kind: 'date', shared: true, hint: 'Từ hôm nay trở đi', phrase: 'ngày {v}' },
-]
-
-/**
  * Danh mục dự án — dùng lại cho MỌI dịch vụ cần chọn dự án.
  *
  * Cố ý KHÔNG còn là field dùng chung. Tham quan và tư vấn là hai việc khác
@@ -109,12 +111,12 @@ export const SHARED_FIELDS: FieldSpec[] = [
  * API nhận `project_name`; `project_id` nội bộ do backend tra ra và không bao
  * giờ rời khỏi backend.
  */
-function projectField(tool: string): FieldSpec {
+function projectField(tool?: string): FieldSpec {
   return {
     key: 'project',
     label: 'Dự án',
     kind: 'select',
-    tool,
+    ...(tool ? { tool } : {}),
     field: 'project_name',
     options: [
       'Vinhomes Ocean Park',
@@ -147,12 +149,12 @@ const YES_NO: Option[] = [
   { value: 'false', label: 'Không' },
 ]
 
-/** Field riêng của từng năng lực. Key trùng SHARED_FIELDS thì lấy giá trị chung. */
+/** Field riêng của từng năng lực — mỗi dịch vụ có đủ field bắt buộc của nó. */
 export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
   // schedule_property_viewing(project_id, viewing_date, viewing_time)
   'Đặt lịch tham quan dự án': [
     projectField('schedule_property_viewing'),
-    { key: 'date', label: 'Ngày', kind: 'date', shared: true },
+    { key: 'viewing_date', label: 'Ngày tham quan', kind: 'date', phrase: 'ngày {v}' },
     {
       key: 'time',
       label: 'Giờ tham quan',
@@ -194,18 +196,21 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
       phrase: 'tại {v}',
       showIf: { key: 'needs_shuttle', equals: 'true' },
       placeholder: 'Ví dụ: Sảnh A toà S1, hoặc 25 Lý Thường Kiệt',
-      hint: 'Điểm gặp chính thức do bộ phận tham quan xác nhận lại',
+      hint: 'Đơn vị tham quan sẽ liên hệ xác nhận điểm đón và báo giờ đón cho bạn',
     },
-    {
-      key: 'pickup_time_note',
-      label: 'Giờ muốn được đón',
-      kind: 'select',
-      freeText: true,
-      phrase: 'khoảng {v}',
-      showIf: { key: 'needs_shuttle', equals: 'true' },
-      options: slots(6, 17),
-      hint: 'Mong muốn của bạn — đơn vị sẽ chốt giờ đón thực tế',
-    },
+    /*
+     * KHÔNG hỏi "Giờ muốn được đón".
+     *
+     * Ô ấy từng ở đây với `freeText: true` và không có `tool`/`field` — giá trị
+     * chỉ chảy vào câu văn gửi Planner, không tới tool nào. Trong khi đó
+     * `pickup_time` là dữ liệu đơn vị vận chuyển TRẢ VỀ (`book_shuttle` sinh ra
+     * nó), không phải input người dùng đặt được. Hỏi một thứ hệ thống không đọc
+     * là hứa suông: chọn 12:00 rồi nhận lịch đón giờ khác.
+     *
+     * Nó còn phản tác dụng ở hai chỗ: giờ đón người dùng đặt có thể mâu thuẫn
+     * với giờ tham quan (xem lúc 12:00, đón lúc 10:00 — đo được trên stack
+     * thật), và câu gửi Planner dài thêm một mệnh đề vô nghĩa.
+     */
     {
       key: 'pickup_phone',
       label: 'Số điện thoại cho tài xế',
@@ -272,25 +277,13 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
   // xác minh, một cái do task trước sinh ra.
   'Đăng ký phương tiện và chỗ đỗ xe': [
     {
-      /*
-       * Ngày bắt đầu KHÔNG hỏi người dùng.
-       *
-       * Cư dân đăng ký chỗ đỗ cho căn hộ của mình — nó là một đăng ký đang có
-       * hiệu lực, không phải một lượt giữ chỗ cho ngày nào đó. Hỏi "bạn muốn
-       * đặt chỗ ngày mấy" biến nó thành đỗ xe theo ngày, và người dùng phải tự
-       * dịch nhu cầu của mình sang mô hình của hệ thống.
-       *
-       * `book_parking` vẫn cần `booking_date` theo contract, nên giao diện điền
-       * sẵn NGÀY HÔM NAY và nói bằng lời: "bắt đầu từ hôm nay". Người dùng
-       * muốn mốc khác thì nói trong ô hội thoại — P-118 hỏi lại đúng chỗ đó.
-       */
-      key: 'start_date',
-      label: 'Bắt đầu',
-      kind: 'text',
+      key: 'booking_date',
+      label: 'Bắt đầu từ',
+      kind: 'date',
       tool: 'book_parking',
-      field: 'booking_date',
-      hidden: true,
-      phrase: 'bắt đầu từ hôm nay ngày {v}',
+      defaultToday: true,
+      hint: 'Mặc định là hôm nay',
+      phrase: 'bắt đầu từ ngày {v}',
     },
     {
       key: 'vehicle_type',
@@ -326,7 +319,7 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
 
   // create_maintenance_request(issue_type, description, location, preferred_date, preferred_time)
   'Báo bảo trì / sửa chữa': [
-    { key: 'date', label: 'Ngày hẹn', kind: 'date', shared: true },
+    { key: 'preferred_date', label: 'Ngày hẹn', kind: 'date', phrase: 'ngày {v}' },
     {
       key: 'issue_type',
       label: 'Hạng mục',
@@ -371,7 +364,7 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
 
   // schedule_move(move_date, move_time, needs_elevator, needs_loading_support, move_vehicle)
   'Đặt lịch chuyển nhà': [
-    { key: 'date', label: 'Ngày chuyển', kind: 'date', shared: true },
+    { key: 'move_date', label: 'Ngày chuyển', kind: 'date', phrase: 'ngày {v}' },
     {
       key: 'move_time',
       label: 'Giờ chuyển',
@@ -411,20 +404,24 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
 
 export type FormValues = Record<string, string>
 
-/** Field còn thiếu của một năng lực, xét cả giá trị dùng chung. */
-export function missingFields(service: string, values: FormValues, shared: FormValues): FieldSpec[] {
+/** Field còn thiếu của một năng lực. */
+export function missingFields(service: string, values: FormValues): FieldSpec[] {
   return (SERVICE_FIELDS[service] ?? []).filter((field) => {
     // Ô số CÓ giá trị mặc định hiển thị (min), nên nó không bao giờ thiếu.
     // Bản trước coi nó là thiếu trong khi màn hình đang hiện "1" — người dùng
     // đọc được một con số nhưng bị báo chưa chọn, và không có cách nào sửa.
     if (field.kind === 'number') return false
-    // Field giao diện tự điền không bao giờ là field còn thiếu.
-    if (field.hidden) return false
+    // Field giao diện tự điền không bao giờ là field còn thiếu — cả loại ẩn
+    // hẳn lẫn loại hiện ra với mặc định hôm nay. Ô `defaultToday` trông rỗng
+    // trong `values` cho tới khi người dùng chạm vào, nhưng màn hình đang hiện
+    // một ngày và câu gửi đi cũng mang đúng ngày ấy; báo nó "còn thiếu" là bắt
+    // người dùng đi sửa một ô đã đúng.
+    if (field.hidden || field.defaultToday) return false
     // Field đang ẩn không phải field còn thiếu.
     if (field.showIf && values[field.showIf.key] !== field.showIf.equals) return false
     // Ghi chú tự do luôn là tuỳ chọn.
     if (field.freeText) return false
-    const value = field.shared ? shared[field.key] : values[field.key]
+    const value = values[field.key]
     // Ô đồng ý: bỏ trống và "không đồng ý" đều là chưa có sự đồng ý.
     if (field.mustBeTrue) return value !== 'true'
     return !value || !value.trim()
@@ -440,12 +437,12 @@ function labelOf(field: FieldSpec, value: string): string {
 }
 
 /** Dòng tóm tắt khi đã điền đủ — thứ hiện ra sau khi gập lại. */
-export function summarise(service: string, values: FormValues, shared: FormValues): string {
+export function summarise(service: string, values: FormValues): string {
   return (SERVICE_FIELDS[service] ?? [])
     .map((field) => {
       if (field.hidden) return ''
       if (field.showIf && values[field.showIf.key] !== field.showIf.equals) return ''
-      const value = field.shared ? shared[field.key] : values[field.key]
+      const value = values[field.key]
       if (field.kind === 'number') return `${value || field.min || 1} khách`
       if (!value) return ''
       // "Cần thang máy: Có" — chỉ nói "Có" thì không ai đoán được là có gì.
@@ -489,6 +486,65 @@ export function matchOption(fieldKey: string, text: string): string | null {
           return option.value
         }
       }
+    }
+  }
+  return null
+}
+
+
+/**
+ * Field của "Cần thêm thông tin" theo khoá backend.
+ *
+ * `missing_fields` trả về TÊN FIELD KỸ THUẬT (`project_id`, `viewing_date`,
+ * `viewing_time`), còn `SERVICE_FIELDS` khai theo key của frontend
+ * (`project`, `date`, `time`). Khớp qua trường `field` (contract field name)
+ * trước, rồi mới tới `key`.
+ *
+ * Trả `null` khi không tìm thấy — lúc đó caller giữ nguyên ô text mặc định,
+ * an toàn hơn là đoán kiểu cho một field chưa ai khai.
+ */
+
+/**
+ * Ánh xạ TRỰC TIẾP tên field contract → FieldSpec.
+ *
+ * `SERVICE_FIELDS` đặt tên theo nghiệp vụ nên không phải lúc nào cũng khớp
+ * tên contract mà backend hỏi trong `missing_fields`:
+ *
+ *   - `project_id` (contract) là `project`/`project_name` trong `SERVICE_FIELDS`
+ *     — nhưng backend hỏi `project_id` vì đó là tên nội bộ.
+ *   - Các field NGÀY dùng chung `key: 'date'` nên không mang tên contract
+ *     (`viewing_date`, `preferred_date`, `move_date`, `booking_date`,
+ *     `tour_date`).
+ *
+ * Tra bảng này TRƯỚC vòng lặp `SERVICE_FIELDS`: nó là nguồn sự thật cho đúng
+ * những tên mà danh sách nghiệp vụ không tự khớp.
+ */
+const CONTRACT_FIELD_OVERRIDES: Record<string, FieldSpec> = {
+  // Backend hỏi `project_id` (PRJ-xxx) nhưng client trả TÊN dự án công khai —
+  // `_resolve_public_answers` (backend) tự đổi tên → mã. `projectField` đã set
+  // `option.value = tên dự án`, đúng thứ cần gửi đi.
+  project_id: projectField(),
+  project_name: projectField(),
+  viewing_date: { key: 'viewing_date', label: 'Ngày tham quan', kind: 'date' },
+  preferred_date: { key: 'preferred_date', label: 'Ngày hẹn', kind: 'date' },
+  move_date: { key: 'move_date', label: 'Ngày chuyển', kind: 'date' },
+  booking_date: { key: 'booking_date', label: 'Ngày đặt chỗ', kind: 'date' },
+  tour_date: { key: 'tour_date', label: 'Ngày đi', kind: 'date' },
+  passenger_count: {
+    key: 'passenger_count',
+    label: 'Số khách',
+    kind: 'number',
+    min: 1,
+    max: 30,
+    hint: 'Tối đa 30 khách mỗi xe',
+  },
+}
+
+export function fieldSpecForMissing(backendKey: string): FieldSpec | null {
+  if (backendKey in CONTRACT_FIELD_OVERRIDES) return CONTRACT_FIELD_OVERRIDES[backendKey]
+  for (const fields of Object.values(SERVICE_FIELDS)) {
+    for (const field of fields) {
+      if ((field.field ?? field.key) === backendKey) return field
     }
   }
   return null

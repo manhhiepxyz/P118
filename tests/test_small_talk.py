@@ -563,3 +563,43 @@ def test_asking_for_parking_is_not_mistaken_for_a_how_to_question(goal):
 def test_real_how_to_questions_still_match(question):
     """Chốt ngược: siết quá tay thành "không bao giờ khớp" cũng là hỏng."""
     assert _has_howto_marker(_normalize(question)), f"{question!r} lẽ ra là câu hỏi cách làm"
+
+
+# --- Câu do CHÍNH giao diện sinh ra không được coi là spam -------------------
+
+_FORM_COMPOSED_GOAL = (
+    "Đặt lịch tham quan Vinhomes Global Gate Hạ Long ngày 2026-08-28 lúc 12:00 "
+    "xe đưa đón cho 1 khách tại NHÀ liên hệ 09882723. "
+    "Đăng ký phương tiện và chỗ đỗ xe bắt đầu từ ngày 2026-08-19 "
+    "Xe máy biển số 66A-92183 chỗ đỗ Khu B"
+)
+
+
+def test_a_goal_composed_by_the_form_is_never_called_spam() -> None:
+    """Người dùng bấm chọn dịch vụ, không gõ chữ nào — không thể là "gõ lặp".
+
+    Câu này do giao diện ghép từ hai dịch vụ đã chọn. Tiếng Việt khiến "xe"
+    xuất hiện ba lần trong ba việc khác nhau — "xe đưa đón", "chỗ đỗ xe",
+    "Xe máy" — và bộ đếm tuyệt đối chặn thẳng ở lần thứ ba. Người dùng không
+    có cách nào sửa, vì chính hệ thống viết ra câu ấy.
+    """
+    from src.api.small_talk import _detect_repetition
+
+    assert _detect_repetition(_FORM_COMPOSED_GOAL) is False
+    assert classify(_FORM_COMPOSED_GOAL) is None, "câu ghép từ form phải đi tới planner"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "ok ok ok",
+        "xe xe xe",
+        "đặt chỗ đặt chỗ đặt chỗ",
+        # Spam DÀI: nới ngưỡng theo tỉ lệ không được mở cửa cho kiểu này.
+        "đặt chỗ xe máy đặt chỗ xe máy đặt chỗ xe máy",
+    ],
+)
+def test_loosening_the_counter_did_not_open_the_door_for_spam(message: str) -> None:
+    from src.api.small_talk import _detect_repetition
+
+    assert _detect_repetition(message) is True, message
