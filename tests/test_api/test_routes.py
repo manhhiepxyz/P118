@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from src.api import routes
+from src.common import field_parsers
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
@@ -150,22 +151,22 @@ def test_book_shuttle_presentation_shows_driver_details() -> None:
     ],
 )
 def test_follow_up_date_is_parsed_deterministically(value, expected) -> None:
-    assert routes._extract_date(value) == expected
+    assert field_parsers._extract_date(value) == expected
 
 
 @pytest.mark.parametrize("value", ["13:40", "13;40", "13h40"])
 def test_follow_up_time_accepts_common_vietnamese_separators(value) -> None:
-    assert routes._extract_time(value) == "13:40"
+    assert field_parsers._extract_time(value) == "13:40"
 
 
 @pytest.mark.parametrize("value", ["12h", "12 giờ", "lúc 12h", "12H"])
 def test_follow_up_time_accepts_an_hour_without_minutes_as_on_the_hour(value) -> None:
-    assert routes._extract_time(value) == "12:00"
+    assert field_parsers._extract_time(value) == "12:00"
 
 
 @pytest.mark.parametrize("value", ["12h99", "12h 99", "25h", "24 giờ"])
 def test_follow_up_time_does_not_truncate_an_invalid_hour_or_minute(value) -> None:
-    assert routes._extract_time(value) is None
+    assert field_parsers._extract_time(value) is None
 
 
 def test_follow_up_extracts_the_exact_viewing_answer_used_in_terminal() -> None:
@@ -220,7 +221,7 @@ def test_follow_up_extracts_the_exact_vehicle_answer_used_in_terminal() -> None:
     ],
 )
 def test_follow_up_normalizes_common_vietnamese_vehicle_names(value, expected) -> None:
-    assert routes._extract_vehicle_type(value) == expected
+    assert field_parsers._extract_vehicle_type(value) == expected
 
 
 def test_follow_up_extracts_project_date_and_time_from_one_natural_answer() -> None:

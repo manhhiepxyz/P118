@@ -25,7 +25,6 @@ from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.payment import PaymentConnector
 from src.connectors.tour import TourConnector
-from src.db.parking_payment_repository import payment_idempotency_key
 from src.executor.executor import Executor
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
@@ -42,22 +41,20 @@ from src.orchestration.payment_approval import (
     persist_full_plan,
     plan_without,
     quote_from_database,
+    quote_from_persisted_book_parking,
     quote_from_results,
     record_decision,
     save_pending_approval,
 )
+from src.orchestration.provider_gateway import ProviderCall, call_provider
 from src.orchestration.repair import RepairManager, repair_missing_fields
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import (
     ServiceApprovalBoundary,
     pending_for_workflow,
-    record_service_decision,
 )
 from src.orchestration.viewing_approval import (
     APPROVED as VIEWING_APPROVED,
-)
-from src.orchestration.viewing_approval import (
-    expire_pending_viewing_approval as _expire_pending_viewing,
 )
 from src.orchestration.viewing_approval import (
     AWAITING as VIEWING_AWAITING,
@@ -76,8 +73,10 @@ from src.orchestration.viewing_approval import (
     viewing_task,
     wants_shuttle_in_plan,
 )
+from src.orchestration.viewing_approval import (
+    expire_pending_viewing_approval as _expire_pending_viewing,
+)
 from src.services.llm import get_llm, structured_output_method
-
 
 # Năm chỗ trong file này gọi `logger.warning(...)` mà chưa bao giờ có `logger`.
 # Cả năm đều nằm trong nhánh `except`, nên chúng chỉ chạy khi đã có lỗi — và
@@ -458,10 +457,15 @@ class PaymentApprovalBoundary:
             if any(not result.success for result in partial_results.values()):
                 return resolved_workflow_id, partial_results
 
-        if self._repository is not None and resolved_workflow_id is not None:
-            for task_id in sorted(payment_task_ids):
-                await self._repository.update_task_status(resolved_workflow_id, task_id, TaskStatus.WAITING_APPROVAL)
-
+        # `pay_fee` KHÔNG đổi trạng thái ở đây. `save_pending_approval`
+        # (`payment_approval.py`) là CHỖ DUY NHẤT được phép chuyển nó sang
+        # WAITING_APPROVAL — cùng transaction với dòng `payment_approvals` và
+        # với trạng thái workflow. Một lần ghi sớm, đứng ngoài transaction đó,
+        # để lại đúng nửa trạng thái bị cấm nếu `save_pending_approval` lỗi
+        # SAU nó: `pay_fee` WAITING_APPROVAL mồ côi, không dòng approval nào,
+        # workflow có thể vẫn RUNNING. Caller (mọi nơi bắt
+        # `PaymentApprovalRequiredError`) luôn gọi `persist_pending_approval`
+        # ngay sau đây — đó là nơi DUY NHẤT trạng thái được chuyển.
         raise PaymentApprovalRequiredError(
             "Mock payment approval is required.",
             workflow_id=resolved_workflow_id,
@@ -614,23 +618,41 @@ async def persist_pending_approval(
     task_results: dict[str, StandardResult],
     plan: TaskPlan | None,
 ) -> PaymentQuote | None:
-    """Ghi ngữ cảnh chờ duyệt + đặt workflow về WAITING_APPROVAL.
+    """Ghi ngữ cảnh chờ duyệt; đặt `pay_fee` và workflow về WAITING_APPROVAL.
 
-    Gọi ngay sau khi `PaymentApprovalRequiredError` được ném. Từ thời điểm này
-    trở đi, mọi thứ cần cho resume đã nằm trong PostgreSQL: restart backend
-    không làm mất chỗ đỗ đã giữ.
+    Gọi ngay sau khi `PaymentApprovalRequiredError` được ném — HOẶC khi
+    `_ensure_payment_card` phát hiện `pay_fee` còn PENDING mà chưa có thẻ nào
+    ghim (đường "tour duyệt sau", không có `task_results` nào để đọc). Từ thời
+    điểm hàm này ghi xong, mọi thứ cần cho resume đã nằm trong PostgreSQL:
+    restart backend không làm mất chỗ đỗ đã giữ.
+
+    Báo giá thử ĐỌC TỪ KẾT QUẢ vừa chạy trước (`task_results` trong RAM, còn
+    mới nhất); rỗng thì đọc lại từ chính `book_parking` đã persist —
+    KHÔNG bao giờ trả None chỉ vì caller quên truyền `task_results`.
     """
     quote = quote_from_results(task_results)
     task_id = payment_task_id(plan) if plan is not None else None
-    if quote is None or task_id is None:
+    if task_id is None:
         return None
 
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
-        await save_pending_approval(pool, workflow_id=workflow_id, task_id=task_id, quote=quote)
-        # Workflow KHÔNG được SUCCESS: prefix xong không có nghĩa là xong việc.
-        await repository.update_workflow_status(workflow_id, WorkflowStatus.WAITING_APPROVAL)
+        if quote is None:
+            quote = await quote_from_persisted_book_parking(pool, workflow_id, task_id)
+        if quote is None:
+            return None
+        # Approval row + trạng thái `pay_fee` + trạng thái workflow: cả ba ghi
+        # trong CÙNG một transaction bên trong `save_pending_approval`. Không
+        # còn lệnh `update_workflow_status` riêng ở đây — tách nó ra khỏi
+        # transaction kia là đúng chỗ để lại nửa trạng thái.
+        #
+        # `save_pending_approval` trả False mà KHÔNG ghi gì khi `pay_fee`
+        # không tồn tại/đã terminal, hoặc approval đã được quyết định từ
+        # trước — cả hai đều nghĩa là không có thẻ nào được ghim ở lượt này.
+        created = await save_pending_approval(pool, workflow_id=workflow_id, task_id=task_id, quote=quote)
+        if not created:
+            return None
     finally:
         await pool.close()
     return quote
@@ -760,8 +782,14 @@ async def _execute_payment_only(
     payment_task_id: str,
     quote: PaymentQuote,
     payment_url: str,
+    client: Any | None = None,
 ) -> dict[str, Any]:
     """Gọi ĐÚNG một lần `pay_fee`, không đụng tới bất kỳ bước nào khác.
+
+    `client` chỉ để test tiêm một transport giả vào ĐÚNG đường production này.
+    Không có nó thì test buộc phải dựng lại luồng bằng tay, và bug vừa rồi —
+    đường duyệt bỏ qua toàn bộ hàng rào — là loại bug chỉ lộ ra khi chạy đúng
+    đường thật.
 
     Input dựng từ báo giá đã persist chứ không resolve lại InputRef: task nguồn
     đã chạy xong từ lượt trước, và booking trong database mới là nguồn sự thật
@@ -772,17 +800,32 @@ async def _execute_payment_only(
     # Đường này từng dùng `wf:{id}:task:{task_id}` còn đường Executor không có
     # khoá nào. Hai dạng khác nhau nghĩa là cùng một lần trả tiền đi qua hai
     # đường sẽ tạo hai giao dịch — đúng thứ khoá idempotency sinh ra để chặn.
-    connector = PaymentConnector(
-        base_url=payment_url,
-        idempotency_key=payment_idempotency_key(workflow_id, quote.booking_id),
-    )
-    result = await connector.execute(
-        "pay_fee",
-        {
-            "booking_id": quote.booking_id,
-            "amount": quote.amount,
-            "currency": quote.currency,
-        },
+    # ĐI QUA CỔNG, không gọi connector thẳng.
+    #
+    # Đây chính là chỗ Phase 2A trước hở: đường này gọi `PaymentConnector.execute`
+    # trực tiếp với khoá tự tính, nên nó bỏ qua cả bốn bước — xin phép, khoá đã
+    # lưu, ghi `SUBMITTING` trước, ghi kết luận sau. Mọi bất biến dựng ở Executor
+    # không áp dụng cho chính đường tiêu tiền của người dùng.
+    #
+    # Khoá KHÔNG còn tính ở đây. `payment_idempotency_key` vẫn là công thức, nhưng
+    # nó chỉ là ĐỀ XUẤT; khoá đi ra dây là khoá `prepare_submission` trả về, tức
+    # khoá database đang giữ. Sau restart, đó là điểm khác nhau giữa "trả tiền một
+    # lần" và "trả tiền hai lần".
+    connector = PaymentConnector(base_url=payment_url, client=client)
+    repository_for_call = await acquire_repository()
+    result = await call_provider(
+        connector,
+        repository_for_call,
+        ProviderCall(
+            workflow_id=workflow_id,
+            task_id=payment_task_id,
+            tool="pay_fee",
+            input_data={
+                "booking_id": quote.booking_id,
+                "amount": quote.amount,
+                "currency": quote.currency,
+            },
+        ),
     )
 
     repository = await acquire_repository()
@@ -882,7 +925,6 @@ def _viewing_request_info(plan: TaskPlan | None) -> dict[str, Any] | None:
     }
 
 
-
 async def _persist_viewing_pause(repository: Any, workflow_id: str, plan: TaskPlan | None) -> None:
     """Ghim yêu cầu duyệt lịch cho các ĐƯỜNG TẮT.
 
@@ -900,6 +942,7 @@ async def _persist_viewing_pause(repository: Any, workflow_id: str, plan: TaskPl
         applicant_name=(user or {}).get("full_name"),
         applicant_phone=(user or {}).get("phone"),
     )
+
 
 async def persist_pending_viewing_approval(
     workflow_id: str,
@@ -943,7 +986,6 @@ async def persist_pending_viewing_approval(
     return {"task_id": info["task_id"], "project_name": resolve_project_name(info["project_id"])}
 
 
-
 async def expire_pending_viewing_approval(workflow_id: str) -> bool:
     """Rút lời nhờ đơn vị tour duyệt, khi người dùng đã huỷ yêu cầu."""
     repository = await acquire_repository()
@@ -952,7 +994,6 @@ async def expire_pending_viewing_approval(workflow_id: str) -> bool:
         return await _expire_pending_viewing(pool, workflow_id)
     finally:
         await pool.close()
-
 
 
 async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[str, Any]:
@@ -983,6 +1024,9 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         if plan is None or not plan.tasks:
             raise ResumeError("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy tiếp.")
 
+        # Trạng thái THẬT của từng bước, đọc một lần để dùng cho cả hai vòng dưới.
+        statuses_now = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
+
         refused = {row["task_id"] for row in rows if row["status"] in {"REJECTED", "EXPIRED"}}
         for task_id in refused:
             await repository.update_task_status(workflow_id, task_id, TaskStatus.CANCELLED)
@@ -995,9 +1039,29 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
 
         # Bước được duyệt phải rời khỏi WAITING_APPROVAL, nếu không `_seed_completed`
         # đọc nó là "chưa xong" mà Executor lại bỏ qua vì trạng thái không phải PENDING.
+        #
+        # NHƯNG chỉ những bước CHƯA chạy. Từ khi hai hàng đợi gộp làm một,
+        # `pending_for_workflow` trả về cả dòng của lịch tham quan — và lịch
+        # tham quan được duyệt ở đường RIÊNG, chạy xong từ trước. Đẩy nó về
+        # PENDING là xoá mất kết quả đã có:
+        #
+        #   duyệt lịch      T1 SUCCESS, lịch đã đặt thật ở hệ thống tour
+        #   duyệt dịch vụ   vòng này set T1 → PENDING, `_seed_completed` không
+        #                   còn thấy nó xong, cổng tham quan ghim lại
+        #                   → T1 nằm vĩnh viễn ở WAITING_APPROVAL
+        #
+        # Đo được trên hai yêu cầu thật: mọi bước SUCCESS, mọi phê duyệt
+        # APPROVED, `pay_fee` đã trả tiền, mà `workflows.status` vẫn RUNNING và
+        # Lịch sử hiện "Đang chạy 4/5 bước" mãi mãi. Trang chi tiết lại báo
+        # hoàn tất vì nó đọc bản cache trong RAM — hai màn hình nói hai chuyện
+        # về cùng một việc, và cái đúng là cái xấu hơn.
         for row in rows:
-            if row["status"] == "APPROVED":
-                await repository.update_task_status(workflow_id, row["task_id"], TaskStatus.PENDING)
+            if row["status"] != "APPROVED":
+                continue
+            hien_tai = statuses_now.get(row["task_id"])
+            if hien_tai in _TERMINAL_TASK_STATUSES:
+                continue
+            await repository.update_task_status(workflow_id, row["task_id"], TaskStatus.PENDING)
 
         connectors = build_connectors(workflow_id=workflow_id, **urls)
         repair_manager = RepairManager()
@@ -1011,9 +1075,7 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         guarded = ServiceApprovalBoundary(
             ViewingApprovalBoundary(
                 PaymentApprovalBoundary(
-                    ValidatedExecutionBoundary(
-                        Executor(connectors, repository, on_failure=repair_manager)
-                    ),
+                    ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
                     False,
                     repository=repository,
                 ),
@@ -1026,8 +1088,11 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
         try:
             await guarded.execute(
-                plan, workflow_id, finalize=False,
-                seed_statuses=seed_statuses, seed_results=seed_results,
+                plan,
+                workflow_id,
+                finalize=False,
+                seed_statuses=seed_statuses,
+                seed_results=seed_results,
             )
         except PolicyInterruptionError as pause:
             await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
@@ -1085,7 +1150,6 @@ async def record_viewing_decision_or_fail(workflow_id: str, decision: str, decid
         await pool.close()
 
 
-
 def _final_status(statuses: dict[str, Any]) -> WorkflowStatus:
     """Trạng thái cuối của workflow, suy từ trạng thái các bước.
 
@@ -1114,7 +1178,6 @@ def _final_status(statuses: dict[str, Any]) -> WorkflowStatus:
     if TaskStatus.FAILED.value in values:
         return WorkflowStatus.FAILED
     return WorkflowStatus.WAITING_APPROVAL
-
 
 
 async def _ensure_payment_card(
@@ -1193,10 +1256,7 @@ async def _persist_hints(repository: Any, workflow_id: str, hints: dict) -> None
         return
     await repository.save_repair_hints(
         workflow_id,
-        {
-            task_id: {"error_code": hint.error_code.value, "message": hint.message}
-            for task_id, hint in hints.items()
-        },
+        {task_id: {"error_code": hint.error_code.value, "message": hint.message} for task_id, hint in hints.items()},
     )
 
 
@@ -1219,7 +1279,6 @@ def _repair_answer_for(hints: dict, plan: Any) -> str | None:
         getattr(cause.error_code, "value", str(cause.error_code)),
         dict(task.input),
     )
-
 
 
 async def _persist_repair_clarification(
@@ -1283,6 +1342,85 @@ class RetryNotAllowed(Exception):
         self.code = code
         self.message = message
         super().__init__(message)
+
+
+# Trạng thái workflow được phép SỬA rồi chạy lại.
+#
+# `RUNNING`/`PENDING` không nằm đây: một yêu cầu đang chạy thì chưa biết nó sẽ
+# dừng ở đâu, và sửa kế hoạch dưới chân nó là đua với chính mình.
+#
+# `SUCCESS` cũng không: mọi bước đã chạy thật và đã tạo cam kết ở phía đơn vị
+# cung cấp. Muốn đổi một chỗ đỗ đã đặt thì đó là một yêu cầu MỚI, không phải
+# viết đè lên yêu cầu cũ — viết đè sẽ xoá mất bản ghi của việc thật sự đã xảy ra.
+AMENDABLE_STATUSES: frozenset[str] = frozenset({WorkflowStatus.CANCELLED.value, WorkflowStatus.FAILED.value})
+
+
+class NotAmendable(Exception):
+    """Yêu cầu này không sửa-rồi-chạy-lại được. `message` viết cho người đọc."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+async def amend_and_rerun(workflow_id: str, answers: dict[str, Any], **urls: str) -> dict[str, Any]:
+    """Sửa vài ô của một yêu cầu ĐÃ DỪNG rồi chạy lại chính nó.
+
+    Vì sao không đi qua hội thoại: giá trị cũ nằm trong `workflow_tasks` — một
+    kế hoạch đã qua Validator — chứ không nằm trong ký ức trò chuyện. Dựng lại
+    từ ký ức thì Planner phải đoán, và `_fields_taken_from_recall` buộc hỏi lại
+    từng ô (đúng như thiết kế: giá trị nhớ được phải được xác nhận). Đọc thẳng
+    từ kế hoạch đã lưu thì không có gì để đoán và không guard nào bị nới.
+
+    Bước đã `SUCCESS` KHÔNG chạy lại: nó đã tạo cam kết thật. Chỉ những bước
+    chưa thành công được mở lại, và `rerun_with_answers` seed phần đã xong.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        # `get_workflow` NÉM `ValueError` cho id không tồn tại, không trả None.
+        # Không bắt thì một id lạ thoát ra thành 500 thay vì 404 — và câu lỗi
+        # mang theo id, tức xác nhận giúp người hỏi rằng id đó có/không tồn tại.
+        try:
+            record = await repository.get_workflow(workflow_id)
+        except ValueError:
+            record = None
+        if record is None:
+            raise NotAmendable("NOT_FOUND", "Không tìm thấy yêu cầu này.")
+        status = (record.get("workflow") or {}).get("status")
+        if status not in AMENDABLE_STATUSES:
+            raise NotAmendable(
+                "NOT_AMENDABLE",
+                "Yêu cầu này không sửa lại được. Chỉ những yêu cầu đã dừng hoặc đã hỏng "
+                "mới sửa được; nếu đã hoàn tất, bạn tạo một yêu cầu mới giúp mình nhé.",
+            )
+        # ĐÃ GỬI TỚI ĐƠN VỊ thì không sửa nữa — kể cả khi cột `status` nói khác.
+        #
+        # Cột đó có thể lệch: đo được một workflow ghi `CANCELLED` trong khi hai
+        # bước của nó nằm `WAITING_APPROVAL` và hàng đợi duyệt có hồ sơ AWAITING.
+        # Tin cột trạng thái nghĩa là khách sửa được thứ đơn vị đang xem xét —
+        # họ duyệt một đằng, hệ thống chạy một nẻo.
+        #
+        # Hàng đợi là nguồn sự thật cho câu hỏi "đã gửi đi chưa", vì nó CHÍNH LÀ
+        # thứ được gửi đi.
+        if any(row.get("status") == "AWAITING" for row in await pending_for_workflow(pool, workflow_id)):
+            raise NotAmendable(
+                "ALREADY_SENT",
+                "Yêu cầu này đã gửi tới đơn vị cung cấp và đang chờ duyệt, nên chưa sửa được. "
+                "Bạn huỷ yêu cầu trước rồi sửa nhé.",
+            )
+        moved = await repository.reopen_cancelled_tasks(workflow_id)
+        # Mở lại CẢ dòng workflow, không chỉ các bước.
+        #
+        # `update_workflow_status` từ chối đưa một workflow rời khỏi
+        # `CANCELLED`, nên gọi nó ở đây là một lệnh KHÔNG LÀM GÌ — đúng ở
+        # trường hợp duy nhất mà đường này tồn tại để phục vụ.
+        reopened = await repository.reopen_cancelled_workflow(workflow_id)
+        logger.warning("sửa và chạy lại %s: mở lại %d bước, workflow=%s", workflow_id[:8], moved, reopened)
+    finally:
+        await pool.close()
+
+    return await rerun_with_answers(workflow_id, answers, **urls)
 
 
 async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: str) -> dict[str, Any]:
@@ -1351,9 +1489,7 @@ async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: 
         guarded = ServiceApprovalBoundary(
             ViewingApprovalBoundary(
                 PaymentApprovalBoundary(
-                    ValidatedExecutionBoundary(
-                        Executor(connectors, repository, on_failure=repair_manager)
-                    ),
+                    ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
                     False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
                     repository=repository,
                 ),
@@ -1506,9 +1642,7 @@ async def retry_failed_tasks(
         guarded = ServiceApprovalBoundary(
             ViewingApprovalBoundary(
                 PaymentApprovalBoundary(
-                    ValidatedExecutionBoundary(
-                        Executor(connectors, repository, on_failure=repair_manager)
-                    ),
+                    ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
                     False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
                     repository=repository,
                 ),
@@ -1698,14 +1832,23 @@ async def _materialize_and_run_remaining(
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
+        # Cùng cổng với Executor và với đường thanh toán. Đây là lối vào thứ ba
+        # cho một side effect ra provider; ba lối vào tự giữ hàng rào riêng thì
+        # sớm muộn một lối quên — đúng chuyện vừa xảy ra với thanh toán.
         tour = TourConnector(base_url=tour_url)
-        result = await tour.execute(
-            "schedule_property_viewing",
-            {
-                "project_id": pending.project_id,
-                "viewing_date": pending.viewing_date,
-                "viewing_time": pending.viewing_time,
-            },
+        result = await call_provider(
+            tour,
+            repository,
+            ProviderCall(
+                workflow_id=workflow_id,
+                task_id=pending.task_id,
+                tool="schedule_property_viewing",
+                input_data={
+                    "project_id": pending.project_id,
+                    "viewing_date": pending.viewing_date,
+                    "viewing_time": pending.viewing_time,
+                },
+            ),
         )
         if not result.success:
             # Materialize thất bại: đánh FAILED viewing + downstream + workflow.
@@ -1757,9 +1900,7 @@ async def _materialize_and_run_remaining(
         # là chỗ sinh ra `depends_on` trỏ vào khoảng không, và `Executor` trần
         # không kiểm điều đó — nó chỉ đơn giản không bao giờ chạy tới bước phụ
         # thuộc, và bước ấy nằm PENDING vĩnh viễn.
-        executor = ValidatedExecutionBoundary(
-            Executor(connectors, repository, on_failure=repair_manager)
-        )
+        executor = ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager))
         # `finalize=False` — Executor KHÔNG được tự chốt SUCCESS ở đây.
         #
         # Thứ tự cũ là: chạy task → set SUCCESS → (không ai sinh lại câu trả
@@ -1821,6 +1962,24 @@ async def _materialize_and_run_remaining(
             for task in plan.tasks
             if task.tool == "pay_fee" and seed_statuses.get(task.task_id) is not TaskStatus.SUCCESS
         }
+        # Giữ bản CÒN `pay_fee` để cuối hàm còn biết phải ghim thẻ thanh toán nào.
+        #
+        # `_ensure_payment_card` tìm bước thanh toán BẰNG plan nó nhận. Đưa cho
+        # nó bản đã cắt thì `payment_task_id()` trả None và nó lặng lẽ không làm
+        # gì — không lỗi, không log, không thẻ.
+        #
+        # Đo được trên V+P khi đơn vị tour là người quyết SAU CÙNG:
+        #     T1..T4 SUCCESS · T5 pay_fee PENDING
+        #     payment_approvals  0 dòng
+        #     workflows.status   WAITING_APPROVAL
+        # Chỗ đỗ đã giữ thật, tiền chưa thu, và người dùng không có nút nào để
+        # bấm. Workflow đứng đó vĩnh viễn.
+        #
+        # Thứ tự hai đơn vị quyết định KHÔNG được serialize ở đâu cả: đổi lại
+        # thứ tự (tour duyệt trước) thì `resume_after_service_decision` chạy sau
+        # cùng, `PaymentApprovalBoundary` ghim thẻ đúng, và mọi thứ chạy. Cùng
+        # một yêu cầu, hai kết cục, khác nhau ở chỗ ai bấm duyệt trước.
+        plan_with_payment = plan
         if unpaid:
             trimmed = plan_without(plan, unpaid)
             if trimmed is not None:
@@ -1848,9 +2007,7 @@ async def _materialize_and_run_remaining(
         # vừa đăng ký lần đầu — một câu không thể đúng, và không có cách nào
         # thoát ra.
         awaiting = {
-            row["task_id"]
-            for row in await pending_for_workflow(pool, workflow_id)
-            if row.get("status") == "AWAITING"
+            row["task_id"] for row in await pending_for_workflow(pool, workflow_id) if row.get("status") == "AWAITING"
         }
         if awaiting:
             trimmed = plan_without(plan, awaiting)
@@ -1881,7 +2038,7 @@ async def _materialize_and_run_remaining(
         statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
         final_status = _final_status(statuses)
         if final_status is WorkflowStatus.WAITING_APPROVAL:
-            await _ensure_payment_card(repository, workflow_id, plan)
+            await _ensure_payment_card(repository, workflow_id, plan_with_payment, task_results)
 
         # Lỗi SỬA ĐƯỢC thì câu chốt phải là câu hỏi lại, không phải cáo phó.
         #

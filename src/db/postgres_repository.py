@@ -265,6 +265,10 @@ class PostgreSQLWorkflowStateRepository:
     async def update_task_status(self, workflow_id: str, task_id: str, status: TaskStatus) -> None:
         await self.workflows.update_task_status(workflow_id, task_id, status.value)
 
+    async def reopen_cancelled_tasks(self, workflow_id: str) -> int:
+        """Mở lại các bước đã huỷ/hỏng để chạy lại — xem tầng repository."""
+        return await self.workflows.reopen_cancelled_tasks(workflow_id)
+
     async def save_task_result(self, workflow_id: str, task_id: str, result: StandardResult) -> None:
         """Lưu StandardResult sau khi Connector trả về."""
         await self.workflows.save_task_result(workflow_id, task_id, result)
@@ -287,6 +291,35 @@ class PostgreSQLWorkflowStateRepository:
 
     async def recent_turns_for_owner(self, **kwargs):
         return await self.workflows.recent_turns_for_owner(**kwargs)
+
+    async def prepare_submission(self, workflow_id: str, task_id: str, *, candidate_key: str | None):
+        """Giấy phép gửi MỘT lần. `allowed=False` nghĩa là không gọi provider."""
+        return await self.workflows.prepare_submission(workflow_id, task_id, candidate_key=candidate_key)
+
+    async def record_submission_outcome(self, workflow_id: str, task_id: str, tool: str, result: Any) -> None:
+        await self.workflows.record_submission_outcome(workflow_id, task_id, tool, result)
+
+    async def read_submission_evidence(self, workflow_id: str) -> dict[str, dict[str, Any]]:
+        return await self.workflows.read_submission_evidence(workflow_id)
+
+    async def append_plan_revision(self, **kwargs):
+        return await self.workflows.append_plan_revision(**kwargs)
+
+    async def lock_workflow_for_amendment(
+        self,
+        workflow_id: str,
+        *,
+        expected_plan_version: str,
+        record_revision: dict[str, Any] | None = None,
+    ):
+        """Khoá và đọc lại. Chữ ký nêu ĐỦ tham số — không nhận `**kwargs`, vì một
+        túi tuỳ ý là chỗ một callback lẻn vào dưới một cái tên khác."""
+        return await self.workflows.lock_workflow_for_amendment(
+            workflow_id, expected_plan_version=expected_plan_version, record_revision=record_revision
+        )
+
+    async def reopen_cancelled_workflow(self, workflow_id: str) -> bool:
+        return await self.workflows.reopen_cancelled_workflow(workflow_id)
 
     async def delete_workflow_for_owner(self, workflow_id: str, *, owner_user_id: str):
         return await self.workflows.delete_workflow_for_owner(workflow_id, owner_user_id=owner_user_id)
@@ -320,8 +353,27 @@ class PostgreSQLWorkflowStateRepository:
     async def list_workflows_by_session(self, session_id: str, *, owner_user_id: str | None = None) -> list[dict]:
         return await self.workflows.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
 
-    async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
-        return await self.workflows.list_all_workflows_history(page=page, limit=limit, search_user=search_user)
+    async def list_admin_requests(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 50,
+        search_user: str | None = None,
+        status: str | None = None,
+        date_from: object | None = None,
+        date_to: object | None = None,
+    ) -> dict:
+        return await self.workflows.list_admin_requests(
+            page=page,
+            limit=limit,
+            search_user=search_user,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+    async def get_admin_request(self, workflow_id: str) -> dict | None:
+        return await self.workflows.get_admin_request(workflow_id)
 
     async def append_events(self, workflow_id: str, events: list[dict]) -> None:
         """Ghim dòng thời gian giai đoạn."""

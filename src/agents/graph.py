@@ -27,7 +27,13 @@ from langgraph.graph import END, StateGraph
 logger = logging.getLogger(__name__)
 
 from src.agents.nodes.example_node import analyze_node, respond_node
-from src.agents.planner import Planner, PlannerError, build_question
+from src.agents.planner import (
+    PAYMENT_QUOTE_REQUIRED_FIELD,
+    UNSUPPORTED_GOAL_FIELD,
+    Planner,
+    PlannerError,
+    build_question,
+)
 from src.agents.state import AgentState
 from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
 from src.common.policy import PolicyInterruptionError
@@ -257,17 +263,41 @@ def _missing_fields_for_user(
     thiếu là lỗi lập kế hoạch và rơi vào câu hỏi chung. Các ID nội bộ khác và
     dữ liệu thanh toán không được biến thành câu hỏi cho người dùng.
     """
+    # Control value: chúng KHÔNG phải ô dữ liệu người dùng điền, chúng mô tả
+    # tình huống — và `build_question` đã có sẵn câu riêng cho từng cái.
+    #
+    # Trước đây chúng rơi vào nhánh `else: return None` ở dưới, nên câu đúng
+    # không bao giờ tới được người dùng. Đo được: sau khi bấm Dừng rồi gõ "tôi
+    # muốn đổi lịch tham quan sang ngày 30", Planner trả `supported_goal` và
+    # khách nhận "Mình chưa đủ cơ sở để hỏi thêm cho yêu cầu này. Bạn mô tả lại
+    # cụ thể hơn giúp mình nhé." — một lời từ chối không nói được lý do, và
+    # không lời mô tả nào cứu được vì vấn đề không nằm ở cách mô tả.
+    #
+    # Câu đúng đã nằm sẵn trong `_UNSUPPORTED_GOAL_QUESTION`: nó LIỆT KÊ những
+    # dịch vụ có hỗ trợ, tức là cho người đọc một lối đi tiếp.
+    control_values = {UNSUPPORTED_GOAL_FIELD, PAYMENT_QUOTE_REQUIRED_FIELD}
+    if set(missing_fields) & control_values:
+        return tuple(name for name in missing_fields if name in control_values)
+
     public_fields: list[str] = []
     for name in missing_fields:
         if name == "viewing_id":
+            # GHI LẠI, mức `warning`. Trả `None` ở đây dẫn thẳng tới câu "Mình
+            # chưa đủ cơ sở để hỏi thêm" — một lời từ chối không nói được lý
+            # do, và không dòng log nào cho biết field nào đã chặn. Người dùng
+            # được bảo "mô tả cụ thể hơn" cho một thứ không lời mô tả nào cứu
+            # được.
+            logger.warning("không hỏi lại được: cần %r, không có nguồn nào ngoài bước trước", name)
             return None
         if name == "vehicle_id":
             if not existing_context.get("resident_id"):
+                logger.warning("không hỏi lại được: cần %r nhưng tài khoản chưa liên kết cư dân", name)
                 return None
             replacements = ("plate_number", "vehicle_type")
         elif name in _USER_PROVIDED_FIELDS:
             replacements = (name,)
         else:
+            logger.warning("không hỏi lại được: %r không nằm trong danh sách hỏi được", name)
             return None
 
         for replacement in replacements:

@@ -88,6 +88,24 @@ class OwnershipConnector:
             raise OwnershipProviderError(502, "INVALID_PROVIDER_RESPONSE", "Provider trả dữ liệu không hợp lệ.")
         return data
 
+    async def get_record(self, record_id: str) -> dict[str, Any]:
+        """Đọc MỘT hồ sơ theo ID. Không đổi trạng thái nào.
+
+        Recovery cần biết provider ĐANG ở trạng thái nào trước khi quyết định
+        có gọi `decide_record` hay không. Không có đường này thì cách duy nhất
+        để biết là gọi `decide` — tức là hỏi bằng cách thay đổi, và đó đúng là
+        thứ sinh ra split-brain: retry sau một lần materialize hỏng lại đập vào
+        `ALREADY_DECIDED` thay vì chạy nốt phần còn thiếu.
+        """
+        response = await self._request("GET", f"/api/verification-records/{record_id}")
+        body = self._unwrap(response)
+        if not isinstance(body, dict) or "status" not in body or "record_type" not in body:
+            # Provider trả đúng HTTP nhưng sai hình dạng: coi như không đọc
+            # được, KHÔNG đoán. Đoán ở đây nghĩa là đoán về một quyết định
+            # nghiệp vụ đã ký.
+            raise OwnershipProviderError(502, "INVALID_PROVIDER_RESPONSE", "Provider trả dữ liệu không hợp lệ.")
+        return body
+
     async def decide_record(
         self,
         record_id: str,

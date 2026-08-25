@@ -1,189 +1,150 @@
-"""Liên kết cư dân: chỉ admin ghi được, và chỉ VERIFIED mở quyền."""
+"""Bản đồ tài khoản ↔ cư dân: ai được ghi, và ai chỉ được đọc.
+
+File này TỪNG kiểm `POST /admin/resident-links/{user_id}` — đường admin tự gán
+liên kết cư dân. Route đó đã bị xoá: nó bật được công tắc `VERIFIED` mà không
+cần hồ sơ nào và không ai bên ngoài xác nhận (bằng chứng đo được nằm trong ghi
+chú ở `src/api/admin_routes.py`).
+
+Các bất biến file này bảo vệ KHÔNG mất đi — chúng chuyển chỗ:
+
+    khách không tự cấp quyền cho mình      → giữ ở đây, nay qua route đã đóng
+    admin không tự cấp quyền               → giữ ở đây
+    chỉ VERIFIED mới mở dịch vụ cư dân     → giữ nguyên, đọc thẳng database
+    admin không có link vẫn là khách       → giữ nguyên
+    đường CẤP quyền chạy được              → `tests/e2e/system_docker.py`,
+                                             vì nó cần Ownership provider thật
+
+Mapping vẫn đọc từ `user_resident_links`; chỉ đường HTTP ghi vào đó bị đóng.
+"""
 
 from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
 
 import pytest
 
 from tests.test_db.conftest import _register_and_login
 
-
-async def _make_admin(db_pool, username: str) -> None:
-    await db_pool.execute("UPDATE users SET role = 'admin' WHERE username = $1", username)
+BYPASS = "/api/v1/admin/resident-links/{}"
 
 
-async def _seed_resident(db_pool, resident_id: str = "RES-PHASEB") -> str:
+async def _user(client, db_pool, username, role=None):
+    await _register_and_login(client, username)
+    if role:
+        await db_pool.execute("UPDATE users SET role=$2 WHERE username=$1", username, role)
+    token = await _register_and_login(client, username)
+    uid = await db_pool.fetchval("SELECT id FROM users WHERE username=$1", username)
+    return token, str(uid)
+
+
+def _auth(t):
+    return {"Authorization": f"Bearer {t}"}
+
+
+async def _seed_link(db_pool, user_id, status):
+    """Mapping dựng THẲNG ở database — không đi qua endpoint bypass đã xoá.
+
+    Fixture phải mô phỏng kết quả cuối của đường canonical, không mô phỏng một
+    đường tắt: nếu test cần một cửa hậu để dàn dựng thì cửa hậu ấy vẫn còn.
+    """
+    rid = f"RES-{uuid.uuid4().hex[:6].upper()}"
     await db_pool.execute(
-        """
-        INSERT INTO residents (resident_id, full_name, apartment_code, residential_area)
-        VALUES ($1, 'Nguyễn Văn Cư Dân', 'B-0808', 'Vinhomes Ocean Park')
-        ON CONFLICT (resident_id) DO NOTHING
-        """,
-        resident_id,
+        "INSERT INTO residents (resident_id, full_name, apartment_code, residential_area) "
+        "VALUES ($1,'Nguyen Van Map',$2,'Toà S1')",
+        rid,
+        f"MP{uuid.uuid4().hex[:4]}",
     )
-    return resident_id
-
-
-async def _user_id(db_pool, username: str) -> str:
-    # Tầng app chuẩn hoá username về lowercase khi đăng ký. Query nguyên chữ
-    # hoa sẽ không thấy row, và test thất bại ở một chỗ chẳng liên quan gì.
-    user_id = await db_pool.fetchval("SELECT id FROM users WHERE username = $1", username.lower())
-    assert user_id is not None, f"chưa đăng ký được {username}"
-    return str(user_id)
+    await db_pool.execute(
+        "INSERT INTO user_resident_links (user_id, resident_id, verification_status, verified_at) "
+        "VALUES ($1::uuid,$2,$3,$4)",
+        user_id,
+        rid,
+        status,
+        datetime.now(UTC) if status == "VERIFIED" else None,
+    )
+    return rid
 
 
 @pytest.mark.asyncio
 async def test_a_customer_cannot_grant_itself_a_verified_link(client, db_pool):
-    """Tự cấp quyền cho mình phải là 403, không phải một biểu mẫu."""
-    token = await _register_and_login(client, "kh_tu_cap")
-    resident_id = await _seed_resident(db_pool)
-    user_id = await _user_id(db_pool, "kh_tu_cap")
+    token, uid = await _user(client, db_pool, "map_khach_tu_cap")
 
     response = await client.post(
-        f"/api/v1/admin/resident-links/{user_id}",
-        json={"resident_id": resident_id, "verification_status": "VERIFIED"},
-        headers={"Authorization": f"Bearer {token}"},
+        BYPASS.format(uid),
+        json={"resident_id": "RES-001", "verification_status": "VERIFIED"},
+        headers=_auth(token),
     )
 
-    assert response.status_code == 403, response.text
-    assert await db_pool.fetchval("SELECT 1 FROM user_resident_links WHERE user_id = $1::uuid", user_id) is None
+    assert response.status_code in (403, 404, 405), response.status_code
+    assert await db_pool.fetchval("SELECT count(*) FROM user_resident_links WHERE user_id=$1::uuid", uid) == 0
 
 
 @pytest.mark.asyncio
-async def test_the_admin_endpoint_rejects_an_anonymous_caller(client, db_pool):
-    await _register_and_login(client, "kh_an_danh")
-    user_id = await _user_id(db_pool, "kh_an_danh")
+async def test_an_admin_cannot_grant_a_link_either(client, db_pool):
+    """Đây là thay đổi contract, không phải một test bị hỏng.
 
-    response = await client.post(
-        f"/api/v1/admin/resident-links/{user_id}",
-        json={"resident_id": "RES-PHASEB", "verification_status": "VERIFIED"},
-    )
-
-    assert response.status_code == 401, response.text
-
-
-@pytest.mark.asyncio
-async def test_an_admin_can_grant_and_then_revoke_a_link(client, db_pool):
-    """`verified_at` chỉ tồn tại khi VERIFIED.
-
-    Một mốc "đã xác minh" còn sót lại trên liên kết đã bị từ chối là bằng chứng
-    sai trong audit trail — người đọc sau này sẽ tin vào nó.
+    Bản cũ tên là `test_an_admin_can_grant_and_then_revoke_a_link` và nó khẳng
+    định điều ngược lại. Quyền xác minh quyền sở hữu căn hộ giờ thuộc về ĐƠN VỊ
+    CUNG CẤP, qua `/verification-records` — nơi có hồ sơ và ảnh chứng minh.
     """
-    await _register_and_login(client, "kh_duoc_cap")
-    admin_token = await _register_and_login(client, "quan_tri_vien")
-    await _make_admin(db_pool, "quan_tri_vien")
-    resident_id = await _seed_resident(db_pool)
-    user_id = await _user_id(db_pool, "kh_duoc_cap")
-    headers = {"Authorization": f"Bearer {admin_token}"}
-
-    granted = await client.post(
-        f"/api/v1/admin/resident-links/{user_id}",
-        json={"resident_id": resident_id, "verification_status": "VERIFIED"},
-        headers=headers,
-    )
-    assert granted.status_code == 200, granted.text
-    row = await db_pool.fetchrow(
-        "SELECT verification_status, verified_at FROM user_resident_links WHERE user_id = $1::uuid", user_id
-    )
-    assert row["verification_status"] == "VERIFIED"
-    assert row["verified_at"] is not None
-
-    revoked = await client.post(
-        f"/api/v1/admin/resident-links/{user_id}",
-        json={"resident_id": resident_id, "verification_status": "REJECTED"},
-        headers=headers,
-    )
-    assert revoked.status_code == 200, revoked.text
-    row = await db_pool.fetchrow(
-        "SELECT verification_status, verified_at FROM user_resident_links WHERE user_id = $1::uuid", user_id
-    )
-    assert row["verification_status"] == "REJECTED"
-    assert row["verified_at"] is None, "verified_at phải bị bỏ khi thu hồi"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("field", ["apartment_code", "residential_area", "verified_at", "user_id"])
-async def test_the_admin_endpoint_refuses_extra_identity_fields(client, db_pool, field):
-    """Dữ liệu căn hộ đọc từ `residents`, không nhận từ body.
-
-    Nhận từ body là tạo nguồn sự thật thứ hai về việc ai ở căn nào; hai nguồn
-    thì sớm muộn cũng lệch, và lúc đó không biết tin cái nào.
-    """
-    admin_token = await _register_and_login(client, f"qtv_{field}")
-    await _make_admin(db_pool, f"qtv_{field}")
-    await _register_and_login(client, f"kh_{field}")
-    user_id = await _user_id(db_pool, f"kh_{field}")
-    resident_id = await _seed_resident(db_pool)
+    admin, _ = await _user(client, db_pool, "map_admin_cap", role="admin")
+    _, target = await _user(client, db_pool, "map_khach_bi_cap")
 
     response = await client.post(
-        f"/api/v1/admin/resident-links/{user_id}",
-        json={"resident_id": resident_id, "verification_status": "VERIFIED", field: "gia-tri-bat-ky"},
-        headers={"Authorization": f"Bearer {admin_token}"},
+        BYPASS.format(target),
+        json={"resident_id": "RES-001", "verification_status": "VERIFIED"},
+        headers=_auth(admin),
     )
 
-    assert response.status_code == 422, response.text
+    assert response.status_code in (404, 405), response.status_code
+    assert await db_pool.fetchval("SELECT count(*) FROM user_resident_links WHERE user_id=$1::uuid", target) == 0
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_resident_is_refused_without_revealing_which_id_is_missing(client, db_pool):
-    admin_token = await _register_and_login(client, "qtv_khong_ro")
-    await _make_admin(db_pool, "qtv_khong_ro")
-    await _register_and_login(client, "kh_khong_ro")
-    user_id = await _user_id(db_pool, "kh_khong_ro")
-
+async def test_the_removed_endpoint_is_not_an_anonymous_hole_either(client, db_pool):
     response = await client.post(
-        f"/api/v1/admin/resident-links/{user_id}",
-        json={"resident_id": "RES-KHONG-TON-TAI", "verification_status": "VERIFIED"},
-        headers={"Authorization": f"Bearer {admin_token}"},
+        BYPASS.format(uuid.uuid4()), json={"resident_id": "RES-001", "verification_status": "VERIFIED"}
     )
-
-    assert response.status_code == 404, response.text
-    body = response.text
-    for leaked in ("RES-KHONG-TON-TAI", user_id, "residents", "users"):
-        assert leaked not in body, f"lỗi rò {leaked!r}"
+    assert response.status_code in (401, 404, 405), response.status_code
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status,expected",
-    [(None, "prospect"), ("PENDING", "prospect"), ("REJECTED", "prospect"), ("VERIFIED", "resident")],
+    [("VERIFIED", "VERIFIED"), ("PENDING", "PENDING"), ("REJECTED", "REJECTED")],
 )
+@pytest.mark.asyncio
 async def test_only_a_verified_link_grants_resident_access(client, db_pool, status, expected):
-    """PENDING và REJECTED đều fail-closed, giống hệt chưa có liên kết.
+    """Bất biến trung tâm, không đổi: chỉ VERIFIED mới mở dịch vụ cư dân."""
+    token, uid = await _user(client, db_pool, f"map_trang_thai_{status.lower()}")
+    await _seed_link(db_pool, uid, status)
 
-    Ba trạng thái đó khác nhau về vận hành nhưng giống nhau về quyền; gộp lại ở
-    một chỗ khiến không nhánh nào vô tình mở quyền cho hai cái đầu.
-    """
-    from src.db.resident_link_repository import VerificationStatus, get_verified_identity, upsert_link
+    me = (await client.get("/api/v1/auth/me", headers=_auth(token))).json()
 
-    username = f"kh_status_{status}"
-    await _register_and_login(client, username)
-    user_id = await _user_id(db_pool, username)
-    resident_id = await _seed_resident(db_pool)
-
-    if status is not None:
-        await upsert_link(
-            db_pool, user_id=user_id, resident_id=resident_id, verification_status=VerificationStatus(status)
-        )
-
-    identity = await get_verified_identity(db_pool, user_id)
-
-    assert (identity is not None) == (expected == "resident")
-    if identity is not None:
-        assert identity.resident_id == resident_id
-        assert identity.apartment_code == "B-0808"
+    assert me["resident_verification_status"] == expected
+    if expected != "VERIFIED":
+        # Không mở quyền, và cũng không phơi căn hộ của ai.
+        assert me.get("apartment_code") in (None, "")
 
 
 @pytest.mark.asyncio
 async def test_an_admin_without_a_link_is_still_a_prospect(client, db_pool):
-    """Role và quyền cư dân là hai trục độc lập.
+    """Vai trong hệ thống không thay cho quyền cư dân đã xác minh."""
+    admin, _ = await _user(client, db_pool, "map_admin_khong_link", role="admin")
 
-    Quản trị viên là người vận hành hệ thống, không phải chủ căn hộ. Gộp lại
-    nghĩa là một tài khoản vận hành đặt được chỗ đỗ xe dưới danh nghĩa cư dân.
-    """
-    from src.db.resident_link_repository import get_verified_identity
+    me = (await client.get("/api/v1/auth/me", headers=_auth(admin))).json()
 
-    await _register_and_login(client, "qtv_khong_lien_ket")
-    await _make_admin(db_pool, "qtv_khong_lien_ket")
-    user_id = await _user_id(db_pool, "qtv_khong_lien_ket")
+    assert me["role"] == "admin"
+    assert me["resident_verification_status"] == "NOT_LINKED"
 
-    assert await get_verified_identity(db_pool, user_id) is None
+
+@pytest.mark.asyncio
+async def test_the_resident_id_never_reaches_the_client(client, db_pool):
+    """Định danh nội bộ không rời backend — nó là chìa khoá tra cứu hồ sơ cư dân."""
+    token, uid = await _user(client, db_pool, "map_khong_ro_id")
+    rid = await _seed_link(db_pool, uid, "VERIFIED")
+
+    body = (await client.get("/api/v1/auth/me", headers=_auth(token))).text
+
+    assert rid not in body
+    assert "resident_id" not in body

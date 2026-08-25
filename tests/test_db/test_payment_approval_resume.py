@@ -470,7 +470,7 @@ async def test_approval_moves_the_payment_task_to_success(resumable, monkeypatch
         def __init__(self, **_kwargs) -> None:
             self.captured: list[str] = []
 
-        async def execute(self, tool_name, input_data):
+        async def execute(self, tool_name, input_data, *, context=None):
             self.captured.append(tool_name)
             return StandardResult.ok({"payment_id": "PAY-RESUME", "payment_status": "PAID"})
 
@@ -503,7 +503,7 @@ async def test_workflow_is_not_success_while_a_task_is_still_pending(resumable, 
         def __init__(self, **_kwargs) -> None:
             pass
 
-        async def execute(self, tool_name, input_data):
+        async def execute(self, tool_name, input_data, *, context=None):
             return StandardResult.ok({"payment_id": "PAY-RESUME", "payment_status": "PAID"})
 
     monkeypatch.setattr(demo_service, "PaymentConnector", _Connector)

@@ -1,7 +1,7 @@
-"""Yêu cầu tham quan chờ duyệt — provider/admin quyết định qua cổng /review.
+"""Yêu cầu tham quan chờ duyệt — ĐƠN VỊ CUNG CẤP quyết định qua cổng /review.
 
 Path song song với `verification_routes.py` (xác thực căn hộ/xe): cùng người
-duyệt (provider/admin), cùng cổng /review, nhưng nguồn dữ liệu KHÁC.
+duyệt (chỉ provider), cùng cổng /review, nhưng nguồn dữ liệu KHÁC.
 
   - verification: record nằm ở Mock Ownership Provider (8004), main app chỉ
     materialize khi duyệt.
@@ -24,7 +24,8 @@ Ranh giới tin cậy:
 
   - Browser KHÔNG gửi `status`/`decided_by`/`reject_reason` cho quyết định duyệt;
     chỉ gửi `{decision, reject_reason?}`. `decided_by` lấy từ JWT của người duyệt.
-  - Chỉ provider/admin vào được (`require_roles`). Khách đọc trạng thái workflow
+  - Chỉ ĐƠN VỊ CUNG CẤP vào được (`require_roles("provider")`). Admin giám sát
+    bằng số liệu ở `/admin`, không ký thay đơn vị. Khách đọc trạng thái workflow
     của mình qua GET /workflows/demo/{id} — field `viewing_approval` KHÔNG chứa
     PII của người yêu cầu.
 """
@@ -77,7 +78,7 @@ def _pending_to_dict(pending) -> dict:
 @router.get("", summary="Danh sách yêu cầu lịch tham quan (cho người duyệt)")
 async def list_viewing_approval_records(
     status: str | None = None,
-    _reviewer: dict = Depends(require_roles("provider", "admin")),
+    _reviewer: dict = Depends(require_roles("provider")),
 ) -> dict:
     """Danh sách yêu cầu tham quan cho cổng /review — mới nhất trước.
 
@@ -108,9 +109,9 @@ async def list_viewing_approval_records(
 async def decide_viewing_approval(
     workflow_id: str,
     body: _DecideBody,
-    reviewer: dict = Depends(require_roles("provider", "admin")),
+    reviewer: dict = Depends(require_roles("provider")),
 ) -> dict:
-    """Provider/admin quyết định lịch tham quan.
+    """ĐƠN VỊ TOUR quyết định lịch tham quan. Admin không có quyền này.
 
     Duyệt → `resume_viewing_after_approval` (đồng bộ, ~30s): materialize lịch
     qua Tour provider, ghi kết quả, chạy nốt `book_shuttle`. Từ chối →

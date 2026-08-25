@@ -1,0 +1,49 @@
+"""Ba tập tool, và chỗ duy nhất định nghĩa chúng.
+
+Owner: Thành Bảo (Decision layer)
+File: src/common/agent_tool_policy.py
+
+    PROVIDER_TOOLS         mọi thứ hệ thống có connector phục vụ
+    AGENT_FORBIDDEN_TOOLS  có connector, nhưng Agent KHÔNG được chạm
+    AGENT_REACHABLE_TOOLS  phần còn lại — Planner lập được, Patch sửa được
+
+Vì sao ở `common` chứ không ở `agents/planner.py`
+------------------------------------------------
+`field_parsers.py` từng `import src.agents.planner` chỉ để lấy danh sách này.
+Chiều ấy sai: `common` là tầng dưới cùng, còn `agents`/`api`/`orchestration`
+dựng trên nó. Một import ngược tạo vòng tiềm tàng, và nó buộc mọi thứ chạm
+`field_parsers` phải kéo theo cả Planner — kể cả những chỗ chỉ cần đọc một
+chuỗi ngày.
+
+Đây là CHÍNH SÁCH, không phải hạ tầng: nó trả lời "Agent được phép làm gì", một
+câu hỏi mà cả bốn tầng đều hỏi. Câu hỏi ấy phải có đúng một câu trả lời, ở một
+chỗ ai cũng với tới được mà không phải với ngược lên.
+
+Vì sao hai tool bị cấm
+----------------------
+`register_resident` — đăng ký / liên kết / xác minh hồ sơ cư dân xảy ra NGOÀI
+Agent (đường admin/provider). Planner tự thêm nó thì nó sẽ hỏi
+`full_name`/`apartment_code`/`residential_area`, ba ô mà giao diện không có chỗ
+nhập; người dùng nhận một câu hỏi không có câu trả lời hợp lệ.
+
+`search_properties` — quyết định sản phẩm: tìm kiếm / listing là chức năng
+marketplace thông thường, không phải tác vụ của Agent.
+
+Cả hai VẪN CÒN connector và provider — không xoá, vì xoá là một thay đổi rộng
+hơn hẳn và không cần thiết. Thứ bị đóng là ĐƯỜNG TỚI chúng từ Agent.
+
+Ràng buộc nằm ở đây, không ở prompt: đã quan sát trên model thật — nó tự thêm
+một tool mà prompt đã dặn không dùng.
+"""
+
+from __future__ import annotations
+
+from typing import get_args
+
+from src.common.task_plan import AllowedTool
+
+PROVIDER_TOOLS: frozenset[str] = frozenset(get_args(AllowedTool))
+
+AGENT_FORBIDDEN_TOOLS: frozenset[str] = frozenset({"register_resident", "search_properties"})
+
+AGENT_REACHABLE_TOOLS: frozenset[str] = PROVIDER_TOOLS - AGENT_FORBIDDEN_TOOLS

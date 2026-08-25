@@ -376,6 +376,28 @@ CREATE TABLE IF NOT EXISTS workflow_tasks (
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
 
+    -- Bằng chứng task đã rời hệ thống tới provider hay chưa.
+    --
+    -- Enum ĐÓNG, không phải boolean: câu hỏi có ba câu trả lời và câu thứ ba
+    -- (`UNKNOWN` — không chứng minh được) là câu quan trọng nhất. Xem
+    -- `src/common/submission.py`.
+    --
+    -- `NOT_SUBMITTED` là mặc định cho row MỚI, và chỉ cho row mới: một task
+    -- vừa được tạo thì chắc chắn chưa gửi gì. Row có TRƯỚC cột này không có
+    -- bằng chứng nào, nên migration backfill chúng thành `UNKNOWN` — xem
+    -- `schema_migrations.sql`.
+    provider_submission_status VARCHAR(20) NOT NULL DEFAULT 'NOT_SUBMITTED'
+                      CHECK (provider_submission_status IN (
+                          'NOT_SUBMITTED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN'
+                      )),
+    -- Tham chiếu CÓ THẨM QUYỀN do provider trả về (booking_id, viewing_id...).
+    -- NULL khi chưa có; không bao giờ được điền bằng giá trị tự dựng.
+    external_request_id        VARCHAR(120),
+    -- Khoá idempotency đã dùng cho lần gửi này. Lưu ở BẢN GHI chứ không chỉ
+    -- trong bộ nhớ process: retry sau restart phải dựng lại đúng khoá cũ, nếu
+    -- không nó rơi ra ngoài bản ghi cũ và tạo giao dịch thứ hai.
+    provider_idempotency_key   VARCHAR(160),
+
     -- task_id unique trong phạm vi một workflow
     CONSTRAINT uq_workflow_tasks_wf_task UNIQUE (workflow_id, task_id)
 );
@@ -385,6 +407,55 @@ CREATE INDEX IF NOT EXISTS idx_workflow_tasks_by_workflow
 
 CREATE INDEX IF NOT EXISTS idx_workflow_tasks_by_status
     ON workflow_tasks(workflow_id, status);
+
+-- =============================================================
+-- workflow_plan_revisions — sổ sửa đổi kế hoạch, CHỈ GHI THÊM
+-- =============================================================
+--
+-- `workflow_tasks` là hình chiếu vận hành: `input_data` bị update mỗi lần một
+-- bước đổi. Nó không phải nhật ký, nên nó không trả lời được "ai đã đổi gì,
+-- lúc nào, từ phiên bản kế hoạch nào".
+--
+-- KHÔNG lưu ở đây: câu người dùng gõ, output thô của model, token/credential,
+-- message của exception, DSN. Chúng là văn bản tự do đi vào một bảng lưu vĩnh
+-- viễn — có thể mang dữ liệu cá nhân, và không giúp gì cho việc dựng lại lịch
+-- sử sửa đổi. Chỉ giữ BẢN VÁ đã được thẩm định.
+CREATE TABLE IF NOT EXISTS workflow_plan_revisions (
+    revision_id         BIGSERIAL   PRIMARY KEY,
+    workflow_id         UUID        NOT NULL REFERENCES workflows(workflow_id),
+    revision_number     INTEGER     NOT NULL CHECK (revision_number > 0),
+    requester_user_id   UUID,
+    plan_version_before VARCHAR(32) NOT NULL,
+    plan_version_after  VARCHAR(32) NOT NULL,
+    accepted_patch      JSONB       NOT NULL,
+    targets             JSONB       NOT NULL,
+    consequence         VARCHAR(40) NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Số thứ tự là thứ dựng lại được LỊCH SỬ. Hai dòng cùng số thì không dựng
+    -- lại được, nên ràng buộc nằm ở database chứ không ở tầng ứng dụng.
+    CONSTRAINT uq_plan_revisions_order UNIQUE (workflow_id, revision_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_revisions_by_workflow
+    ON workflow_plan_revisions(workflow_id, revision_number);
+
+-- Append-only, chặn ở DATABASE.
+--
+-- Một dòng audit viết đè lên được thì nó là ghi chú, không phải bằng chứng. Và
+-- chặn ở tầng ứng dụng là không chặn: một script vận hành, một lần `psql`, hay
+-- một tầng viết sau này đều đi vòng qua tầng ấy.
+CREATE OR REPLACE FUNCTION workflow_plan_revisions_append_only() RETURNS trigger AS $fn$
+BEGIN
+    RAISE EXCEPTION 'workflow_plan_revisions chi duoc GHI THEM; % bi tu choi', TG_OP;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS workflow_plan_revisions_no_update ON workflow_plan_revisions;
+CREATE TRIGGER workflow_plan_revisions_no_update
+    BEFORE UPDATE OR DELETE ON workflow_plan_revisions
+    FOR EACH ROW EXECUTE FUNCTION workflow_plan_revisions_append_only();
+
 
 
 -- =============================================================
@@ -656,68 +727,73 @@ END
 $$;
 
 
--- Khung nhìn `viewing_approvals` GHI ĐƯỢC.
+-- Trigger ghi cho `viewing_approvals` nằm ở `schema_migrations.sql`.
 --
--- Gộp hàng đợi thì mọi chỗ ĐỌC giữ nguyên nhờ khung nhìn, nhưng chỗ GHI thì
--- không: PostgreSQL từ chối `INSERT` vào một view có cột dẫn xuất
--- (`details->>'project_id'` không phải cột của bảng gốc).
---
--- Đo được: 12 test đỏ ngay khi gộp, tất cả vì chúng seed dữ liệu bằng `INSERT
--- INTO viewing_approvals`. Sửa từng test là bỏ sót — mã cũ, script vận hành và
--- test chưa viết đều có thể ghi vào đây.
---
--- Trigger dịch ngược: cột riêng của tham quan gói lại thành `details`, phần
--- còn lại đi thẳng. Sau đó bảng chỉ còn MỘT, mà giao diện cũ vẫn nguyên vẹn.
-CREATE OR REPLACE FUNCTION viewing_approvals_write() RETURNS trigger AS $fn$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        INSERT INTO service_approvals (
-            workflow_id, task_id, tool, service_label, details, status,
-            applicant_user_id, applicant_name, applicant_phone,
-            reject_reason, decided_by, created_at, decided_at
-        ) VALUES (
-            NEW.workflow_id, NEW.task_id, 'schedule_property_viewing',
-            'Đặt lịch tham quan',
-            jsonb_strip_nulls(jsonb_build_object(
-                'project_id', NEW.project_id,
-                'project_name', NEW.project_name,
-                'viewing_date', to_char(NEW.viewing_date, 'YYYY-MM-DD'),
-                'viewing_time', NEW.viewing_time,
-                'passenger_count', NEW.passenger_count,
-                'wants_shuttle', NEW.wants_shuttle
-            )),
-            COALESCE(NEW.status, 'AWAITING'),
-            NEW.applicant_user_id, NEW.applicant_name, NEW.applicant_phone,
-            NEW.reject_reason, NEW.decided_by,
-            COALESCE(NEW.created_at, NOW()), NEW.decided_at
-        )
-        ON CONFLICT (workflow_id, task_id) DO NOTHING;
-        RETURN NEW;
-    END IF;
+-- File đó là file duy nhất định nghĩa `viewing_approvals_write()`, vì nó phải
+-- CHẠY ĐƯỢC MỘT MÌNH trên một database cũ (xem
+-- `test_schema_migrations_upgrades_legacy_table`) — nên nó không thể mượn định
+-- nghĩa từ đây. Chép sang cả hai file thì file chạy sau đè lên file chạy
+-- trước, và một sửa đổi ở đây im lặng không có tác dụng: đo được khi
+-- `ON CONFLICT ... DO UPDATE` viết ở file này, migration báo chạy xong, mà hàm
+-- trong database vẫn giữ `DO NOTHING`.
 
-    UPDATE service_approvals SET
-        status            = COALESCE(NEW.status, status),
-        reject_reason     = NEW.reject_reason,
-        decided_by        = NEW.decided_by,
-        decided_at        = NEW.decided_at,
-        applicant_name    = NEW.applicant_name,
-        applicant_phone   = NEW.applicant_phone,
-        details           = details || jsonb_strip_nulls(jsonb_build_object(
-                                'project_id', NEW.project_id,
-                                'project_name', NEW.project_name,
-                                'viewing_date', to_char(NEW.viewing_date, 'YYYY-MM-DD'),
-                                'viewing_time', NEW.viewing_time,
-                                'passenger_count', NEW.passenger_count,
-                                'wants_shuttle', NEW.wants_shuttle
-                            ))
-     WHERE workflow_id = OLD.workflow_id
-       AND task_id = OLD.task_id
-       AND tool = 'schedule_property_viewing';
-    RETURN NEW;
-END;
-$fn$ LANGUAGE plpgsql;
+-- =============================================================
+-- Biên lai MATERIALIZATION cho hồ sơ xác minh.
+--
+-- Quyết định của đơn vị nằm ở Ownership Provider; kết quả nghiệp vụ
+-- (liên kết cư dân, xe) nằm ở database này. Hai hệ thống, nối bằng HTTP,
+-- KHÔNG chung transaction — nên tồn tại một khe mà cả hai đều không mô tả:
+-- đơn vị đã ký, main app chưa ghi, và không ai biết.
+--
+-- Đo được trước khi có bảng này, ép lỗi đúng vào khe ấy:
+--
+--     provider           APPROVED
+--     user_resident_links 0 dòng
+--     lần đầu   http=500
+--     lần hai   http=409   (ALREADY_DECIDED)
+--
+-- Người dùng kẹt vĩnh viễn: duyệt lại chỉ đập vào provider, không chạy nốt
+-- phần còn thiếu.
+--
+-- Bảng này là BẰNG CHỨNG VẬN HÀNH của tiến trình nối hai hệ thống, KHÔNG phải
+-- bản sao nguồn sự thật. Nó cố ý không mang `claimed_data`, ảnh giấy tờ, họ
+-- tên, CCCD, token hay payload thô của provider — giữ chúng ở đây là tạo một
+-- bản sao thứ hai của đúng thứ nhạy cảm nhất, trong một bảng sinh ra để phục
+-- vụ retry.
+--
+-- KHÔNG có FK sang `verification_records`: Ownership Provider là một hệ thống
+-- LOGIC khác. Hôm nay nó tình cờ dùng chung một PostgreSQL; một FK sẽ biến sự
+-- trùng hợp ấy thành ràng buộc, và tách service ra sẽ vỡ.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS verification_materializations (
+    record_id                 UUID PRIMARY KEY,
+    -- NULL cho tới khi đọc được provider. Xem ghi chú ở
+    -- `verification_recovery.py`: đoán 'apartment' là ghi một sự kiện
+    -- CHƯA BIẾT vào audit dưới dạng ĐÃ BIẾT.
+    record_type               VARCHAR(20),
+    requested_decision        VARCHAR(10)  NOT NULL,
+    provider_decision_status  VARCHAR(20)  NOT NULL DEFAULT 'UNKNOWN',
+    materialization_status    VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+    -- Khoá ổn định theo record_id. Cùng một hồ sơ, dù retry bao nhiêu lần và
+    -- từ tiến trình nào, luôn ra cùng một khoá.
+    idempotency_key           VARCHAR(120) NOT NULL,
+    -- Chỉ MÃ lỗi, không bao giờ message. Message của provider và của database
+    -- đều từng mang nguyên payload, và bảng này là thứ bị dump vào issue.
+    safe_error_code           VARCHAR(50),
+    attempt_count             INTEGER      NOT NULL DEFAULT 0,
+    created_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_verif_mat_idempotency UNIQUE (idempotency_key),
+    CONSTRAINT verif_mat_type_check
+        CHECK (record_type IS NULL OR record_type IN ('apartment', 'vehicle')),
+    CONSTRAINT verif_mat_decision_check
+        CHECK (requested_decision IN ('approve', 'reject')),
+    CONSTRAINT verif_mat_provider_check
+        CHECK (provider_decision_status IN ('UNKNOWN', 'PENDING', 'APPROVED', 'REJECTED')),
+    CONSTRAINT verif_mat_status_check
+        CHECK (materialization_status IN ('NOT_REQUIRED', 'PENDING', 'SUCCESS', 'FAILED'))
+);
 
-DROP TRIGGER IF EXISTS viewing_approvals_write_trg ON viewing_approvals;
-CREATE TRIGGER viewing_approvals_write_trg
-    INSTEAD OF INSERT OR UPDATE ON viewing_approvals
-    FOR EACH ROW EXECUTE FUNCTION viewing_approvals_write();
+CREATE INDEX IF NOT EXISTS idx_verif_mat_unfinished
+    ON verification_materializations(materialization_status)
+    WHERE materialization_status IN ('PENDING', 'FAILED');

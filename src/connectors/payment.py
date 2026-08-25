@@ -36,7 +36,7 @@ import httpx
 
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
-from src.connectors.base import Connector
+from src.connectors.base import Connector, ProviderCallContext
 
 
 class PaymentConnector(Connector):
@@ -51,24 +51,14 @@ class PaymentConnector(Connector):
         base_url: str = "http://localhost:8003",
         timeout: float = 30.0,
         client: httpx.AsyncClient | None = None,
-        idempotency_key: str | None = None,
         workflow_id: str | None = None,
     ):
-        # Khoá idempotency do ORCHESTRATION đặt, deterministic theo
-        # workflow_id + task_id. Không đưa vào TaskPlan: field trong TaskPlan là
-        # thứ LLM sinh ra, mà khoá do LLM đặt thì mỗi lần retry lại một giá trị
-        # khác — retry nào cũng thành giao dịch mới, đúng thứ khoá này sinh ra
-        # để chặn. Vì vậy nó đi qua header, không qua body.
-        self._idempotency_key = idempotency_key
-        # Khi caller không đưa sẵn khoá, connector tự dựng từ `workflow_id` +
-        # `booking_id` của chính lần gọi. Trước đây đường chạy thường dựng
-        # `PaymentConnector(base_url=...)` trần, nên `pay_fee` đi ra provider
-        # KHÔNG mang khoá — và dedupe phía provider chỉ chạy khi có khoá.
-        #
-        # Đo được: PAY-016 có `idempotency_key` NULL, lượt gọi thứ hai bỏ qua
-        # dedupe, rơi vào kiểm `already_paid` và trả "Booking has already been
-        # paid". Tiền đã trừ thật, còn task thì ghi FAILED.
-        self._workflow_id = workflow_id
+        # `workflow_id` KHÔNG còn dùng để dựng khoá. Khoá đi ra dây đến từ
+        # `ProviderCallContext` của từng lần gọi — xem `execute`. Tham số giữ
+        # lại để không phải sửa mọi chỗ dựng connector, và cố ý không được đọc:
+        # một connector dùng chung cho cả workflow thì state của nó không thể
+        # là dữ liệu của một lần gọi.
+        del workflow_id
         # Chuẩn hóa base_url bỏ dấu / ở cuối
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -80,6 +70,24 @@ class PaymentConnector(Connector):
         # Danh sách các tool mà connector này đảm nhận
         return ["pay_fee"]
 
+    def idempotency_key_for(
+        self, workflow_id: str, task_id: str, tool_name: str, resolved_input: dict[str, Any]
+    ) -> str | None:
+        """Khoá ĐỀ XUẤT, tính deterministic từ chính tham số của lần gọi.
+
+        Không đọc `self._workflow_id` hay `self._idempotency_key`: cùng bộ tham
+        số phải ra cùng khoá ở mọi process, kể cả sau restart — đó là điều kiện
+        để khoá đã lưu và khoá vừa tính so được với nhau.
+        """
+        if tool_name != "pay_fee":
+            return None
+        booking_id = (resolved_input or {}).get("booking_id")
+        if not workflow_id or not isinstance(booking_id, str) or not booking_id:
+            return None
+        from src.db.parking_payment_repository import payment_idempotency_key
+
+        return payment_idempotency_key(str(workflow_id), booking_id)
+
     def is_retry_safe(self, tool_name: str) -> bool:
         """`pay_fee` chỉ an toàn khi lần gọi này MANG idempotency key.
 
@@ -87,23 +95,17 @@ class PaymentConnector(Connector):
         retry sau timeout sẽ thu tiền lần hai. Có key thì provider trả lại đúng
         payment cũ, nên gọi lại vô hại.
         """
-        return tool_name == "pay_fee" and bool(self._idempotency_key or self._workflow_id)
-
-    def _key_for(self, input_data: dict[str, Any]) -> str | None:
-        """Khoá dựng tại chỗ từ `workflow_id` + `booking_id` của lần gọi này."""
-        if not self._workflow_id:
-            return None
-        booking_id = input_data.get("booking_id")
-        if not booking_id:
-            return None
-        from src.db.parking_payment_repository import payment_idempotency_key
-
-        return payment_idempotency_key(self._workflow_id, str(booking_id))
+        # NĂNG LỰC của tool, không phải state của connector: `pay_fee` gửi
+        # được khoá idempotency. Việc lần gọi NÀY có khoá hay không do Executor
+        # quyết, vì chỉ nó cầm permit — xem `_candidate_key`.
+        return tool_name == "pay_fee"
 
     async def execute(
         self,
         tool_name: str,
         input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
     ) -> StandardResult:
         # --- Bước 1: Kiểm tra tính hợp lệ của tool_name ---
         if tool_name != "pay_fee":
@@ -115,7 +117,13 @@ class PaymentConnector(Connector):
         try:
             # --- Bước 2: Khởi tạo HTTP client và gọi API ---
             async with self._get_client() as client:
-                key = self._idempotency_key or self._key_for(input_data)
+                # Khoá đến TỪ context của lần gọi này, và chỉ từ đó.
+                #
+                # Bản trước lấy `self._idempotency_key or self._key_for(...)` —
+                # state của một connector dùng chung cho cả workflow. Hai lần
+                # gọi song song ghi đè lên nhau, và không gì chứng minh khoá đi
+                # ra dây là khoá database đang giữ.
+                key = context.idempotency_key if context is not None else None
                 headers = {"Idempotency-Key": key} if key is not None else None
                 response = await client.post(
                     f"{self.base_url}/api/payments",

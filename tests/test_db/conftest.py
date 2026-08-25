@@ -16,6 +16,7 @@ Chạy test:
 from __future__ import annotations
 
 import asyncpg
+import pytest
 import pytest_asyncio
 
 from src.db.migrations import create_test_db
@@ -148,3 +149,29 @@ async def _register_and_login(client: AsyncClient, username: str) -> str:
     )
     assert response.status_code == 200, response.text
     return response.json()["access_token"]
+
+
+# ---------------------------------------------------------------------------
+# Ma trận "duyệt → chạy tiếp → hoàn tất" — connector gián điệp dùng chung.
+#
+# Đặt ở conftest thay vì import chéo giữa hai file test: import một fixture từ
+# module test khác rồi lại nhận nó làm tham số khiến nó bị định nghĩa lại và
+# ruff báo F811 — đúng lý do `client` cũng nằm ở đây.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def matrix_spy(db_pool, monkeypatch):
+    """MỘT connector cho mọi tool, tiêm vào cả BA lối ra provider.
+
+    Ba lối, không một: `build_connectors` cho Executor, `TourConnector` cho
+    materialize lịch tham quan, `PaymentConnector` cho đường trả tiền. Bỏ sót
+    một lối nghĩa là test đi ra HTTP thật và hỏng theo kiểu khó đọc.
+    """
+    from tests.matrix.domain_spy import DomainSpyConnector
+
+    connector = DomainSpyConnector(pool=db_pool)
+    monkeypatch.setattr("src.orchestration.demo_service.build_connectors", lambda **_: [connector])
+    monkeypatch.setattr("src.orchestration.demo_service.TourConnector", lambda **_: connector)
+    monkeypatch.setattr("src.orchestration.demo_service.PaymentConnector", lambda **_: connector)
+    return connector

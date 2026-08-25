@@ -34,9 +34,7 @@ import asyncpg
 from src.common.enums import TaskStatus
 
 # Bước đã kết thúc — không đổi trạng thái được nữa, và cũng không cần.
-_TERMINAL_TASK_STATUSES = frozenset(
-    {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}
-)
+_TERMINAL_TASK_STATUSES = frozenset({TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value})
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
@@ -117,6 +115,23 @@ def wants_shuttle_in_plan(plan: TaskPlan) -> bool:
     return any(task.tool == "book_shuttle" for task in plan.tasks)
 
 
+# Thứ tự khoá dùng chung cho MỌI người ghi hàng đợi duyệt.
+#
+# `lock_workflow_for_amendment` khoá `workflows` trước, rồi `workflow_tasks`,
+# rồi các dòng duyệt. `SELECT ... FOR UPDATE` khoá được dòng ĐANG CÓ, nhưng
+# không khoá được dòng CHƯA tồn tại — nên một lượt ghim hàng đợi MỚI vẫn chèn
+# được ngay giữa lúc amendment đang dùng snapshot, và bản vá commit dựa trên
+# một hàng đợi đã khác.
+#
+# Vì vậy người ghi cũng khoá `workflows` TRƯỚC, cùng thứ tự. Cùng thứ tự là
+# điều kiện để chúng xếp hàng thay vì ôm nhau chết.
+async def _lock_workflow_row(conn: Any, workflow_id: str) -> None:
+    await conn.fetchrow(
+        "SELECT workflow_id FROM workflows WHERE workflow_id = $1 FOR UPDATE",
+        workflow_id if isinstance(workflow_id, UUID) else UUID(str(workflow_id)),
+    )
+
+
 async def save_pending_viewing_approval(
     pool: asyncpg.Pool,
     *,
@@ -135,7 +150,8 @@ async def save_pending_viewing_approval(
     """Ghi ngữ cảnh chờ duyệt lịch tham quan. Chạy lại cùng workflow không tạo
     bản thứ hai; chỉ update khi record vẫn còn AWAITING (đã quyết định thì đừng
     viết đè lên quyết định cũ)."""
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock_workflow_row(conn, workflow_id)
         await conn.execute(
             """
             -- MỘT bảng vật lý cho mọi hàng đợi duyệt. `viewing_approvals`
@@ -160,15 +176,36 @@ async def save_pending_viewing_approval(
                 )),
                 'AWAITING', $9, $10, $11
             )
+            -- GHIM LẠI nghĩa là cần một quyết định MỚI.
+            --
+            -- `WHERE status = 'AWAITING'` từng đứng ở đây để không viết đè lên
+            -- một quyết định đã có. Ý đúng, phạm vi sai: `EXPIRED` KHÔNG phải
+            -- quyết định của đơn vị tour — nó là dấu vết người dùng bấm Dừng.
+            -- Nên sau khi họ sửa ngày rồi chạy lại, dòng cũ không bao giờ được
+            -- vũ trang lại. Đo được trên 1fc4b70d:
+            --
+            --     workflow_tasks.T1   WAITING_APPROVAL   viewing_date 2026-09-30
+            --     service_approvals   EXPIRED            viewing_date 2026-09-10
+            --
+            -- Bước chờ một quyết định về ngày MỚI; hồ sơ thì đã hết hạn và vẫn
+            -- mang ngày CŨ. Không ai được hỏi, và yêu cầu treo vĩnh viễn.
+            --
+            -- Hàng rào vẫn còn, chỉ đúng phạm vi hơn: `APPROVED`/`REJECTED` là
+            -- quyết định THẬT của đơn vị tour và không được viết đè (xem
+            -- `test_save_after_decision_does_not_overwrite`). `EXPIRED` thì
+            -- không — nó chỉ ghi lại việc người dùng đã dừng, và dừng rồi sửa
+            -- lại chính là việc đường này tồn tại để phục vụ.
             ON CONFLICT (workflow_id, task_id) DO UPDATE
                 SET details = EXCLUDED.details,
+                    status = 'AWAITING',
                     applicant_user_id = EXCLUDED.applicant_user_id,
                     applicant_name = EXCLUDED.applicant_name,
                     applicant_phone = EXCLUDED.applicant_phone,
                     reject_reason = NULL,
                     decided_by = NULL,
-                    decided_at = NULL
-            WHERE service_approvals.status = 'AWAITING'
+                    decided_at = NULL,
+                    created_at = NOW()
+            WHERE service_approvals.status IN ('AWAITING', 'EXPIRED')
             """,
             _uuid(workflow_id),
             task_id,
@@ -480,7 +517,6 @@ class ViewingApprovalBoundary:
             partial_results=partial_results,
         )
 
-
     async def _cancel_viewing_tasks(self, workflow_id: str | None, task_ids: set[str]) -> None:
         """Bỏ các bước tham quan khi phần trước đã hỏng.
 
@@ -524,6 +560,7 @@ class ViewingApprovalBoundary:
             if rows.get(task_id) in _TERMINAL_TASK_STATUSES:
                 continue
             await self._repository.update_task_status(workflow_id, task_id, TaskStatus.WAITING_APPROVAL)
+
 
 async def expire_pending_viewing_approval(pool: asyncpg.Pool, workflow_id: str) -> bool:
     """Rút lời nhờ duyệt khi người dùng huỷ yêu cầu. Trả True nếu có rút.

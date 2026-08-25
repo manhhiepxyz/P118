@@ -334,3 +334,73 @@ async def test_an_already_finished_viewing_is_not_parked_again(db_pool):
     assert status == TaskStatus.SUCCESS.value, (
         f"bước tham quan đã xong bị ghim lại thành {status!r} — màn hình sẽ nói nó chưa được duyệt"
     )
+
+
+@pytest.mark.asyncio
+async def test_approving_a_service_never_rewinds_a_step_that_already_ran(client, db_pool):
+    """Duyệt dịch vụ không được xoá kết quả của bước đã chạy xong.
+
+    Từ khi hai hàng đợi gộp làm một, `pending_for_workflow` trả về cả dòng của
+    LỊCH THAM QUAN — vốn được duyệt ở đường riêng và chạy xong từ trước. Vòng
+    "đưa bước đã duyệt rời khỏi WAITING_APPROVAL" đẩy luôn nó về PENDING, nên
+    `_seed_completed` không còn thấy nó xong và cổng tham quan ghim lại.
+
+    Đo được trên hai yêu cầu thật của người dùng:
+
+        mọi bước SUCCESS, mọi phê duyệt APPROVED, pay_fee đã trả tiền
+        workflows.status  RUNNING
+        Lịch sử           "Đang chạy 4/5 bước" — vĩnh viễn
+        Trang chi tiết    "hoàn tất"  (đọc cache RAM)
+
+    Hai màn hình nói hai chuyện về cùng một việc, và cái đúng là cái xấu hơn.
+
+    Nhận `client` để lifespan đăng ký repository provider. Thiếu nó,
+    `resume_after_service_decision` ném ngay ở `acquire_repository()`, `except`
+    nuốt mất, và test xanh mà chưa hề chạy tới đoạn cần kiểm — đo được bằng
+    cách gỡ bản vá: vẫn 8/8 xanh.
+    """
+    from src.orchestration.demo_service import resume_after_service_decision
+    from src.orchestration.service_approval import save_pending_service_approvals
+
+    wid = uuid.uuid4()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO workflows (workflow_id, goal, status) VALUES ($1,'tham quan + đỗ xe','RUNNING')", wid
+        )
+        # T1 đã chạy xong ở đường duyệt lịch tham quan.
+        await conn.execute(
+            "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, input_data, result_data) "
+            "VALUES ($1,'T1','schedule_property_viewing','SUCCESS','{}'::jsonb,'{\"viewing_id\":\"VIEW-001\"}'::jsonb)",
+            wid,
+        )
+        await conn.execute(
+            "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, input_data) "
+            "VALUES ($1,'T2','book_parking','WAITING_APPROVAL','{}'::jsonb)",
+            wid,
+        )
+    workflow_id = str(wid)
+
+    # Cả hai dòng đều APPROVED — đúng trạng thái sau khi đơn vị bấm duyệt hết.
+    await save_pending_service_approvals(
+        db_pool,
+        workflow_id=workflow_id,
+        rows=[
+            {"task_id": "T1", "tool": "schedule_property_viewing", "service_label": "Đặt lịch tham quan", "details": {}},
+            {"task_id": "T2", "tool": "book_parking", "service_label": "Giữ chỗ đỗ xe", "details": {}},
+        ],
+    )
+    await db_pool.execute(
+        "UPDATE service_approvals SET status='APPROVED' WHERE workflow_id = $1::uuid", wid
+    )
+
+    try:
+        await resume_after_service_decision(workflow_id)
+    except Exception:  # noqa: BLE001 - connector thật không có ở đây; chỉ kiểm phần trạng thái
+        pass
+
+    status = await db_pool.fetchval(
+        "SELECT status FROM workflow_tasks WHERE workflow_id = $1::uuid AND task_id = 'T1'", wid
+    )
+    assert status == TaskStatus.SUCCESS.value, (
+        f"bước tham quan đã xong bị lùi về {status!r} — Lịch sử sẽ hiện 'Đang chạy' mãi mãi"
+    )

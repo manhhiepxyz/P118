@@ -22,6 +22,8 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
         self._workflows: dict[str, dict] = {}
         self._tasks: dict[str, dict] = {}  # key: f"{workflow_id}:{task_id}"
         self._repair_hints: dict[str, dict[str, dict]] = {}  # workflow_id -> {task_id: hint}
+        # Bằng chứng gửi provider, khoá theo (workflow_id, task_id).
+        self._submission: dict[tuple[str, str], dict] = {}
 
     async def create_workflow(self, workflow_data: dict) -> str:
         """Tạo workflow mới, trả về workflow_id."""
@@ -86,6 +88,40 @@ class InMemoryWorkflowStateRepository(WorkflowStateRepository):
             raise ValueError(f"Task not found: {task_id} in workflow {workflow_id}")
         self._tasks[key]["status"] = status.value
         self._tasks[key]["updated_at"] = datetime.now(UTC).isoformat()
+
+    async def prepare_submission(self, workflow_id: str, task_id: str, *, candidate_key: str | None):
+        """Bản trong bộ nhớ của luật thật: khoá đã lưu là authoritative.
+
+        Không phải một stub trả `True`: nếu nó luôn cho phép thì mọi test dùng
+        fake sẽ không bao giờ thấy hàng rào, và hàng rào chỉ tồn tại ở đường
+        PostgreSQL.
+        """
+        from src.db.workflow_repository import SubmissionPermit
+
+        evidence = self._submission.setdefault(
+            (workflow_id, task_id), {"status": "NOT_SUBMITTED", "key": None, "external_id": None}
+        )
+        if evidence["status"] in ("ACKNOWLEDGED", "UNKNOWN"):
+            return SubmissionPermit(allowed=False, reason="ALREADY_TERMINAL")
+        stored = evidence["key"]
+        if stored is not None and candidate_key is not None and stored != candidate_key:
+            return SubmissionPermit(allowed=False, reason="IDEMPOTENCY_KEY_MISMATCH")
+        effective = stored if stored is not None else candidate_key
+        evidence["key"] = effective
+        evidence["status"] = "SUBMITTING"
+        return SubmissionPermit(allowed=True, effective_key=effective)
+
+    async def record_submission_outcome(self, workflow_id: str, task_id: str, tool: str, result) -> None:
+        from src.common.submission import TERMINAL_SUBMISSION_STATUSES, evidence_from_result
+
+        evidence = self._submission.setdefault(
+            (workflow_id, task_id), {"status": "NOT_SUBMITTED", "key": None, "external_id": None}
+        )
+        if evidence["status"] in TERMINAL_SUBMISSION_STATUSES:
+            return
+        status, external_id = evidence_from_result(tool, result)
+        evidence["status"] = status.value
+        evidence["external_id"] = external_id or evidence["external_id"]
 
     async def save_task_result(
         self,

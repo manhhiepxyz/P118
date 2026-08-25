@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -9,7 +11,44 @@ from uuid import UUID
 import asyncpg
 from pydantic_core import to_jsonable_python
 
+from src.common.plan_fingerprint import plan_version_of
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SubmissionPermit:
+    """Giấy phép gửi MỘT lần, cấp bởi database sau khi đã khoá hàng.
+
+    `allowed=False` nghĩa là KHÔNG được gọi provider. Không có nhánh "cứ gửi
+    thử": mọi lý do từ chối đều là một lý do để không tạo side effect.
+
+    `effective_key` là khoá idempotency ĐÃ LƯU — thứ lần gửi trước đã dùng, hoặc
+    thứ vừa được ghi cho lần đầu. Nó là authoritative; connector đề xuất khác đi
+    thì permit bị từ chối chứ khoá cũ không bị viết đè.
+    """
+
+    allowed: bool
+    reason: str | None = None
+    effective_key: str | None = None
+
+
+@dataclass(frozen=True)
+class LockedPlanSnapshot:
+    """Ảnh chụp trạng thái ĐÃ KHOÁ. `conflict` khác None nghĩa là không ghi gì cả."""
+
+    workflow_id: str
+    owner_user_id: str | None = None
+    goal: str = ""
+    workflow_status: str = ""
+    plan_version: str = ""
+    task_status: dict[str, str] = field(default_factory=dict)
+    task_rows: tuple[dict[str, Any], ...] = ()
+    # Hàng đợi đang chờ MỘT AI ĐÓ quyết định. Đây là trạng thái nội bộ — KHÔNG
+    # phải bằng chứng provider đã nhận request; xem `submission_evidence`.
+    open_approvals: tuple[tuple[str, str, str], ...] = ()
+    submission_evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
+    conflict: str | None = None
 
 
 def _decode_clarification_row(row) -> dict:
@@ -146,7 +185,6 @@ class TaskNotFoundError(RuntimeError):
 
     def __init__(self, workflow_id: str, task_id: str) -> None:
         super().__init__(f"Workflow task không tồn tại: workflow={workflow_id} task={task_id}")
-
 
 
 def _to_timestamp(value: Any) -> datetime | None:
@@ -728,6 +766,390 @@ class WorkflowRepository:
                 _depends_on_dumps(task_data.get("depends_on")),
                 _json_dumps(task_data.get("input")),
             )
+
+    async def reopen_cancelled_tasks(self, workflow_id: str) -> int:
+        """Đưa các bước ĐÃ HUỶ/HỎNG về PENDING để chạy lại. Trả số dòng đổi.
+
+        Phải là một thao tác CÓ TÊN RIÊNG, không phải một lượt gọi
+        `update_task_status`: hàm đó cố ý từ chối đưa một task rời khỏi
+        `CANCELLED` (`AND (status <> 'CANCELLED' OR ...)`), để một lỗi ở tầng
+        trên không âm thầm hồi sinh việc người dùng đã dừng.
+
+        Mở lại là quyết định của NGƯỜI DÙNG — họ bấm "Sửa và chạy lại" — nên nó
+        đi qua một cửa riêng, đọc được trong diff và trong log.
+
+        KHÔNG đụng bước đã `SUCCESS`: nó đã chạy thật, có kết quả thật ở phía
+        đơn vị cung cấp. Chạy lại nó là đặt hai lần.
+        """
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE workflow_tasks
+                SET status = 'PENDING', error_code = NULL, error_message = NULL, updated_at = NOW()
+                WHERE workflow_id = $1
+                  AND status IN ('CANCELLED', 'FAILED', 'SKIPPED', 'WAITING_APPROVAL')
+                """,
+                _uuid(workflow_id),
+            )
+        return int(result.split()[-1]) if result else 0
+
+    # ------------------------------------------------------------------
+    # Khoá và đọc lại — primitive cho Phase 2B
+    # ------------------------------------------------------------------
+
+    _REVISION_FIELDS = frozenset(
+        {
+            "requester_user_id",
+            "plan_version_after",
+            "accepted_patch",
+            "targets",
+            "consequence",
+            "hold_for_seconds",
+        }
+    )
+
+    async def lock_workflow_for_amendment(
+        self,
+        workflow_id: str,
+        *,
+        expected_plan_version: str,
+        record_revision: dict[str, Any] | None = None,
+    ) -> LockedPlanSnapshot:
+        """Khoá hàng, đọc lại trạng thái, so phiên bản. Fail-closed khi lệch.
+
+        Đây là thứ làm cho `plan_version` có nghĩa. Tự nó vân tay chỉ PHÁT HIỆN
+        thay đổi; ở đây nó được tính LẠI bên trong một transaction đã
+        `SELECT ... FOR UPDATE`, nên khoảng trống giữa "đọc" và "ghi" đóng lại.
+
+        Khoá gồm CẢ hàng đợi duyệt. Thiếu chúng thì một quyết định duyệt đổi
+        được ngay trong lúc snapshot đang được dùng, và bản vá commit dựa trên
+        một hàng đợi không còn tồn tại như thế nữa. Người GHI hàng đợi cũng khoá
+        `workflows` trước — cùng thứ tự — nên cả `UPDATE` lẫn `INSERT` mới đều
+        xếp hàng sau amendment.
+
+        Thứ tự khoá cố định (`workflows` → `workflow_tasks` theo `task_id` →
+        approvals): khoá ngược nhau thì hai transaction ôm nhau chết.
+
+        `record_revision` là một BẢN GHI CÓ CẤU TRÚC, không phải mã. Bản trước
+        nhận một callback tuỳ ý rồi `await` nó khi transaction đang mở — caller
+        gọi được LLM hay provider từ trong đó, và một test đọc thân hàm không
+        thấy gì cả. Cửa ấy đóng: chỉ đúng các trường dưới đây được nhận, trường
+        lạ là `TypeError`.
+
+        `hold_for_seconds` giữ khoá thêm một khoảnh khắc, chỉ để test đồng thời
+        chứng minh được khoá thật sự đang giữ. Clamp 0–1s: nó không phải một
+        chỗ để chờ bất cứ thứ gì.
+        """
+        if record_revision is not None:
+            unknown = set(record_revision) - self._REVISION_FIELDS
+            if unknown:
+                raise TypeError(f"record_revision có trường không hợp lệ: {sorted(unknown)}")
+
+        pool_uuid = _uuid(workflow_id)
+        async with self._pool.acquire() as conn, conn.transaction():
+            workflow = await conn.fetchrow(
+                "SELECT workflow_id, goal, status, owner_user_id FROM workflows "
+                "WHERE workflow_id = $1 AND archived_at IS NULL FOR UPDATE",
+                pool_uuid,
+            )
+            if workflow is None:
+                return LockedPlanSnapshot(workflow_id=workflow_id, conflict="WORKFLOW_NOT_FOUND")
+
+            task_rows = await conn.fetch(
+                """
+                SELECT task_id, tool, depends_on, status, input_data,
+                       provider_submission_status, external_request_id, provider_idempotency_key
+                FROM workflow_tasks WHERE workflow_id = $1 ORDER BY task_id FOR UPDATE
+                """,
+                pool_uuid,
+            )
+
+            approvals: list[tuple[str, str, str]] = []
+            for source, table in (("service", "service_approvals"), ("payment", "payment_approvals")):
+                found = await conn.fetch(
+                    f"SELECT task_id, status FROM {table} WHERE workflow_id = $1 "  # noqa: S608 - tên bảng là hằng số
+                    "ORDER BY task_id FOR UPDATE",
+                    pool_uuid,
+                )
+                approvals.extend((source, str(r["task_id"]), str(r["status"])) for r in found)
+
+            actual = plan_version_of([dict(row) for row in task_rows], approvals)
+            if actual != expected_plan_version:
+                return LockedPlanSnapshot(workflow_id=workflow_id, plan_version=actual, conflict="PLAN_VERSION_CHANGED")
+
+            snapshot = LockedPlanSnapshot(
+                workflow_id=workflow_id,
+                owner_user_id=str(workflow["owner_user_id"]) if workflow["owner_user_id"] else None,
+                goal=str(workflow["goal"] or ""),
+                workflow_status=str(workflow["status"]),
+                plan_version=actual,
+                task_status={str(r["task_id"]): str(r["status"]) for r in task_rows},
+                task_rows=tuple(dict(r) for r in task_rows),
+                open_approvals=tuple(item for item in approvals if item[2] == "AWAITING"),
+                submission_evidence={
+                    str(r["task_id"]): {
+                        "provider_submission_status": r["provider_submission_status"],
+                        "external_request_id": r["external_request_id"],
+                        "provider_idempotency_key": r["provider_idempotency_key"],
+                    }
+                    for r in task_rows
+                },
+            )
+
+            if record_revision is not None:
+                await self._append_revision_locked(
+                    conn,
+                    pool_uuid,
+                    plan_version_before=actual,
+                    payload=record_revision,
+                )
+                hold = float(record_revision.get("hold_for_seconds") or 0.0)
+                if hold > 0:
+                    await asyncio.sleep(min(hold, 1.0))
+            return snapshot
+
+    @staticmethod
+    async def _append_revision_locked(conn, workflow_uuid, *, plan_version_before: str, payload: dict) -> None:
+        """Ghi một dòng sổ TRONG transaction đã khoá. Riêng tư, chỉ chạm database."""
+        next_number = await conn.fetchval(
+            "SELECT COALESCE(MAX(revision_number), 0) + 1 FROM workflow_plan_revisions WHERE workflow_id = $1",
+            workflow_uuid,
+        )
+        requester = payload.get("requester_user_id")
+        await conn.execute(
+            """
+            INSERT INTO workflow_plan_revisions
+                (workflow_id, revision_number, requester_user_id, plan_version_before,
+                 plan_version_after, accepted_patch, targets, consequence)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+            """,
+            workflow_uuid,
+            next_number,
+            _uuid(requester) if requester else None,
+            plan_version_before,
+            str(payload.get("plan_version_after") or ""),
+            _json_dumps(payload.get("accepted_patch") or {}),
+            _json_dumps(payload.get("targets") or {}),
+            str(payload.get("consequence") or ""),
+        )
+
+    # ------------------------------------------------------------------
+    # Bằng chứng gửi provider
+    # ------------------------------------------------------------------
+
+    async def prepare_submission(
+        self, workflow_id: str, task_id: str, *, candidate_key: str | None
+    ) -> SubmissionPermit:
+        """Cấp phép gửi, hoặc từ chối. Ghi `SUBMITTING` trong CÙNG transaction.
+
+        Đây là điều kiện của lời gọi provider, không phải một ghi chú bên lề.
+        Bản trước ghi best-effort rồi gọi connector dù ghi hỏng — đo được
+        `provider_calls_after_submission_write_failed = 1`, tức database nói
+        "chưa gửi" trong khi provider có thể đã nhận, và lượt sau gửi lại.
+
+        Bốn lý do từ chối, tất cả đều fail-closed:
+
+          TASK_NOT_FOUND            không có dòng nào khớp. `UPDATE ... WHERE`
+                                    không khớp gì là một LỖI, không phải một
+                                    thành công im lặng.
+          ALREADY_TERMINAL          `ACKNOWLEDGED`/`UNKNOWN`. Cái thứ hai mới
+                                    nguy: provider CÓ THỂ đã ghi nhận, nên gọi
+                                    lại là đặt lần hai.
+          IDEMPOTENCY_KEY_MISMATCH  khoá đã lưu khác khoá connector đề xuất.
+                                    Khoá đã gửi đi là sự thật; một công thức
+                                    đổi sau restart không được viết đè lên nó.
+          TASK_STATUS_BLOCKS_SEND   bước đã kết thúc thì không còn gì để gửi.
+
+        `SELECT ... FOR UPDATE` bao cả đọc lẫn ghi: không có nó thì hai lượt
+        đồng thời cùng đọc "chưa có khoá" và cùng ghi khoá của mình.
+        """
+        blocked_task_statuses = ("SUCCESS", "CANCELLED", "SKIPPED")
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT status, provider_submission_status, provider_idempotency_key
+                FROM workflow_tasks WHERE workflow_id = $1 AND task_id = $2
+                FOR UPDATE
+                """,
+                _uuid(workflow_id),
+                task_id,
+            )
+            if row is None:
+                return SubmissionPermit(allowed=False, reason="TASK_NOT_FOUND")
+            if row["provider_submission_status"] in ("ACKNOWLEDGED", "UNKNOWN"):
+                return SubmissionPermit(allowed=False, reason="ALREADY_TERMINAL")
+            if str(row["status"]) in blocked_task_statuses:
+                return SubmissionPermit(allowed=False, reason="TASK_STATUS_BLOCKS_SEND")
+
+            stored = row["provider_idempotency_key"]
+
+            # `SUBMITTING` nghĩa là một lần gửi ĐÃ BẮT ĐẦU và chưa có kết luận —
+            # process chết giữa chừng, hoặc đang chạy ở nơi khác. Provider có
+            # thể đã nhận.
+            #
+            # Không khoá thì nó không dedupe được, nên gọi lại là tạo bản ghi
+            # thứ hai, và không ai chứng minh được nó chưa được tạo lần đầu.
+            # Có khoá VÀ khoá khớp thì gửi lại là an toàn: provider trả lại
+            # chính bản ghi cũ.
+            if row["provider_submission_status"] == "SUBMITTING":
+                if stored is None:
+                    return SubmissionPermit(allowed=False, reason="IN_FLIGHT_WITHOUT_KEY")
+                if candidate_key is None or candidate_key != stored:
+                    return SubmissionPermit(allowed=False, reason="IDEMPOTENCY_KEY_MISMATCH")
+
+            if stored is not None and candidate_key is not None and stored != candidate_key:
+                # KHÔNG ghi đè. Lý do không mang giá trị khoá nào ra ngoài.
+                return SubmissionPermit(allowed=False, reason="IDEMPOTENCY_KEY_MISMATCH")
+            effective = stored if stored is not None else candidate_key
+
+            updated = await conn.execute(
+                """
+                UPDATE workflow_tasks
+                SET provider_submission_status = 'SUBMITTING',
+                    provider_idempotency_key = $3,
+                    updated_at = NOW()
+                WHERE workflow_id = $1 AND task_id = $2
+                """,
+                _uuid(workflow_id),
+                task_id,
+                effective,
+            )
+            if updated.split()[-1] == "0":
+                return SubmissionPermit(allowed=False, reason="TASK_NOT_FOUND")
+            return SubmissionPermit(allowed=True, effective_key=effective)
+
+    async def record_submission_outcome(self, workflow_id: str, task_id: str, tool: str, result: Any) -> None:
+        """Ghi kết luận sau MỘT lời gọi connector.
+
+        Luật suy ra nằm ở `src/common/submission.py`; ở đây chỉ có phần ghi, và
+        một hàng rào: trạng thái CUỐI không bao giờ bị viết đè.
+
+        `UNKNOWN` là kết luận "không chứng minh được", và không quan sát nào về
+        sau làm nó chứng minh được lại. Cho phép `UNKNOWN → NOT_SUBMITTED` là mở
+        lại đúng đường gửi trùng — đo được kịch bản: timeout ở lượt một, lượt
+        hai báo `DEPENDENCY_ERROR`, và nếu tin lượt hai thì hệ thống kết luận
+        "chưa gửi bao giờ".
+        """
+        from src.common.submission import TERMINAL_SUBMISSION_STATUSES, evidence_from_result
+
+        status, external_id = evidence_from_result(tool, result)
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                f"""
+                UPDATE workflow_tasks
+                SET provider_submission_status = $3,
+                    external_request_id = COALESCE($4, external_request_id),
+                    updated_at = NOW()
+                WHERE workflow_id = $1 AND task_id = $2
+                  AND provider_submission_status NOT IN ({", ".join(f"'{s}'" for s in sorted(TERMINAL_SUBMISSION_STATUSES))})
+                """,  # noqa: S608 - nội suy từ hằng số nội bộ, không từ đầu vào
+                _uuid(workflow_id),
+                task_id,
+                status.value,
+                external_id,
+            )
+
+    async def read_submission_evidence(self, workflow_id: str) -> dict[str, dict[str, Any]]:
+        """`task_id → bằng chứng`. Đọc thuần, không suy diễn gì thêm."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT task_id, provider_submission_status, external_request_id, provider_idempotency_key
+                FROM workflow_tasks WHERE workflow_id = $1
+                """,
+                _uuid(workflow_id),
+            )
+        return {
+            str(row["task_id"]): {
+                "provider_submission_status": row["provider_submission_status"],
+                "external_request_id": row["external_request_id"],
+                "provider_idempotency_key": row["provider_idempotency_key"],
+            }
+            for row in rows
+        }
+
+    # ------------------------------------------------------------------
+    # Sổ sửa đổi kế hoạch
+    # ------------------------------------------------------------------
+
+    async def append_plan_revision(
+        self,
+        *,
+        workflow_id: str,
+        requester_user_id: str | None,
+        plan_version_before: str,
+        plan_version_after: str,
+        accepted_patch: dict[str, Any],
+        targets: dict[str, Any],
+        consequence: str,
+    ) -> dict[str, Any]:
+        """Ghi THÊM một dòng vào sổ sửa đổi. Không bao giờ sửa dòng cũ.
+
+        Số thứ tự cấp bên trong một transaction đã khoá HÀNG WORKFLOW. Không có
+        khoá ấy thì hai lượt đồng thời cùng đọc `MAX(revision_number)` và cùng
+        xin một số — một cái vỡ vì ràng buộc UNIQUE, và người dùng nhận một lỗi
+        database cho một thao tác hợp lệ.
+
+        Chỉ nhận bản vá ĐÃ THẨM ĐỊNH. Câu người dùng gõ và output thô của model
+        không có chỗ ở đây — xem ghi chú bảng trong `schema.sql`.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.fetchrow(
+                "SELECT workflow_id FROM workflows WHERE workflow_id = $1 FOR UPDATE", _uuid(workflow_id)
+            )
+            next_number = await conn.fetchval(
+                "SELECT COALESCE(MAX(revision_number), 0) + 1 FROM workflow_plan_revisions WHERE workflow_id = $1",
+                _uuid(workflow_id),
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO workflow_plan_revisions
+                    (workflow_id, revision_number, requester_user_id, plan_version_before,
+                     plan_version_after, accepted_patch, targets, consequence)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+                RETURNING revision_id, revision_number, created_at
+                """,
+                _uuid(workflow_id),
+                next_number,
+                _uuid(requester_user_id) if requester_user_id else None,
+                plan_version_before,
+                plan_version_after,
+                _json_dumps(accepted_patch),
+                _json_dumps(targets),
+                consequence,
+            )
+        return dict(row)
+
+    async def reopen_cancelled_workflow(self, workflow_id: str) -> bool:
+        """Đưa CHÍNH DÒNG workflow rời khỏi `CANCELLED`. Trả True nếu có đổi.
+
+        Song song `reopen_cancelled_tasks`, và phải có vì cùng một hàng rào tồn
+        tại ở cả hai bảng: `update_workflow_status` cũng từ chối đưa một
+        workflow ra khỏi `CANCELLED`
+        (`AND (status <> 'CANCELLED' OR $1 = 'CANCELLED')`).
+
+        Thiếu nó, "Sửa và chạy lại" mở lại được các BƯỚC nhưng không mở được
+        yêu cầu. Đo được trên 09430928, sau khi sửa ngày tham quan bằng lời:
+
+            workflow_tasks.T1  WAITING_APPROVAL   viewing_date 2026-09-30
+            workflows.status   CANCELLED
+
+        Kế hoạch chạy thật, còn màn hình đọc cột kia và nói "đã dừng". Và vì
+        `persist_pending_viewing_approval` cũng đặt trạng thái qua đúng hàm bị
+        chặn ấy, mọi lời "đang chờ đơn vị duyệt" sau đó cũng im lặng biến mất.
+        """
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE workflows
+                SET status = 'RUNNING', error_code = NULL, updated_at = NOW()
+                WHERE workflow_id = $1
+                  AND archived_at IS NULL
+                  AND status IN ('CANCELLED', 'FAILED')
+                """,
+                _uuid(workflow_id),
+            )
+        return bool(result) and result.split()[-1] != "0"
 
     async def update_task_status(self, workflow_id: str, task_id: str, status: str) -> None:
         async with self._pool.acquire() as conn:
@@ -1472,65 +1894,153 @@ class WorkflowRepository:
             record["parent_workflow_id"] = str(record["parent_workflow_id"])
         return record
 
-    async def list_all_workflows_history(self, page: int = 1, limit: int = 50, search_user: str | None = None) -> dict:
-        """Lấy danh sách tất cả các luồng hoạt động cho Admin.
+    # ------------------------------------------------------------------
+    # Giám sát của ADMIN — đọc, và chỉ đọc.
+    #
+    # Vì sao không dùng lại hàng đợi của provider: hai màn hình trả lời hai câu
+    # hỏi khác nhau. Provider hỏi "tôi phải quyết định việc gì" nên họ cần dữ
+    # kiện để quyết. Admin hỏi "hệ thống đang có việc gì, của ai, kẹt ở đâu" nên
+    # họ cần trạng thái và thời điểm.
+    #
+    # Dùng chung một nguồn nghĩa là sớm muộn màn giám sát mọc ra một nút Duyệt —
+    # nó đã có sẵn mọi thứ để bấm. Tách ở tầng SQL là cách rẻ nhất để cái nút ấy
+    # không bao giờ có dữ liệu mà mọc.
+    # ------------------------------------------------------------------
 
-        Đã bỏ cơ chế ẩn danh theo yêu cầu để hỗ trợ quản lý. Trả về `goal` gốc,
-        `owner_username`, và `input_data` của task bị lỗi.
-        Hỗ trợ lọc theo `search_user`.
+    async def list_admin_requests(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 50,
+        search_user: str | None = None,
+        status: str | None = None,
+        date_from: object | None = None,
+        date_to: object | None = None,
+    ) -> dict[str, Any]:
+        """Danh sách yêu cầu cho màn giám sát: ai, việc gì, đang ở đâu.
+
+        `approval_status` là câu trả lời cho "đang chờ AI", và nó không suy được
+        từ `workflows.status`: `WAITING_APPROVAL` mang hai tình huống khác hẳn
+        nhau — chờ ĐƠN VỊ nhận việc, và chờ CHÍNH KHÁCH xác nhận khoản tiền.
+        Gộp hai cái đó thành một dòng "đang chờ" là xoá mất thông tin duy nhất
+        khiến người giám sát biết phải gọi ai.
         """
-        offset = (page - 1) * limit
+        offset = max(0, (max(1, page) - 1) * limit)
         async with self._pool.acquire() as conn:
-            if search_user:
-                total_query = """
-                    SELECT COUNT(*) 
-                    FROM workflows w
-                    LEFT JOIN users u ON w.owner_user_id = u.id
-                    WHERE u.username ILIKE '%' || $1 || '%'
+            total = await conn.fetchval(
                 """
-                total = await conn.fetchval(total_query, search_user)
-            else:
-                total = await conn.fetchval("SELECT COUNT(*) FROM workflows")
-
-            rows_query = """
-                SELECT 
-                    w.workflow_id, 
-                    w.goal, 
-                    w.status, 
+                SELECT count(*) FROM workflows w
+                LEFT JOIN users u ON u.id = w.owner_user_id
+                WHERE ($1::text IS NULL OR u.username ILIKE '%' || $1 || '%')
+                  AND ($2::text IS NULL OR w.status = $2)
+                  AND ($3::date IS NULL OR w.created_at::date >= $3::date)
+                  AND ($4::date IS NULL OR w.created_at::date <= $4::date)
+                """,
+                search_user,
+                status,
+                date_from,
+                date_to,
+            )
+            rows = await conn.fetch(
+                """
+                SELECT
+                    w.workflow_id,
+                    w.goal,
+                    w.status                AS workflow_status,
                     w.error_code,
-                    w.created_at, 
+                    w.created_at,
                     w.updated_at,
-                    w.assistant_answer,
-                    u.username as owner_username,
-                    (
-                        SELECT COALESCE(json_agg(t.tool), '[]'::json)
-                        FROM (
-                            SELECT tool FROM workflow_tasks wt 
-                            WHERE wt.workflow_id = w.workflow_id 
-                            ORDER BY wt.id
-                        ) t
-                    ) as tools,
-                    (
-                        SELECT json_build_object('tool', wt.tool, 'message', wt.error_message, 'input', wt.input_data)
-                        FROM workflow_tasks wt
-                        WHERE wt.workflow_id = w.workflow_id AND wt.status = 'FAILED'
-                        LIMIT 1
-                    ) as failed_task
+                    w.owner_user_id,
+                    u.username              AS owner_username,
+                    u.full_name             AS owner_full_name,
+                    (SELECT COALESCE(json_agg(t.tool ORDER BY t.id), '[]'::json)
+                       FROM workflow_tasks t WHERE t.workflow_id = w.workflow_id) AS tools,
+                    (SELECT count(*) FROM service_approvals sa
+                      WHERE sa.workflow_id = w.workflow_id AND sa.status = 'AWAITING') AS awaiting_provider,
+                    (SELECT count(*) FROM payment_approvals pa
+                      WHERE pa.workflow_id = w.workflow_id AND pa.status = 'AWAITING') AS awaiting_payment,
+                    -- LỊCH SỬ quyết định, không chỉ "còn chờ hay không".
+                    --
+                    -- Một workflow đã được đơn vị DUYỆT và một workflow chưa
+                    -- ai đụng tới đều có 0 dòng AWAITING. Chỉ đếm hàng chờ thì
+                    -- màn danh sách nói hai việc ấy giống hệt nhau, và người
+                    -- giám sát mất đúng thông tin họ cần: đơn vị đã quyết định
+                    -- gì rồi.
+                    (SELECT COALESCE(json_agg(DISTINCT sa.status), '[]'::json)
+                       FROM service_approvals sa WHERE sa.workflow_id = w.workflow_id) AS provider_decisions,
+                    (SELECT pa.status FROM payment_approvals pa
+                      WHERE pa.workflow_id = w.workflow_id LIMIT 1) AS payment_decision,
+                    (SELECT t.tool FROM workflow_tasks t
+                      WHERE t.workflow_id = w.workflow_id
+                        AND t.status NOT IN ('SUCCESS','FAILED','CANCELLED','SKIPPED')
+                      ORDER BY t.id LIMIT 1) AS current_tool,
+                    (SELECT t.error_message FROM workflow_tasks t
+                      WHERE t.workflow_id = w.workflow_id AND t.status = 'FAILED'
+                      ORDER BY t.id DESC LIMIT 1) AS failure_message
                 FROM workflows w
-                LEFT JOIN users u ON w.owner_user_id = u.id
-                WHERE ($3::text IS NULL OR u.username ILIKE '%' || $3 || '%')
-                ORDER BY w.created_at DESC
-                LIMIT $1 OFFSET $2
-            """
-            rows = await conn.fetch(rows_query, limit, offset, search_user)
+                LEFT JOIN users u ON u.id = w.owner_user_id
+                WHERE ($1::text IS NULL OR u.username ILIKE '%' || $1 || '%')
+                  AND ($2::text IS NULL OR w.status = $2)
+                  AND ($3::date IS NULL OR w.created_at::date >= $3::date)
+                  AND ($4::date IS NULL OR w.created_at::date <= $4::date)
+                ORDER BY w.updated_at DESC NULLS LAST, w.created_at DESC
+                LIMIT $5 OFFSET $6
+                """,
+                search_user,
+                status,
+                date_from,
+                date_to,
+                limit,
+                offset,
+            )
+        return {"total": int(total or 0), "page": page, "limit": limit, "items": [dict(r) for r in rows]}
 
-        items = []
-        for r in rows:
-            item = dict(r)
-            item["workflow_id"] = str(item["workflow_id"])
-            if isinstance(item.get("tools"), str):
-                item["tools"] = json.loads(item["tools"])
-            if isinstance(item.get("failed_task"), str):
-                item["failed_task"] = json.loads(item["failed_task"])
-            items.append(item)
-        return {"items": items, "total": total, "page": page, "limit": limit}
+    async def get_admin_request(self, workflow_id: str) -> dict[str, Any] | None:
+        """Chi tiết một yêu cầu: các bước, ai đã quyết định, lúc nào.
+
+        `decided_by`/`decided_at` đọc từ `service_approvals` — đó là chỗ DUY
+        NHẤT ghi lại ai đã ký. Suy nó từ `workflow_tasks.status` là suy ra một
+        cái tên không có trong dữ liệu.
+        """
+        wid = workflow_id if isinstance(workflow_id, UUID) else UUID(str(workflow_id))
+        async with self._pool.acquire() as conn:
+            head = await conn.fetchrow(
+                """
+                SELECT w.workflow_id, w.goal, w.status AS workflow_status, w.error_code,
+                       w.created_at, w.updated_at, w.owner_user_id,
+                       u.username AS owner_username, u.full_name AS owner_full_name
+                  FROM workflows w LEFT JOIN users u ON u.id = w.owner_user_id
+                 WHERE w.workflow_id = $1
+                """,
+                wid,
+            )
+            if head is None:
+                return None
+            steps = await conn.fetch(
+                """
+                SELECT t.task_id, t.tool, t.status, t.depends_on, t.error_code, t.error_message,
+                       t.provider_submission_status, t.created_at, t.updated_at,
+                       sa.status AS approval_status, sa.decided_by, sa.decided_at, sa.reject_reason
+                  FROM workflow_tasks t
+                  LEFT JOIN service_approvals sa
+                         ON sa.workflow_id = t.workflow_id AND sa.task_id = t.task_id
+                 WHERE t.workflow_id = $1
+                 ORDER BY t.id
+                """,
+                wid,
+            )
+            payment = await conn.fetchrow(
+                "SELECT task_id, status, amount, currency, created_at, decided_at "
+                "FROM payment_approvals WHERE workflow_id = $1",
+                wid,
+            )
+            events = await conn.fetch(
+                "SELECT stage, created_at FROM workflow_events WHERE workflow_id = $1 ORDER BY sequence LIMIT 100",
+                wid,
+            )
+        return {
+            "workflow": dict(head),
+            "steps": [dict(r) for r in steps],
+            "payment": dict(payment) if payment else None,
+            "events": [dict(r) for r in events],
+        }

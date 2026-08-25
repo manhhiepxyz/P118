@@ -58,6 +58,21 @@ class RecordingRepository:
     async def update_task_status(self, workflow_id: str, task_id: str, status: TaskStatus) -> None:
         self.task_statuses[task_id] = status
 
+    async def prepare_submission(self, workflow_id, task_id, *, candidate_key):
+        """Cấp phép gửi. Fake này chỉ cần cho phép — nhưng nó phải TỒN TẠI.
+
+        Executor gọi primitive này ngay trước mỗi lời gọi connector và từ chối
+        gửi khi không có phép. Một repository thiếu nó sẽ chặn mọi lần gửi;
+        luật thật được kiểm ở `tests/test_db/test_a_submission_is_never_sent_blind.py`
+        trên PostgreSQL, còn ở đây chỉ cần hợp đồng có mặt.
+        """
+        from src.db.workflow_repository import SubmissionPermit
+
+        return SubmissionPermit(allowed=True, effective_key=candidate_key)
+
+    async def record_submission_outcome(self, workflow_id, task_id, tool, result) -> None:
+        return None
+
     async def save_task_result(self, workflow_id: str, task_id: str, result: StandardResult) -> None:
         self.results[task_id] = result
 
@@ -84,7 +99,7 @@ class StubConnector:
     def tool_names(self) -> list[str]:
         return ["register_vehicle", "book_parking", "pay_fee"]
 
-    async def execute(self, tool_name: str, input_data: dict) -> StandardResult:
+    async def execute(self, tool_name: str, input_data: dict, *, context=None) -> StandardResult:
         self.calls.append(tool_name)
         if tool_name == "register_vehicle":
             return StandardResult.ok({"vehicle_id": "VEH-001"})

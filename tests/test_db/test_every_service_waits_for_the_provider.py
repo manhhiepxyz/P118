@@ -21,7 +21,7 @@ from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.orchestration.service_approval import (
-    PROVIDER_TOOLS,
+    SERVICE_GATED_TOOLS,
     SERVICE_LABELS,
     ServiceApprovalBoundary,
     ServiceApprovalRequiredError,
@@ -54,18 +54,18 @@ def _plan(tool: str) -> TaskPlan:
 async def _seed_workflow(pool) -> str:
     wid = uuid.uuid4()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO workflows (workflow_id, goal, status) VALUES ($1,'kiểm cổng','RUNNING')", wid
-        )
+        await conn.execute("INSERT INTO workflows (workflow_id, goal, status) VALUES ($1,'kiểm cổng','RUNNING')", wid)
         for task_id, tool in (("T1", "search_properties"), ("T2", "book_parking")):
             await conn.execute(
                 "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status) VALUES ($1,$2,$3,'PENDING')",
-                wid, task_id, tool,
+                wid,
+                task_id,
+                tool,
             )
     return str(wid)
 
 
-@pytest.mark.parametrize("tool", sorted(PROVIDER_TOOLS))
+@pytest.mark.parametrize("tool", sorted(SERVICE_GATED_TOOLS))
 def test_every_provider_service_has_a_human_readable_label(tool: str) -> None:
     """Đơn vị nhìn hàng đợi, không nhìn tên tool."""
     assert SERVICE_LABELS.get(tool), f"{tool} không có tên dịch vụ cho người duyệt"
@@ -77,12 +77,12 @@ def test_the_gate_covers_every_service_that_commits_a_provider() -> None:
 
     # Ba tool KHÔNG qua cổng này, mỗi cái một lý do khác nhau.
     khong_can = {
-        "search_properties",            # chỉ đọc, không tạo cam kết
-        "register_resident",            # định danh của chính người dùng
-        "pay_fee",                      # tiền là quyết định của NGƯỜI DÙNG
-        "schedule_property_viewing",    # đã có cổng riêng đang chạy
+        "search_properties",  # chỉ đọc, không tạo cam kết
+        "register_resident",  # định danh của chính người dùng
+        "pay_fee",  # tiền là quyết định của NGƯỜI DÙNG
+        "schedule_property_viewing",  # đã có cổng riêng đang chạy
     }
-    thieu = set(_TOOL_PRESENTATION) - khong_can - set(PROVIDER_TOOLS)
+    thieu = set(_TOOL_PRESENTATION) - khong_can - set(SERVICE_GATED_TOOLS)
     assert not thieu, f"dịch vụ chạy thẳng, không ai duyệt: {sorted(thieu)}"
 
 
@@ -119,9 +119,7 @@ async def test_it_runs_once_the_provider_has_approved(db_pool) -> None:
             _plan("book_parking"), workflow_id
         )
 
-    assert await record_service_decision(
-        db_pool, workflow_id, "T2", "APPROVED", decided_by="provider"
-    ) is True
+    assert await record_service_decision(db_pool, workflow_id, "T2", "APPROVED", decided_by="provider") is True
 
     after = _Runtime()
     await ServiceApprovalBoundary(after, approved=True, repository=repository).execute(
@@ -206,8 +204,7 @@ async def test_the_old_view_is_still_readable_and_writable(db_pool) -> None:
             uuid.UUID(workflow_id),
         )
         row = await conn.fetchrow(
-            "SELECT status, project_id, viewing_time FROM viewing_approvals "
-            "WHERE workflow_id=$1 AND task_id='T3'",
+            "SELECT status, project_id, viewing_time FROM viewing_approvals WHERE workflow_id=$1 AND task_id='T3'",
             uuid.UUID(workflow_id),
         )
         tool = await conn.fetchval(
@@ -252,8 +249,7 @@ async def test_one_provider_decision_does_not_decide_another_providers_part(db_p
     rows = {r["task_id"]: r["status"] for r in await pending_for_workflow(db_pool, workflow_id)}
     assert rows["T5"] == "APPROVED", "quyết định của đơn vị tour không được ghi"
     assert rows["T2"] == "AWAITING", (
-        "đơn vị tour duyệt lịch mà chỗ đỗ xe cũng thành APPROVED — một đơn vị "
-        "vừa quyết định thay cho đơn vị khác"
+        "đơn vị tour duyệt lịch mà chỗ đỗ xe cũng thành APPROVED — một đơn vị vừa quyết định thay cho đơn vị khác"
     )
 
 
@@ -277,8 +273,7 @@ def test_the_review_page_shows_one_queue_for_every_service() -> None:
     # (materialize qua Tour provider rồi đặt xe đưa đón). Gộp hàng đợi không
     # có nghĩa là gộp cách chạy tiếp.
     assert "record.tool === 'schedule_property_viewing'" in source, (
-        "mọi dịch vụ đi chung một đường chạy tiếp — lịch tham quan sẽ mất bước "
-        "materialize và xe đưa đón"
+        "mọi dịch vụ đi chung một đường chạy tiếp — lịch tham quan sẽ mất bước materialize và xe đưa đón"
     )
     assert "decideServiceApproval(" in source
 
@@ -289,9 +284,7 @@ def test_the_review_page_does_not_hardcode_one_service_shape() -> None:
 
     page = Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages" / "ProviderReviewPage.tsx"
     source = page.read_text(encoding="utf-8")
-    assert "Object.entries(record.details)" in source, (
-        "dữ kiện vẽ cứng theo tham quan; dịch vụ khác sẽ hiện thiếu"
-    )
+    assert "Object.entries(record.details)" in source, "dữ kiện vẽ cứng theo tham quan; dịch vụ khác sẽ hiện thiếu"
     assert "DETAIL_LABELS" in source, "hiện khoá thô — đó là từ vựng nội bộ"
 
 
@@ -309,8 +302,7 @@ def test_the_queue_is_split_by_service_type() -> None:
     assert "SERVICE_TAB_LABELS" in source, "tab con không có nhãn tiếng Việt"
     assert 'role="tab"' in source, "không có thanh tab con cho từng loại dịch vụ"
     assert "SERVICE_ORDER" in source, (
-        "thứ tự tab theo dữ liệu về — tab nhảy chỗ giữa hai lần tải, và người "
-        "duyệt phải tìm lại mỗi lần"
+        "thứ tự tab theo dữ liệu về — tab nhảy chỗ giữa hai lần tải, và người duyệt phải tìm lại mỗi lần"
     )
     assert "({count})" in source, "tab không hiện số việc; không thấy chỗ nào đang dồn"
 
@@ -329,12 +321,10 @@ def test_a_decided_item_leaves_the_list_immediately() -> None:
     body = source[source.index("async function decideService(") :]
     body = body[: body.index("\n  /**", 1)]
     assert "setServiceItems((current) =>" in body, (
-        "mục vừa quyết định không bị bỏ khỏi danh sách ngay — người duyệt không "
-        "thấy thao tác của mình có tác dụng"
+        "mục vừa quyết định không bị bỏ khỏi danh sách ngay — người duyệt không thấy thao tác của mình có tác dụng"
     )
     assert "item.task_id === record.task_id" in body, (
-        "lọc theo mình workflow_id — một yêu cầu có nhiều bước, và bỏ nhầm bước "
-        "của đơn vị khác"
+        "lọc theo mình workflow_id — một yêu cầu có nhiều bước, và bỏ nhầm bước của đơn vị khác"
     )
 
 

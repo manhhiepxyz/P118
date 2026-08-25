@@ -535,6 +535,48 @@ export async function cancelWorkflow(
   );
 }
 
+/** Một ô có thể sửa của yêu cầu đã dừng, kèm giá trị đang lưu. */
+export interface AmendableField {
+  name: string;
+  label: string;
+  value: string | number | boolean | null;
+}
+
+export interface AmendableInfo {
+  can_amend: boolean;
+  reason: string | null;
+  fields: AmendableField[];
+}
+
+/**
+ * Yêu cầu này có sửa được không, và sửa được những ô nào.
+ *
+ * Gọi TRƯỚC khi mở biểu mẫu. Dựng form rồi mới báo không dùng được là cách tệ
+ * nhất: người dùng điền xong mới bị từ chối.
+ */
+export async function getAmendable(workflowId: string): Promise<AmendableInfo> {
+  return request<AmendableInfo>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/amendable`,
+  );
+}
+
+/**
+ * Sửa vài ô rồi chạy lại CHÍNH yêu cầu đó.
+ *
+ * Khác `continueWorkflow`: đường này không đi qua Planner. Giá trị cũ đọc từ
+ * kế hoạch đã lưu — một kế hoạch đã qua Validator — nên không ô nào bị hỏi lại.
+ * Bước đã thành công giữ nguyên kết quả; chỉ phần chưa xong chạy lại.
+ */
+export async function amendWorkflow(
+  workflowId: string,
+  fields: Record<string, string | number | boolean>,
+): Promise<AgentWorkflowResponse> {
+  return request<AgentWorkflowResponse>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/amend`,
+    { method: "POST", body: { fields } },
+  );
+}
+
 /**
  * Xoá một yêu cầu ĐÃ KẾT THÚC khỏi danh sách.
  *
@@ -623,6 +665,10 @@ export async function fetchNotificationSummary(): Promise<NotificationSummary> {
 
 /* ------------------------------------------------------------------ */
 /* Xác thực căn hộ / xe có ảnh — verification-records (Path B)         */
+/*                                                                     */
+/* `GET /verification-records` là bề mặt của ĐƠN VỊ CUNG CẤP — chỉ role */
+/* `provider`. Admin KHÔNG gọi route này (403); màn giám sát của admin  */
+/* là `GET /admin/verifications`, chỉ đọc và không có động từ quyết định.*/
 /* ------------------------------------------------------------------ */
 
 /**
@@ -812,52 +858,112 @@ export async function adminUpdateUserStatus(
   );
 }
 
-export interface AdminWorkflowHistoryItem {
-  workflow_id: string;
-  goal: string;
-  status: string;
-  error_code: string | null;
-  created_at: string;
-  updated_at: string;
-  assistant_answer?: string | null;
-  owner_username: string | null;
-  tools: string[];
-  failed_task: { tool: string; message: string; input?: any } | null;
+/**
+ * Màn giám sát của admin — nguồn CANONICAL và duy nhất.
+ *
+ * `adminWorkflowsHistory` và `adminRetryWorkflow` đã bị xoá cùng hai endpoint
+ * của chúng. `history` trả `goal` thô và `failed_task.input` — nội dung người
+ * dùng gõ, chưa qua lọc nào; `retry` đặt thẳng `workflows.status = PENDING`,
+ * tức mở lại được cả một workflow đã SUCCESS và đã thu tiền.
+ *
+ * Admin CHỈ ĐỌC. Không có hàm nào ở đây phát request ghi.
+ */
+
+/** Ai tạo yêu cầu. Không kèm liên hệ — màn giám sát không cần số điện thoại. */
+export interface AdminAccountSummary {
+  user_id: string | null;
+  username: string | null;
+  display_name: string | null;
 }
 
-export async function adminWorkflowsHistory(
-  page = 1,
-  limit = 50,
-  search_user?: string
-): Promise<{
-  items: AdminWorkflowHistoryItem[];
+/** Đang chờ AI làm tiếp. Tách khỏi hai trường quyết định bên dưới. */
+export type AdminWaitingFor = "PROVIDER" | "CUSTOMER_PAYMENT" | "NONE";
+
+/** Một bên đã quyết định gì. `NONE` = chưa từng có quyết định nào. */
+export type AdminDecisionStatus = "AWAITING" | "APPROVED" | "REJECTED" | "NONE";
+
+export interface AdminRequestStep {
+  task_id: string;
+  /** Nhãn tiếng Việt. Backend không bao giờ trả tên tool nội bộ. */
+  service_name: string;
+  status: string | null;
+  approval_status: string | null;
+  decided_by: { username: string; display_name: string } | null;
+  decided_at: string | null;
+  reject_reason: string | null;
+  provider_submission_status: string | null;
+  failure_summary: string | null;
+  updated_at: string | null;
+}
+
+export interface AdminPaymentSummary {
+  task_id: string;
+  status: string;
+  amount: number;
+  currency: string;
+  decided_at: string | null;
+}
+
+export interface AdminRequestListItem {
+  workflow_id: string;
+  account: AdminAccountSummary;
+  goal: string | null;
+  service_names: string[];
+  workflow_status: string | null;
+  waiting_for: AdminWaitingFor;
+  provider_decision_status: AdminDecisionStatus;
+  payment_decision_status: AdminDecisionStatus;
+  current_step: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  failure_summary: string | null;
+}
+
+export interface AdminRequestDetail {
+  workflow_id: string;
+  account: AdminAccountSummary;
+  goal: string | null;
+  workflow_status: string | null;
+  waiting_for: AdminWaitingFor;
+  provider_decision_status: AdminDecisionStatus;
+  payment_decision_status: AdminDecisionStatus;
+  created_at: string | null;
+  updated_at: string | null;
+  steps: AdminRequestStep[];
+  payment: AdminPaymentSummary | null;
+  history: { stage: string; at: string | null }[];
+}
+
+export interface AdminRequestPage {
+  items: AdminRequestListItem[];
   total: number;
   page: number;
   limit: number;
-}> {
+}
+
+export async function adminRequests(
+  page = 1,
+  limit = 50,
+  search_user?: string,
+  status?: string,
+  date_from?: string,
+  date_to?: string,
+): Promise<AdminRequestPage> {
   const query = new URLSearchParams({
     page: page.toString(),
     limit: limit.toString(),
   });
-  if (search_user) {
-    query.append("search_user", search_user);
-  }
-  return request<{
-    items: AdminWorkflowHistoryItem[];
-    total: number;
-    page: number;
-    limit: number;
-  }>(`/admin/workflows/history?${query.toString()}`);
+  if (search_user) query.append("search_user", search_user);
+  if (status) query.append("status", status);
+  if (date_from) query.append("date_from", date_from);
+  if (date_to) query.append("date_to", date_to);
+  return request<AdminRequestPage>(`/admin/requests?${query.toString()}`);
 }
 
-export async function adminRetryWorkflow(
+export async function adminRequestDetail(
   workflowId: string,
-): Promise<{ message: string }> {
-  return request<{ message: string }>(
-    `/admin/workflows/${encodeURIComponent(workflowId)}/retry`,
-    {
-      method: "POST",
-    },
+): Promise<AdminRequestDetail> {
+  return request<AdminRequestDetail>(
+    `/admin/requests/${encodeURIComponent(workflowId)}`,
   );
 }
-

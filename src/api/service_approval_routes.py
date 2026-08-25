@@ -58,7 +58,7 @@ async def list_service_approvals(
     # người đang chờ.
     limit: int = 200,
     status: str = "AWAITING",
-    _reviewer: dict = Depends(require_roles("provider", "admin")),
+    _reviewer: dict = Depends(require_roles("provider")),
 ) -> dict[str, Any]:
     """`status=AWAITING` (mặc định) là hàng đợi; `status=decided` là lịch sử.
 
@@ -125,7 +125,7 @@ async def decide_service_approval(
     workflow_id: str,
     task_id: str,
     body: _DecideBody,
-    reviewer: dict = Depends(require_roles("provider", "admin")),
+    reviewer: dict = Depends(require_roles("provider")),
 ) -> dict[str, Any]:
     """Quyết định một bước, rồi chạy tiếp NẾU không còn bước nào đang chờ.
 

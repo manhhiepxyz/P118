@@ -143,7 +143,9 @@ export function ApartmentLinkPage() {
 
 function apartmentLabel(record: VerificationRecord): string {
   const c = record.claimed_data
-  if (record.record_type === 'apartment' && 'apartment_code' in c) {
+  // Customer view cố ý không trả lại giấy tờ/claim đã nộp. Đừng để một field
+  // bị lược vì privacy làm sập cả trang trạng thái sau reload.
+  if (c && record.record_type === 'apartment' && 'apartment_code' in c) {
     return `${c.apartment_code}${c.residential_area ? ` · ${c.residential_area}` : ''}`
   }
   return record.record_id

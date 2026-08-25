@@ -11,7 +11,7 @@
  *   cd frontend && VITE_API_PROXY_TARGET=http://127.0.0.1:$APP_PORT npm run dev -- --port 5273
  *   node tests/e2e/browser_acceptance.mjs
  *
- * Database: p118_db của stack hiện tại. Không đọc/in API key, token hay DSN.
+ * Database: chỉ `p118_e2e_db`. Không đọc/in API key, token hay DSN.
  */
 
 import { chromium } from 'playwright'
@@ -19,6 +19,8 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+
+import { approveProviderWork as approveProviderWorkAt } from './provider_approvals.mjs'
 
 const APP = process.env.P118_APP ?? 'http://127.0.0.1:5273'
 
@@ -47,7 +49,13 @@ function appPort() {
 }
 
 const API = process.env.P118_API ?? `http://127.0.0.1:${appPort()}/api/v1`
-const DB = 'p118_db'
+// Harness này ghi dữ liệu thật và có nhánh recreate container. Thiếu biến hoặc
+// nhận một tên gần giống đều phải dừng; fallback sang database demo từng làm
+// stack chuyển từ p118_e2e_db về p118_db ngay trong lúc dọn lỗi.
+const DB = (process.env.P118_DB ?? '').trim()
+if (DB !== 'p118_e2e_db') {
+  throw new Error('P118_DB phải trỏ chính xác tới database p118_e2e_db.')
+}
 const PASSWORD = 'MatKhauBrowser!2030'
 const STAMP = String(Date.now()).slice(-9)
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
@@ -118,6 +126,9 @@ function apartmentForm(apartmentCode, residentialArea, fullName) {
   form.append('files', new Blob([PNG_1X1], { type: 'image/png' }), 'so-hong-canary.png')
   return form
 }
+
+const approveProviderWork = (workflowId, providerToken, options) =>
+  approveProviderWorkAt(API, workflowId, providerToken, options)
 
 function check(name, ok, detail = '') {
   RESULTS.push({ name, ok, detail })
@@ -402,8 +413,18 @@ function compose(args, { override = null } = {}) {
   }
   const files = ['-p', COMPOSE_PROJECT, '-f', 'docker-compose.yml']
   if (override) files.push('-f', override)
-  return execFileSync('docker', ['compose', ...files, ...args],
-    { cwd: REPO, encoding: 'utf8', timeout: 300000 })
+  return execFileSync('docker', ['compose', ...files, ...args], {
+    cwd: REPO,
+    encoding: 'utf8',
+    timeout: 300000,
+    env: {
+      ...process.env,
+      P118_DB: DB,
+      POSTGRES_DB: DB,
+      POSTGRES_PORT: process.env.POSTGRES_PORT ?? '5433',
+      APP_PORT: process.env.APP_PORT ?? '8080',
+    },
+  })
 }
 
 async function waitReady(expected, tries = 60) {
@@ -523,7 +544,12 @@ async function main() {
   check('3c. Gửi tạo đúng một yêu cầu PENDING', pending1 === '1', `PENDING=${pending1}`)
 
   await pageA.reload()
-  await pageA.waitForTimeout(2500)
+  // Reload đi qua PortalHandoff rồi mới render dữ liệu GET. Chờ câu contract
+  // thay vì một delay cố định: máy Docker bận có thể vượt 2.5 giây dù trạng
+  // thái vẫn được giữ đúng trong PostgreSQL.
+  await pageA.getByText('Đang chờ đơn vị xác thực duyệt', { exact: true })
+    .waitFor({ timeout: 15000 })
+    .catch(() => {})
   const afterReload = await pageA.locator('body').innerText()
   // "ban quản lý" → "đơn vị xác thực": cùng một hồ sơ mà hai trang gọi bên
   // duyệt bằng hai tên khác nhau, đã thống nhất lại.
@@ -547,12 +573,14 @@ async function main() {
 
   if (stopHere('link')) return finish(browser)
 
-  /* ============ 4. Admin approval ============ */
+  /* ============ 4. Provider verification ============ */
 
   const ctxAdm = await browser.newContext()
   const pageAdm = await ctxAdm.newPage()
   await registerViaUi(pageAdm, adminU)
-  sql(`UPDATE users SET role = 'admin' WHERE username = '${adminU}'`)
+  // `/review` là bàn làm việc của đơn vị xác thực. Admin nội bộ chỉ giám sát
+  // qua `/admin/verifications` và không được quyết định thay provider.
+  sql(`UPDATE users SET role = 'provider' WHERE username = '${adminU}'`)
   await loginViaUi(pageAdm, adminU)
   await pageAdm.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 40000 })
 
@@ -715,10 +743,10 @@ async function main() {
     await pageA.waitForTimeout(500)
   }
   await projectSelect.selectOption({ index: 1 })
-  // `date` là field DÙNG CHUNG: nó nằm ngoài dòng dịch vụ và mang tiền tố id
-  // KHÁC — `shared-<khoá>` chứ không phải `f-<khoá>`. Hai tiền tố phản ánh hai
-  // chỗ dựng khác nhau (`ServiceLauncher` vs `InlineServiceForm`).
-  await pageA.locator('#shared-date').fill(date1)
+  // `date` dùng chung tiền tố `f-<khoá>` với mọi field khác: `InlineServiceForm`
+  // sinh `id = f-${field.key}` cho TẤT CẢ, kể cả field dùng chung. Tiền tố
+  // `shared-` là giả định của một bản dựng cũ và không còn tồn tại trong DOM.
+  await pageA.locator('#f-viewing_date').fill(date1)
   await pageA.locator('#f-time').selectOption({ index: 1 })
   // `needs_shuttle` là field BẮT BUỘC. Bỏ trống thì nút "Thực hiện" vẫn sáng
   // nhưng execute bị chặn kèm thông báo "Còn thiếu: Xe đưa đón" — không có

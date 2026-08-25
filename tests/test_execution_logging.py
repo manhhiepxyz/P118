@@ -20,7 +20,7 @@ class SuccessConnector(Connector):
     def tool_names(self):
         return ["book_parking"]
 
-    async def execute(self, tool_name, input_data):
+    async def execute(self, tool_name, input_data, *, context=None):
         return StandardResult.ok({"booking_id": "BOOK-001"})
 
 
@@ -34,7 +34,7 @@ class FailConnector(Connector):
     def tool_names(self):
         return ["book_parking"]
 
-    async def execute(self, tool_name, input_data):
+    async def execute(self, tool_name, input_data, *, context=None):
         return StandardResult.fail(self._error_code, self._message, retryable=self._retryable)
 
 
@@ -56,7 +56,7 @@ class TransientThenSuccessConnector(Connector):
         """
         return True
 
-    async def execute(self, tool_name, input_data):
+    async def execute(self, tool_name, input_data, *, context=None):
         self.call_count += 1
         if self.call_count < self._success_after:
             return StandardResult.fail(ErrorCode.SERVICE_TIMEOUT, "timeout", retryable=True)

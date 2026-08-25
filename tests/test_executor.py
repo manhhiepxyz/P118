@@ -35,7 +35,7 @@ class MockConnector(Connector):
     def tool_names(self) -> list[str]:
         return [self._tool_name]
 
-    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+    async def execute(self, tool_name: str, input_data: dict[str, Any], *, context=None) -> StandardResult:
         self.call_count += 1
         self.last_input = input_data
         return self._response
@@ -50,7 +50,7 @@ class ConcurrentProbeConnector(Connector):
     def tool_names(self) -> list[str]:
         return ["schedule_property_viewing", "register_property_interest"]
 
-    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+    async def execute(self, tool_name: str, input_data: dict[str, Any], *, context=None) -> StandardResult:
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         await asyncio.sleep(0.01)
@@ -79,7 +79,7 @@ class TransientThenSuccessConnector(Connector):
         """
         return True
 
-    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+    async def execute(self, tool_name: str, input_data: dict[str, Any], *, context=None) -> StandardResult:
         self.call_count += 1
         if self.call_count < self._success_after:
             return StandardResult.fail(
@@ -109,7 +109,7 @@ class AlwaysFailRetryableConnector(Connector):
         """
         return True
 
-    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+    async def execute(self, tool_name: str, input_data: dict[str, Any], *, context=None) -> StandardResult:
         self.call_count += 1
         return StandardResult.fail(
             ErrorCode.SERVICE_UNAVAILABLE,
@@ -732,7 +732,7 @@ class TestExecutorEdgeCases:
             def tool_names(self) -> list[str]:
                 return ["register_resident"]
 
-            async def execute(self, tool_name, input_data):
+            async def execute(self, tool_name, input_data, *, context=None):
                 from src.common.results import StandardResult
 
                 return StandardResult(success=False, data=None, error_code=None, message="oops", retryable=False)

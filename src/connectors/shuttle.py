@@ -33,7 +33,7 @@ import httpx
 
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
-from src.connectors.base import Connector
+from src.connectors.base import Connector, ProviderCallContext
 
 
 class ShuttleConnector(Connector):
@@ -63,7 +63,12 @@ class ShuttleConnector(Connector):
         self,
         tool_name: str,
         input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
     ) -> StandardResult:
+        # Tool của connector này không mang khoá idempotency; `context` có mặt
+        # để hợp đồng đồng nhất, và bỏ qua ở đây là cố ý.
+        del context
         # --- Bước 1: Guard – chỉ xử lý tool được khai báo ---
         if tool_name != "book_shuttle":
             return StandardResult.fail(

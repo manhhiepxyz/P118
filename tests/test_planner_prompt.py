@@ -284,7 +284,7 @@ def test_prompt_has_self_check_before_output() -> None:
     assert "amount, currency" in checklist  # nhắc đúng cặp hay sai nhất
     assert "InputRef" in checklist
     assert "pay_fee" in checklist
-    assert "10 tool" in checklist
+    assert "8 tool" in checklist
     assert "book_shuttle" in checklist
 
 
@@ -312,18 +312,25 @@ def test_prompt_documents_the_viewing_to_shuttle_chain() -> None:
 
 
 def test_property_search_is_read_only_and_never_auto_schedules() -> None:
-    section = PROMPT.split("## Quy tắc tìm nhà và đặt lịch xem", 1)[1].split("## Quy tắc book_parking", 1)[0]
+    section = PROMPT.split("## Quy tắc đặt lịch xem nhà", 1)[1].split("## Quy tắc book_parking", 1)[0]
 
-    assert "search_properties" in section
-    assert "không tạo giao dịch" in section
-    assert "Không tự thêm `schedule_property_viewing`" in section
-    assert "người dùng phải chọn một `project_id`" in section
+    # Prompt không còn MỜI model dùng `search_properties`. Ràng buộc thật nằm ở
+    # `PLANNER_FORBIDDEN_TOOLS`; prompt chỉ để model khỏi tốn một lượt đề xuất
+    # một tool chắc chắn bị từ chối.
+    assert "search_properties" not in section
+    assert "không phải của Agent" in section
+    assert "Agent không tự chọn hộ" in section
 
 
 def test_property_transaction_actions_remain_outside_tool_contract() -> None:
     tool_section = PROMPT.split("## Tool được phép dùng", 1)[1].split("## Định dạng giá trị", 1)[0]
 
-    assert "search_properties" in tool_section
+    # Phân biệt "được liệt kê trong BẢNG" với "được nêu tên để cấm". Prompt vẫn
+    # nói `search_properties` không dùng được — đó là cấm, không phải mời.
+    table = tool_section.split("|---|---|---|", 1)[1].split("\n\n", 1)[0]
+    listed = [line.split("|")[1].strip() for line in table.strip().splitlines() if line.startswith("|")]
+    assert "search_properties" not in listed, "bảng tool không được liệt kê tool đã loại khỏi Agent"
+    assert "register_resident" not in listed
     assert "schedule_property_viewing" in tool_section
     assert "register_property_interest" in tool_section
     assert "create_maintenance_request" in tool_section
@@ -334,7 +341,7 @@ def test_property_transaction_actions_remain_outside_tool_contract() -> None:
 
 
 def test_viewing_and_interest_are_explicitly_parallel_when_independent() -> None:
-    section = PROMPT.split("## Quy tắc tìm nhà và đặt lịch xem", 1)[1].split("## Quy tắc book_parking", 1)[0]
+    section = PROMPT.split("## Quy tắc đặt lịch xem nhà", 1)[1].split("## Quy tắc book_parking", 1)[0]
 
     assert "register_property_interest" in section
     assert "KHÔNG phụ thuộc output của nhau" in section
@@ -368,7 +375,7 @@ def test_prompt_still_forbids_llm_authored_question() -> None:
 
 
 def test_prompt_still_forbids_tools_outside_allowlist() -> None:
-    assert "Không có tool nào khác tồn tại" in PROMPT
+    assert "Planner CHỈ được dùng 8 tool trên" in PROMPT
     assert f'missing_fields = ["{UNSUPPORTED_GOAL_FIELD}"]' in PROMPT
 
 

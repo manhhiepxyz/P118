@@ -31,7 +31,7 @@ import inspect
 import pytest
 
 from src.orchestration import demo_service
-from src.orchestration.service_approval import PROVIDER_TOOLS
+from src.orchestration.service_approval import SERVICE_GATED_TOOLS
 
 
 def test_the_viewing_resume_never_runs_a_step_still_waiting_for_someone():
@@ -67,12 +67,12 @@ def test_every_raw_executor_path_trims_what_it_must_not_run():
     assert not tho, f"{tho} chạy Executor trần mà không cắt bước nào — mọi cổng duyệt bị đi vòng"
 
 
-@pytest.mark.parametrize("tool", sorted(PROVIDER_TOOLS))
+@pytest.mark.parametrize("tool", sorted(SERVICE_GATED_TOOLS))
 def test_the_gate_list_is_what_the_trim_uses(tool: str):
     """Cắt theo HÀNG ĐỢI THẬT (`service_approvals` còn AWAITING), không theo một
     danh sách tool chép tay ở chỗ khác.
 
-    Danh sách chép tay là bản sao thứ hai của `PROVIDER_TOOLS`, và bản sao thì
+    Danh sách chép tay là bản sao thứ hai của `SERVICE_GATED_TOOLS`, và bản sao thì
     lệch: thêm một dịch vụ vào cổng mà quên chỗ kia là dịch vụ đó chạy chui.
     """
     body = inspect.getsource(demo_service._materialize_and_run_remaining)

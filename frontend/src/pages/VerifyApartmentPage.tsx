@@ -83,8 +83,15 @@ export function VerifyApartmentPage() {
       // vụ dựa trên nó. Nên lời hứa "dịch vụ cư dân mở ngay sau khi được
       // duyệt" là sai trên thực tế: mọi thứ vẫn khoá cho đến khi người dùng
       // đăng xuất rồi đăng nhập lại — mà không ai bảo họ phải làm thế.
-      const approved = latestApartmentRecord(rows)?.status === 'APPROVED'
-      if (approved && user?.resident_verification_status !== 'VERIFIED') {
+      // `effective_status`, KHÔNG phải `status`.
+      //
+      // `status` (alias của `provider_status`) chỉ nói đơn vị đã ký. Quyền cư
+      // dân mở hay chưa còn phụ thuộc main app đã ghi xong kết quả chưa — hai
+      // chuyện ở hai hệ thống, không chung transaction. Dùng `APPROVED` để mở
+      // khoá màn hình là hứa quyền đã mở trong khi nó có thể còn đang hoàn tất,
+      // đã hỏng, hoặc bị điều kiện nghiệp vụ chặn.
+      const verified = latestApartmentRecord(rows)?.effective_status === 'VERIFIED'
+      if (verified && user?.resident_verification_status !== 'VERIFIED') {
         await refreshUser()
       }
     } catch {
@@ -276,7 +283,9 @@ export function VerifyApartmentPage() {
 
 function apartmentLabel(record: VerificationRecord): string {
   const c = record.claimed_data
-  if (record.record_type === 'apartment' && 'apartment_code' in c) {
+  // Customer view cố ý không trả lại giấy tờ/claim đã nộp. Đừng để một field
+  // bị lược vì privacy làm sập cả trang trạng thái sau reload.
+  if (c && record.record_type === 'apartment' && 'apartment_code' in c) {
     return `${c.apartment_code}${c.residential_area ? ` · ${c.residential_area}` : ''}`
   }
   return record.record_id

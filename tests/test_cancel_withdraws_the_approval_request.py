@@ -21,11 +21,8 @@ dịch vụ" sau khi huỷ, KHÔNG workflow nào được tạo và màn hình v
 from __future__ import annotations
 
 import inspect
-import uuid
 
-import pytest
-
-from src.orchestration.viewing_approval import expire_pending_viewing_approval, save_pending_viewing_approval
+from src.orchestration.viewing_approval import expire_pending_viewing_approval
 
 
 def test_the_cancel_route_withdraws_the_request() -> None:
@@ -33,8 +30,7 @@ def test_the_cancel_route_withdraws_the_request() -> None:
 
     source = inspect.getsource(routes.cancel_demo_workflow)
     assert "expire_pending_viewing_approval" in source, (
-        "huỷ yêu cầu mà không rút lời nhờ duyệt — đơn vị tour vẫn được hỏi, và "
-        "có thể duyệt, một lịch đã huỷ"
+        "huỷ yêu cầu mà không rút lời nhờ duyệt — đơn vị tour vẫn được hỏi, và có thể duyệt, một lịch đã huỷ"
     )
 
 

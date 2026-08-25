@@ -9,7 +9,7 @@ Cơ chế giống hệt `ViewingApprovalBoundary`, vì cơ chế ấy đã đún
 KHÔNG cần duyệt trước, đưa các bước cần duyệt về `WAITING_APPROVAL`, ghim hàng
 đợi rồi ngắt luồng. Khác ở ba điểm:
 
-  * Không cố định một tool. Danh sách nằm ở `PROVIDER_TOOLS`.
+  * Không cố định một tool. Danh sách nằm ở `SERVICE_GATED_TOOLS`.
   * Một dòng cho MỖI bước, không phải mỗi workflow: một yêu cầu có thể gồm
     nhiều dịch vụ của nhiều đơn vị, và mỗi đơn vị chỉ quyết định phần của mình.
   * Chạy tiếp KHÔNG cần connector riêng. Bước đã được duyệt chạy qua chính
@@ -44,7 +44,12 @@ from src.orchestration.payment_approval import persist_full_plan, plan_without
 #                         một là việc nên làm, nhưng viết lại một cổng đang
 #                         hoạt động giữa lúc gấp là đổi một rủi ro nhỏ lấy một
 #                         rủi ro lớn hơn. Xem ghi chú NỢ ở cuối file.
-PROVIDER_TOOLS: frozenset[str] = frozenset(
+#
+# Tên cũ là `PROVIDER_TOOLS`, và nó ĐỤNG TÊN với
+# `src.common.agent_tool_policy.PROVIDER_TOOLS` — một tập khác hẳn (mọi tool có
+# connector, 10 cái). Hai khái niệm khác nhau mang cùng một tên là cách hai
+# người đọc cùng một dòng rồi hiểu hai điều.
+SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
     {
         "register_vehicle",
         "book_parking",
@@ -70,6 +75,23 @@ SERVICE_LABELS: dict[str, str] = {
 _HIDDEN_FIELDS = frozenset({"resident_id", "vehicle_id", "booking_id"})
 
 
+# Thứ tự khoá dùng chung cho MỌI người ghi hàng đợi duyệt.
+#
+# `lock_workflow_for_amendment` khoá `workflows` trước, rồi `workflow_tasks`,
+# rồi các dòng duyệt. `SELECT ... FOR UPDATE` khoá được dòng ĐANG CÓ, nhưng
+# không khoá được dòng CHƯA tồn tại — nên một lượt ghim hàng đợi MỚI vẫn chèn
+# được ngay giữa lúc amendment đang dùng snapshot, và bản vá commit dựa trên
+# một hàng đợi đã khác.
+#
+# Vì vậy người ghi cũng khoá `workflows` TRƯỚC, cùng thứ tự. Cùng thứ tự là
+# điều kiện để chúng xếp hàng thay vì ôm nhau chết.
+async def _lock_workflow_row(conn: Any, workflow_id: str) -> None:
+    await conn.fetchrow(
+        "SELECT workflow_id FROM workflows WHERE workflow_id = $1 FOR UPDATE",
+        workflow_id if isinstance(workflow_id, UUID) else UUID(str(workflow_id)),
+    )
+
+
 class ServiceApprovalRequiredError(PolicyInterruptionError):
     """Plan có dịch vụ hướng-đơn-vị mà chưa ai duyệt."""
 
@@ -92,7 +114,7 @@ class _ExecutionBoundary(Protocol):
 
 def gated_tasks(plan: TaskPlan) -> dict[str, str]:
     """`task_id → tool` cho các bước phải chờ đơn vị duyệt."""
-    return {task.task_id: task.tool for task in plan.tasks if task.tool in PROVIDER_TOOLS}
+    return {task.task_id: task.tool for task in plan.tasks if task.tool in SERVICE_GATED_TOOLS}
 
 
 def approval_details(task: Any) -> dict[str, Any]:
@@ -281,7 +303,8 @@ async def save_pending_service_approvals(
     if not rows:
         return
     applicant = applicant or {}
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock_workflow_row(conn, workflow_id)
         await conn.executemany(
             """
             INSERT INTO service_approvals
@@ -329,7 +352,8 @@ async def record_service_decision(
     `WHERE status = 'AWAITING'` là khoá chống hai lệnh duyệt đồng thời: chỉ một
     lệnh đổi được trạng thái, lệnh còn lại thấy 0 dòng và biết mình đến sau.
     """
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock_workflow_row(conn, workflow_id)
         result = await conn.execute(
             """
             UPDATE service_approvals
