@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronRight, FileText, Home } from 'lucide-react'
+import { CheckCircle2, ChevronRight, FileText, Home } from 'lucide-react'
 
 import { ActivityFeed } from '../components/workspace/ActivityFeed'
 import { CommandRail } from '../components/workspace/CommandRail'
@@ -8,7 +8,15 @@ import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
 
 import { LogoutButton } from '../components/workspace/LogoutButton'
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
-import { SERVICE_FIELDS, matchOption, missingFields, today, type FormValues } from '../lib/serviceForms'
+import {
+  SERVICE_FIELDS,
+  expectedDependency,
+  expectedTools,
+  matchOption,
+  missingFields,
+  today,
+  type FormValues,
+} from '../lib/serviceForms'
 import { JourneySummary } from '../components/workspace/JourneySummary'
 import { ServiceLauncher } from '../components/workspace/ServiceLauncher'
 import type { ChatTurn } from '../lib/journeyMock'
@@ -16,6 +24,7 @@ import { ConversationStream } from '../components/workspace/ConversationStream'
 import { PendingCard } from '../components/workspace/PendingCard'
 import { extractValue, normalizeIntent, resolve, type PendingAction } from '../lib/pendingAction'
 import { closingLine, journeyFromWorkflow, pendingFromWorkflow } from '../lib/liveJourney'
+import { toolLabel } from '../lib/status'
 import {
   ApiError,
   cancelWorkflow,
@@ -169,6 +178,90 @@ function goalFromForms(
 /* Điều hướng và nút đổi theme đã chuyển vào `WorkspaceShell` — hai trang
    dùng chung, nên không thể lệch nhau. */
 
+/**
+ * Khung hành trình TẠM: các bước sắp chạy, xếp theo đúng công thức toạ độ của
+ * hành trình thật (`liveJourney.layout`) — cột = độ sâu phụ thuộc, hàng = thứ
+ * tự trong cột.
+ *
+ * Bản đầu xếp mọi bước trên MỘT hàng ngang và bỏ hẳn đường nối. Sáu thẻ trải
+ * ngang thành một dải mỏng, không thấy bước nào phụ thuộc bước nào, và lúc
+ * plan thật tới thì bố cục nhảy hẳn sang dạng khác.
+ *
+ * Bước "Lập kế hoạch" đứng ở cột 0 với trạng thái `running` — Planner đang
+ * chạy thật, nên nói vậy là đúng, và `STEP_STATE.running` có sẵn vòng xoay +
+ * vệt quét.
+ */
+function provisionalCanvas(tools: string[]) {
+  const COLUMN = 380
+  const ROW = 150
+
+  const depthOf = (tool: string): number => {
+    let depth = 1 // cột 0 dành cho bước Lập kế hoạch
+    let current: string | null = tool
+    const seen = new Set<string>()
+    while (current && !seen.has(current)) {
+      seen.add(current)
+      const parent: string | null = expectedDependency(current)
+      if (!parent || !tools.includes(parent)) break
+      depth += 1
+      current = parent
+    }
+    return depth
+  }
+
+  const rowOf = new Map<number, number>()
+  const place = (column: number) => {
+    const row = rowOf.get(column) ?? 0
+    rowOf.set(column, row + 1)
+    return { x: 60 + column * COLUMN, y: 40 + row * ROW }
+  }
+
+  const base = {
+    timestamp: null,
+    details: [],
+    actions: [],
+    waitingOn: null,
+    lane: 'main',
+  }
+
+  const steps = [
+    {
+      ...base,
+      id: 'provisional-plan',
+      title: 'Lập kế hoạch',
+      state: 'running' as const,
+      summary: 'Đang xác định các bước cần thực hiện.',
+      ...place(0),
+    },
+    ...tools.map((tool) => {
+      const parent = expectedDependency(tool)
+      return {
+        ...base,
+        id: `provisional-${tool}`,
+        title: toolLabel(tool),
+        state: 'proposed' as const,
+        summary: 'Chưa bắt đầu.',
+        // Khung tạm cũng phải nói "chờ bước nào".
+        //
+        // Bỏ trống ở đây thì mục "Cần xong trước" chỉ hiện được ở chặng thật —
+        // tức là đúng lúc người dùng tò mò nhất (kế hoạch vừa hiện, chưa chạy
+        // gì) lại là lúc inspector im lặng.
+        blockedBy: parent && tools.includes(parent) ? [toolLabel(parent)] : ['Lập kế hoạch'],
+        ...place(depthOf(tool)),
+      }
+    }),
+  ]
+
+  const edges = tools.map((tool) => {
+    const parent = expectedDependency(tool)
+    const source = parent && tools.includes(parent) ? `provisional-${parent}` : 'provisional-plan'
+    const target = `provisional-${tool}`
+    return { id: `${source}->${target}`, source, target }
+  })
+
+  return { steps, edges }
+}
+
 export function JourneyWorkspacePage() {
   // Mặc định chọn chặng CẦN CHÚ Ý nhất, không phải chặng đầu: người mở màn hình
   // lên thường vào để xử lý việc đang vướng, không để đọc lại việc đã xong.
@@ -197,6 +290,25 @@ export function JourneyWorkspacePage() {
    * không chạy, không lời giải thích. Người dùng chỉ có thể kết luận là hỏng.
    */
   const [blocked, setBlocked] = useState<string | null>(null)
+
+  const [stopping, setStopping] = useState(false)
+
+  /** Dừng yêu cầu đang chạy — cùng đường với việc từ chối trong hội thoại. */
+  async function stopWorkflow() {
+    const id = live?.workflow_id
+    if (!id || stopping) return
+    setStopping(true)
+    try {
+      absorb(await cancelWorkflow(id))
+      say('agent', 'Mình đã dừng yêu cầu này. Các bước đã hoàn thành trước đó vẫn được giữ lại.')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      say('agent', `Mình chưa dừng được yêu cầu này. ${detail}`)
+      setFault(detail)
+    } finally {
+      setStopping(false)
+    }
+  }
 
   function setField(service: string, key: string, value: string) {
     setValues((current) => ({ ...current, [service]: { ...current[service], [key]: value } }))
@@ -259,6 +371,22 @@ export function JourneyWorkspacePage() {
    * không cộng dồn thời gian chờ của cả cuộc hội thoại.
    */
   const pendingSince = useRef<number | null>(null)
+
+  /**
+   * Các chặng TẠM, vẽ trong lúc Planner còn đang chạy.
+   *
+   * Chặng thật dựng từ `live.plan`, mà plan chưa tồn tại suốt 20–120 giây lập
+   * kế hoạch. Trong cửa sổ đó canvas trống trơn: người dùng bấm Thực hiện rồi
+   * nhìn một khoảng trắng, và chỉ thấy hành trình khi mọi thứ gần xong.
+   *
+   * Nhưng ta BIẾT họ vừa chọn dịch vụ nào. Vẽ đúng những dịch vụ ấy ở trạng
+   * thái `proposed` — "đã nhận, chưa chạy" — rồi để plan thật thay thế khi tới.
+   *
+   * Cố ý KHÔNG đoán số bước: một dịch vụ có thể nở thành nhiều task (đăng ký
+   * xe + đặt chỗ + trả phí). Vẽ nhiều hơn sự thật rồi rút lại còn tệ hơn vẽ
+   * ít. Mỗi dịch vụ đúng một chặng tạm, và nhãn lấy nguyên tên dịch vụ.
+   */
+  const provisional = useRef<string[]>([])
 
   function say(from: ChatTurn['from'], text: string) {
     turnId.current += 1
@@ -341,6 +469,17 @@ export function JourneyWorkspacePage() {
       pendingSince.current = null
       sayOnce(res.answer || res.question || (next ? next.message : null))
     }
+    // Xong thì NÓI NGAY, đừng đợi model soạn văn.
+    //
+    // `summary` do backend dựng từ dữ liệu thật — "Đã thanh toán 150.000 VND.
+    // Chỗ đỗ xe của bạn đã được xác nhận." Nó có mặt ngay khi workflow chuyển
+    // SUCCESS, còn `answer` thì tới sau một lượt gọi LLM nữa.
+    //
+    // Chờ `answer` nghĩa là người vừa bấm Xác nhận thanh toán nhìn ba chấm
+    // quay tiếp — tiền đã trừ, việc đã xong, mà màn hình vẫn nói "đang thực
+    // hiện". `sayOnce` đảm bảo câu của model tới sau không bị nói trùng.
+    if (res.status === 'SUCCESS') sayOnce(res.summary)
+
     // Lời kết nói SAU cùng, và chỉ khi thật sự xong. `sayOnce` lo phần không
     // lặp lại ở những nhịp poll tiếp theo.
     sayOnce(closingLine(res))
@@ -404,6 +543,13 @@ export function JourneyWorkspacePage() {
   async function respondWithFields(values: Record<string, string>) {
     const action = pending
     if (!action) return
+    // Lỗi CŨ phải biến mất ngay khi người dùng thử lại.
+    //
+    // Đo được: nhập sai khu → backend trả 422 "Hãy chọn Khu A hoặc Khu B." →
+    // câu đó nằm lại ở dải thông báo. Chọn đúng khu rồi gửi lại thì màn hình
+    // VẪN mắng, vì `fault` chỉ được ghi lúc lỗi mà không ai xoá lúc gửi lại.
+    // Người dùng đã làm đúng và không có cách nào biết.
+    setFault(null)
     try {
       const fields: Record<string, string> = {}
       for (const [key, value] of Object.entries(values)) fields[key] = extractValue(value)
@@ -448,6 +594,13 @@ export function JourneyWorkspacePage() {
      */
     source: 'chat' | 'field' = 'chat',
   ) {
+    // Lỗi CŨ phải biến mất ngay khi người dùng thử lại.
+    //
+    // Đo được: nhập sai khu → backend trả 422 "Hãy chọn Khu A hoặc Khu B." →
+    // câu đó nằm lại ở dải thông báo. Chọn đúng khu rồi gửi lại thì màn hình
+    // VẪN mắng, vì `fault` chỉ được ghi lúc lỗi mà không ai xoá lúc gửi lại.
+    // Người dùng đã làm đúng và không có cách nào biết.
+    setFault(null)
     const outcome = resolve(
       action,
       intent,
@@ -629,6 +782,27 @@ export function JourneyWorkspacePage() {
         return
       }
 
+      // Yêu cầu trước CÒN ĐANG CHẠY thì câu này không phải yêu cầu mới.
+      //
+      // Luật "không có việc nào đang chờ → đây là yêu cầu mới" đúng khi yêu
+      // cầu trước đã xong. Nhưng lúc nó đang lập kế hoạch thì cũng không có gì
+      // đang chờ — mà cửa sổ ấy dài 20–120 giây, đúng lúc người dùng gõ thêm.
+      //
+      // Đo được, ba workflow liên tiếp trong cùng một session:
+      //
+      //   03:54:03  "Đặt lịch tham quan Vinhomes Hải Vân Bay…"  → PLANNING
+      //   03:54:16  "cả 2"          ← 13 giây sau, thành workflow MỚI
+      //
+      // Goal của workflow thứ hai đúng là chuỗi "cả 2", nên hệ thống hỏi lại
+      // sáu ô từ đầu. Người dùng đọc thành "gõ một câu là nó quên hết".
+      //
+      // Nói thẳng là đang bận, và GIỮ LẠI câu vừa gõ để họ không phải gõ lại.
+      if (snapshot && (snapshot.status === 'PENDING' || snapshot.status === 'RUNNING')) {
+        setDraft(text)
+        say('agent', 'Mình đang xử lý yêu cầu trước đó. Chờ mình một chút rồi gửi tiếp nhé.')
+        return
+      }
+
       setFault(null)
       said.current = new Set()
       pendingSince.current = null
@@ -677,6 +851,11 @@ export function JourneyWorkspacePage() {
     setFault(null)
     say('user', goal)
 
+    // Giữ lại tên dịch vụ TRƯỚC khi xoá chip — đây là thứ duy nhất vẽ được
+    // trong lúc Planner còn chạy.
+    provisional.current = expectedTools(picked)
+    sawRealPlan.current = false
+
     setLeaving(true)
     window.setTimeout(async () => {
       setMode('journey')
@@ -702,8 +881,29 @@ export function JourneyWorkspacePage() {
 
   // Dữ liệu THẬT khi đã có workflow; dữ liệu mẫu chỉ còn là chỗ dựa lúc chưa
   // gọi được backend, để canvas không bao giờ là một khung trắng không lời.
+
   const journey = live ? journeyFromWorkflow(live) : null
-  const steps = journey?.steps ?? []
+  /**
+   * Đã từng thấy kế hoạch THẬT chưa.
+   *
+   * Khung tạm chỉ được phép xuất hiện MỘT LẦN, trước kế hoạch đầu tiên. Không
+   * có chốt này, nó hiện lại bất cứ khi nào một response tình cờ không mang
+   * `plan` — kể cả sau khi mọi việc đã xong — và người dùng thấy "Lập kế hoạch
+   * — Đang thực hiện" quay trở lại ngay sau khi trả tiền. Đọc lên đúng như hệ
+   * thống tự chạy lại kế hoạch, dù database cho thấy không có gì chạy lại.
+   */
+  const sawRealPlan = useRef(false)
+  if ((journey?.steps.length ?? 0) > 0) sawRealPlan.current = true
+
+  const planning =
+    !!live &&
+    !sawRealPlan.current &&
+    !TERMINAL.has(live.status) &&
+    (journey?.steps.length ?? 0) === 0 &&
+    provisional.current.length > 0
+  const shownJourney = planning && journey ? { ...journey, ...provisionalCanvas(provisional.current) } : journey
+
+  const steps = shownJourney?.steps ?? []
   const selected = steps.find((step) => step.id === selectedId) ?? null
   const done = steps.filter((step) => step.state === 'success').length
   const needsYou = steps.filter((step) => step.state === 'waiting_user').length
@@ -712,7 +912,7 @@ export function JourneyWorkspacePage() {
   // `goalText` từng đứng trước — nghĩa là thanh tiêu đề và cả cột phải hiển thị
   // nguyên văn tin nhắn vừa gửi, lặp lại đúng thứ đang nằm trong hội thoại ngay
   // bên dưới. Câu càng dài thì hai chỗ đó càng vô dụng.
-  const title = journey?.title || 'Đang chuẩn bị…'
+  const title = shownJourney?.title || 'Đang chuẩn bị…'
 
   /**
    * P-118 đang nghĩ: workflow còn chạy, hoặc câu trả lời đang được soạn.
@@ -721,6 +921,19 @@ export function JourneyWorkspacePage() {
    * nhịp poll, vì đếm nhịp là một protocol ngầm sẽ sai ngay khi đổi tốc độ mô
    * hình.
    */
+  /**
+   * Việc backend ĐANG làm — lấy từ sự kiện mới nhất, không tự đặt tên.
+   *
+   * Backend phát sẵn chuỗi giai đoạn từ giây đầu (PLANNING → PLANNED →
+   * VALIDATING → VALIDATED → EXECUTING), nhưng workspace chưa bao giờ đọc tới:
+   * nó chỉ vẽ ba chấm. Mà lượt lập kế hoạch đo được 20–120 giây, nên người
+   * dùng nhìn ba chấm im lặng cả phút và kết luận là treo.
+   *
+   * Đọc từ `events` chứ không dịch lại `status`: câu chữ thuộc về backend, và
+   * một bảng thứ hai ở đây là một chỗ nữa để hai bên nói khác nhau.
+   */
+  const stageLine = live?.events?.length ? (live.events[live.events.length - 1].message ?? null) : null
+
   const thinking =
     mode === 'journey' &&
     !!live &&
@@ -735,6 +948,14 @@ export function JourneyWorkspacePage() {
     // và một chỉ báo "đang xử lý" không bao giờ tắt là lời nói dối tệ hơn cả
     // việc không có chỉ báo nào.
     !live.answer &&
+    // ĐÃ XONG thì không còn gì để quay.
+    //
+    // Điều kiện cũ giữ nhịp chấm khi `response_state === 'PENDING'`, kể cả ở
+    // trạng thái kết thúc — chủ ý là "model còn đang soạn câu". Nhưng với
+    // người vừa trả tiền, ba chấm nghĩa là việc chưa xong, trong khi tiền đã
+    // trừ và chỗ đỗ đã giữ. Câu văn đẹp hơn không đáng để nói dối về trạng
+    // thái; `summary` đã được nói ngay ở trên rồi.
+    live.status !== 'SUCCESS' &&
     (!TERMINAL.has(live.status) || live.response_state === 'PENDING')
 
   return (
@@ -762,6 +983,32 @@ export function JourneyWorkspacePage() {
             của sản phẩm. */}
         <div className="flex min-h-0 flex-1" data-journey-state={live?.status ?? 'IDLE'}>
           <div className="relative flex min-w-0 flex-1 flex-col">
+            {/* Dải BÁO HOÀN TẤT — đứng trên cùng, không lẫn vào hội thoại.
+                Người vừa bấm Xác nhận thanh toán cần một tín hiệu dứt khoát là
+                xong; một dòng chat trôi giữa các dòng khác thì không phải tín
+                hiệu ấy. Nội dung lấy nguyên `summary` của backend — nó dựng từ
+                dữ liệu thật ("Đã thanh toán 150.000 VND…"), không phải câu do
+                model viết. */}
+            {mode === 'journey' && live?.status === 'SUCCESS' && live.summary && (
+              <div className="rise shrink-0 pt-6">
+                <div className="mx-auto w-full max-w-[1000px] px-12">
+                  <div
+                    role="status"
+                    className="flex items-start gap-3 rounded-[var(--r-sm)] px-4 py-3"
+                    style={{ backgroundColor: 'color-mix(in srgb, var(--success) 10%, transparent)' }}
+                  >
+                    <CheckCircle2
+                      className="mt-[2px] h-[18px] w-[18px] shrink-0"
+                      style={{ color: 'var(--success)' }}
+                      strokeWidth={2.2}
+                      aria-hidden
+                    />
+                    <p className="text-[15px] leading-[1.6] text-[var(--text-primary)]">{live.summary}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {mode === 'journey' && (
               <div className="rise shrink-0 pb-5 pt-6">
                 {/* Cùng trục ngang với danh sách năng lực và ô nhập: đổi chế
@@ -797,6 +1044,22 @@ export function JourneyWorkspacePage() {
                   </div>
 
                   <div className="mt-1 flex shrink-0 items-center gap-2.5">
+                    {/* Nút DỪNG phải ở đây, nơi người dùng đang đứng.
+                        Nó vốn chỉ có ở trang chi tiết, mà workspace mới là màn
+                        hình họ nhìn lúc yêu cầu đang chạy — đo được: 0 nút dừng
+                        trên canvas. Muốn dừng thì phải đi tìm sang trang khác,
+                        hoặc gõ "thôi" và hy vọng hệ thống hiểu. */}
+                    {live && !TERMINAL.has(live.status) && (
+                      <button
+                        type="button"
+                        onClick={stopWorkflow}
+                        disabled={stopping}
+                        className="press cursor-pointer rounded-full px-3 py-1.5 text-[13px] font-medium disabled:cursor-not-allowed"
+                        style={{ color: 'var(--danger)', boxShadow: 'inset 0 0 0 1px var(--border-subtle)' }}
+                      >
+                        {stopping ? 'Đang dừng…' : 'Dừng'}
+                      </button>
+                    )}
                     <span className="rounded-full border border-[var(--border-subtle)] px-3 py-1.5 font-mono text-[13px] tabular-nums text-[var(--text-secondary)]">
                       {done}/{steps.length}
                     </span>
@@ -844,7 +1107,11 @@ export function JourneyWorkspacePage() {
                   selectedId={selectedId}
                   onSelect={setSelectedId}
                   steps={steps}
-                  edges={journey?.edges ?? []}
+                  // `shownJourney`, KHÔNG phải `journey`: chặng lấy từ cái
+                  // này còn đường nối lấy từ cái kia thì lúc chưa có plan,
+                  // canvas có sáu thẻ mà không đường nào — đo được 6 node,
+                  // 0 edge.
+                  edges={shownJourney?.edges ?? []}
                 />
               )}
             </div>
@@ -854,7 +1121,7 @@ export function JourneyWorkspacePage() {
                 lệch khỏi tiêu đề — đo được 296 so với 422. Cùng cột thì cùng
                 trục, ở cả hai chế độ. */}
             {mode === 'journey' && (
-              <ConversationStream turns={turns} thinking={thinking} />
+              <ConversationStream turns={turns} thinking={thinking} stage={stageLine} />
             )}
 
             <CommandRail

@@ -633,11 +633,15 @@ _STAGE_MESSAGES = {
     "RESIDENT_CHECKING": "Đang kiểm tra liên kết cư dân với ban quản lý.",
     "RESIDENT_VERIFIED": "Đã xác nhận tài khoản cư dân.",
     "WAITING_APPROVAL": "Đang chờ bạn xác nhận thanh toán.",
+    "WAITING_VIEWING_APPROVAL": "Đang chờ đơn vị xác nhận lịch tham quan.",
     "EXECUTING": "Đang thực hiện yêu cầu.",
     "TASK_RUNNING": "Đang thực hiện một bước trong yêu cầu.",
     "TASK_SUCCESS": "Đã hoàn thành một bước trong yêu cầu.",
     "TASK_FAILED": "Một bước không thể hoàn thành.",
     "NEEDS_INFORMATION": "Cần bạn bổ sung thêm thông tin.",
+    # `QUESTION` được phát nhưng chưa từng có câu, nên rơi về câu mặc định
+    # "Đang xử lý yêu cầu" — đúng mà vô nghĩa với người vừa HỎI một điều.
+    "QUESTION": "Đang trả lời câu hỏi của bạn.",
     "VALIDATION_FAILED": "Thông tin chưa đủ điều kiện để thực hiện.",
     "EXECUTION_FAILED": "Yêu cầu đã dừng lại giữa chừng.",
     "FINISHED": "Yêu cầu đã hoàn tất.",
@@ -1264,7 +1268,13 @@ async def _run_demo_job(
         if response.status == "NEEDS_INFORMATION":
             terminal_stage = "NEEDS_INFORMATION"
         elif response.status == "WAITING_APPROVAL":
-            terminal_stage = "WAITING_APPROVAL"
+            # Cùng một `status`, HAI loại chờ. Suy giai đoạn từ status thôi thì
+            # lịch tham quan cũng phát ra "Đang chờ bạn xác nhận thanh toán" —
+            # và vì đây là sự kiện CUỐI, đó đúng là câu giao diện hiển thị.
+            #
+            # `viewing_approval` chỉ có mặt ở nhánh chờ đơn vị, nên nó phân
+            # biệt được mà không cần thêm trạng thái mới.
+            terminal_stage = "WAITING_VIEWING_APPROVAL" if response.viewing_approval else "WAITING_APPROVAL"
         elif response.status == "VALIDATION_ERROR":
             terminal_stage = "VALIDATION_FAILED"
         elif response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
@@ -3458,8 +3468,10 @@ def _waiting_viewing_approval_view(
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status="WAITING_APPROVAL",
-        stage="WAITING_APPROVAL",
-        message="Đang chờ đơn vị xác nhận lịch tham quan.",
+        # Câu chữ đã đúng từ trước, nhưng `stage` thì vẫn là mã của nhánh thanh
+        # toán — và `stage` mới là thứ mọi tầng khác đọc để quyết định câu.
+        stage="WAITING_VIEWING_APPROVAL",
+        message=_STAGE_MESSAGES["WAITING_VIEWING_APPROVAL"],
         viewing_approval=DemoViewingApproval(**pending),
         # PHẢI đặt ở cả đường dựng-lại-từ-DB này, không chỉ ở đường đầu tiên.
         #
@@ -4256,10 +4268,26 @@ async def decide_demo_payment(
         )
 
     amount = f"{quote.amount:,.0f}".replace(",", ".")
-    response = DemoWorkflowResponse(
-        workflow_id=workflow_id,
-        status="SUCCESS",
-        summary=f"Đã thanh toán {amount} {quote.currency}. Chỗ đỗ xe của bạn đã được xác nhận.",
+    summary = f"Đã thanh toán {amount} {quote.currency}. Chỗ đỗ xe của bạn đã được xác nhận."
+
+    # Response này phải mang THEO các bước, không chỉ một câu tóm tắt.
+    #
+    # Bản trước dựng `DemoWorkflowResponse(workflow_id, status, summary)` trần.
+    # `status="SUCCESS"` là trạng thái kết thúc nên giao diện NGỪNG poll ngay —
+    # và bản trần ấy là thứ cuối cùng nó thấy. Người dùng vừa trả tiền xong mở
+    # trang chi tiết và không có bước nào cả: không biết chỗ đỗ nào, xe nào,
+    # lịch tham quan ra sao.
+    #
+    # Tệ hơn: nó còn được ghi vào `job["response"]`, nên mọi lượt poll sau đó
+    # cũng trả bản rỗng cho tới khi tiến trình khởi động lại.
+    #
+    # Dựng lại từ database như đường duyệt lịch tham quan vẫn làm, rồi chỉ ĐÈ
+    # câu tóm tắt — số tiền và mã đặt chỗ là thứ chỉ chỗ này biết.
+    view = await _public_view_from_db(workflow_id)
+    response = (
+        view.model_copy(update={"status": "SUCCESS", "summary": summary})
+        if view is not None
+        else DemoWorkflowResponse(workflow_id=workflow_id, status="SUCCESS", summary=summary)
     )
     if job is not None:
         _append_job_event(job, "FINISHED")

@@ -556,3 +556,49 @@ export function today(): string {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }
+
+/**
+ * Các tool một dịch vụ SẼ gọi — đọc từ chính metadata `tool` của form.
+ *
+ * Dùng để vẽ khung hành trình NGAY khi bấm Thực hiện, trong lúc Planner còn
+ * chạy 20–120 giây. Không phải phỏng đoán: mỗi ô nhập đã khai nó thuộc tool
+ * nào, nên danh sách này là thứ chính form đang hứa với backend.
+ *
+ * Vẫn có thể LỆCH với plan thật — Planner có thể thêm `pay_fee`, hoặc bỏ một
+ * bước đã làm xong ở lượt trước. Vì vậy khung này chỉ sống tới khi plan thật
+ * tới, rồi bị thay hoàn toàn. Nó trả lời "sắp làm những gì", không phải "đã
+ * quyết làm những gì".
+ */
+export function expectedTools(services: string[]): string[] {
+  const tools: string[] = []
+  for (const service of services) {
+    for (const field of SERVICE_FIELDS[service] ?? []) {
+      if (field.tool && !tools.includes(field.tool)) tools.push(field.tool)
+    }
+    // `pay_fee` không có ô nhập nào nên không khai được ở trên, nhưng mọi lần
+    // đặt chỗ đỗ đều kéo theo nó — `book_parking` luôn sinh một khoản phí.
+    if (tools.includes('book_parking') && !tools.includes('pay_fee')) tools.push('pay_fee')
+  }
+  return tools
+}
+
+/**
+ * Bước nào phải chạy TRƯỚC bước nào — quan hệ có thật giữa các tool.
+ *
+ * `book_shuttle` cần `viewing_id` từ lịch tham quan; `book_parking` cần
+ * `vehicle_id` từ đăng ký xe; `pay_fee` cần `booking_id` từ đặt chỗ. Đây là
+ * ràng buộc InputRef của chính tool contract, không phải phỏng đoán về thứ tự.
+ *
+ * Dùng để khung tạm có ĐƯỜNG NỐI và xếp theo cột giống hành trình thật, thay
+ * vì một hàng ngang rời rạc. Nhờ vậy lúc plan thật tới, bố cục gần như không
+ * nhảy.
+ */
+const TOOL_DEPENDS_ON: Record<string, string> = {
+  book_shuttle: 'schedule_property_viewing',
+  book_parking: 'register_vehicle',
+  pay_fee: 'book_parking',
+}
+
+export function expectedDependency(tool: string): string | null {
+  return TOOL_DEPENDS_ON[tool] ?? null
+}

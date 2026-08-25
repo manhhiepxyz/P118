@@ -137,6 +137,15 @@ export interface AgentWorkflowEvent {
   sequence: number
   stage: AgentWorkflowStage
   message: string
+  /**
+   * Sự kiện này thuộc về BƯỚC nào. Null với các mốc của cả workflow
+   * (lập kế hoạch, kiểm tra, hoàn tất).
+   *
+   * Backend gửi hai trường này từ lâu (`DemoWorkflowEvent`), nhưng kiểu ở đây
+   * bỏ sót — nên không có cách nào lọc nhật ký theo từng chặng.
+   */
+  task_id?: string | null
+  task_status?: string | null
 }
 
 /** Báo giá do backend tính. Browser hiển thị, không gửi lại. */

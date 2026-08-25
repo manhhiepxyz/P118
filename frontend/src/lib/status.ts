@@ -186,6 +186,11 @@ export const TOOL_LABELS: Record<string, string> = {
   register_property_interest: 'Đăng ký quan tâm',
   create_maintenance_request: 'Yêu cầu bảo trì',
   schedule_move: 'Đăng ký chuyển nhà',
+  // Thiếu hai dòng này thì `toolLabel` trả về NGUYÊN TÊN TOOL, và người dùng
+  // đọc được "book_shuttle" giữa một hàng nhãn tiếng Việt. Đo được trên màn
+  // hình thật.
+  book_shuttle: 'Đặt xe đưa đón',
+  register_resident: 'Đăng ký cư dân',
 }
 
 export function toolLabel(tool: string): string {

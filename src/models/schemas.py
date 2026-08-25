@@ -169,6 +169,14 @@ class DemoWorkflowEvent(BaseModel):
         "RESIDENT_CHECKING",
         "RESIDENT_VERIFIED",
         "WAITING_APPROVAL",
+        # Phải có ở CẢ HAI Literal `stage`.
+        #
+        # Bản vá đầu chỉ thêm vào `DemoWorkflowResponse.stage`, còn đây thì
+        # quên — và mọi GET workflow có sự kiện này trả HTTP 500. Suite xanh
+        # 1850 test vì không test nào dựng một `DemoWorkflowEvent` với giá trị
+        # mới. Đổi một câu chữ sai thành một endpoint hỏng, đúng thứ comment ở
+        # `DemoWorkflowResponse` cảnh báo mà tôi vẫn sập.
+        "WAITING_VIEWING_APPROVAL",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",
@@ -179,6 +187,15 @@ class DemoWorkflowEvent(BaseModel):
         "VALIDATION_FAILED",
         "EXECUTION_FAILED",
         "FINISHED",
+        # `CHAT` được `_append_job_event` phát ra ở hai chỗ (small-talk và
+        # nhánh trả lời câu hỏi giữa hội thoại), nhưng Literal này không có nó
+        # — nên mọi GET một workflow chat còn trong RAM đều trả HTTP 500.
+        #
+        # Cùng khuôn với `WAITING_VIEWING_APPROVAL`: giá trị thêm vào
+        # `DemoWorkflowResponse.stage` mà quên `DemoWorkflowEvent.stage`. Lần
+        # này không phải quên — nó chưa từng được thêm, và không ai thấy vì
+        # không test nào dựng một sự kiện CHAT.
+        "CHAT",
     ]
     message: str
     task_id: str | None = None
@@ -294,6 +311,11 @@ class DemoWorkflowResponse(BaseModel):
             "RESIDENT_CHECKING",
             "RESIDENT_VERIFIED",
             "WAITING_APPROVAL",
+            # Chờ ĐƠN VỊ duyệt lịch tham quan — khác hẳn `WAITING_APPROVAL`,
+            # vốn là chờ chính người dùng xác nhận một khoản tiền. Gộp hai thứ
+            # làm một khiến người đặt lịch xem nhà được bảo đi xác nhận thanh
+            # toán, và họ đi tìm một nút không tồn tại.
+            "WAITING_VIEWING_APPROVAL",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",

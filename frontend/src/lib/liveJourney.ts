@@ -143,6 +143,9 @@ export function journeyFromWorkflow(res: AgentWorkflowResponse): LiveJourney {
    */
   const waitsOnProvider = res.approval_actor === 'PROVIDER' || res.approval_actor === 'ADMIN'
 
+  // task_id → nhãn người đọc, để nói "chờ bước nào" bằng tên chứ không bằng mã.
+  const titleOf = new Map(res.plan.map((step) => [step.task_id, step.title || step.task_id]))
+
   const steps = res.plan.map((step) => {
     const task = results.get(step.task_id)
     const at = position.get(step.task_id) ?? { x: 60, y: 40 }
@@ -171,6 +174,14 @@ export function journeyFromWorkflow(res: AgentWorkflowResponse): LiveJourney {
             : state === 'running'
               ? 'P-118 đang xử lý.'
               : null,
+      // Chỉ nêu bước CHƯA xong: một bước đã chạy xong thì không còn chặn ai.
+      blockedBy: (step.depends_on ?? [])
+        .filter((parent) => results.get(parent)?.status !== 'SUCCESS')
+        .map((parent) => titleOf.get(parent) ?? parent),
+      log: (res.events ?? [])
+        .filter((event) => event.task_id === step.task_id)
+        .map((event) => event.message ?? '')
+        .filter(Boolean),
       lane: 'flow',
       x: at.x,
       y: at.y,
