@@ -43,6 +43,9 @@ class _RecordingBoundary:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        # Đồ giả phải RỘNG bằng hàng thật. Hẹp hơn thì `TypeError` lúc chạy —
+        # và nó trông y hệt một thất bại của sản phẩm.
+        **_forwarded,
     ):
         self.finalize_flags.append(finalize)
         results: dict[str, StandardResult] = {}
@@ -161,6 +164,7 @@ async def test_failed_prefix_is_returned_without_requesting_viewing_approval() -
             finalize: bool = True,
             parent_workflow_id: str | None = None,
             session_id: str | None = None,
+        **_forwarded,
         ) -> tuple[str, dict[str, StandardResult]]:
             return workflow_id or "wf-failed", {
                 "T1": StandardResult.fail(

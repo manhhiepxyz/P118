@@ -25,11 +25,14 @@ from src.connectors.tour import TourConnector
 from src.db.parking_payment_repository import payment_idempotency_key
 from src.executor.executor import Executor
 from src.common.failure_messages import repair_question
+from src.agents.graph import _apply_user_answers
+from src.agents.validator import TaskPlanValidator
 from src.orchestration.repair import RepairManager
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.deps import build_connectors, build_execution_boundary
 from src.orchestration.final_answer import compose as compose_final_answer
+from src.orchestration.boundary import ValidatedExecutionBoundary
 from src.orchestration.payment_approval import (
     APPROVED,
     AWAITING,
@@ -213,6 +216,8 @@ class ResidentAccessBoundary:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        seed_statuses: dict[str, Any] | None = None,
+        seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         if any(task.tool in self._LINKING_TOOLS for task in plan.tasks):
             raise ResidentLinkingOutsideAgentError("Resident linking happens outside the agent.")
@@ -247,6 +252,8 @@ class ResidentAccessBoundary:
             finalize=finalize,
             parent_workflow_id=parent_workflow_id,
             session_id=session_id,
+            seed_statuses=seed_statuses,
+            seed_results=seed_results,
         )
 
     # Field mang ID tài nguyên nghiệp vụ, kèm cách kiểm quyền sở hữu tương ứng.
@@ -345,6 +352,8 @@ class PaymentApprovalBoundary:
         *,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        seed_statuses: dict[str, Any] | None = None,
+        seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         """Chạy phần trước thanh toán mà KHÔNG chốt trạng thái workflow.
 
@@ -359,6 +368,8 @@ class PaymentApprovalBoundary:
             finalize=False,
             parent_workflow_id=parent_workflow_id,
             session_id=session_id,
+            seed_statuses=seed_statuses,
+            seed_results=seed_results,
         )
 
     async def execute(
@@ -369,6 +380,8 @@ class PaymentApprovalBoundary:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        seed_statuses: dict[str, Any] | None = None,
+        seed_results: dict[str, StandardResult] | None = None,
     ) -> tuple[str, dict[str, StandardResult]]:
         payment_task_ids = {task.task_id for task in plan.tasks if task.tool == "pay_fee"}
         if not payment_task_ids or self._payment_approved:
@@ -378,6 +391,8 @@ class PaymentApprovalBoundary:
                 finalize=finalize,
                 parent_workflow_id=parent_workflow_id,
                 session_id=session_id,
+                seed_statuses=seed_statuses,
+                seed_results=seed_results,
             )
 
         # Trước đây chặn TOÀN BỘ plan: với chuỗi register_vehicle → book_parking
@@ -405,6 +420,8 @@ class PaymentApprovalBoundary:
                 resolved_workflow_id,
                 parent_workflow_id=parent_workflow_id,
                 session_id=session_id,
+                seed_statuses=seed_statuses,
+                seed_results=seed_results,
             )
             resolved_workflow_id = resolved_workflow_id or executed_id
 
@@ -954,6 +971,113 @@ class RetryNotAllowed(Exception):
         super().__init__(message)
 
 
+async def rerun_with_answers(workflow_id: str, answers: dict[str, Any], **urls: str) -> dict[str, Any]:
+    """Vá câu trả lời vào kế hoạch ĐÃ CÓ rồi chạy tiếp — KHÔNG gọi lại Planner.
+
+    Người dùng sửa đúng một ô ("Khu B") và hệ thống đi hỏi model lại toàn bộ
+    yêu cầu. Đo được: 175 giây trong Planner trên tổng 200 giây, hai lượt gọi.
+    Kế hoạch đã có sẵn và đã qua Validator; đem nó ra hỏi lại là đặt cược lại
+    một ván đã thắng — và ván ấy thua thật: cùng một câu, ba lượt chạy cho ba
+    kết quả khác nhau (READY / thiếu project_id / không hiểu yêu cầu).
+
+    Ranh giới hẹp có chủ ý — chỉ dùng khi câu trả lời là DỮ LIỆU CÓ CẤU TRÚC:
+
+      - Ô có cấu trúc chỉ nhận giá trị trong allowlist đóng, nên nó không thể
+        mang ý định đổi hình dạng kế hoạch ("bỏ chỗ đỗ đi, chỉ giữ tham quan").
+        Câu chữ tự do thì có, và những câu ấy vẫn đi đường lập lại như cũ.
+      - Vá xong PHẢI validate lại. `Executor` trần không validate — việc đó do
+        `ValidatedExecutionBoundary` làm. Đường này giờ ĐÃ đi qua nó (bọc trong
+        chuỗi boundary đầy đủ), nhưng validate sớm ở đây vẫn giữ: nó biến một
+        plan hỏng thành `RetryNotAllowed` để caller rơi về đường cũ, thay vì
+        thành `PlanRejectedError` giữa lúc chạy.
+
+    Bước đã SUCCESS được seed, không chạy lại: các tool này không idempotent.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        record = await repository.get_workflow(workflow_id)
+        if record is None:
+            raise RetryNotAllowed("NOT_FOUND", "Không tìm thấy yêu cầu này.")
+
+        rows = record.get("tasks") or []
+        plan = _plan_from_task_rows(record["workflow"].get("goal") or "", rows)
+        if plan is None or not plan.tasks:
+            raise RetryNotAllowed("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy lại.")
+
+        # Ép giá trị người dùng VỪA trả lời đè lên giá trị cũ trong plan — cùng
+        # một hàm mà graph dùng, không viết bản thứ hai.
+        _apply_user_answers(plan, answers)
+
+        # Cửa duy nhất vào tầng thực thi cho đường này.
+        try:
+            TaskPlanValidator.validate(plan)
+        except ValueError as exc:
+            raise RetryNotAllowed("INVALID_PLAN", str(exc)) from None
+
+        connectors = build_connectors(workflow_id=workflow_id, **urls)
+        repair_manager = RepairManager()
+        # Chuỗi ĐẦY ĐỦ, không phải `Executor` trần.
+        #
+        # Executor trần là một đường vòng quanh mọi boundary. Đo được: bản đầu
+        # của đường tắt này trừ 100.000 VND với 0 bản ghi duyệt. Bọc lại thì
+        # `pay_fee` dừng đúng chỗ nó phải dừng, và đường tắt lấy lại được tốc
+        # độ cho cả luồng có phí.
+        guarded = PaymentApprovalBoundary(
+            ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
+            False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
+            repository=repository,
+        )
+
+        seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
+        try:
+            await guarded.execute(
+                plan,
+                workflow_id,
+                finalize=False,
+                seed_statuses=seed_statuses,
+                seed_results=seed_results,
+            )
+        except PolicyInterruptionError as pause:
+            # Dừng lại hỏi KHÔNG phải lỗi — nhưng CHỈ ném thôi thì chưa đủ.
+            #
+            # Boundary ném `PaymentApprovalRequiredError` kèm kết quả phần
+            # trước; việc GHIM yêu cầu duyệt là của caller. Đường chạy thường
+            # làm điều đó ở `_run_demo_job`. Đường tắt bắt lỗi rồi bỏ qua bước
+            # ấy thì đo được: `pay_fee` PENDING, `payment_approvals` 0 dòng,
+            # workflow WAITING_APPROVAL — người dùng chờ một nút không tồn tại.
+            #
+            # Không rò tiền, nhưng kẹt cứng. Ghim ở đây, đúng như caller kia.
+            await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
+            return {"workflow_id": workflow_id, "status": WorkflowStatus.WAITING_APPROVAL.value}
+
+        hints = repair_manager.hints_for(workflow_id)
+        await _persist_hints(repository, workflow_id, hints)
+        repair_manager.clear(workflow_id)
+
+        statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
+        all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
+        final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
+
+        repair_answer = _repair_answer_for(hints, plan)
+        try:
+            await repository.save_assistant_response(
+                workflow_id,
+                answer=repair_answer
+                or compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                suggestions=[],
+                state="FALLBACK",
+                for_status="NEEDS_INFORMATION" if repair_answer else final_status.value,
+            )
+        except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+            logger.info("không ghi được câu chốt sau khi vá plan (%s)", type(exc).__name__)
+
+        await repository.update_workflow_status(workflow_id, final_status)
+        return {"workflow_id": workflow_id, "status": final_status.value}
+    finally:
+        await pool.close()
+
+
 async def retry_failed_tasks(
     workflow_id: str,
     *,
@@ -1018,16 +1142,39 @@ async def retry_failed_tasks(
             workflow_id=workflow_id,
         )
         repair_manager = RepairManager()
-        executor = Executor(connectors, repository, on_failure=repair_manager)
+        # Chuỗi ĐẦY ĐỦ, không phải `Executor` trần.
+        #
+        # Executor trần là một đường vòng quanh mọi boundary. Đo được: bản đầu
+        # của đường tắt này trừ 100.000 VND với 0 bản ghi duyệt. Bọc lại thì
+        # `pay_fee` dừng đúng chỗ nó phải dừng, và đường tắt lấy lại được tốc
+        # độ cho cả luồng có phí.
+        guarded = PaymentApprovalBoundary(
+            ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
+            False,  # KHÔNG bao giờ pre-approve: cổng duyệt không được là tuỳ chọn
+            repository=repository,
+        )
 
         seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
-        await executor.execute(
-            plan,
-            workflow_id,
-            finalize=False,
-            seed_statuses=seed_statuses,
-            seed_results=seed_results,
-        )
+        try:
+            await guarded.execute(
+                plan,
+                workflow_id,
+                finalize=False,
+                seed_statuses=seed_statuses,
+                seed_results=seed_results,
+            )
+        except PolicyInterruptionError as pause:
+            # Dừng lại hỏi KHÔNG phải lỗi — nhưng CHỈ ném thôi thì chưa đủ.
+            #
+            # Boundary ném `PaymentApprovalRequiredError` kèm kết quả phần
+            # trước; việc GHIM yêu cầu duyệt là của caller. Đường chạy thường
+            # làm điều đó ở `_run_demo_job`. Đường tắt bắt lỗi rồi bỏ qua bước
+            # ấy thì đo được: `pay_fee` PENDING, `payment_approvals` 0 dòng,
+            # workflow WAITING_APPROVAL — người dùng chờ một nút không tồn tại.
+            #
+            # Không rò tiền, nhưng kẹt cứng. Ghim ở đây, đúng như caller kia.
+            await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
+            return {"workflow_id": workflow_id, "status": WorkflowStatus.WAITING_APPROVAL.value}
 
         hints = repair_manager.hints_for(workflow_id)
         await _persist_hints(repository, workflow_id, hints)
@@ -1270,6 +1417,31 @@ async def _materialize_and_run_remaining(
         # Task tham quan vừa materialize xong — kết quả mới đè lên hàng cũ.
         seed_statuses[pending.task_id] = TaskStatus.SUCCESS
         seed_results[pending.task_id] = result
+
+        # `pay_fee` KHÔNG chạy ở đây, và đó phải là một bảo đảm CẤU TRÚC.
+        #
+        # Đường này dùng `Executor` trần — không có `PaymentApprovalBoundary`.
+        # Plan dựng lại từ `workflow_tasks` giữ MỌI task, kể cả `pay_fee`, nên
+        # về mặt code nó thừa sức gọi Payment API mà không qua cổng duyệt.
+        #
+        # Đo trên dữ liệu thật thì chưa từng xảy ra: mọi workflow đã trả tiền
+        # đều có bản ghi duyệt, và yêu cầu duyệt luôn được tạo TRƯỚC khi lịch
+        # được duyệt (5/5) — tức `PaymentApprovalBoundary` đã kịp tách `pay_fee`
+        # ra từ lượt chạy đầu. Nhưng tôi không tìm được cơ chế nào BẢO ĐẢM điều
+        # đó, và "chưa từng xảy ra" không phải một bảo đảm.
+        #
+        # Tách hẳn ra khỏi plan chạy ở đây. Thanh toán đi đường riêng của nó:
+        # `/payment-decision` → `resume_payment_after_approval`, nơi có báo giá
+        # authoritative và khoá idempotency.
+        unpaid = {
+            task.task_id
+            for task in plan.tasks
+            if task.tool == "pay_fee" and seed_statuses.get(task.task_id) is not TaskStatus.SUCCESS
+        }
+        if unpaid:
+            trimmed = plan_without(plan, unpaid)
+            if trimmed is not None:
+                plan = trimmed
 
         final_workflow_id, task_results = await executor.execute(
             plan,

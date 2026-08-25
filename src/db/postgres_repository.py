@@ -105,6 +105,10 @@ class PostgreSQLWorkflowStateRepository:
         """Trả dict gồm workflow metadata + danh sách tasks."""
         return await self.workflows.get_workflow(workflow_id)
 
+    async def resolve_clarification(self, workflow_id: str) -> bool:
+        """Đóng câu hỏi đang mở, không tạo workflow con."""
+        return await self.workflows.resolve_clarification(workflow_id)
+
     async def consume_clarification_and_create_child(self, parent_workflow_id: str, **kwargs) -> dict | None:
         """Claim clarification + tạo child atomic. Xem WorkflowRepository."""
         return await self.workflows.consume_clarification_and_create_child(parent_workflow_id, **kwargs)
@@ -315,6 +319,14 @@ class PostgreSQLWorkflowStateRepository:
 
     async def list_workflows_by_session(self, session_id: str, *, owner_user_id: str | None = None) -> list[dict]:
         return await self.workflows.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+
+    async def append_events(self, workflow_id: str, events: list[dict]) -> None:
+        """Ghim dòng thời gian giai đoạn."""
+        await self.workflows.append_events(workflow_id, events)
+
+    async def get_events(self, workflow_id: str) -> list[dict]:
+        """Đọc dòng thời gian đã ghim."""
+        return await self.workflows.get_events(workflow_id)
 
     async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
         """Persist repair hints cho workflow FAILED repairable."""

@@ -321,6 +321,34 @@ CREATE INDEX IF NOT EXISTS idx_workflow_clarifications_open
     ON workflow_clarifications(workflow_id) WHERE resolved_at IS NULL;
 
 
+-- Dòng thời gian GIAI ĐOẠN của một workflow.
+--
+-- Trước đây `events` chỉ sống trong `_DEMO_JOBS` — bộ nhớ tiến trình — nên mỗi
+-- lần backend khởi động lại là mất sạch, và mọi yêu cầu cũ mở lại từ Lịch sử
+-- đều có mục "Chi tiết xử lý" trống. Trạng thái và các bước vẫn còn vì chúng
+-- nằm trong database; chỉ dòng thời gian là bốc hơi.
+--
+-- Đây là bảng CHỈ THÊM: không sửa, không xoá theo dòng. Một sự kiện đã xảy ra
+-- thì không đổi được, và ghi đè nó là viết lại lịch sử.
+CREATE TABLE IF NOT EXISTS workflow_events (
+    id           BIGSERIAL    PRIMARY KEY,
+    workflow_id  UUID         NOT NULL REFERENCES workflows(workflow_id),
+    sequence     INTEGER      NOT NULL,
+    stage        VARCHAR(40)  NOT NULL,
+    message      TEXT         NOT NULL,
+    task_id      VARCHAR(20),
+    task_status  VARCHAR(30),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- Cùng một workflow không thể có hai sự kiện thứ N. Ràng buộc này biến một
+    -- lượt ghi lặp (poll trùng, retry sau timeout) thành no-op thay vì thành
+    -- dòng thừa: `ON CONFLICT DO NOTHING` dựa vào nó.
+    UNIQUE (workflow_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow
+    ON workflow_events(workflow_id, sequence);
+
+
 CREATE TABLE IF NOT EXISTS workflow_tasks (
     id            BIGSERIAL    PRIMARY KEY,
     workflow_id   UUID         NOT NULL

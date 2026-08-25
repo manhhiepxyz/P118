@@ -14,7 +14,8 @@
  */
 
 import type { JourneyEdge, JourneyStep, StepState } from './journeyMock'
-import type { PendingAction } from './pendingAction'
+import type { PendingAction, PendingField } from './pendingAction'
+import { fieldSpecForMissing, today } from './serviceForms'
 import type { AgentTaskResult, AgentWorkflowResponse } from './types'
 
 /**
@@ -55,7 +56,8 @@ const FIELD_LABEL: Record<string, string> = {
   max_price: 'Ngân sách',
 }
 
-const label = (key: string) => FIELD_LABEL[key] ?? key
+// `label()` cũ đã được `pendingFieldFor` thay thế — nó tra thêm cả kiểu ô,
+// không chỉ cái tên.
 
 /** Trạng thái task của backend → trạng thái ngữ nghĩa của một chặng. */
 const STATE: Record<AgentTaskResult['status'], StepState> = {
@@ -297,6 +299,39 @@ function money(quote: AgentWorkflowResponse['payment_quote']): string {
  *                        đây là mời người dùng bấm một thứ không có thật.
  *   NEEDS_INFORMATION  → người dùng cung cấp thông tin còn thiếu.
  */
+/**
+ * Ô backend đang hỏi → ô nhập CÓ RÀNG BUỘC.
+ *
+ * `fieldSpecForMissing` đã tồn tại và được export từ `serviceForms.ts`, nhưng
+ * chưa ai gọi — nên thẻ "Cần thêm thông tin" vẽ ô text trần cho mọi thứ, kể cả
+ * khu đỗ xe (enum hai giá trị) và ngày. Người dùng gõ tự do rồi mới bị từ chối
+ * ở lượt sau, và câu từ chối ấy đến sau cả một vòng gọi model.
+ *
+ * Ràng buộc ngay lúc NHẬP thì không còn gì để từ chối ở lượt sau.
+ */
+function pendingFieldFor(key: string): PendingField {
+  const label = FIELD_LABEL[key] ?? key
+  const base: PendingField = { key, label, placeholder: `Nhập ${label.toLowerCase()}` }
+
+  const spec = fieldSpecForMissing(key)
+  if (spec === null) return base
+
+  return {
+    ...base,
+    label: spec.label || label,
+    kind: spec.kind,
+    options: spec.options,
+    min: spec.min,
+    max: spec.max,
+    hint: spec.hint,
+    // Ngày trong quá khứ không bao giờ là câu trả lời đúng, và backend sẽ từ
+    // chối nó. Chặn ngay ở ô nhập thì người dùng không phải đi một vòng để
+    // biết điều đó.
+    minDate: spec.kind === 'date' ? today() : undefined,
+    placeholder: spec.placeholder || base.placeholder,
+  }
+}
+
 export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction | null {
   const workflowId = res.workflow_id
   if (!workflowId) return null
@@ -362,15 +397,11 @@ export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction |
       // ngay bên dưới, nên dòng này chỉ lặp lại đúng thứ người dùng đang nhìn.
       details: [],
       field: first
-        ? { key: first, label: label(first), placeholder: `Nhập ${label(first).toLowerCase()}` }
+        ? pendingFieldFor(first)
         : { key: 'answer', label: 'Trả lời', placeholder: 'Trả lời P-118' },
       // Đủ MỌI ô đang chờ — backend từ chối cả lượt nếu thiếu một ô.
       fields: res.missing_fields.length
-        ? res.missing_fields.map((key) => ({
-            key,
-            label: label(key),
-            placeholder: `Nhập ${label(key).toLowerCase()}`,
-          }))
+        ? res.missing_fields.map(pendingFieldFor)
         : [{ key: 'answer', label: 'Trả lời', placeholder: 'Trả lời P-118' }],
       fingerprint: res.missing_fields.join(','),
       explain: res.question || 'Mình cần thông tin này để lập kế hoạch tiếp.',

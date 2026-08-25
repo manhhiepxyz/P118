@@ -40,6 +40,41 @@ export interface PendingDetail {
   value: string
 }
 
+/**
+ * Một ô backend đang chờ, KÈM cách nhập đúng của nó.
+ *
+ * Trước đây chỉ có `{key, label, placeholder}` nên `PendingCard` vẽ ô text
+ * trần cho mọi thứ — kể cả khu đỗ xe (một enum hai giá trị) và ngày. Người
+ * dùng gõ tự do rồi mới bị từ chối ở lượt sau.
+ *
+ * Đo được, những ô hay bị hỏi lại nhất:
+ *
+ *     parking_zone   66 lần   ← enum đóng
+ *     plate_number   53
+ *     booking_date   53       ← ngày
+ *     viewing_date   52       ← ngày
+ *     viewing_time   49       ← enum giờ
+ *
+ * Bốn trên sáu là ngày hoặc danh sách chọn. Ràng buộc ngay lúc NHẬP thì không
+ * còn gì để từ chối ở lượt sau.
+ */
+export interface PendingField {
+  key: string
+  label: string
+  placeholder: string
+  /** Control cần dùng. Thiếu = ô text, giữ nguyên hành vi cũ. */
+  kind?: 'select' | 'date' | 'time' | 'number' | 'text'
+  /** Chỉ `select`: value là GIÁ TRỊ BACKEND, label là chữ người đọc. */
+  options?: { value: string; label: string }[]
+  /** Chỉ `number`. */
+  min?: number
+  max?: number
+  /** Chỉ `date`: không cho chọn ngày đã qua. */
+  minDate?: string
+  /** Câu gợi ý dưới ô, giống form ở màn hình chọn dịch vụ. */
+  hint?: string
+}
+
 export interface PendingAction {
   actionId: string
   workflowId: string
@@ -56,7 +91,7 @@ export interface PendingAction {
   approveLabel?: string
   rejectLabel?: string
   /** Với `missing_info`: ô ĐẦU TIÊN cần điền — giữ cho các lối gọi cũ. */
-  field?: { key: string; label: string; placeholder: string }
+  field?: PendingField
   /**
    * TẤT CẢ ô backend đang chờ, theo đúng thứ tự nó hỏi.
    *
@@ -66,7 +101,7 @@ export interface PendingAction {
    * đúng dự án, bấm Tiếp tục, và bị trả lời về NGÀY THAM QUAN, một ô họ chưa
    * hề được hỏi.
    */
-  fields?: { key: string; label: string; placeholder: string }[]
+  fields?: PendingField[]
   /**
    * Dấu vân của thứ đang được duyệt — số tiền, mã chỗ đỗ, ngày.
    *
@@ -136,6 +171,45 @@ const APPROVE = [
 const QUESTION = ['là gì', 'la gi', 'tại sao', 'tai sao', 'vì sao', 'vi sao', 'bao nhiêu', 'thế nào', 'phí gì']
 
 /**
+ * Câu hỏi CÓ–KHÔNG của tiếng Việt, nhận ra bằng cấu trúc chứ không bằng từ.
+ *
+ * "không" ở CUỐI câu là trợ từ nghi vấn, không phải lời từ chối:
+ *
+ *     "có dự án nào đáng giá tham quan không"   ← hỏi
+ *     "không"                                    ← từ chối
+ *
+ * `REJECT` chứa "không", và nó được xét trước khi biết câu ấy là câu hỏi. Đo
+ * được trên stack thật: người dùng hỏi về dự án và nhận lại "Mình đã dừng
+ * 'Cần thêm thông tin'. Không có gì được thực hiện thêm." — yêu cầu của họ bị
+ * huỷ vì họ đặt một câu hỏi.
+ *
+ * Nguy hiểm hơn kể từ khi "từ chối" thật sự huỷ workflow ở backend: trước đây
+ * nó chỉ nói suông, giờ nó xoá việc.
+ */
+const YES_NO_TAIL = [
+  / được không\s*[?.!]*$/u,
+  / phải không\s*[?.!]*$/u,
+  / đúng không\s*[?.!]*$/u,
+  / chưa\s*[?.!]*$/u,
+  / nhỉ\s*[?.!]*$/u,
+  / hả\s*[?.!]*$/u,
+]
+
+function isYesNoQuestion(text: string): boolean {
+  if (YES_NO_TAIL.some((pattern) => pattern.test(text))) return true
+
+  // "không" ở CUỐI một câu nhiều chữ là trợ từ nghi vấn; "không" đứng một
+  // mình mới là lời từ chối.
+  //
+  // KHÔNG dùng `\b` cho tiếng Việt: trong JS nó chỉ hiểu [A-Za-z0-9_], nên
+  // chữ có dấu không tính là "word character" và `\bcó\b` không bao giờ
+  // khớp. Đây là lỗi của bản vá đầu — ba ca hỏi vẫn bị đọc thành từ chối.
+  const words = text.replace(/[?.!,]+$/u, '').trim().split(/\s+/u)
+  const last = words[words.length - 1]
+  return words.length >= 3 && (last === 'không' || last === 'khong')
+}
+
+/**
  * Câu tiếng Việt → ý định. Không quyết định gì cả, chỉ phân loại.
  *
  * Ở luồng thật đây là chỗ DUY NHẤT LLM tham gia. Bản client này dùng từ khoá
@@ -148,7 +222,12 @@ export function normalizeIntent(raw: string, action: PendingAction | null): Inte
 
   // Câu hỏi xét TRƯỚC: "Tôi có cần thanh toán không?" chứa cả "không" lẫn
   // "thanh toán", nhưng nó là câu hỏi chứ không phải câu trả lời.
-  if (text.endsWith('?') || QUESTION.some((k) => text.includes(k))) return 'QUESTION'
+  // Câu hỏi xét TRƯỚC, và phải nhận ra cả dạng KHÔNG có dấu hỏi.
+  //
+  // Người Việt gõ nhanh thường bỏ dấu "?", nên chỉ dựa vào nó là bỏ sót đúng
+  // những câu hỏi tự nhiên nhất — và câu bị bỏ sót rơi thẳng vào `REJECT` vì
+  // nó kết thúc bằng "không".
+  if (text.endsWith('?') || QUESTION.some((k) => text.includes(k)) || isYesNoQuestion(text)) return 'QUESTION'
 
   const word = (list: string[]) => list.some((k) => new RegExp(`(^|\\s|,)${k}($|\\s|,|\\.|!)`, 'u').test(text))
   if (word(REJECT)) return 'REJECT'
@@ -202,11 +281,41 @@ export interface Resolution {
  * Bốn điều kiện, đúng theo luồng đã thống nhất: cùng workflow, cùng action,
  * action vẫn đang mở, và thứ được duyệt chưa đổi.
  */
+/**
+ * Câu chữ nói RÕ RÀNG là đồng ý trả tiền — không phải một tiếng đệm.
+ *
+ * `APPROVE` gom cả "ok", "được", "ừ": đúng cho một xác nhận thông thường,
+ * nhưng "ok" là tiếng đệm phổ biến nhất tiếng Việt. Người dùng đọc xong thẻ
+ * báo phí, gõ "ok" với nghĩa "à, tôi thấy rồi", và 100.000 đồng đi mất.
+ *
+ * Đo được trên stack thật: `/continue` (đổi khu) rồi 8 giây sau
+ * `/payment-decision` — không có cú bấm nút nào ở giữa.
+ */
+const EXPLICIT_PAYMENT_APPROVAL = [
+  'đồng ý thanh toán',
+  'dong y thanh toan',
+  'xác nhận thanh toán',
+  'xac nhan thanh toan',
+  'thanh toán đi',
+  'thanh toan di',
+  'trả tiền',
+  'tra tien',
+  'trả đi',
+  'tra di',
+]
+
 export function resolve(
   action: PendingAction | null,
   intent: Intent,
   context: { workflowId: string; fingerprint: string },
   value?: string,
+  /**
+   * Quyết định đến từ đâu — và với TIỀN thì đây không phải chi tiết vụn vặt.
+   *
+   * `button`: người dùng bấm đúng nút "Xác nhận thanh toán". Không mơ hồ.
+   * `chat`  : họ gõ chữ. Chữ thì mơ hồ, và "ok" mơ hồ nhất.
+   */
+  source: 'chat' | 'button' = 'chat',
 ): Resolution {
   if (!action) {
     return { ok: false, reply: 'Hiện không có việc nào đang chờ bạn xác nhận.' }
@@ -253,6 +362,21 @@ export function resolve(
     if (action.kind === 'missing_info') {
       return { ok: false, reply: `Mình vẫn còn thiếu ${action.field?.label.toLowerCase()}. Bạn cho mình xin thông tin này nhé.` }
     }
+
+    // TIỀN thì không nhận tiếng đệm.
+    //
+    // Từ chối bằng chữ vẫn được — hỏng theo hướng an toàn, không ai mất gì.
+    // Nhưng ĐỒNG Ý thì phải là một hành động không thể hiểu nhầm: bấm đúng
+    // nút, hoặc nói thẳng ra là đồng ý trả tiền.
+    const spoken = (value ?? '').trim().toLowerCase()
+    const explicit = EXPLICIT_PAYMENT_APPROVAL.some((phrase) => spoken.includes(phrase))
+    if (source !== 'button' && !explicit) {
+      return {
+        ok: false,
+        reply: `Khoản này cần bạn xác nhận rõ ràng. Bạn bấm "Xác nhận thanh toán", hoặc nhắn "đồng ý thanh toán" nhé.`,
+      }
+    }
+
     return { ok: true, next: 'RESOLVED', reply: `Đã xác nhận. Mình tiếp tục với "${action.title}".` }
   }
 

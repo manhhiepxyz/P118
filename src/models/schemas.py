@@ -198,6 +198,10 @@ class DemoWorkflowEvent(BaseModel):
         "CHAT",
     ]
     message: str
+    # Thời điểm sự kiện xảy ra, ISO. Bảng `workflow_events` vốn có `created_at`
+    # nhưng nó chưa bao giờ đi ra tới client — nên dòng nhật ký không có giờ,
+    # và giao diện phải bịa giờ hoặc bỏ trống.
+    at: str | None = None
     task_id: str | None = None
     task_status: Literal["RUNNING", "SUCCESS", "FAILED"] | None = None
 

@@ -956,6 +956,53 @@ class WorkflowRepository:
             )
         return {str(row["workflow_id"]): row["tool"] for row in rows}
 
+    async def append_events(self, workflow_id: str, events: list[dict]) -> None:
+        """Ghi dòng thời gian giai đoạn — CHỈ THÊM, không sửa, không xoá.
+
+        Một sự kiện đã xảy ra thì không đổi được; ghi đè nó là viết lại lịch sử.
+        `ON CONFLICT DO NOTHING` dựa vào ràng buộc `(workflow_id, sequence)`, nên
+        gọi lại với cùng danh sách là no-op — quan trọng vì hàm này chạy ở mọi
+        điểm dừng, và một workflow đi qua nhiều điểm dừng.
+        """
+        if not events:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO workflow_events
+                    (workflow_id, sequence, stage, message, task_id, task_status, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, NOW()))
+                ON CONFLICT (workflow_id, sequence) DO NOTHING
+                """,
+                [
+                    (
+                        _uuid(workflow_id),
+                        int(event["sequence"]),
+                        str(event["stage"]),
+                        str(event.get("message") or ""),
+                        event.get("task_id"),
+                        event.get("task_status"),
+                        # Giờ do caller đóng dấu lúc sự kiện XẢY RA. Ghim theo
+                        # lô ở điểm dừng nên `NOW()` lúc ghim muộn hơn thực tế.
+                        event.get("at"),
+                    )
+                    for event in events
+                ],
+            )
+
+    async def get_events(self, workflow_id: str) -> list[dict]:
+        """Dòng thời gian đã ghim, theo đúng thứ tự xảy ra."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT sequence, stage, message, task_id, task_status,
+                       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS at
+                FROM workflow_events WHERE workflow_id = $1 ORDER BY sequence
+                """,
+                _uuid(workflow_id),
+            )
+        return [dict(row) for row in rows]
+
     async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
         """Persist repair hints của một workflow.
 
@@ -1134,6 +1181,29 @@ class WorkflowRepository:
         if row is None:
             return None
         return _decode_clarification_row(row)
+
+    async def resolve_clarification(self, workflow_id: str) -> bool:
+        """Đánh dấu câu hỏi đã được trả lời, KHÔNG tạo workflow con.
+
+        Đường vá-kế-hoạch chạy tiếp trên CHÍNH workflow đó, nên nó không cần
+        child — nhưng vẫn phải đóng câu hỏi lại, nếu không workflow nằm mãi ở
+        "chờ bổ sung": chiếm một suất hạn ngạch và là một dòng đang-chờ trong
+        Lịch sử vĩnh viễn.
+
+        `WHERE resolved_at IS NULL` giữ nguyên tính tuần tự hoá: hai request
+        đồng thời thì chỉ một cái nhận True.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE workflow_clarifications
+                SET resolved_at = NOW(), updated_at = NOW()
+                WHERE workflow_id = $1 AND resolved_at IS NULL
+                RETURNING workflow_id
+                """,
+                _uuid(workflow_id),
+            )
+        return row is not None
 
     async def consume_clarification_and_create_child(
         self,

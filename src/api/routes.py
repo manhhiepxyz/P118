@@ -4,7 +4,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from datetime import date, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -48,6 +48,7 @@ from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, us
 from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
     RetryNotAllowed,
+    rerun_with_answers,
     retry_failed_tasks,
     ResumeError,
     persist_pending_approval,
@@ -675,6 +676,10 @@ def _append_job_event(job: dict[str, Any], stage: str, payload: dict[str, Any] |
             "sequence": len(events) + 1,
             "stage": stage,
             "message": message,
+            # Đóng dấu NGAY lúc xảy ra, không để database tự stamp: sự kiện
+            # được ghim theo lô ở điểm dừng, nên `NOW()` lúc ghim có thể muộn
+            # hơn lúc xảy ra cả phút.
+            "at": datetime.now(UTC).isoformat(),
             "task_id": payload.get("task_id"),
             "task_status": payload.get("task_status"),
             "signature": signature,
@@ -1280,6 +1285,7 @@ async def _run_demo_job(
         elif response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
             terminal_stage = "EXECUTION_FAILED"
         _append_job_event(job, terminal_stage)
+        await _persist_events(workflow_id, job)
         job["message"] = response.summary or response.question or job["message"]
         # `_demo_response()` dựng view model từ AgentState nên không biết
         # workflow_id. Gắn lại ngay khi cache, đừng để nhánh đọc phải tự đoán.
@@ -1876,6 +1882,9 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
         summary=summary,
         tasks=tasks,
         persisted=True,
+        # Dòng thời gian đọc từ `workflow_events`, không phải từ RAM — đây là
+        # đường mọi yêu cầu cũ trong Lịch sử đi qua.
+        events=await _read_events(workflow_id),
         # Gửi mã GỐC kể cả khi sổ hạ tầng không biết nó — giấu mã đi thì giao
         # diện không còn gì để phân biệt hai kiểu hỏng khác hẳn nhau.
         error_code=failure.code if failure else root_code,
@@ -2270,6 +2279,66 @@ async def _read_repair_hints(workflow_id: str) -> list[dict]:
         return await repository.get_repair_hints(workflow_id)
     except Exception:  # noqa: BLE001 - poll không được lộ connection detail
         return []
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _read_events(workflow_id: str) -> list[DemoWorkflowEvent]:
+    """Dòng thời gian đã ghim, đọc lại từ database.
+
+    Đường này là thứ duy nhất còn dữ liệu sau khi backend khởi động lại —
+    `_DEMO_JOBS` trống, nên `_public_events(job)` trả rỗng.
+
+    Đọc hỏng thì trả rỗng: dòng thời gian là dữ liệu phụ trợ, không được kéo
+    theo phần dữ liệu chính.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await repository.get_events(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không đọc được dòng thời gian (%s)", type(exc).__name__)
+        return []
+    finally:
+        if pool is not None:
+            await pool.close()
+    out: list[DemoWorkflowEvent] = []
+    for row in rows:
+        try:
+            out.append(DemoWorkflowEvent.model_validate(dict(row)))
+        except Exception:  # noqa: BLE001 - một dòng hỏng không làm mất cả danh sách
+            continue
+    return out
+
+
+async def _persist_events(workflow_id: str, job: dict[str, Any] | None) -> None:
+    """Ghim dòng thời gian giai đoạn xuống database.
+
+    `_append_job_event` là hàm SYNC (nó chạy trong callback không có async
+    context), nên nó chỉ gom vào `job["events"]` — bộ nhớ tiến trình. Mỗi lần
+    backend khởi động lại là mất sạch, và mọi yêu cầu cũ mở lại từ Lịch sử đều
+    có mục "Chi tiết xử lý" trống.
+
+    Gọi ở ĐIỂM DỪNG, không phải mỗi lần đổi giai đoạn: một workflow phát 6–10
+    sự kiện, ghim từng cái là 6–10 lượt mở pool. Ở điểm dừng thì ghim cả danh
+    sách một lượt, và `ON CONFLICT DO NOTHING` khiến lần ghim sau chỉ thêm phần
+    mới.
+
+    KHÔNG bao giờ raise: dòng thời gian là dữ liệu phụ trợ. Ghim hỏng thì mất
+    một mục hiển thị, còn ném lỗi ra caller thì hỏng cả workflow.
+    """
+    events = (job or {}).get("events") or []
+    if not events:
+        return
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.append_events(workflow_id, [{k: v for k, v in e.items() if k != "signature"} for e in events])
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không ghim được dòng thời gian (%s)", type(exc).__name__)
     finally:
         if pool is not None:
             await pool.close()
@@ -3207,7 +3276,26 @@ async def continue_demo_workflow(
                 sorted(request.fields),
                 sorted(unresolved),
             )
-            raise HTTPException(status_code=422, detail=_follow_up_validation_message(unresolved))
+            # Field lạ và giá trị sai là HAI chuyện, đừng nói chung một câu.
+            #
+            # `_extract_structured_follow_up_answers` từ chối cả lượt khi client
+            # gửi một field không được hỏi — đúng, đó là all-or-none có chủ ý.
+            # Nhưng nó trả về toàn bộ `missing_fields` làm "chưa hiểu", nên câu
+            # báo ra đổ lỗi cho GIÁ TRỊ người dùng nhập: họ chọn đúng Khu B và
+            # vẫn nghe "Hãy chọn Khu A hoặc Khu B".
+            #
+            # Người dùng không sửa được lỗi này — nó nằm ở hợp đồng giữa giao
+            # diện và API. Nói đúng chuyện thì ít nhất người đọc log biết tìm ở
+            # đâu, thay vì đi kiểm lại giá trị vốn đã đúng.
+            expected = {_canonical_field(name) for name in missing_fields}
+            unexpected = sorted({name for name in request.fields if _canonical_field(name) not in expected})
+            detail = (
+                "Biểu mẫu gửi lên có mục không nằm trong câu hỏi, nên mình chưa nhận được. "
+                "Bạn tải lại trang rồi trả lời giúp mình nhé."
+                if unexpected
+                else _follow_up_validation_message(unresolved)
+            )
+            raise HTTPException(status_code=422, detail=detail)
         if not answers:
             logger.info(
                 "clarification contained no usable answer (expected=%s received=%s)",
@@ -3228,6 +3316,67 @@ async def continue_demo_workflow(
         if bad_field is not None:
             raise HTTPException(status_code=422, detail=_UNSUPPORTED_PROJECT_MESSAGE)
         context.update(answers)
+
+    # ĐƯỜNG NHANH: vá kế hoạch cũ thay vì hỏi Planner lại từ đầu.
+    #
+    # Đo được trên một lần sửa đúng MỘT ô: 175 giây trong Planner trên tổng 200
+    # giây, hai lượt gọi model. Kế hoạch đã có và đã qua Validator; hỏi lại là
+    # đặt cược lại một ván đã thắng — và ván ấy thua thật, cùng một câu ba lượt
+    # chạy cho ba kết quả khác nhau.
+    #
+    # Ba điều kiện, thiếu một là đi đường cũ:
+    #
+    #   1. Câu trả lời là DỮ LIỆU CÓ CẤU TRÚC (`fields`). Ô có cấu trúc chỉ
+    #      nhận giá trị trong allowlist đóng nên nó không thể mang ý định đổi
+    #      hình dạng kế hoạch; câu chữ tự do thì có.
+    #   2. Workflow cha CÓ repair hint — tức đây là sửa sau khi một bước hỏng,
+    #      không phải lần hỏi đầu lúc chưa có kế hoạch nào.
+    #   3. Cha còn task đã chạy để seed lại.
+    #
+    # Đo được: 83/90 lượt hỏi lại là lần hỏi ĐẦU (chưa có plan để tái dùng),
+    # nên đường nhanh này chạm 7 lượt — nhưng đúng 7 lượt đó là toàn bộ trải
+    # nghiệm "chờ ba phút".
+    if request.fields and answers and await _read_repair_hints(workflow_id):
+        settings = get_settings()
+        try:
+            await rerun_with_answers(
+                workflow_id,
+                answers,
+                resident_url=settings.resident_service_url,
+                transport_url=settings.transport_service_url,
+                payment_url=settings.payment_service_url,
+                property_url=settings.property_service_url,
+                resident_services_url=settings.resident_services_service_url,
+                tour_url=settings.tour_service_url,
+                consultation_url=settings.consultation_service_url,
+                shuttle_url=settings.shuttle_service_url,
+            )
+        except RetryNotAllowed as exc:
+            # Không dùng được đường nhanh thì RƠI VỀ đường cũ, không báo lỗi:
+            # người dùng vừa trả lời đúng, họ không có lỗi gì để nghe.
+            logger.info("không vá được kế hoạch cũ (%s), lập lại từ đầu", exc.code)
+        else:
+            # Cache RAM dựng lúc còn chờ là ảnh cũ; giữ lại thì mọi lượt poll
+            # sau vẫn trả trạng thái hỏng.
+            job = _DEMO_JOBS.get(workflow_id)
+            if job is not None:
+                job["response"] = None
+            # Đóng câu hỏi lại: đường này chạy tiếp trên CHÍNH workflow đó
+            # nên không có child nào để claim, nhưng để ngỏ thì nó nằm mãi ở
+            # "chờ bổ sung" — chiếm hạn ngạch và là một dòng đang-chờ vĩnh viễn.
+            pool = None
+            try:
+                repository = await acquire_repository()
+                pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+                await repository.resolve_clarification(workflow_id)
+            except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+                logger.info("không đóng được câu hỏi sau khi vá plan (%s)", type(exc).__name__)
+            finally:
+                if pool is not None:
+                    await pool.close()
+            view = await _public_view_from_db(workflow_id)
+            if view is not None:
+                return await _with_stored_answer(view, workflow_id)
 
     # CONSUME atomic ngay trước khi tạo child. Đây là điểm duy nhất quyết định
     # ai được đi tiếp: `UPDATE ... WHERE resolved_at IS NULL ... RETURNING *`
@@ -3687,7 +3836,12 @@ async def _demo_workflow_status(
                 plan=_plan_from_job_or_record(job, record),
                 record=record,
                 pending=pending_viewing,
-                events=_public_events(job),
+                # RAM trước, database sau. `_DEMO_JOBS` có thì nó là bản mới
+                # nhất (gồm cả sự kiện chưa kịp ghim); trống — tức vừa restart —
+                # thì đọc lại từ `workflow_events`. Chỉ đọc RAM thì đúng những
+                # workflow sống sót qua restart lại là những workflow mất sạch
+                # dòng thời gian.
+                events=_public_events(job) or await _read_events(workflow_id),
             ),
             workflow_id,
         )
@@ -3704,7 +3858,12 @@ async def _demo_workflow_status(
                 plan=_plan_from_job_or_record(job, record),
                 record=record,
                 pending=pending_payment,
-                events=_public_events(job),
+                # RAM trước, database sau. `_DEMO_JOBS` có thì nó là bản mới
+                # nhất (gồm cả sự kiện chưa kịp ghim); trống — tức vừa restart —
+                # thì đọc lại từ `workflow_events`. Chỉ đọc RAM thì đúng những
+                # workflow sống sót qua restart lại là những workflow mất sạch
+                # dòng thời gian.
+                events=_public_events(job) or await _read_events(workflow_id),
             ),
             workflow_id,
         )
@@ -3793,8 +3952,12 @@ async def _demo_workflow_status(
                 resumable=True,
                 plan=_plan_view(plan),
                 tasks=_polling_task_views(plan, record),
-                # Không bịa event: lượt chạy đó thuộc tiến trình đã chết.
-                events=[],
+                # Dòng thời gian ĐÃ GHIM thì đọc lại được, kể cả sau restart.
+                # Trước đây chỗ này trả rỗng kèm ghi chú "không bịa event" —
+                # đúng lúc đó, vì sự kiện chỉ sống trong RAM. Giờ chúng nằm
+                # trong `workflow_events`, nên trả rỗng mới là giấu dữ liệu có
+                # thật.
+                events=await _read_events(workflow_id),
             )
 
     task_views = _polling_task_views(plan, record)
@@ -3842,7 +4005,9 @@ async def _demo_workflow_status(
             persisted=record is not None,
             plan=_plan_view(plan),
             tasks=task_views,
-            events=_public_events(job),
+            # Đường polling chung: RAM trước, database sau. Sau restart thì RAM
+            # trống, và đây là chỗ mọi yêu cầu cũ trong Lịch sử đi qua.
+            events=_public_events(job) or await _read_events(workflow_id),
             error_code=failure.code if failure else None,
             retryable=failure.retryable if failure else None,
         ),
