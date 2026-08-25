@@ -125,6 +125,20 @@ class Settings(BaseSettings):
     # Số yêu cầu ĐÃ KẾT THÚC giữ lại trong lịch sử mỗi người. Cũ hơn thì tự ẩn
     # (xoá mềm bằng `archived_at`, xem `trim_history_for_owner`). 0 = không cắt.
     history_keep_per_user: int = 15
+    # Hạn ngạch NGÀY theo NGƯỜI DÙNG — thứ duy nhất thật sự chặn dùng vô hạn.
+    #
+    # Rate limit 20/phút (`rate_limit_per_minute`) chặn bùng phát tức thời,
+    # nhưng nó khoá theo ĐỊA CHỈ IP: đổi mạng là reset, và 20/phút vẫn cho phép
+    # 28.800 request/ngày. Cắt lượt trong một cuộc trò chuyện cũng không chặn —
+    # người dùng chỉ cần mở cuộc mới.
+    #
+    # Đo được: mỗi workflow ~12.264 token ≈ $0,00365. 50/ngày là trần
+    # $0,18/người/ngày. Người dùng thật nhiều nhất hiện tại mới 112 lượt gọi LLM
+    # TỔNG CỘNG từ đầu dự án, nên ngưỡng này không chạm ai.
+    #
+    # 0 = tắt.
+    daily_workflow_quota: int = 50
+    daily_quota_window_hours: int = 24
 
 
 @lru_cache

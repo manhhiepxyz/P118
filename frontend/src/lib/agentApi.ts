@@ -296,9 +296,19 @@ export function logout(): void {
  * Body chỉ có `goal` (+ `project_name` tuỳ chọn). Mọi thứ khác — quyền, danh
  * tính cư dân, phiên, chủ sở hữu — backend tự dựng từ token.
  */
-export async function startWorkflow(goal: string, projectName?: string): Promise<AgentWorkflowResponse> {
+export async function startWorkflow(
+  goal: string,
+  projectName?: string,
+  sessionId?: string | null,
+): Promise<AgentWorkflowResponse> {
   const body: Record<string, string> = { goal }
   if (projectName) body.project_name = projectName
+  // Nối vào cuộc trò chuyện đang mở. Không gửi = bắt đầu cuộc mới.
+  //
+  // Server KHÔNG tin giá trị này: nó đọc session bằng truy vấn giới hạn chủ sở
+  // hữu, và `account_state` vẫn lấy từ bảng `sessions`. Gửi session của người
+  // khác thì bị bỏ qua, không phải được chấp nhận.
+  if (sessionId) body.session_id = sessionId
   return request<AgentWorkflowResponse>('/workflows/demo/start', { method: 'POST', body })
 }
 

@@ -49,6 +49,16 @@ class DemoWorkflowRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(..., min_length=1, max_length=5000)
+    # Cuộc trò chuyện mà câu này thuộc về. Bỏ trống = bắt đầu cuộc mới.
+    #
+    # KHÔNG phải giá trị tin cậy: nó chỉ nói "tôi muốn nối vào cuộc này". Server
+    # đọc session bằng phép truy vấn có giới hạn chủ sở hữu; không thuộc về
+    # người gọi thì bị bỏ qua và một cuộc mới được tạo — im lặng, vì đây không
+    # phải lỗi của người dùng và cũng không có gì để họ sửa.
+    #
+    # `account_state` vẫn LUÔN đọc từ bảng `sessions`, không từ body. Đó là thứ
+    # chặn leo thang đặc quyền, và nó không đổi.
+    session_id: str | None = Field(default=None, max_length=100)
     # Các field sau ĐÃ BỊ LOẠI KHỎI CONTRACT (Phase B):
     #
     #   account_state        — quyền suy ra từ token + user_resident_links
@@ -58,7 +68,14 @@ class DemoWorkflowRequest(BaseModel):
     #   existing_context     — dựng server-side
     #   approve_mock_payment — thanh toán chỉ duyệt qua /payment-decision
     #   contact_profile      — lấy từ tài khoản/provider, không từ browser
-    #   session_id           — server sinh; client biết được thì client đổi được
+    #
+    # `session_id` TRƯỚC ĐÂY nằm trong danh sách này. Nó được nhận lại (xem
+    # field ở trên) vì không có nó thì mỗi tin nhắn là một cuộc trò chuyện
+    # riêng — người dùng không thể hỏi tiếp, và Lịch sử thành nhật ký từng câu.
+    #
+    # Lý do loại nó ban đầu vẫn đúng và vẫn được giữ: client KHÔNG được quyết
+    # định `account_state`. Phép chặn nằm ở chỗ khác — server đọc session bằng
+    # truy vấn giới hạn chủ sở hữu, và persona luôn lấy từ bảng `sessions`.
     #
     # `extra="forbid"` biến mọi request còn gửi chúng thành 422. Giữ field lại
     # rồi bỏ qua sẽ tệ hơn: caller vẫn gửi, vẫn tin nó có tác dụng, và không ai
