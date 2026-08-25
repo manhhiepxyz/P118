@@ -40,6 +40,18 @@ jobs:
       OPENAI_API_KEY: test-key
       # Báo cho conftest biết đang chạy trong CI → thiếu DB phải FAIL, không skip.
       CI: "true"
+      # Ghi đè tường minh hai biến mà `.env.example` (copy ở step "Dựng .env")
+      # đặt khác default trong code — process env LUÔN thắng file `.env` theo
+      # pydantic-settings, nên hai dòng này phục hồi đúng giá trị test kỳ
+      # vọng mà không cần sửa .env.example (file đó dành cho người dev tự điền
+      # key thật, không phải cấu hình test):
+      #   llm_provider mặc định "openai" (khớp OPENAI_API_KEY ở trên);
+      #   .env.example đặt "deepseek" — không có DEEPSEEK_API_KEY nên
+      #   readiness check báo not_ready.
+      LLM_PROVIDER: openai
+      #   daily_workflow_quota mặc định 200; .env.example đặt 50 (trần dùng
+      #   thật cho một buổi demo), thấp hơn ngưỡng test đòi cho một buổi thử.
+      DAILY_WORKFLOW_QUOTA: "200"
 
     steps:
       - uses: actions/checkout@v4
