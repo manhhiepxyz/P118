@@ -196,11 +196,20 @@ class TaskPlanValidator:
                     cls._reject_sensitive(value, key_label)
 
     @classmethod
-    def validate(cls, plan: TaskPlan) -> TaskPlan:
+    def validate(cls, plan: TaskPlan, *, seeded_task_ids: frozenset[str] = frozenset()) -> TaskPlan:
         """Run all validation checks. Raises ValueError with a clear message on failure.
 
         Error messages never echo potentially sensitive content — only the location
         of the violation and the matched pattern name.
+
+        ``seeded_task_ids``: task_id đã có kết quả seed (đã chạy xong ở lượt
+        trước, sẽ KHÔNG được thực thi lại — xem ``seed_statuses`` ở
+        ``ValidatedExecutionBoundary``). Input của những task này ngừng đại
+        diện cho "sắp chạy với dữ liệu này" — nó là dữ liệu LỊCH SỬ đã đủ để
+        chạy THÀNH CÔNG dưới `REQUIRED_INPUTS` tại thời điểm đó. Đòi nó khớp
+        `REQUIRED_INPUTS` HIỆN TẠI (sau khi field bắt buộc có thể đã đổi) sẽ
+        chặn nhầm mọi lượt duyệt/từ chối hồ sơ trên một booking cũ — dù task đó
+        không hề chạy lại.
         """
         # 0. No URL or credential anywhere in the plan. Runs before the structural
         #    checks so dangerous content is rejected on its own terms rather than
@@ -278,7 +287,16 @@ class TaskPlanValidator:
         # 6. Kiểm tra các giá trị ĐÃ CÓ và InputRef trước. Nhờ vậy một plan vừa
         # thiếu field vừa có reference/enum/ngày sai vẫn bị từ chối đúng lỗi cấu
         # trúc; graph chỉ hỏi bổ sung khi phần hiện hữu đã an toàn.
+        #
+        # Bỏ qua task đã seed — cùng lý do với bước 7. Cụ thể với ngày: một
+        # `viewing_date` đã qua là chuyện BÌNH THƯỜNG cho một lịch đã CHẠY
+        # XONG (nó thuộc về quá khứ theo đúng nghĩa), nhưng luật "ngày không
+        # được ở quá khứ" ở `_validate_schedule_values` được viết cho task SẮP
+        # chạy. Không loại trừ task đã seed thì mọi hồ sơ xin đổi/huỷ trên một
+        # booking cũ sẽ vỡ đúng vào ngày hôm sau ngày đặt lịch.
         for task in plan.tasks:
+            if task.task_id in seeded_task_ids:
+                continue
             cls._validate_schedule_values(task.tool, task.input)
             cls._validate_enum_values(task.tool, task.input)
 
@@ -305,8 +323,12 @@ class TaskPlanValidator:
         # 7. Required inputs present for each tool. Thu thập toàn bộ tên field
         # còn thiếu để UI chỉ hỏi người dùng một lượt. Thứ tự deterministic theo
         # task rồi theo tên field; không đưa task_id/giá trị LLM vào payload.
+        #
+        # Bỏ qua task đã seed: nó không "sắp chạy" nên không cần "sẵn sàng chạy".
         missing_fields: list[str] = []
         for task in plan.tasks:
+            if task.task_id in seeded_task_ids:
+                continue
             required = cls.REQUIRED_INPUTS.get(task.tool, frozenset())
             present = frozenset(task.input.keys())
             for field in sorted(required - present):
