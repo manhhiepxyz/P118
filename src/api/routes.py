@@ -47,6 +47,8 @@ from src.models.schemas import (
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
+    RetryNotAllowed,
+    retry_failed_tasks,
     ResumeError,
     persist_pending_approval,
     persist_pending_viewing_approval,
@@ -753,7 +755,35 @@ def _money(amount: Any, currency: Any) -> str | None:
     return f"{formatted} {currency_text}" if currency_text else formatted
 
 
-def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetailItem]]:
+def _resolve_input(value: Any, results_by_task: dict[str, Any] | None) -> Any:
+    """Giá trị thật của một input, kể cả khi nó là con trỏ sang task khác.
+
+    Plan lưu input dạng InputRef — `{"field": "amount", "from_task": "T3"}` —
+    và bản ghi trong `workflow_tasks.input_data` giữ nguyên con trỏ đó. Đọc
+    thẳng nó ra màn hình thì không có gì để hiện, nên chi tiết bước thanh toán
+    chỉ còn mã và trạng thái: "PAY-015 / PAID". Không số tiền, không mã đặt
+    chỗ — đúng hai thứ người ta mở lịch sử ra để xem.
+
+    Số tiền là dữ liệu có thẩm quyền của provider, nằm trong KẾT QUẢ của task
+    được trỏ tới. Lấy từ đó, không lấy từ nơi nào khác.
+    """
+    if not isinstance(value, dict):
+        return value
+    from_task = value.get("from_task")
+    field = value.get("field")
+    if not from_task or not field or not results_by_task:
+        return None
+    source = results_by_task.get(str(from_task))
+    if not isinstance(source, dict):
+        return None
+    return source.get(str(field))
+
+
+def _task_presentation(
+    task: Any,
+    result: Any,
+    results_by_task: dict[str, Any] | None = None,
+) -> tuple[str, str, list[DemoDetailItem]]:
     """Tạo nội dung tiếng Việt từ allowlist field của các tool MVP."""
     title, _ = _TOOL_PRESENTATION[task.tool]
     inputs = task.input
@@ -854,7 +884,17 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
     elif task.tool == "pay_fee":
         payment_status = _text(data.get("payment_status"))
         message = "Đã thanh toán phí đặt chỗ thành công."
+        # Số tiền và mã đặt chỗ đi vào task này dưới dạng InputRef, nên phải
+        # giải ra từ kết quả của task được trỏ tới. Không có chúng thì màn hình
+        # lịch sử nói "đã thanh toán" mà không nói thanh toán bao nhiêu, cho
+        # việc gì — với một giao dịch tiền thì đó là thiếu thứ quan trọng nhất.
+        amount = _resolve_input(inputs.get("amount"), results_by_task)
+        currency = _resolve_input(inputs.get("currency"), results_by_task)
+        booking_id = _resolve_input(inputs.get("booking_id"), results_by_task)
         candidates = [
+            _detail("Số tiền", _money(amount, currency)),
+            _detail("Nội dung", "Phí đặt chỗ đỗ xe" if booking_id else None),
+            _detail("Mã đặt chỗ", booking_id),
             _detail("Mã thanh toán", data.get("payment_id")),
             _detail("Trạng thái", payment_status),
         ]
@@ -987,6 +1027,10 @@ def _polling_task_views(
     if plan is None:
         return []
     rows = {row["task_id"]: row for row in (record or {}).get("tasks", [])}
+    # Kết quả của MỌI task, để giải InputRef của bước thanh toán.
+    results_by_task = {
+        task_id: row.get("result_data") for task_id, row in rows.items() if isinstance(row.get("result_data"), dict)
+    }
     views = []
     for task in plan.tasks:
         row = rows.get(task.task_id)
@@ -1008,6 +1052,7 @@ def _polling_task_views(
             _, message, details = _task_presentation(
                 task,
                 SimpleNamespace(data=row.get("result_data") or {}),
+                results_by_task,
             )
             views.append(
                 DemoTaskResult(
@@ -1351,6 +1396,12 @@ async def _run_demo_job(
             type(exc).__name__,
             request_id,
         )
+        # Traceback CHỈ ở mức debug. Message của exception hay kèm URL, tên
+        # biến môi trường, đôi khi cả một phần credential — nên nó không được
+        # nằm ở mức warning trong log production. Nhưng không có traceback nào
+        # thì một `NameError` trong tác vụ nền là bất khả truy: log chỉ nói
+        # "NameError" và không chỉ vào dòng nào.
+        logger.debug("demo background workflow traceback request_id=%s", request_id, exc_info=True)
         _append_job_event(job, "EXECUTION_FAILED")
         job["message"] = failure.message
 
@@ -1907,6 +1958,23 @@ async def _capability_names_safely(owner_user_id: Any) -> list[str]:
     return [item.name for item in _CAPABILITY_CATALOGUE if is_resident or not item.requires_resident]
 
 
+# Dấu hiệu một câu hỏi lại được dựng bởi `repair_question`, không phải bởi
+# nhánh thiếu thông tin.
+#
+# Nhận diện bằng NỘI DUNG chứ không bằng một cờ trong response: cờ phải đi qua
+# `DemoWorkflowResponse`, qua database, qua cả đường dựng lại sau restart — bốn
+# chỗ để quên đồng bộ. Điểm chung của mọi câu sửa lỗi là chúng nêu LÝ DO,
+# và tập lý do đó là đóng (`failure_messages.repair_question`).
+_REPAIR_QUESTION_MARKERS = ("hết chỗ", "kín lịch", "đã có chỗ đỗ", "đã được đăng ký", "đã được đăng ký trước đó")
+
+
+def _is_repair_question(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.casefold()
+    return any(marker in lowered for marker in _REPAIR_QUESTION_MARKERS)
+
+
 async def _speak(
     response: DemoWorkflowResponse,
     *,
@@ -1920,6 +1988,27 @@ async def _speak(
     Gọi ở mỗi lượt poll sẽ tốn một request LLM mỗi 1.5 giây cho một trạng thái
     không đổi.
     """
+    # Câu SỬA LỖI không được diễn đạt lại.
+    #
+    # `repair_question` mang những dữ kiện mà Response Agent không có cách nào
+    # biết: khu nào kín, ngày nào, khu nào còn trống. Đo được nguyên văn trên
+    # stack thật, cùng một workflow, hai câu cùng tồn tại:
+    #
+    #   question         "Khu A đã hết chỗ ngày 2026-08-19. Bạn thử Khu B
+    #                     hoặc chọn ngày khác giúp mình nhé."
+    #   assistant_answer "Bạn ơi, mình cần biết thêm khu vực đỗ xe bạn muốn là
+    #                     Khu A hay Khu B để hoàn tất đăng ký nhé."
+    #
+    # Giao diện ưu tiên `answer`, nên người dùng chỉ đọc câu thứ hai — và họ đã
+    # nói Khu A rồi, nên họ trả lời Khu A lần nữa, rồi hỏng y hệt. Đúng vòng
+    # lặp mà `repair_question` được viết ra để phá, tái xuất hiện ở một tầng
+    # khác: lần này không phải dùng nhầm câu, mà là để model viết lại câu đúng.
+    #
+    # Bỏ qua luôn lượt gọi model ở đây cũng tiết kiệm một request — tầng trả
+    # lời trung bình 1.469 ms, không nhiều, nhưng nó không mua được gì cả.
+    if response.status == "NEEDS_INFORMATION" and _is_repair_question(response.question):
+        return response.model_copy(update={"answer": response.question})
+
     usage_logger = LlmUsageLogger()
     # Theo dõi token/cost riêng cho lớp trả lời. Không tách stage thì mọi chi
     # phí dồn vào "plan", và không ai biết lớp diễn đạt đang tốn bao nhiêu —
@@ -2562,6 +2651,12 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
         return DemoWorkflowResponse(status="EXECUTION_ERROR", plan=plan_view)
 
     task_results = state.get("task_results", {})
+    # Kết quả của MỌI task, để giải InputRef của bước thanh toán.
+    live_results = {
+        task_id: value.data
+        for task_id, value in task_results.items()
+        if getattr(value, "success", False) and isinstance(getattr(value, "data", None), dict)
+    }
     task_views = []
     for task in plan.tasks if plan is not None else []:
         result = task_results.get(task.task_id)
@@ -2577,7 +2672,7 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                 )
             )
         elif result.success:
-            title, message, details = _task_presentation(task, result)
+            title, message, details = _task_presentation(task, result, live_results)
             task_views.append(
                 DemoTaskResult(
                     task_id=task.task_id,
@@ -4001,6 +4096,25 @@ async def cancel_demo_workflow(
     if not outcome.get("cancelled") and previous_status != "CANCELLED":
         raise HTTPException(status_code=409, detail="Yêu cầu đã kết thúc nên không thể huỷ.")
 
+    # Người dùng BỎ CUỘC một lỗi sửa được → gỡ side-effect ngay.
+    #
+    # `release_on_failure` bị chặn có chủ ý khi workflow còn repair hint: hint
+    # nghĩa là "người dùng sẽ sửa input rồi chạy tiếp", và hoàn tác sẽ phá đúng
+    # thứ họ định tiếp tục. Nhưng bấm Dừng là câu trả lời dứt khoát cho chính
+    # giả định đó — họ không tiếp tục nữa.
+    #
+    # Không đợi sweeper 48 giờ: người vừa nói "thôi" mà chỗ đỗ còn giữ và phí
+    # còn tính suốt hai ngày là một lời hứa bị bội.
+    #
+    # Chỉ chạy khi CÓ repair hint. Huỷ một workflow đang chờ thanh toán vẫn
+    # theo chính sách cũ — từ chối tiền, giữ booking — và đó là quyết định
+    # riêng, không đổi ở đây.
+    try:
+        if await _read_repair_hints(workflow_id):
+            await release_on_failure(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - hoàn tác hỏng không được chặn việc huỷ
+        logger.info("không release được sau khi huỷ (%s)", type(exc).__name__)
+
     # Dừng coroutine đúng workflow trong tiến trình hiện tại. Sau restart không
     # có task RAM nào; PostgreSQL vừa được chốt CANCELLED là nguồn sự thật.
     running_task = _DEMO_WORKFLOW_TASKS.get(workflow_id)
@@ -4030,6 +4144,53 @@ async def cancel_demo_workflow(
         _append_job_event(job, "FINISHED")
     _keep_demo_task(asyncio.create_task(_attach_answer(answer_job, workflow_id, goal=answer_job.get("goal") or "")))
     return response
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/retry",
+    response_model=DemoWorkflowResponse,
+)
+async def retry_demo_workflow(
+    workflow_id: str,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Chạy lại TỪ BƯỚC HỎNG, giữ nguyên mọi bước đã thành công.
+
+    Chỉ cho lỗi HẠ TẦNG (`retryable=True`). Lỗi nghiệp vụ như "Khu A đã hết
+    chỗ" chạy lại y nguyên sẽ hỏng như cũ — lối ra của nó là câu hỏi lại để
+    người dùng đổi input, và endpoint này từ chối kèm đúng lời nhắc đó.
+
+    Bước đã SUCCESS được seed chứ không chạy lại: các tool này không idempotent.
+    """
+    await _require_workflow_owner(workflow_id, user)
+    settings = get_settings()
+
+    # Cache RAM dựng từ lượt chạy trước là ảnh cũ. Không bỏ đi thì mọi lần poll
+    # sau retry vẫn trả trạng thái hỏng cũ (mirror payment/viewing route).
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+
+    try:
+        await retry_failed_tasks(
+            workflow_id,
+            resident_url=settings.resident_service_url,
+            transport_url=settings.transport_service_url,
+            payment_url=settings.payment_service_url,
+            property_url=settings.property_service_url,
+            resident_services_url=settings.resident_services_service_url,
+            tour_url=settings.tour_service_url,
+            consultation_url=settings.consultation_service_url,
+            shuttle_url=settings.shuttle_service_url,
+        )
+    except RetryNotAllowed as exc:
+        status_code = 404 if exc.code == "NOT_FOUND" else 409
+        raise HTTPException(status_code=status_code, detail=exc.message) from None
+
+    view = await _public_view_from_db(workflow_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+    return await _with_stored_answer(view, workflow_id)
 
 
 @router.post(

@@ -56,6 +56,7 @@ def build_connectors(
     consultation_url: str = "http://localhost:8007",
     shuttle_url: str = "http://localhost:8009",
     contact_profile: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
 ) -> list[Any]:
     """Dựng các Connector thật trỏ tới Mock Provider.
 
@@ -71,7 +72,12 @@ def build_connectors(
     return [
         ResidentConnector(base_url=resident_url),
         TransportConnector(base_url=transport_url),
-        PaymentConnector(base_url=payment_url),
+        # `workflow_id` là thứ cho phép `pay_fee` mang khoá idempotency.
+        # Thiếu nó thì provider coi mỗi request là một giao dịch mới, và một
+        # lượt gọi lặp — sau timeout, sau restart, sau bất kỳ đường resume nào —
+        # sẽ báo "Booking has already been paid" thay vì trả lại đúng giao dịch
+        # cũ. Đo được: tiền đã trừ thật mà task ghi FAILED.
+        PaymentConnector(base_url=payment_url, workflow_id=workflow_id),
         PropertyConnector(base_url=property_url, contact_profile=contact_profile),
         TourConnector(base_url=tour_url),
         ResidentServicesConnector(base_url=resident_services_url),
@@ -108,6 +114,10 @@ async def build_execution_boundary(
     contact_profile: dict[str, Any] | None = None,
     on_task_progress: Callable[[str, str, TaskStatus], Awaitable[None]] | None = None,
     on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
+    # Đi thẳng xuống `PaymentConnector`: thiếu nó thì `pay_fee` ra provider
+    # không mang khoá idempotency, và một lượt gọi lặp báo "Booking has already
+    # been paid" trong khi tiền đã trừ thật.
+    workflow_id: str | None = None,
 ) -> tuple[ValidatedExecutionBoundary, PostgreSQLWorkflowStateRepository]:
     """Dựng boundary tương thích trực tiếp với Planner graph.
 
@@ -122,6 +132,7 @@ async def build_execution_boundary(
         resident_services_url,
         contact_profile=contact_profile,
         shuttle_url=shuttle_url,
+        workflow_id=workflow_id,
     )
     executor = Executor(connectors, repository, on_progress=on_task_progress, on_failure=on_failure)
     return ValidatedExecutionBoundary(executor), repository
@@ -137,6 +148,7 @@ async def build_runtime(
     consultation_url: str | None = None,
     shuttle_url: str | None = None,
     contact_profile: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
 ) -> tuple[list[Any], PostgreSQLWorkflowStateRepository]:
     """Dựng toàn bộ runtime: connectors + repository.
 
@@ -161,6 +173,7 @@ async def build_runtime(
         consultation_url=consultation_url or settings.consultation_service_url,
         shuttle_url=shuttle_url or settings.shuttle_service_url,
         contact_profile=contact_profile,
+        workflow_id=workflow_id,
     )
     repository = await build_repository()
     return connectors, repository

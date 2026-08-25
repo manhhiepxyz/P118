@@ -16,7 +16,14 @@ import { ConversationStream } from '../components/workspace/ConversationStream'
 import { PendingCard } from '../components/workspace/PendingCard'
 import { extractValue, normalizeIntent, resolve, type PendingAction } from '../lib/pendingAction'
 import { closingLine, journeyFromWorkflow, pendingFromWorkflow } from '../lib/liveJourney'
-import { ApiError, continueWorkflow, decidePayment, getWorkflow, startWorkflow } from '../lib/agentApi'
+import {
+  ApiError,
+  cancelWorkflow,
+  continueWorkflow,
+  decidePayment,
+  getWorkflow,
+  startWorkflow,
+} from '../lib/agentApi'
 import type { AgentWorkflowResponse } from '../lib/types'
 
 /** Trạng thái không còn chuyển nữa — ngừng poll. */
@@ -478,7 +485,26 @@ export function JourneyWorkspacePage() {
         res = await decidePayment(action.workflowId, intent === 'REJECT' ? 'reject' : 'approve')
       } else if (action.kind === 'missing_info') {
         if (intent === 'REJECT') {
-          res = await getWorkflow(action.workflowId)
+          // Từ chối phải THẬT SỰ dừng, không chỉ nói là đã dừng.
+          //
+          // Bản trước chỉ `getWorkflow` — đọc lại rồi thôi. Backend không hề
+          // biết người dùng đã bỏ cuộc, nên workflow nằm nguyên ở "chờ bổ
+          // sung": vẫn chiếm một suất hạn ngạch, vẫn là một dòng đang-chờ
+          // trong Lịch sử, và nhịp poll kế tiếp dựng lại đúng cái thẻ vừa bị
+          // từ chối — câu "Mình đã dừng" bị chính màn hình phản bác sau 1,5
+          // giây.
+          //
+          // Đo được: 42 workflow đang treo ở trạng thái chờ bổ sung không ai
+          // giải quyết.
+          try {
+            res = await cancelWorkflow(action.workflowId)
+          } catch (error) {
+            // Huỷ hỏng thì nói thật, đừng nói "đã dừng" cho một thứ chưa dừng.
+            const detail = error instanceof Error ? error.message : String(error)
+            say('agent', `Mình chưa dừng được yêu cầu này. ${detail}`)
+            setFault(detail)
+            return
+          }
           say('agent', outcome.reply)
           absorb(res)
           return

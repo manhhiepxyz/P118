@@ -121,6 +121,61 @@ async def _sweep_zombie_workflows(pool: Any, running_ttl_hours: float, live_ids:
     return swept_ids
 
 
+async def _abandoned_repair_candidates(pool: Any, ttl_hours: int) -> list[str]:
+    """Workflow FAILED còn repair hint mà người dùng đã bỏ cuộc.
+
+    Tách riêng khỏi phần release để test kiểm ĐƯỢC ĐIỀU KIỆN CHỌN.
+    `_release_abandoned_repairs` chỉ trả về những cái thật sự gỡ được (có
+    booking để huỷ), nên dựng test quanh nó sẽ phải seed cả một chuỗi booking +
+    payment chỉ để kiểm một mệnh đề WHERE — và bản test đầu tiên đã đi đường
+    tắt tệ hơn: chép lại câu SQL vào test. Chép xong thì test kiểm bản chép,
+    còn bản thật sửa sai vẫn xanh (đo được: gỡ điều kiện "câu hỏi còn mở" mà
+    4/4 test vẫn qua).
+
+    KHÔNG đụng workflow còn câu hỏi chưa trả lời — đó là người dùng đang được
+    hỏi, không phải đã bỏ cuộc. Gỡ chỗ của họ trong lúc màn hình vẫn mời họ
+    chọn Khu B là phá đúng thứ câu hỏi ấy đang chuẩn bị.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT workflow_id FROM workflows
+            WHERE status = 'FAILED'
+              AND archived_at IS NULL
+              AND updated_at < NOW() - make_interval(secs => $1)
+              AND EXISTS (
+                  SELECT 1 FROM workflow_repair_hints AS hint
+                  WHERE hint.workflow_id = workflows.workflow_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM workflow_clarifications AS clarification
+                  WHERE clarification.workflow_id = workflows.workflow_id
+                    AND clarification.resolved_at IS NULL
+              )
+            """,
+            float(ttl_hours) * 3600.0,
+        )
+    return [str(row["workflow_id"]) for row in rows]
+
+
+async def _release_abandoned_repairs(pool: Any, ttl_hours: int) -> list[str]:
+    """Loại zombie thứ ba, và là loại duy nhất KHÔNG phải do tiến trình chết.
+
+    `release_on_failure` bị chặn có chủ ý cho workflow còn repair hint: hint
+    nghĩa là "người dùng sẽ sửa input rồi chạy tiếp", và hoàn tác sẽ phá đúng
+    thứ họ định tiếp tục. Lập luận ấy đúng — khi họ quay lại. Khi họ không quay
+    lại thì không ai gỡ: chỗ đỗ vẫn giữ, capacity không về, phí vẫn tính.
+
+    Đo được: 7 chỗ đỗ thuộc workflow FAILED/CANCELLED chưa được hoàn.
+    """
+    released: list[str] = []
+    for workflow_id in await _abandoned_repair_candidates(pool, ttl_hours):
+        outcome = await release_on_failure(workflow_id)
+        if outcome.get("released"):
+            released.append(workflow_id)
+    return released
+
+
 async def _cancel_workflow_and_tasks(workflow_id: str, *, from_expiry: bool) -> None:
     """Đưa workflow về trạng thái terminal rồi release.
 
@@ -166,6 +221,7 @@ async def sweep_zombie_workflows(live_ids: set[str] | None = None) -> dict[str, 
         "expired_approvals": [],
         "archived_parents": [],
         "swept_workflows": [],
+        "released_abandoned": [],
         "disabled": False,
     }
     repository = await acquire_repository()
@@ -175,10 +231,13 @@ async def sweep_zombie_workflows(live_ids: set[str] | None = None) -> dict[str, 
         # Đóng cha đã bàn giao TRƯỚC, để sweeper không đánh chúng là thất bại.
         summary["archived_parents"] = await _archive_superseded_parents(pool)
         summary["swept_workflows"] = await _sweep_zombie_workflows(pool, settings.zombie_running_ttl_hours, live)
+        summary["released_abandoned"] = await _release_abandoned_repairs(
+            pool, settings.abandoned_repair_ttl_hours
+        )
     except Exception:  # noqa: BLE001 - sweep không được làm vỡ poll
         logger.warning("zombie sweep failed", exc_info=True)
     finally:
         await pool.close()
-    if summary["expired_approvals"] or summary["swept_workflows"]:
+    if summary["expired_approvals"] or summary["swept_workflows"] or summary["released_abandoned"]:
         logger.info("zombie sweep: %s", summary)
     return summary

@@ -181,6 +181,21 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
             slot = " ".join(part for part in (time_text, f"ngày {date}" if date else "") if part)
             subject = f"Khung giờ {slot}" if slot else "Khung giờ bạn chọn"
             return f"{subject} đã kín lịch. Bạn chọn giờ hoặc ngày khác giúp mình nhé."
+        # Bảo trì và chuyển nhà trước đây không có câu nào, nên rơi về câu của
+        # nhánh THIẾU THÔNG TIN — "mình cần thêm thông tin" — cho một người đã
+        # cung cấp đầy đủ. Họ gõ lại đúng ngày cũ và hỏng y hệt.
+        if task_tool == "create_maintenance_request":
+            date = _text(inputs.get("preferred_date"))
+            time_text = _text(inputs.get("preferred_time"))
+            slot = " ".join(part for part in (f"ngày {date}" if date else "", time_text) if part)
+            subject = f"Lịch bảo trì {slot}" if slot else "Khung giờ bảo trì bạn chọn"
+            return f"{subject} đã kín. Bạn chọn ngày hoặc giờ khác giúp mình nhé."
+        if task_tool == "create_moving_request":
+            date = _text(inputs.get("move_date"))
+            time_text = _text(inputs.get("move_time"))
+            slot = " ".join(part for part in (f"ngày {date}" if date else "", time_text) if part)
+            subject = f"Lịch chuyển nhà {slot}" if slot else "Khung giờ chuyển nhà bạn chọn"
+            return f"{subject} đã kín. Bạn chọn ngày hoặc giờ khác giúp mình nhé."
 
     if code == "VEHICLE_ALREADY_EXISTS":
         plate = _text(inputs.get("plate_number"))

@@ -95,6 +95,27 @@ class RepairManager:
             self._hints.pop(workflow_id, None)
 
 
+# Ngày/giờ mà TỪNG tool dùng — tên đúng theo tool contract.
+#
+# Hỏi sai tên field thì câu trả lời hợp lệ của người dùng vẫn bị từ chối, và
+# họ không có cách nào biết vì sao.
+_NO_AVAILABILITY_FIELDS: dict[str, list[str]] = {
+    "schedule_property_viewing": ["viewing_date", "viewing_time"],
+    "book_shuttle": ["tour_date"],
+    "create_maintenance_request": ["preferred_date", "preferred_time"],
+    "create_moving_request": ["move_date", "move_time"],
+    "book_parking": ["parking_zone"],
+}
+
+_ALREADY_BOOKED_FIELDS: dict[str, list[str]] = {
+    "book_parking": ["booking_date"],
+    "book_shuttle": ["tour_date"],
+    "schedule_property_viewing": ["viewing_date", "viewing_time"],
+    "create_maintenance_request": ["preferred_date"],
+    "create_moving_request": ["move_date"],
+}
+
+
 def repair_missing_fields(task_tool: str, error_code: ErrorCode, task_input: dict | None) -> list[str]:
     """Map error_code + tool → field người dùng cần cung cấp lại.
 
@@ -102,15 +123,28 @@ def repair_missing_fields(task_tool: str, error_code: ErrorCode, task_input: dic
     RepairManager KHÔNG gọi hàm này (nó không biết tool).
     """
     if error_code == ErrorCode.NO_AVAILABILITY:
-        if task_tool == "schedule_property_viewing":
-            return ["viewing_date", "viewing_time"]
-        return ["parking_zone"]
+        # Field phải thuộc về CHÍNH tool đã hỏng.
+        #
+        # Nhánh cũ chỉ tách riêng `schedule_property_viewing`, mọi tool còn lại
+        # rơi về `parking_zone`. Hệ quả đo được, và nó mâu thuẫn ngay với câu
+        # mà `repair_question` nói cùng lúc:
+        #
+        #   book_shuttle  câu : "Xe tham quan đã hết chỗ ngày 2026-08-28.
+        #                        Bạn chọn ngày khác giúp mình nhé."
+        #                 ô   : parking_zone
+        #
+        # Người dùng được bảo đổi NGÀY rồi đưa cho một ô chọn KHU ĐỖ XE. Bảo
+        # trì và chuyển nhà còn tệ hơn: không có câu nào, và vẫn hỏi khu đỗ xe.
+        return _NO_AVAILABILITY_FIELDS.get(task_tool, ["parking_zone"])
     if error_code == ErrorCode.RESIDENT_ALREADY_EXISTS:
         return ["apartment_code"]
     if error_code == ErrorCode.VEHICLE_ALREADY_EXISTS:
         return ["plate_number"]
     if error_code == ErrorCode.BOOKING_ALREADY_EXISTS:
-        return ["booking_date"]
+        # Chỉ `book_parking` mới có `booking_date`. Tool khác trùng lịch thì
+        # ngày của nó mang tên khác, và hỏi sai tên thì backend từ chối câu trả
+        # lời hợp lệ của người dùng.
+        return _ALREADY_BOOKED_FIELDS.get(task_tool, ["booking_date"])
     if error_code == ErrorCode.INVALID_INPUT:
         # Field lỗi thường nằm trong task input. Không biết cụ thể field nào
         # thì yêu cầu mô tả lại mục tiêu (user chọn dịch vụ khác).

@@ -52,6 +52,7 @@ class PaymentConnector(Connector):
         timeout: float = 30.0,
         client: httpx.AsyncClient | None = None,
         idempotency_key: str | None = None,
+        workflow_id: str | None = None,
     ):
         # Khoá idempotency do ORCHESTRATION đặt, deterministic theo
         # workflow_id + task_id. Không đưa vào TaskPlan: field trong TaskPlan là
@@ -59,6 +60,15 @@ class PaymentConnector(Connector):
         # khác — retry nào cũng thành giao dịch mới, đúng thứ khoá này sinh ra
         # để chặn. Vì vậy nó đi qua header, không qua body.
         self._idempotency_key = idempotency_key
+        # Khi caller không đưa sẵn khoá, connector tự dựng từ `workflow_id` +
+        # `booking_id` của chính lần gọi. Trước đây đường chạy thường dựng
+        # `PaymentConnector(base_url=...)` trần, nên `pay_fee` đi ra provider
+        # KHÔNG mang khoá — và dedupe phía provider chỉ chạy khi có khoá.
+        #
+        # Đo được: PAY-016 có `idempotency_key` NULL, lượt gọi thứ hai bỏ qua
+        # dedupe, rơi vào kiểm `already_paid` và trả "Booking has already been
+        # paid". Tiền đã trừ thật, còn task thì ghi FAILED.
+        self._workflow_id = workflow_id
         # Chuẩn hóa base_url bỏ dấu / ở cuối
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -77,7 +87,18 @@ class PaymentConnector(Connector):
         retry sau timeout sẽ thu tiền lần hai. Có key thì provider trả lại đúng
         payment cũ, nên gọi lại vô hại.
         """
-        return tool_name == "pay_fee" and bool(self._idempotency_key)
+        return tool_name == "pay_fee" and bool(self._idempotency_key or self._workflow_id)
+
+    def _key_for(self, input_data: dict[str, Any]) -> str | None:
+        """Khoá dựng tại chỗ từ `workflow_id` + `booking_id` của lần gọi này."""
+        if not self._workflow_id:
+            return None
+        booking_id = input_data.get("booking_id")
+        if not booking_id:
+            return None
+        from src.db.parking_payment_repository import payment_idempotency_key
+
+        return payment_idempotency_key(self._workflow_id, str(booking_id))
 
     async def execute(
         self,
@@ -94,7 +115,8 @@ class PaymentConnector(Connector):
         try:
             # --- Bước 2: Khởi tạo HTTP client và gọi API ---
             async with self._get_client() as client:
-                headers = {"Idempotency-Key": self._idempotency_key} if self._idempotency_key is not None else None
+                key = self._idempotency_key or self._key_for(input_data)
+                headers = {"Idempotency-Key": key} if key is not None else None
                 response = await client.post(
                     f"{self.base_url}/api/payments",
                     json=input_data,

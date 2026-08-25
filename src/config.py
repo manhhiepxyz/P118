@@ -122,6 +122,21 @@ class Settings(BaseSettings):
     )
     zombie_sweep_interval_seconds: int = 300
     zombie_running_ttl_hours: float = 0.5
+
+    # `abandoned_repair_ttl_hours`: workflow FAILED còn repair hint mà người
+    # dùng không quay lại.
+    #
+    # `release_on_failure` cố ý KHÔNG chạy cho loại này — hint nghĩa là "người
+    # dùng sẽ sửa input rồi chạy tiếp", và hoàn tác sẽ phá đúng thứ họ định
+    # tiếp tục. Lập luận ấy đúng khi họ quay lại. Khi họ không quay lại thì
+    # không ai gỡ, và chỗ đỗ vẫn giữ, capacity không về, phí vẫn tính.
+    #
+    # Đo được trên dữ liệu thật: 7 chỗ đỗ thuộc workflow FAILED/CANCELLED chưa
+    # được hoàn.
+    #
+    # Dài hơn TTL của payment approval: sửa input là việc người dùng làm trong
+    # ngày, không phải trong nửa giờ.
+    abandoned_repair_ttl_hours: int = 48
     # Số yêu cầu ĐÃ KẾT THÚC giữ lại trong lịch sử mỗi người. Cũ hơn thì tự ẩn
     # (xoá mềm bằng `archived_at`, xem `trim_history_for_owner`). 0 = không cắt.
     history_keep_per_user: int = 15

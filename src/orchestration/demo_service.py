@@ -24,6 +24,8 @@ from src.connectors.payment import PaymentConnector
 from src.connectors.tour import TourConnector
 from src.db.parking_payment_repository import payment_idempotency_key
 from src.executor.executor import Executor
+from src.common.failure_messages import repair_question
+from src.orchestration.repair import RepairManager
 from src.monitoring.llm_trace import trace_callbacks
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.deps import build_connectors, build_execution_boundary
@@ -468,7 +470,14 @@ async def run_demo_workflow(
         if stage is not None:
             await on_stage(stage, {"task_id": task_id, "task_status": status.value})
 
-    boundary_kwargs: dict[str, Any] = {"on_task_progress": on_task_progress, "shuttle_url": shuttle_url}
+    boundary_kwargs: dict[str, Any] = {
+        "on_task_progress": on_task_progress,
+        "shuttle_url": shuttle_url,
+        # Không có `workflow_id` thì `pay_fee` đi ra provider KHÔNG mang khoá
+        # idempotency, và mọi lượt gọi lặp thành "Booking has already been paid"
+        # thay vì trả lại đúng giao dịch cũ.
+        "workflow_id": workflow_id,
+    }
     if contact_profile:
         boundary_kwargs["contact_profile"] = contact_profile
     if on_failure is not None:
@@ -709,9 +718,14 @@ async def _execute_payment_only(
     đã chạy xong từ lượt trước, và booking trong database mới là nguồn sự thật
     về số tiền.
     """
+    # MỘT dạng khoá duy nhất cho mọi đường trả tiền.
+    #
+    # Đường này từng dùng `wf:{id}:task:{task_id}` còn đường Executor không có
+    # khoá nào. Hai dạng khác nhau nghĩa là cùng một lần trả tiền đi qua hai
+    # đường sẽ tạo hai giao dịch — đúng thứ khoá idempotency sinh ra để chặn.
     connector = PaymentConnector(
         base_url=payment_url,
-        idempotency_key=payment_idempotency_key(workflow_id, payment_task_id),
+        idempotency_key=payment_idempotency_key(workflow_id, quote.booking_id),
     )
     result = await connector.execute(
         "pay_fee",
@@ -867,6 +881,177 @@ async def record_viewing_decision_or_fail(workflow_id: str, decision: str, decid
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
         return await record_viewing_decision(pool, workflow_id, decision, decided_by)
+    finally:
+        await pool.close()
+
+
+async def _seed_completed(repository: Any, workflow_id: str) -> tuple[dict, dict]:
+    """Trạng thái + kết quả của mọi task ĐÃ SUCCESS, để không chạy lại chúng.
+
+    Task đã thành công thật thì chạy lại là gọi provider lần hai với cùng dữ
+    liệu — và các tool này không idempotent. Đo được: chỗ đỗ đã đặt bị đặt lần
+    hai, lần hai đâm vào ràng buộc do lần một tạo ra, rồi lời từ chối ấy ghi đè
+    lên kết quả thành công.
+
+    Executor CHỈ nhận `StandardResult`. `_resolve_input` đọc `ref_result.success`
+    rồi `ref_result.data[field]`; dict thô không có cả hai và sẽ nổ
+    AttributeError ở task đầu tiên có InputRef trỏ tới task đã seed.
+    """
+    done = {
+        row["task_id"]: row
+        for row in await repository.list_tasks(workflow_id)
+        if str(row.get("status")) == TaskStatus.SUCCESS.value
+    }
+    statuses = {task_id: TaskStatus.SUCCESS for task_id in done}
+    results = {
+        task_id: StandardResult(success=True, data=row["result_data"])
+        for task_id, row in done.items()
+        if isinstance(row.get("result_data"), dict)
+    }
+    return statuses, results
+
+
+async def _persist_hints(repository: Any, workflow_id: str, hints: dict) -> None:
+    """Ghim repair hint xuống database — bộ nhớ của manager chết cùng request."""
+    if not hints:
+        return
+    await repository.save_repair_hints(
+        workflow_id,
+        {
+            task_id: {"error_code": hint.error_code.value, "message": hint.message}
+            for task_id, hint in hints.items()
+        },
+    )
+
+
+def _repair_answer_for(hints: dict, plan: Any) -> str | None:
+    """Câu hỏi lại của lỗi GỐC, hoặc None nếu không có lỗi sửa được.
+
+    `DEPENDENCY_ERROR` bị loại: nó là hệ quả của một bước khác hỏng, không phải
+    nguyên nhân. Nói "bước trước không thành công" trong khi biết rõ bước nào và
+    vì sao là giấu đi đúng thứ người dùng cần.
+    """
+    if not hints:
+        return None
+    causes = [h for h in hints.values() if h.error_code is not ErrorCode.DEPENDENCY_ERROR] or list(hints.values())
+    cause = causes[0]
+    task = next((t for t in plan.tasks if t.task_id == cause.task_id), None)
+    if task is None:
+        return None
+    return repair_question(
+        task.tool,
+        getattr(cause.error_code, "value", str(cause.error_code)),
+        dict(task.input),
+    )
+
+
+class RetryNotAllowed(Exception):
+    """Yêu cầu này không chạy lại được, kèm lý do nói cho người dùng."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+async def retry_failed_tasks(
+    workflow_id: str,
+    *,
+    resident_url: str = "http://localhost:8001",
+    transport_url: str = "http://localhost:8002",
+    payment_url: str = "http://localhost:8003",
+    property_url: str = "http://localhost:8008",
+    resident_services_url: str = "http://localhost:8006",
+    tour_url: str = "http://localhost:8005",
+    consultation_url: str = "http://localhost:8007",
+    shuttle_url: str = "http://localhost:8009",
+) -> dict[str, Any]:
+    """Chạy lại TỪ BƯỚC HỎNG, giữ nguyên mọi bước đã thành công.
+
+    Dành cho lỗi HẠ TẦNG — provider tạm chết, timeout, database bận. Chúng có
+    `retryable=True` và chạy lại là hết.
+
+    KHÔNG dành cho lỗi nghiệp vụ. "Khu A đã hết chỗ" chạy lại với đúng input cũ
+    thì hỏng y hệt; lối ra của nó là câu hỏi lại để người dùng đổi khu. Cho
+    retry chạy ở đó là mời người dùng bấm một nút không bao giờ hoạt động, và
+    mỗi lần bấm là một vòng gọi provider vô ích.
+
+    Bước đã SUCCESS được seed, không chạy lại: các tool này không idempotent, và
+    chạy lại một `book_parking` đã thành công sẽ đâm vào ràng buộc do chính nó
+    tạo ra.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        record = await repository.get_workflow(workflow_id)
+        if record is None:
+            raise RetryNotAllowed("NOT_FOUND", "Không tìm thấy yêu cầu này.")
+
+        rows = record.get("tasks") or []
+        failed = [row for row in rows if str(row.get("status")) == TaskStatus.FAILED.value]
+        if not failed:
+            raise RetryNotAllowed("NOTHING_TO_RETRY", "Yêu cầu này không có bước nào đang hỏng.")
+
+        # `DEPENDENCY_ERROR` là hệ quả — nó retry được khi nguyên nhân retry
+        # được, nên không tính nó vào lúc quyết định.
+        causes = [row for row in failed if row.get("error_code") != ErrorCode.DEPENDENCY_ERROR.value] or failed
+        if not any(bool(row.get("retryable")) for row in causes):
+            raise RetryNotAllowed(
+                "NOT_RETRYABLE",
+                "Bước này hỏng vì dữ liệu chưa dùng được, chạy lại y nguyên sẽ hỏng như cũ. "
+                "Bạn cho mình biết muốn đổi gì nhé.",
+            )
+
+        plan = _plan_from_task_rows(record["workflow"].get("goal") or "", rows)
+        if plan is None or not plan.tasks:
+            raise RetryNotAllowed("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy lại.")
+
+        connectors = build_connectors(
+            resident_url=resident_url,
+            transport_url=transport_url,
+            payment_url=payment_url,
+            property_url=property_url,
+            resident_services_url=resident_services_url,
+            tour_url=tour_url,
+            consultation_url=consultation_url,
+            shuttle_url=shuttle_url,
+            workflow_id=workflow_id,
+        )
+        repair_manager = RepairManager()
+        executor = Executor(connectors, repository, on_failure=repair_manager)
+
+        seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
+        await executor.execute(
+            plan,
+            workflow_id,
+            finalize=False,
+            seed_statuses=seed_statuses,
+            seed_results=seed_results,
+        )
+
+        hints = repair_manager.hints_for(workflow_id)
+        await _persist_hints(repository, workflow_id, hints)
+        repair_manager.clear(workflow_id)
+
+        statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
+        all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
+        final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
+
+        repair_answer = _repair_answer_for(hints, plan)
+        try:
+            await repository.save_assistant_response(
+                workflow_id,
+                answer=repair_answer
+                or compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                suggestions=[],
+                state="FALLBACK",
+                for_status="NEEDS_INFORMATION" if repair_answer else final_status.value,
+            )
+        except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+            logger.info("không ghi được câu chốt sau retry (%s)", type(exc).__name__)
+
+        await repository.update_workflow_status(workflow_id, final_status)
+        return {"workflow_id": workflow_id, "status": final_status.value}
     finally:
         await pool.close()
 
@@ -1030,8 +1215,21 @@ async def _materialize_and_run_remaining(
             tour_url=tour_url,
             consultation_url=consultation_url,
             shuttle_url=shuttle_url,
+            workflow_id=workflow_id,
         )
-        executor = Executor(connectors, repository)
+        # Nối RepairManager vào đúng như đường chạy thường.
+        #
+        # Đường resume này thiếu nó, và hệ quả không nhìn thấy được từ code:
+        # `Executor.on_failure` là thứ DUY NHẤT sinh repair hint, và repair hint
+        # là thứ duy nhất mở nhánh hỏi lại người dùng ở `_demo_response`. Không
+        # có nó thì một lỗi hoàn toàn sửa được — "Khu A đã hết chỗ" — kết thúc
+        # bằng workflow FAILED, không câu hỏi, không cách đổi khu.
+        #
+        # Đo được trên dữ liệu thật: toàn bộ database chỉ có 3 repair hint từng
+        # được ghi, và không cái nào thuộc workflow đi qua duyệt lịch tham quan.
+        # Mọi yêu cầu ghép "tham quan + đỗ xe" đều rơi vào đường này.
+        repair_manager = RepairManager()
+        executor = Executor(connectors, repository, on_failure=repair_manager)
         # `finalize=False` — Executor KHÔNG được tự chốt SUCCESS ở đây.
         #
         # Thứ tự cũ là: chạy task → set SUCCESS → (không ai sinh lại câu trả
@@ -1044,17 +1242,68 @@ async def _materialize_and_run_remaining(
         # Khi giao diện nhìn thấy SUCCESS thì mọi thứ nó cần đã nằm sẵn trong
         # database; không còn khoảng thời gian nào mà trạng thái đã xong còn
         # nội dung thì chưa.
+        # Giữ MỌI task đã SUCCESS, không chỉ task tham quan.
+        #
+        # `schedule_property_viewing` không phải dependency của `register_vehicle`
+        # hay `book_parking`, nên ở lượt chạy ĐẦU chúng chạy song song và thành
+        # công thật trước khi ranh giới duyệt lịch ngắt luồng. Seed mỗi task
+        # tham quan nghĩa là resume chạy LẠI tất cả những task kia.
+        #
+        # Chúng không idempotent. Đo được, nguyên văn hai lượt:
+        #
+        #   14:28:45  BOOK-046 tạo thành công
+        #   14:28:59  provider duyệt
+        #   14:28:59  book_parking ghi FAILED — BOOKING_ALREADY_EXISTS
+        #
+        #   14:02:32  BOOK-044 tạo, chiếm nốt chỗ cuối của Khu A (3/3)
+        #   14:02:53  provider duyệt
+        #   14:03:23  book_parking ghi FAILED — NO_AVAILABILITY
+        #
+        # Lượt hai đâm vào ràng buộc `uq_bookings_vehicle_date` do chính lượt
+        # một tạo ra, rồi lời từ chối ấy ghi đè lên kết quả thành công. Người
+        # dùng đổi biển số, đổi ngày, đổi khu — lần nào cũng hỏng, vì thứ chặn
+        # họ là bản ghi mà chính yêu cầu của họ vừa tạo.
+        #
+        # Chỗ đỗ vẫn nằm trong database và vẫn bị tính phí; chỉ có màn hình nói
+        # là thất bại.
+        seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
+        # Task tham quan vừa materialize xong — kết quả mới đè lên hàng cũ.
+        seed_statuses[pending.task_id] = TaskStatus.SUCCESS
+        seed_results[pending.task_id] = result
+
         final_workflow_id, task_results = await executor.execute(
             plan,
             workflow_id,
             finalize=False,
-            seed_statuses={pending.task_id: TaskStatus.SUCCESS},
-            seed_results={pending.task_id: result},
+            seed_statuses=seed_statuses,
+            seed_results=seed_results,
         )
+
+        hints = repair_manager.hints_for(workflow_id)
+        await _persist_hints(repository, workflow_id, hints)
+        repair_manager.clear(workflow_id)
 
         statuses = {row["task_id"]: row.get("status") for row in await repository.list_tasks(workflow_id)}
         all_success = all(str(value) == TaskStatus.SUCCESS.value for value in statuses.values())
         final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
+
+        # Lỗi SỬA ĐƯỢC thì câu chốt phải là câu hỏi lại, không phải cáo phó.
+        #
+        # `compose_final_answer(..., FAILED)` trả "Yêu cầu chưa hoàn tất được.
+        # Bạn xem chi tiết từng bước để biết vướng ở đâu nhé" — đúng về mặt
+        # trạng thái, vô dụng với người đọc. Trong khi hệ thống biết chính xác
+        # vướng gì và lối ra nào: "Bạn đã có chỗ đỗ xe ngày 2026-08-23 rồi. Bạn
+        # chọn ngày khác giúp mình nhé."
+        #
+        # `_demo_response` sẽ dựng NEEDS_INFORMATION từ repair hint ở mọi lượt
+        # poll sau đó, nhưng câu ĐÃ GHIM mới là thứ giao diện hiển thị — ghim
+        # câu chung ở đây là đè mất câu đúng, y như tầng Response Agent từng
+        # làm với chính câu này.
+        #
+        # `for_status` phải khớp NEEDS_INFORMATION, không phải FAILED: câu ghim
+        # chỉ được dùng lại khi trạng thái khớp, và trạng thái người dùng nhìn
+        # thấy là trạng thái do `_demo_response` dựng.
+        repair_answer = _repair_answer_for(hints, plan)
 
         # Câu trả lời cuối, GHI TRƯỚC khi đổi trạng thái.
         #
@@ -1064,10 +1313,11 @@ async def _materialize_and_run_remaining(
         try:
             await repository.save_assistant_response(
                 workflow_id,
-                answer=compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
+                answer=repair_answer
+                or compose_final_answer(await repository.list_tasks(workflow_id), final_status.value),
                 suggestions=[],
                 state="FALLBACK",
-                for_status=final_status.value,
+                for_status="NEEDS_INFORMATION" if repair_answer else final_status.value,
             )
         except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
             # Ghi hỏng thì khách đọc câu cũ. Ném lỗi thì workflow treo ở
