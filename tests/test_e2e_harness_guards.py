@@ -10,6 +10,7 @@ dưới đây kiểm chính những bất biến mà harness dựa vào, trên P
 
 from __future__ import annotations
 
+import os
 import subprocess
 import uuid
 
@@ -18,22 +19,15 @@ from tests._dbcheck import require_test_database_url
 
 def _psql(query: str) -> subprocess.CompletedProcess:
     require_test_database_url()  # skip khi chưa cấu hình, fail trong CI
+    # Nối thẳng qua `TEST_DATABASE_URL`, KHÔNG `docker exec` vào tên container
+    # cố định của dev stack (`p118_postgres`) — CI dùng Postgres ephemeral qua
+    # `services:`, container đó không tồn tại và mọi test ở đây fail ngay từ
+    # "Initialize containers". Bài test này kiểm HÀNH VI của cờ `psql`
+    # (`-q`/`ON_ERROR_STOP`), không kiểm gì riêng của dev stack — nối trực
+    # tiếp chạy đúng ở cả hai nơi.
+    dsn = os.environ["TEST_DATABASE_URL"]
     return subprocess.run(
-        [
-            "docker",
-            "exec",
-            "p118_postgres",
-            "psql",
-            "-U",
-            "p118",
-            "-d",
-            "p118_test_db",
-            "-q",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-tAc",
-            query,
-        ],
+        ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1", "-tAc", query],
         capture_output=True,
         text=True,
         timeout=60,

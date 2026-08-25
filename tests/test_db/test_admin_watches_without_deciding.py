@@ -197,7 +197,7 @@ async def test_secrets_never_leave_through_the_monitoring_surface(client, db_poo
     admin, _ = await _user(client, db_pool, "giam_sat_admin_5", role="admin")
     _, owner = await _user(client, db_pool, "giam_sat_chu_5")
     doc = "postgresql://p118:matkhau@postgres:5432/p118_db"
-    khoa = "api_key=sk-abcdefghijklmnopqrstuvwx"
+    khoa = "api_key=sk-abcdefghijklmnopqrstuvwx"  # secret-fixture
     wid = await _workflow(db_pool, owner, goal=f"Kết nối {doc} rồi bảo trì", status="FAILED")
     await _task(db_pool, wid, "T1", "create_maintenance_request", "FAILED", error_message=f"provider trả lỗi {khoa}")
 
@@ -207,7 +207,7 @@ async def test_secrets_never_leave_through_the_monitoring_surface(client, db_poo
     for blob in (raw_list, raw_detail):
         assert "matkhau" not in blob
         assert "postgresql://" not in blob
-        assert "sk-abcdefghijklmnopqrstuvwx" not in blob
+        assert "sk-abcdefghijklmnopqrstuvwx" not in blob  # secret-fixture
         assert "[đã ẩn]" in blob
 
 

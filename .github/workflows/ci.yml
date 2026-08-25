@@ -57,7 +57,16 @@ jobs:
         # `job.services.postgres.ports['5432']` là cổng HOST thật Docker vừa
         # gán — chỉ biết được sau khi service đã khởi động, nên không đặt được
         # ở khối `env:` cấp job (khối đó dựng TRƯỚC khi service tồn tại).
-        run: echo "TEST_DATABASE_URL=postgresql://p118_ci:p118_ci_ephemeral@localhost:${{ job.services.postgres.ports['5432'] }}/p118_test_db" >> "$GITHUB_ENV"
+        #
+        # DATABASE_URL trỏ CÙNG một Postgres ephemeral với TEST_DATABASE_URL.
+        # Hai biến này tách biệt có chủ đích trong code (xem `tests/_dbcheck.py`
+        # — một cái test được TRUNCATE, cái kia là "stack thật" cho test gọi
+        # lifespan() trực tiếp), nhưng `require_running_app_database()` chỉ mở
+        # rồi đóng kết nối, không bao giờ ghi — nên dùng chung DB ephemeral này
+        # là an toàn, không cần dựng thêm một Postgres thứ hai trong CI.
+        run: |
+          echo "TEST_DATABASE_URL=postgresql://p118_ci:p118_ci_ephemeral@localhost:${{ job.services.postgres.ports['5432'] }}/p118_test_db" >> "$GITHUB_ENV"
+          echo "DATABASE_URL=postgresql://p118_ci:p118_ci_ephemeral@localhost:${{ job.services.postgres.ports['5432'] }}/p118_test_db" >> "$GITHUB_ENV"
 
       - name: Guard — TEST_DATABASE_URL phải được set
         run: |
