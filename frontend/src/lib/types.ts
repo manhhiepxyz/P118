@@ -189,6 +189,15 @@ export interface AgentWorkflowResponse {
   missing_fields: string[]
   payment_quote: AgentPaymentQuote | null
   /**
+   * URL thanh toán gateway (VNPay) trả về NGAY khi user bấm duyệt.
+   *
+   * Khác null → giao diện chuyển hướng CẢ CỬA SỔ sang đây thay vì coi duyệt là
+   * xong: tiền chưa về lúc này, workflow vẫn WAITING_APPROVAL cho tới khi
+   * callback IPN của gateway xác nhận (backend là nơi duy nhất được tin).
+   * Mock không bao giờ đặt field này — hai chế độ phân biệt bằng null.
+   */
+  payment_redirect_url: string | null
+  /**
    * Cùng status WAITING_APPROVAL với thanh toán nhưng KHÁC loại chờ: lịch tham
    * quan đang chờ provider duyệt trong /review. Khác null → hiển thị màn chờ
    * tham quan (không có nút quyết định) thay vì màn chờ thanh toán.

@@ -104,6 +104,32 @@ class Settings(BaseSettings):
     payment_approval_ttl_hours: int = 24
     zombie_sweep_enabled: bool = True
 
+    # Cổng thanh toán thật (VNPay sandbox) — tùy chọn, mặc định mock.
+    #
+    # `payment_provider=mock` giữ nguyên luồng đồng bộ hiện có: duyệt là xong.
+    # `payment_provider=vnpay` chuyển sang redirect + IPN bất đồng bộ: duyệt chỉ
+    # MỞ PHIÊN thanh toán, tiền được xác nhận bởi callback máy-nói-chuyện-với-máy
+    # của VNPay (`/api/v1/webhooks/vnpay/ipn`). Contract `pay_fee` không đổi —
+    # `payment_status=PENDING` lần đầu được dùng thật cho phiên đang mở.
+    #
+    # Bật vnpay mà thiếu TMN/HASH_SECRET/public_base_url phải fail-fast lúc dựng
+    # connector, không âm thầm rơi về mock — một phiên thanh toán mở nhầm là
+    # một chỗ đỗ bị treo.
+    payment_provider: Literal["mock", "vnpay"] = "mock"
+    vnpay_tmn_code: str = ""
+    vnpay_hash_secret: str = ""
+    vnpay_payment_url: str = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
+    vnpay_query_url: str = "https://sandbox.vnpayment.vn/merchant_webapi/api/transaction"
+    # Phiên thanh toán sống tối đa bao lâu. Hết hạn: URL chết ở phía VNPay
+    # (vnp_ExpireDate) và sweeper đánh dấu payment FAILED, nhả khóa đổi khu.
+    vnpay_session_ttl_minutes: int = Field(default=30, ge=1, le=1440)
+    # Địa chỉ CÔNG KHAI của backend để VNPay gọi IPN (ngrok/deploy). Localhost
+    # thuần không bao giờ nhận được callback từ máy chủ VNPay.
+    public_base_url: str = ""
+    # Địa chỉ frontend để trả trình duyệt user về trang kết quả sau khi VNPay
+    # redirect về backend. Backend chỉ làm bưu điện, không render UI.
+    frontend_base_url: str = "http://localhost:5173"
+
     # `auto_approve_viewing_seconds`: tự duyệt lịch tham quan sau N giây.
     #
     # 0 = TẮT, và đó là mặc định. Đây thuần tuý là tiện ích DEMO: khi trình bày

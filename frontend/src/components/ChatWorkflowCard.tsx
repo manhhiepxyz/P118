@@ -197,6 +197,14 @@ export function ChatWorkflowCard({
       // Body CHỈ có `decision`. Số tiền và mã đặt chỗ là dữ liệu có thẩm quyền
       // của backend; gửi từ browser là để người dùng tự định giá dịch vụ.
       const next = await decidePayment(currentId, decision)
+      // PAYMENT_PROVIDER=vnpay: duyệt chỉ MỞ PHIÊN — response mang URL gateway
+      // đã ký. Chuyển hướng cả cửa sổ (không tab mới): sau khi trả tiền,
+      // VNPay đưa trình duyệt về /payment/result rồi polling tự chốt SUCCESS.
+      // Mock không bao giờ trả field này, luồng cũ chạy nguyên trạng.
+      if (decision === 'approve' && next.payment_redirect_url) {
+        window.location.href = next.payment_redirect_url
+        return
+      }
       announced.current = null
       accept(next)
     } catch (e) {

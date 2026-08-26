@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 
@@ -79,9 +80,27 @@ class Payment:
     amount: int
     currency: str
     payment_status: str
+    # Các field gateway chỉ có trên phiên VNPay; row mock/legacy để mặc định.
+    provider: str = "mock"
+    workflow_id: str | None = None
+    provider_txn_ref: str | None = None
 
     def as_output(self) -> dict[str, Any]:
         return {"payment_id": self.payment_id, "payment_status": self.payment_status}
+
+
+def _row_to_payment(row: asyncpg.Record) -> Payment:
+    workflow_id = row.get("workflow_id") if hasattr(row, "get") else None
+    return Payment(
+        payment_id=row["payment_id"],
+        booking_id=row["booking_id"],
+        amount=row["amount"],
+        currency=row["currency"],
+        payment_status=row["payment_status"],
+        provider=row["provider"] if "provider" in row.keys() else "mock",
+        workflow_id=str(workflow_id) if workflow_id else None,
+        provider_txn_ref=row["provider_txn_ref"] if "provider_txn_ref" in row.keys() else None,
+    )
 
 
 def _row_to_booking(row: asyncpg.Record) -> Booking:
@@ -465,6 +484,26 @@ async def change_booking_zone(pool: asyncpg.Pool, *, booking_id: str, parking_zo
         if parking_zone not in ZONE_PRICES:
             raise BookingError("INVALID_INPUT", "Unknown parking zone")
 
+        # Guard cửa sổ đua gateway: một phiên VNPay còn PENDING nghĩa là có
+        # người đang đứng ở trang thanh toán với URL đã ký BẢN ĐÓNG BĂNG giá
+        # hiện tại. Đổi khu giờ sẽ sinh thế hệ giá thứ hai trong khi giao dịch
+        # thế hệ một còn bay — IPN đối chiếu bản đóng băng sẽ lệch. Chặn ở đây
+        # là chỗ DUY NHẤT mọi đường sửa giá đều đi qua. Phiên hết hạn do
+        # sweeper thì khóa tự nhả.
+        active_session = await conn.fetchval(
+            """
+            SELECT 1 FROM payments
+            WHERE booking_id = $1 AND payment_status = 'PENDING' AND provider = 'vnpay'
+            LIMIT 1
+            """,
+            booking_id,
+        )
+        if active_session is not None:
+            raise BookingError(
+                "PAYMENT_SESSION_ACTIVE",
+                "Booking has an open payment session; retry after it closes",
+            )
+
         # Đổi về đúng khu đang giữ: không phải lỗi, và cũng không được đi tiếp
         # qua phần kiểm capacity — chính chỗ này đang chiếm một suất của khu đó,
         # nên một khu sức chứa 1 sẽ tự báo hết chỗ với chủ của nó.
@@ -746,15 +785,9 @@ async def create_payment(
 async def get_payment(pool: asyncpg.Pool, payment_id: str) -> Payment | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM payments WHERE payment_id = $1", payment_id)
-    if row is None:
-        return None
-    return Payment(
-        payment_id=row["payment_id"],
-        booking_id=row["booking_id"],
-        amount=row["amount"],
-        currency=row["currency"],
-        payment_status=row["payment_status"],
-    )
+    # _row_to_payment giữ provider/workflow_id/provider_txn_ref — webhook cần
+    # biết phiên thuộc gateway nào trước khi quyết định ghi tiền.
+    return None if row is None else _row_to_payment(row)
 
 
 async def cancel_booking(pool: asyncpg.Pool, booking_id: str) -> bool:
@@ -832,3 +865,189 @@ def payment_idempotency_key(workflow_id: str, booking_id: str) -> str:
     booding đã hoàn tiền sẽ rơi vào bản ghi REFUNDED cũ và được coi là đã trả.
     """
     return f"wf:{workflow_id}:booking:{booking_id}"
+
+
+# ---------------------------------------------------------------------------
+# VNPay payment session — redirect + IPN (PENDING → PAID hai pha)
+# ---------------------------------------------------------------------------
+
+
+async def create_pending_payment(
+    pool: asyncpg.Pool,
+    *,
+    booking_id: str,
+    amount: int,
+    currency: str,
+    workflow_id: str,
+    idempotency_key: str | None = None,
+) -> Payment:
+    """MỞ PHIÊN thanh toán gateway: sinh row PENDING, chưa có tiền nào di chuyển.
+
+    Khác `create_payment` ở chỗ KHÔNG đánh dấu PAID ngay — số tiền ghi vào đây
+    là BẢN ĐÓNG BĂNG mà IPN sẽ đối chiếu sau này. Đơn vị đổi khu giữa chừng
+    user đứng ở trang VNPay không được phép làm lệch giao dịch đang bay.
+
+    Replay-safe qua idempotency key như `create_payment`: route duyệt bị retry
+    (double-click, crash giữa chừng) trả về đúng phiên cũ thay vì mở phiên thứ
+    hai cho cùng một khoản tiền.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        if idempotency_key is not None:
+            existing = await conn.fetchrow("SELECT * FROM payments WHERE idempotency_key = $1", idempotency_key)
+            if existing is not None:
+                return _row_to_payment(existing)
+
+        booking_row = await conn.fetchrow("SELECT * FROM parking_bookings WHERE booking_id = $1 FOR UPDATE", booking_id)
+        if booking_row is None:
+            raise BookingError("BOOKING_NOT_FOUND", "Booking not found")
+
+        booking = _row_to_booking(booking_row)
+        if amount != booking.amount:
+            raise BookingError("PAYMENT_AMOUNT_MISMATCH", "Amount does not match the booking")
+        if currency != booking.currency:
+            raise BookingError("PAYMENT_CURRENCY_MISMATCH", "Currency does not match the booking")
+
+        already_paid = await conn.fetchrow(
+            "SELECT payment_id FROM payments WHERE booking_id = $1 AND payment_status = 'PAID'",
+            booking_id,
+        )
+        if already_paid is not None:
+            raise BookingError("PAYMENT_ALREADY_COMPLETED", "Booking has already been paid")
+
+        # Một booking chỉ được MỘT phiên mở cùng lúc. Phiên thứ hai từ workflow
+        # khác là dấu hiệu đua — chặn ở đây thay vì để hai URL thanh toán cùng
+        # tồn tại với hai bản đóng băng khác nhau.
+        active_session = await conn.fetchrow(
+            "SELECT payment_id FROM payments WHERE booking_id = $1 AND payment_status = 'PENDING'",
+            booking_id,
+        )
+        if active_session is not None:
+            raise BookingError("PAYMENT_SESSION_ACTIVE", "A payment session is already open for this booking")
+
+        payment_id = await _next_id(conn, "PAY")
+        await conn.execute(
+            """
+            INSERT INTO payments
+                (payment_id, booking_id, amount, currency, payment_status,
+                 provider, workflow_id, provider_txn_ref, idempotency_key)
+            VALUES ($1, $2, $3, $4, 'PENDING', 'vnpay', $5::uuid, $1, $6)
+            """,
+            payment_id,
+            booking_id,
+            amount,
+            currency,
+            UUID(workflow_id),
+            idempotency_key,
+        )
+
+        return Payment(
+            payment_id=payment_id,
+            booking_id=booking_id,
+            amount=amount,
+            currency=currency,
+            payment_status="PENDING",
+            provider="vnpay",
+            workflow_id=workflow_id,
+            provider_txn_ref=payment_id,
+        )
+
+
+async def confirm_pending_payment(
+    pool: asyncpg.Pool,
+    *,
+    payment_id: str,
+    amount_vnd: int,
+) -> str:
+    """Xác nhận tiền đã về: PENDING → PAID. Trả về mã kết quả để IPN map sang RspCode.
+
+    Mã trả về:
+      CONFIRMED          — flip thành công, caller resume workflow.
+      ALREADY_CONFIRMED  — đã PAID trước đó: IPN gọi lại, vô hại (idempotent).
+      AMOUNT_MISMATCH    — số tiền callback không khớp bản đóng băng → TỪ CHỐI.
+      NOT_FOUND          — không có giao dịch nào mang mã này.
+      NOT_PENDING        — phiên đã FAILED/hết hạn mà tiền vẫn bị thu: bất thường,
+                           cần đối soát thủ công (phase hoàn tiền tự động).
+    """
+    outcome_by_status = {
+        "PAID": "ALREADY_CONFIRMED",
+        "FAILED": "NOT_PENDING",
+        "REFUNDED": "NOT_PENDING",
+    }
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM payments WHERE payment_id = $1", payment_id)
+        if row is None:
+            return "NOT_FOUND"
+        current = _row_to_payment(row)
+        if current.amount != amount_vnd:
+            return "AMOUNT_MISMATCH"
+        if current.payment_status == "PENDING":
+            tag = await conn.execute(
+                """
+                UPDATE payments
+                SET payment_status = 'PAID', updated_at = NOW()
+                WHERE payment_id = $1 AND payment_status = 'PENDING'
+                """,
+                payment_id,
+            )
+            return "CONFIRMED" if tag.endswith("1") else "ALREADY_CONFIRMED"
+        return outcome_by_status.get(current.payment_status, "NOT_PENDING")
+
+
+async def get_vnpay_session_for_workflow(
+    pool: asyncpg.Pool,
+    *,
+    workflow_id: str,
+    booking_id: str,
+) -> Payment | None:
+    """Phiên VNPay mới nhất của (workflow, booking) — nguồn cho connector confirm."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM payments
+            WHERE workflow_id = $1::uuid AND booking_id = $2 AND provider = 'vnpay'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            UUID(workflow_id),
+            booking_id,
+        )
+    return None if row is None else _row_to_payment(row)
+
+
+async def booking_has_active_payment_session(pool: asyncpg.Pool, booking_id: str) -> bool:
+    """Guard đổi khu: booking đang có phiên thanh toán mở thì không được sửa giá."""
+    async with pool.acquire() as conn:
+        value = await conn.fetchval(
+            "SELECT 1 FROM payments WHERE booking_id = $1 AND payment_status = 'PENDING' LIMIT 1",
+            booking_id,
+        )
+    return value is not None
+
+
+async def expire_stale_vnpay_sessions(pool: asyncpg.Pool, ttl_minutes: int) -> list[dict[str, str]]:
+    """Đóng các phiên PENDING quá hạn → FAILED. Trả danh sách để sweeper huỷ workflow.
+
+    User bỏ cuộc ở trang VNPay là đường bình thường, không phải lỗi: phiên chết
+    theo vnp_ExpireDate ở phía gateway, ở phía ta chỉ cần ghi nhận và NHẢ KHÓA
+    (booking được sửa giá lại). Idempotent: chạy nhiều lần, lần sau chọn 0 row.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            UPDATE payments
+            SET payment_status = 'FAILED', updated_at = NOW()
+            WHERE payment_status = 'PENDING'
+              AND provider = 'vnpay'
+              AND created_at < NOW() - make_interval(mins => $1)
+            RETURNING payment_id, booking_id, workflow_id
+            """,
+            ttl_minutes,
+        )
+    return [
+        {
+            "payment_id": row["payment_id"],
+            "booking_id": row["booking_id"],
+            "workflow_id": str(row["workflow_id"]) if row["workflow_id"] else "",
+        }
+        for row in rows
+    ]

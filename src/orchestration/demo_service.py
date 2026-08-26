@@ -812,6 +812,7 @@ async def _execute_payment_only(
     quote: PaymentQuote,
     payment_url: str,
     client: Any | None = None,
+    connector: Any | None = None,
 ) -> dict[str, Any]:
     """Gọi ĐÚNG một lần `pay_fee`, không đụng tới bất kỳ bước nào khác.
 
@@ -819,6 +820,11 @@ async def _execute_payment_only(
     Không có nó thì test buộc phải dựng lại luồng bằng tay, và bug vừa rồi —
     đường duyệt bỏ qua toàn bộ hàng rào — là loại bug chỉ lộ ra khi chạy đúng
     đường thật.
+
+    `connector` cho phép đường VNPay tiêm `VnPayPaymentConnector`: luồng gateway
+    KHÔNG POST HTTP nào lúc này — tiền đã được IPN ghi PAID trước đó, connector
+    chỉ đọc phiên đã xác nhận và chuẩn hoá thành StandardResult. Mock giữ nguyên
+    đường cũ khi `connector` bỏ trống.
 
     Input dựng từ báo giá đã persist chứ không resolve lại InputRef: task nguồn
     đã chạy xong từ lượt trước, và booking trong database mới là nguồn sự thật
@@ -840,7 +846,8 @@ async def _execute_payment_only(
     # nó chỉ là ĐỀ XUẤT; khoá đi ra dây là khoá `prepare_submission` trả về, tức
     # khoá database đang giữ. Sau restart, đó là điểm khác nhau giữa "trả tiền một
     # lần" và "trả tiền hai lần".
-    connector = PaymentConnector(base_url=payment_url, client=client)
+    if connector is None:
+        connector = PaymentConnector(base_url=payment_url, client=client)
     repository_for_call = await acquire_repository()
     result = await call_provider(
         connector,
@@ -920,6 +927,187 @@ async def reject_payment(workflow_id: str) -> None:
         await repository.update_workflow_status(workflow_id, WorkflowStatus.CANCELLED)
     finally:
         await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# VNPay gateway — mở phiên tại đường duyệt + resume sau khi IPN xác nhận
+# ---------------------------------------------------------------------------
+
+
+async def _payment_resume_context(pool: Any, workflow_id: str) -> tuple[Any, PaymentQuote]:
+    """Ngữ cảnh chung của mọi đường chạy nốt `pay_fee`.
+
+    Trả về (pending approval, quote đóng băng từ booking persist). Kiểm bao đóng
+    phụ thuộc giống hệt `resume_payment_after_approval`: chỉ những bước thanh
+    toán THỰC SỰ phụ thuộc mới phải xong trước, để một workflow gộp nhiều dịch
+    vụ độc lập không bị khoá chéo lẫn nhau.
+    """
+    pending = await get_pending_approval(pool, workflow_id)
+    if pending is None:
+        raise ResumeError("NOT_FOUND", "Không tìm thấy yêu cầu thanh toán đang chờ.")
+
+    task_rows = await pool_acquire_list_tasks(pool, workflow_id)
+    depends = {row["task_id"]: list(row.get("depends_on") or []) for row in task_rows}
+    pay_ids = [row["task_id"] for row in task_rows if row.get("tool") == "pay_fee"]
+    needed: set[str] = set()
+    queue = [parent for task_id in pay_ids for parent in depends.get(task_id, [])]
+    while queue:
+        current = queue.pop()
+        if current in needed:
+            continue
+        needed.add(current)
+        queue.extend(depends.get(current, []))
+
+    unfinished_prefix = [
+        row["task_id"]
+        for row in task_rows
+        if row["task_id"] in needed and row.get("status") != TaskStatus.SUCCESS.value
+    ]
+    if unfinished_prefix:
+        raise ResumeError("PREFIX_INCOMPLETE", "Các bước trước thanh toán chưa hoàn tất.")
+
+    # Báo giá đọc lại từ booking đã persist, không tin số trong bảng approval.
+    quote = await quote_from_database(pool, pending.quote.booking_id)
+    if quote is None:
+        raise ResumeError("NOT_FOUND", "Không tìm thấy chỗ đỗ đã giữ.")
+    return pending, quote
+
+
+async def pool_acquire_list_tasks(pool: Any, workflow_id: str) -> list[dict[str, Any]]:
+    """Đọc danh sách task qua repository của composition root."""
+    from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+
+    repository = PostgreSQLWorkflowStateRepository(pool)
+    return await repository.list_tasks(workflow_id)
+
+
+async def open_vnpay_payment_session(workflow_id: str, *, client_ip: str = "") -> dict[str, Any]:
+    """Đường duyệt khi PAYMENT_PROVIDER=vnpay: chốt APPROVED rồi MỞ PHIÊN.
+
+    Khác `resume_payment_after_approval` ở bước cuối: thay vì gọi mock connector
+    thu tiền ngay, hàm này tạo row payments PENDING (BẢN ĐÓNG BĂNG số tiền) và
+    trả về URL VNPay có chữ ký cho frontend chuyển hướng. Tiền thật chỉ được
+    xác nhận bởi callback IPN — nguồn sự thật duy nhất.
+
+    Trả về dict {payment_redirect_url, payment_id, quote} hoặc raise ResumeError.
+    """
+    from src.config import get_settings
+
+    settings = get_settings()
+    if not settings.public_base_url:
+        raise ResumeError(
+            "GATEWAY_NOT_CONFIGURED",
+            "Thiếu PUBLIC_BASE_URL — VNPay không thể gọi IPN về backend.",
+        )
+
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        pending, quote = await _payment_resume_context(pool, workflow_id)
+    finally:
+        await pool.close()
+
+    # Chỉ MỘT lệnh được đổi AWAITING → APPROVED; lượt duyệt sau nhận 409.
+    if not await record_decision_or_fail(workflow_id, APPROVED):
+        raise ResumeError("ALREADY_DECIDED", "Yêu cầu thanh toán này đã được xử lý.")
+
+    from src.connectors.vnpay import (
+        VnPaySessionConfig,
+        build_payment_url,
+    )
+    from src.db.parking_payment_repository import (
+        BookingError,
+        create_pending_payment,
+        payment_idempotency_key,
+    )
+
+    session_repository = await acquire_repository()
+    session_pool = session_repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        try:
+            session = await create_pending_payment(
+                session_pool,
+                booking_id=quote.booking_id,
+                amount=quote.amount,
+                currency=quote.currency,
+                workflow_id=workflow_id,
+                idempotency_key=payment_idempotency_key(workflow_id, quote.booking_id),
+            )
+        except BookingError as exc:
+            raise ResumeError(exc.code, exc.args[0]) from exc
+    finally:
+        await session_pool.close()
+
+    config = VnPaySessionConfig(
+        tmn_code=settings.vnpay_tmn_code,
+        hash_secret=settings.vnpay_hash_secret,
+        payment_url=settings.vnpay_payment_url,
+        ttl_minutes=settings.vnpay_session_ttl_minutes,
+    )
+    redirect_url = build_payment_url(
+        config,
+        txn_ref=session.payment_id,
+        amount_vnd=session.amount,
+        order_info=f"Thanh toan phi dat cho {session.booking_id}",
+        ip_addr=client_ip or "127.0.0.1",
+        return_url=f"{settings.public_base_url.rstrip('/')}/api/v1/webhooks/vnpay/return",
+    )
+    return {
+        "workflow_id": workflow_id,
+        "payment_task_id": pending.task_id,
+        "payment_id": session.payment_id,
+        "payment_redirect_url": redirect_url,
+        "quote": quote.as_public_dict(),
+    }
+
+
+async def resume_vnpay_after_gateway(workflow_id: str) -> dict[str, Any]:
+    """Chạy nốt `pay_fee` sau khi IPN xác nhận tiền ĐÃ VỀ.
+
+    Được gọi bởi `/webhooks/vnpay/ipn` SAU khi `confirm_pending_payment` flip
+    PENDING→PAID thành công, và bởi sweeper để hàn workflow bị ngắt giữa chừng
+    (PAID rồi nhưng process chết trước khi kịp chốt).
+
+    Báo giá lấy từ PHIÊN ĐÓNG BĂNG trong bảng payments — nguyên tắc "số tiền
+    user thấy khi trả là số tiền được tất toán", không đọc lại booking sống.
+    """
+    from src.connectors.vnpay import VnPayPaymentConnector
+    from src.db.parking_payment_repository import get_vnpay_session_for_workflow
+
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        pending = await get_pending_approval(pool, workflow_id)
+        if pending is None:
+            raise ResumeError("NOT_FOUND", "Không tìm thấy yêu cầu thanh toán.")
+        if pending.status != APPROVED:
+            raise ResumeError("NOT_APPROVED", "Phiên chưa được người dùng duyệt.")
+
+        # Bao đóng phụ thuộc đã kiểm ở lúc mở phiên và guard zone-change giữ
+        # trạng thái đứng yên trong phiên; phiên đọc lại từ bảng payments để
+        # chống dữ liệu lệch do can thiệp tay.
+        session = await get_vnpay_session_for_workflow(
+            pool, workflow_id=workflow_id, booking_id=pending.quote.booking_id
+        )
+        if session is None:
+            raise ResumeError("NOT_FOUND", "Không tìm thấy phiên thanh toán gateway.")
+        if session.payment_status != "PAID":
+            raise ResumeError("NOT_CONFIRMED", "Gateway chưa xác nhận giao dịch.")
+        quote = PaymentQuote(
+            booking_id=session.booking_id,
+            amount=session.amount,
+            currency=session.currency,
+        )
+    finally:
+        await pool.close()
+
+    return await _execute_payment_only(
+        workflow_id=workflow_id,
+        payment_task_id=pending.task_id,
+        quote=quote,
+        payment_url="",
+        connector=VnPayPaymentConnector(workflow_id=workflow_id),
+    )
 
 
 # ---------------------------------------------------------------------------

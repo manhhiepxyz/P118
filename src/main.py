@@ -20,6 +20,7 @@ from src.api.routes import router
 from src.api.service_approval_routes import router as service_approval_router
 from src.api.verification_routes import router as verification_router
 from src.api.viewing_approval_routes import router as viewing_approval_router
+from src.api.webhook_routes import router as webhook_router
 from src.config import get_settings
 from src.monitoring.llm_trace import trace_enabled
 from src.orchestration.auto_approve import auto_approve_due_viewings
@@ -204,6 +205,8 @@ app.include_router(viewing_approval_router, prefix="/api/v1")
 app.include_router(notification_router, prefix="/api/v1")
 # Profile tự khai: PATCH /api/v1/users/me (multipart + avatar).
 app.include_router(users_router, prefix="/api/v1")
+# Webhook cổng thanh toán VNPay (IPN + return) — KHÔNG JWT, bảo vệ bằng HMAC.
+app.include_router(webhook_router, prefix="/api/v1")
 
 
 # Ảnh giấy tờ xác thực. Thư mục phải tồn tại trước khi mount — StaticFiles

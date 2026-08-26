@@ -204,6 +204,10 @@ class DemoWorkflowEvent(BaseModel):
         # ghi thành FAILED / UNKNOWN_EXTERNAL_ERROR, và khách đọc "Yêu cầu đã
         # dừng lại giữa chừng" trong khi hàng đợi duyệt đã có đủ hồ sơ.
         "WAITING_SERVICE_APPROVAL",
+        # Đã mở phiên thanh toán gateway (VNPay), đang chờ IPN xác nhận tiền.
+        # Chỉ phát khi PAYMENT_PROVIDER=vnpay; mock không bao giờ thấy giá trị
+        # này. Phải có ở CẢ HAI Literal `stage` — xem cảnh báo phía trên.
+        "WAITING_PAYMENT_GATEWAY",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",
@@ -368,6 +372,9 @@ class DemoWorkflowResponse(BaseModel):
             # Chờ đơn vị duyệt dịch vụ khác lịch tham quan. Xem ghi chú cùng
             # tên ở `DemoWorkflowEvent.stage` — giá trị này phải có ở CẢ HAI.
             "WAITING_SERVICE_APPROVAL",
+            # Đã mở phiên thanh toán gateway (VNPay), chờ IPN xác nhận tiền.
+            # Phải có ở CẢ HAI Literal `stage`.
+            "WAITING_PAYMENT_GATEWAY",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",
@@ -404,6 +411,11 @@ class DemoWorkflowResponse(BaseModel):
     # Báo giá authoritative đọc từ booking đã persist. Browser KHÔNG được gửi
     # amount/currency; nó chỉ hiển thị lại đúng con số backend đưa xuống.
     payment_quote: dict[str, Any] | None = None
+    # URL thanh toán gateway (PAYMENT_PROVIDER=vnpay) trả về NGAY sau khi user
+    # bấm duyệt. Giao diện chuyển hướng cả cửa sổ sang đây; tiền chưa về lúc
+    # này — workflow vẫn WAITING_APPROVAL cho tới khi IPN xác nhận. Mock không
+    # bao giờ đặt field này, nên giao diện phân biệt hai chế độ bằng null.
+    payment_redirect_url: str | None = None
     # Lịch tham quan đang chờ provider/admin duyệt. Khách đọc được lịch + dự án
     # nhưng KHÔNG quyết định được (người duyệt là provider qua /review). Cùng
     # status WAITING_APPROVAL như thanh toán — giao diện phân biệt bằng field này.
