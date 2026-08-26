@@ -70,7 +70,9 @@ class _LaneCoKeHoach:
         self._plan = plan
         self.so_lan = 0
 
-    async def plan(self, goal, existing_context=None):
+    # `user_answers` là tham số THỨ BA của contract Fast Lane — lane giả phải
+    # nhận đủ, nếu không nó chỉ chứng minh được đường cũ còn chạy.
+    async def plan(self, goal, existing_context=None, user_answers=None):
         self.so_lan += 1
         return self._plan
 
@@ -79,7 +81,7 @@ class _LaneNhuong:
     def __init__(self):
         self.so_lan = 0
 
-    async def plan(self, goal, existing_context=None):
+    async def plan(self, goal, existing_context=None, user_answers=None):
         self.so_lan += 1
         return None
 

@@ -24,7 +24,12 @@ import type { ChatTurn } from '../lib/journeyMock'
 import { ConversationStream } from '../components/workspace/ConversationStream'
 import { PendingCard } from '../components/workspace/PendingCard'
 import { extractValue, normalizeIntent, resolve, type PendingAction } from '../lib/pendingAction'
-import { closingLine, journeyFromWorkflow, pendingFromWorkflow } from '../lib/liveJourney'
+import {
+  FREE_TEXT_ANSWER_KEY,
+  closingLine,
+  journeyFromWorkflow,
+  pendingFromWorkflow,
+} from '../lib/liveJourney'
 import { toolLabel } from '../lib/status'
 import {
   ApiError,
@@ -331,7 +336,8 @@ export function JourneyWorkspacePage() {
       // chốt của backend, và nếu cờ chưa bật thì nó lọt qua rồi câu của mình
       // nói tiếp — hai câu huỷ liền nhau cho một lần bấm.
       stopAnnouncedFor.current = id
-      absorb(await cancelWorkflow(id))
+      const seq = beginFetch()
+      absorbIfCurrent(seq, await cancelWorkflow(id))
       say('agent', 'Mình đã dừng yêu cầu này. Các bước đã hoàn thành trước đó vẫn được giữ lại.')
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
@@ -435,6 +441,37 @@ export function JourneyWorkspacePage() {
   const pendingSince = useRef<number | null>(null)
 
   /**
+   * Vé số tăng dần cho MỖI lần bắt đầu đọc/gửi workflow — chặn kết quả CŨ về
+   * SAU kết quả MỚI ghi đè lên hội thoại.
+   *
+   * Bug đã đo được: một câu "Xong rồi — ..." (từ nhịp poll mới nhất) đã hiện
+   * ra, rồi một lượt đọc lại CHẬM hơn — từ nhánh phục hồi 409, hoặc từ lượt
+   * đọc-trước-khi-gửi trong `execute()` — về SAU, mang đúng snapshot CŨ
+   * ("Đơn vị tour đang xác nhận lịch") và `absorb()` vô điều kiện nối thêm nó
+   * vào cuối `turns`. Không có gì sai ở logic HTTP hay ở `sayOnce` — bong bóng
+   * kia CHƯA từng bị nói trước đó nên dedupe theo nội dung không chặn được.
+   * Vấn đề thuần là THỨ TỰ: `turns` chỉ nối theo thứ tự promise nào resolve
+   * trước, không theo thứ tự request nào được gửi trước.
+   *
+   * `beginFetch()` phát một vé MỚI trước khi bắt đầu một lượt đọc/gửi.
+   * `absorbIfCurrent()` chỉ gọi `absorb()` khi vé đó VẪN LÀ vé mới nhất — nếu
+   * một lượt khác đã bắt đầu (và có thể đã xong) sau nó, kết quả này bị coi
+   * là cũ và bỏ qua, không nối vào hội thoại nữa. Cùng nguyên lý
+   * `generationRef` đã dùng ở `useWorkflowPolling.ts`.
+   */
+  const requestSeq = useRef(0)
+
+  function beginFetch(): number {
+    requestSeq.current += 1
+    return requestSeq.current
+  }
+
+  function absorbIfCurrent(seq: number, res: AgentWorkflowResponse) {
+    if (seq !== requestSeq.current) return
+    absorb(res)
+  }
+
+  /**
    * Các chặng TẠM, vẽ trong lúc Planner còn đang chạy.
    *
    * Chặng thật dựng từ `live.plan`, mà plan chưa tồn tại suốt 20–120 giây lập
@@ -526,9 +563,10 @@ export function JourneyWorkspacePage() {
     const id = new URL(window.location.href).searchParams.get(WORKFLOW_PARAM)
     if (!id) return
     let alive = true
+    const seq = beginFetch()
     getWorkflow(id)
       .then((res) => {
-        if (alive) absorb(res)
+        if (alive) absorbIfCurrent(seq, res)
       })
       .catch(() => {
         if (!alive) return
@@ -663,9 +701,10 @@ export function JourneyWorkspacePage() {
     if (TERMINAL.has(live.status) && !answerPending) return
     let alive = true
     const timer = window.setTimeout(async () => {
+      const seq = beginFetch()
       try {
         const res = await getWorkflow(id)
-        if (alive) absorb(res)
+        if (alive) absorbIfCurrent(seq, res)
       } catch (error) {
         if (alive) setFault(error instanceof Error ? error.message : 'Mất kết nối tới P-118.')
       }
@@ -712,7 +751,15 @@ export function JourneyWorkspacePage() {
     try {
       const fields: Record<string, string> = {}
       for (const [key, value] of Object.entries(values)) fields[key] = extractValue(value)
-      absorb(await continueWorkflow(action.workflowId, { fields }))
+      const seq = beginFetch()
+      // Ô "trả lời chung" KHÔNG phải field của contract — gửi nó như `fields`
+      // là 422 chắc chắn, không lối thoát. Xem `FREE_TEXT_ANSWER_KEY`.
+      const freeText = fields[FREE_TEXT_ANSWER_KEY]
+      const payload =
+        freeText !== undefined && Object.keys(fields).length === 1
+          ? { message: freeText }
+          : { fields }
+      absorbIfCurrent(seq, await continueWorkflow(action.workflowId, payload))
     } catch (error) {
       // Nói LẠI LÝ DO backend đưa ra, không phủ lên nó một câu chung chung.
       // Người dùng từng thấy "Mình chưa gửi được xác nhận của bạn" đè lên câu
@@ -726,8 +773,16 @@ export function JourneyWorkspacePage() {
       // nhưng thẻ "Xác nhận thanh toán" vẫn nằm đó từ nhịp poll trước. Người
       // dùng bấm — 409. Bấm lại — 409 lần nữa. Không tải lại thì thẻ ấy còn
       // mãi và mọi cú bấm đều hỏng y hệt.
+      //
+      // Vé mới TRƯỚC khi đọc lại: đây là lượt đọc CHẬM, chạy song song với
+      // mọi nhịp poll/mutation khác — không có vé, kết quả của nó có thể về
+      // SAU một `absorb` mới hơn và nối một câu CŨ vào cuối hội thoại đã có
+      // câu MỚI. Đây chính là bug đã đo được trên UI thật.
       if (error instanceof ApiError && error.status === 409 && live?.workflow_id) {
-        getWorkflow(live.workflow_id).then(absorb).catch(() => {})
+        const recoverySeq = beginFetch()
+        getWorkflow(live.workflow_id)
+          .then((res) => absorbIfCurrent(recoverySeq, res))
+          .catch(() => {})
       }
     }
   }
@@ -794,6 +849,7 @@ export function JourneyWorkspacePage() {
     }
 
     try {
+      const seq = beginFetch()
       let res: AgentWorkflowResponse
       if (action.kind === 'approval') {
         res = await decidePayment(action.workflowId, intent === 'REJECT' ? 'reject' : 'approve')
@@ -820,7 +876,7 @@ export function JourneyWorkspacePage() {
             return
           }
           say('agent', outcome.reply)
-          absorb(res)
+          absorbIfCurrent(seq, res)
           return
         }
         // Câu ngắn trả lời một field có tập giá trị hữu hạn ("Khu B") được
@@ -866,7 +922,7 @@ export function JourneyWorkspacePage() {
             : outcome.reply,
         )
       }
-      absorb(res)
+      absorbIfCurrent(seq, res)
     } catch (error) {
       // Câu mẫu "chưa gửi được" nói SAI chuyện đã xảy ra khi server đã nhận và
       // từ chối có lý do. Người dùng thấy hai câu chồng lên nhau và không biết
@@ -881,7 +937,10 @@ export function JourneyWorkspacePage() {
       // dùng bấm — 409. Bấm lại — 409 lần nữa. Không tải lại thì thẻ ấy còn
       // mãi và mọi cú bấm đều hỏng y hệt.
       if (error instanceof ApiError && error.status === 409 && live?.workflow_id) {
-        getWorkflow(live.workflow_id).then(absorb).catch(() => {})
+        const recoverySeq = beginFetch()
+        getWorkflow(live.workflow_id)
+          .then((res) => absorbIfCurrent(recoverySeq, res))
+          .catch(() => {})
       }
     }
   }
@@ -959,8 +1018,9 @@ export function JourneyWorkspacePage() {
       let snapshot = live
       if (live?.workflow_id) {
         try {
+          const seq = beginFetch()
           snapshot = await getWorkflow(live.workflow_id)
-          absorb(snapshot)
+          absorbIfCurrent(seq, snapshot)
         } catch {
           /* đọc lại hỏng thì dùng ảnh đang có, không chặn người dùng */
         }
@@ -1122,7 +1182,8 @@ export function JourneyWorkspacePage() {
       setPicked([])
       setInvalid({})
       try {
-        absorb(await startWorkflow(goal, built.projectName, sessionRef.current, built.formFields))
+        const seq = beginFetch()
+        absorbIfCurrent(seq, await startWorkflow(goal, built.projectName, sessionRef.current, built.formFields))
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         setFault(detail)

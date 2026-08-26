@@ -95,6 +95,10 @@ class PostgreSQLWorkflowStateRepository:
         """Giành quyền sinh câu trả lời cho một trạng thái. Xem WorkflowRepository."""
         return await self.workflows.claim_assistant_response(workflow_id, for_status=for_status)
 
+    async def invalidate_assistant_response(self, workflow_id: str) -> None:
+        """Buộc lần đọc kế tiếp dựng câu từ dữ kiện nghiệp vụ mới nhất."""
+        await self.workflows.invalidate_assistant_response(workflow_id)
+
     async def save_assistant_response(self, workflow_id: str, **kwargs) -> None:
         await self.workflows.save_assistant_response(workflow_id, **kwargs)
 

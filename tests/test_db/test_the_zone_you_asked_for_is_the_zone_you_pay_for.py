@@ -462,6 +462,53 @@ async def test_approval_moves_the_spot_and_repins_the_price(client, db_pool, spy
 
 
 @pytest.mark.asyncio
+async def test_the_customer_view_uses_the_changed_zone_and_price(client, db_pool, spy):
+    """Audit giữ Khu A; read-model phải kể booking hiện hành là Khu B."""
+    from src.api.routes import _public_view_from_db
+
+    wid, _booking_id = await _seed_booked_zone_a(db_pool, tag="31")
+    snapshot = json.loads(json.dumps(_PLAN_SNAPSHOT))
+    snapshot["tasks"][2]["input"] = {
+        "booking_id": {"from_task": "T5", "field": "booking_id"},
+        "amount": {"from_task": "T5", "field": "amount"},
+        "currency": {"from_task": "T5", "field": "currency"},
+    }
+    await db_pool.execute(
+        "UPDATE workflows SET task_plan=$2::jsonb WHERE workflow_id=$1::uuid",
+        wid,
+        json.dumps(snapshot),
+    )
+    await demo_service.rerun_with_answers(wid, {"parking_zone": "ZONE_B"})
+    task_id = [r for r in await pending_for_workflow(db_pool, wid) if r["status"] == "AWAITING"][0]["task_id"]
+    await record_service_decision(db_pool, wid, task_id, "APPROVED", decided_by="don_vi_do_xe")
+    await demo_service.resume_after_service_decision(wid)
+
+    view = await _public_view_from_db(wid)
+    assert view is not None
+    parking = next(task for task in view.tasks if task.tool == "book_parking")
+    parking_details = {item.label: item.value for item in parking.details}
+
+    assert parking_details["Khu vực"] == "Khu B"
+    assert parking_details["Phí đặt chỗ"] == "100.000 VND"
+    assert "Khu A" not in parking.message
+
+    # Sau thanh toán, InputRef của T8 vẫn trỏ T5 (dấu vết giữ chỗ ban đầu).
+    # Read-model phải giải nó qua projection hiện hành, không quay về 150.000.
+    await db_pool.execute(
+        "UPDATE workflow_tasks SET status='SUCCESS', result_data=$2::jsonb "
+        "WHERE workflow_id=$1::uuid AND task_id='T8'",
+        wid,
+        json.dumps({"payment_id": "PAY-31", "payment_status": "PAID"}),
+    )
+    await db_pool.execute("UPDATE workflows SET status='SUCCESS' WHERE workflow_id=$1::uuid", wid)
+    finished = await _public_view_from_db(wid)
+    assert finished is not None
+    payment = next(task for task in finished.tasks if task.tool == "pay_fee")
+    payment_details = {item.label: item.value for item in payment.details}
+    assert payment_details["Số tiền"] == "100.000 VND"
+
+
+@pytest.mark.asyncio
 async def test_the_provider_is_called_exactly_once(client, db_pool, spy):
     wid, _booking_id = await _seed_booked_zone_a(db_pool, tag="14")
     await demo_service.rerun_with_answers(wid, {"parking_zone": "ZONE_B"})

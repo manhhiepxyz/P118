@@ -910,10 +910,14 @@ def _resolve_input(value: Any, results_by_task: dict[str, Any] | None) -> Any:
     Số tiền là dữ liệu có thẩm quyền của provider, nằm trong KẾT QUẢ của task
     được trỏ tới. Lấy từ đó, không lấy từ nơi nào khác.
     """
-    if not isinstance(value, dict):
+    if isinstance(value, InputRef):
+        from_task = value.from_task
+        field = value.field
+    elif isinstance(value, dict):
+        from_task = value.get("from_task")
+        field = value.get("field")
+    else:
         return value
-    from_task = value.get("from_task")
-    field = value.get("field")
     if not from_task or not field or not results_by_task:
         return None
     source = results_by_task.get(str(from_task))
@@ -1236,10 +1240,45 @@ def _polling_task_views(
     if plan is None:
         return []
     rows = {row["task_id"]: row for row in (record or {}).get("tasks", [])}
+
+    # `change_parking_zone` là một lệnh nghiệp vụ mới, còn `book_parking` là
+    # dấu vết của lần giữ chỗ ban đầu. Vì vậy database CỐ Ý giữ cả hai:
+    #
+    #   T2    book_parking        SUCCESS  ZONE_A / 150.000
+    #   T2Z2  change_parking_zone SUCCESS  ZONE_B / 100.000
+    #
+    # Public view trước đây chỉ có T2 trong snapshot kế hoạch, nên sau khi đơn
+    # vị đã đổi booking thật sang Khu B, trang chi tiết và Response Agent vẫn
+    # kể lại Khu A. Không được vá ngược T2 trong database — làm vậy phá audit.
+    # Thay vào đó, chiếu kết quả đổi khu SUCCESS mới nhất lên đúng booking khi
+    # dựng READ MODEL cho người dùng. Thứ tự rows là thứ tự id tăng dần từ
+    # repository, nên lần đổi sau cùng thắng nếu khách đổi nhiều lần.
+    effective_booking_results: dict[str, dict[str, Any]] = {}
+    for row in (record or {}).get("tasks", []):
+        if row.get("tool") != "change_parking_zone" or row.get("status") != "SUCCESS":
+            continue
+        changed = row.get("result_data")
+        booking_id = changed.get("booking_id") if isinstance(changed, dict) else None
+        if booking_id:
+            effective_booking_results[str(booking_id)] = dict(changed)
+
+    effective_results_by_task: dict[str, dict[str, Any]] = {}
+    for task_id, row in rows.items():
+        raw = row.get("result_data")
+        if not isinstance(raw, dict):
+            continue
+        effective = dict(raw)
+        if row.get("tool") == "book_parking":
+            booking_id = effective.get("booking_id")
+            changed = effective_booking_results.get(str(booking_id)) if booking_id else None
+            if changed is not None:
+                effective.update(changed)
+        effective_results_by_task[task_id] = effective
+
     # Kết quả của MỌI task, để giải InputRef của bước thanh toán.
-    results_by_task = {
-        task_id: row.get("result_data") for task_id, row in rows.items() if isinstance(row.get("result_data"), dict)
-    }
+    # Dùng projection hiện hành để `pay_fee` trỏ T2 vẫn hiện đúng giá sau đổi
+    # khu, thay vì đọc amount cũ trong dấu vết giữ chỗ ban đầu.
+    results_by_task = effective_results_by_task
     views = []
     for task in plan.tasks:
         row = rows.get(task.task_id)
@@ -1260,7 +1299,7 @@ def _polling_task_views(
         if status == "SUCCESS":
             _, message, details = _task_presentation(
                 task,
-                SimpleNamespace(data=row.get("result_data") or {}),
+                SimpleNamespace(data=effective_results_by_task.get(task.task_id, row.get("result_data") or {})),
                 results_by_task,
             )
             views.append(
@@ -5421,8 +5460,30 @@ async def _demo_workflow_status(
     #
     # NEEDS_INFORMATION KHÔNG phải giá trị trong `WorkflowStatus`: nó được SUY
     # RA từ bảng con, đúng cách repair hint đang làm ở khối ngay trên.
+    #
+    # KHÔNG còn khoá sau `job is None`. Điều kiện ấy hẹp hơn ý định của chính
+    # nó: tới được đây nghĩa là cache RAM ĐÃ KHÔNG dựng nổi một response dùng
+    # được (nhánh `job["response"]` phía trên đã return nếu có). Còn một entry
+    # `_DEMO_JOBS` dở dang — `response = None` sau khi `retry` xoá nó, hoặc sau
+    # một lần dựng lại chỉ được một phần — thì `job is None` là False, nhánh
+    # này bị bỏ qua, và response rơi xuống bản dựng từ `workflows`/
+    # `workflow_tasks`. Bản đó không mang `question` lẫn `missing_fields`.
+    #
+    # Đo được trên máy người dùng, mở lại một yêu cầu từ Lịch sử:
+    #
+    #     GET  → status=NEEDS_INFORMATION, missing_fields=[]
+    #     UI   → không có ô nào để vẽ, dựng một ô "trả lời chung" khoá `answer`
+    #     POST → 422 "Biểu mẫu gửi lên có mục không nằm trong câu hỏi"
+    #
+    # Ngõ cụt tuyệt đối: `answer` không bao giờ nằm trong `missing_fields`, nên
+    # người dùng gõ gì cũng hỏng, và "tải lại trang" không sửa được vì lỗi
+    # không nằm ở trang.
+    #
+    # Chốt chặn theo TRẠNG THÁI thì giữ nguyên, và nó là chốt thật: `cancel`
+    # chỉ đổi `workflows.status`, KHÔNG xoá dòng clarification — thiếu nó, một
+    # yêu cầu vừa bấm Dừng sẽ hiện lại đúng câu hỏi cũ.
     database_status = record["workflow"]["status"] if record is not None else None
-    if job is None and record is not None and database_status not in {"SUCCESS", "FAILED", "CANCELLED"}:
+    if record is not None and database_status not in {"SUCCESS", "FAILED", "CANCELLED"}:
         pending = await _load_clarification_safely(workflow_id)
         if pending is not None:
             return DemoWorkflowResponse(

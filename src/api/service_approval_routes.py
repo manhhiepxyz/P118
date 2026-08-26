@@ -244,6 +244,16 @@ async def decide_service_approval(
     # xoá nó và nhờ một mô hình viết lại một quyết định nghiệp vụ — người duyệt
     # là người duy nhất biết vì sao họ từ chối.
     if not outcome.get("repair_pending"):
+        # Một quyết định có thể đổi dữ kiện mà KHÔNG đổi status/actor. Ca thật:
+        # đổi Khu A → Khu B xong vẫn WAITING_APPROVAL:USER vì còn thanh toán.
+        # Nếu chỉ gọi `request_fresh_answer`, claim theo cùng khoá sẽ từ chối
+        # và câu cũ "Khu A, 150.000" sống tiếp dù booking đã là Khu B/100.000.
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            await repository.invalidate_assistant_response(workflow_id)
+        finally:
+            await pool.close()
         request_fresh_answer(workflow_id, job=job)
 
     return {"workflow_id": workflow_id, "task_id": task_id, "decision": body.decision, **outcome}

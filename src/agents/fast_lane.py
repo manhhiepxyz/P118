@@ -178,6 +178,7 @@ class FastLane:
         self,
         goal: str,
         existing_context: dict[str, Any] | None = None,
+        user_answers: dict[str, Any] | None = None,
     ) -> TaskPlan | None:
         if not (goal or "").strip():
             return None
@@ -217,6 +218,30 @@ class FastLane:
 
         for o in O_TU_NGU_CANH:
             gia_tri = (existing_context or {}).get(o)
+            if gia_tri is not None:
+                values[o] = gia_tri
+
+        # Câu trả lời người dùng VỪA gõ ở lượt hỏi lại, đặt SAU cùng nên nó
+        # THẮNG giá trị model đọc được từ goal.
+        #
+        # `/continue` giữ NGUYÊN goal cũ và để câu trả lời mới ở `user_answers`
+        # (xem `routes.py`), vì goal là điều họ nói LÚC ĐẦU còn `user_answers`
+        # là điều họ nói SAU KHI biết còn thiếu gì. Không đọc nó ở đây thì
+        # đường nhanh luôn thiếu đúng cái ô người dùng vừa điền — kế hoạch
+        # trượt Validator và rơi về Planner đầy đủ, MỌI LẦN.
+        #
+        # Đo được trên `llm_usage` trước khi sửa:
+        #
+        #     workflow gốc (/start)      53 lượt → 20 về đích (38%)
+        #     workflow con (/continue)    4 lượt →  0 về đích (0%), 44,1s
+        #
+        # Lượt hỏi lại — đúng lúc hệ thống đã biết CHÍNH XÁC thiếu ô nào và
+        # người dùng vừa điền nốt — lại là lượt chậm nhất.
+        #
+        # Giá trị `None` KHÔNG ghi đè: một ô chưa trả lời không được phép xoá
+        # giá trị goal đã nói rõ. Và mọi thứ vẫn đi qua `TaskPlanValidator` ở
+        # dưới — đây là thêm một NGUỒN giá trị, không phải nới một cổng kiểm.
+        for o, gia_tri in (user_answers or {}).items():
             if gia_tri is not None:
                 values[o] = gia_tri
 

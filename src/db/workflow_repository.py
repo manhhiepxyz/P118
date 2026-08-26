@@ -624,6 +624,29 @@ class WorkflowRepository:
             )
         return claimed is not None
 
+    async def invalidate_assistant_response(self, workflow_id: str) -> None:
+        """Bỏ câu đã dựng khi dữ kiện nghiệp vụ đổi nhưng status không đổi.
+
+        Ví dụ đổi Khu A → Khu B vẫn để workflow ở WAITING_APPROVAL vì khách
+        còn phải trả tiền. Khoá câu trả lời chỉ theo status/actor sẽ coi câu
+        cũ là còn hợp lệ và tiếp tục nói Khu A. Xoá cả khoá lẫn nội dung để
+        lượt `request_fresh_answer` kế tiếp phải đọc read-model mới.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE workflows
+                SET assistant_answer = NULL,
+                    assistant_suggestions = '[]'::jsonb,
+                    assistant_response_state = NULL,
+                    assistant_for_status = NULL,
+                    assistant_updated_at = NULL,
+                    updated_at = NOW()
+                WHERE workflow_id = $1
+                """,
+                _uuid(workflow_id),
+            )
+
     async def save_assistant_response(
         self,
         workflow_id: str,

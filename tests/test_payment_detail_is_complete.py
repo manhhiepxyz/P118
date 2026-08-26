@@ -13,6 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from src.api.routes import _resolve_input, _task_presentation
+from src.common.task_plan import InputRef
 
 
 class _Task:
@@ -31,6 +32,10 @@ RESULTS = {"T3": {"amount": 150000, "currency": "VND", "booking_id": "BOOK-047",
 def test_input_ref_resolves_from_the_task_it_points_at() -> None:
     assert _resolve_input({"field": "amount", "from_task": "T3"}, RESULTS) == 150000
     assert _resolve_input({"field": "booking_id", "from_task": "T3"}, RESULTS) == "BOOK-047"
+
+
+def test_input_ref_object_resolves_from_the_task_it_points_at() -> None:
+    assert _resolve_input(InputRef(field="amount", from_task="T3"), RESULTS) == 150000
 
 
 def test_a_plain_value_passes_through_untouched() -> None:

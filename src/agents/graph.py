@@ -522,7 +522,15 @@ def build_planner_graph(
         #
         # `None` ở mọi nhánh không chắc chắn, và ta rơi về Planner như hôm nay.
         if fast_lane is not None:
-            nhanh = await fast_lane.plan(state.get("goal", ""), state.get("existing_context", {}))
+            # `user_answers` PHẢI đi cùng: ở lượt `/continue`, `goal` vẫn là
+            # câu gốc còn thiếu đúng ô người dùng vừa điền. Không truyền thì
+            # Fast Lane luôn trượt Validator và mọi lượt hỏi lại đều trả giá
+            # 33s — đo được 0/4 workflow con từng đi được đường nhanh.
+            nhanh = await fast_lane.plan(
+                state.get("goal", ""),
+                state.get("existing_context", {}),
+                state.get("user_answers") or {},
+            )
             if nhanh is not None:
                 _apply_user_answers(nhanh, state.get("user_answers") or {})
                 _inject_trusted_identity(nhanh, state.get("existing_context", {}))

@@ -19,6 +19,31 @@ import { fieldSpecForMissing, today } from './serviceForms'
 import type { AgentTaskResult, AgentWorkflowResponse } from './types'
 
 /**
+ * Ô "trả lời chung" khi backend nói CẦN THÊM THÔNG TIN mà không kèm ô nào.
+ *
+ * KHÔNG phải một field của contract — backend chưa bao giờ hỏi nó. Nó chỉ là
+ * chỗ để người dùng gõ một câu tự do khi `missing_fields` rỗng (workflow mở
+ * lại từ Lịch sử, hoặc cache RAM chỉ dựng lại một phần).
+ *
+ * Vì thế nó PHẢI được gửi đi dưới dạng `message`, KHÔNG phải `fields`. Gửi như
+ * field là ngõ cụt tuyệt đối, đo được nguyên văn trên máy người dùng:
+ *
+ *     UI gửi   {"fields": {"answer": "2 người"}}
+ *     Backend  `answer` không nằm trong danh sách đang hỏi
+ *              → 422 "Biểu mẫu gửi lên có mục không nằm trong câu hỏi,
+ *                 nên mình chưa nhận được. Bạn tải lại trang rồi trả lời
+ *                 giúp mình nhé."
+ *
+ * Tải lại trang không cứu được, vì lỗi không nằm ở trang: `fields` là hợp đồng
+ * ALL-OR-NONE theo đúng `missing_fields` backend đang chờ, và `answer` không
+ * bao giờ nằm trong đó. Người dùng gõ gì cũng hỏng y hệt.
+ *
+ * `message` thì ngược lại — backend đọc nó bằng `_extract_follow_up_answers`,
+ * đúng đường mà một câu chat tự do vẫn đi.
+ */
+export const FREE_TEXT_ANSWER_KEY = 'answer'
+
+/**
  * Khoá field của backend → nhãn tiếng Việt.
  *
  * `missing_fields` trả về tên field kỹ thuật (`plate_number`, `viewing_date`).
@@ -416,11 +441,11 @@ export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction |
       details: [],
       field: first
         ? pendingFieldFor(first)
-        : { key: 'answer', label: 'Trả lời', placeholder: 'Trả lời P-118' },
+        : { key: FREE_TEXT_ANSWER_KEY, label: 'Trả lời', placeholder: 'Trả lời P-118' },
       // Đủ MỌI ô đang chờ — backend từ chối cả lượt nếu thiếu một ô.
       fields: res.missing_fields.length
         ? res.missing_fields.map(pendingFieldFor)
-        : [{ key: 'answer', label: 'Trả lời', placeholder: 'Trả lời P-118' }],
+        : [{ key: FREE_TEXT_ANSWER_KEY, label: 'Trả lời', placeholder: 'Trả lời P-118' }],
       fingerprint: res.missing_fields.join(','),
       explain: res.question || 'Mình cần thông tin này để lập kế hoạch tiếp.',
     }
