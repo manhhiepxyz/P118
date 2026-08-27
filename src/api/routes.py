@@ -2023,6 +2023,26 @@ async def _facts_for(
     if availability:
         facts.update(availability)
 
+    if response.provider_proposal:
+        # Đề xuất đơn vị đang chờ KHÁCH bấm. Không có những dữ kiện này thì
+        # model được giao đúng tình huống mà không có dữ liệu về nó — và nó
+        # đoán. Đo được trên canary, nguyên văn:
+        #
+        #     "Mình cần bạn xác nhận khoản THANH TOÁN để chốt lịch chuyển nhà"
+        #
+        # Không có khoản thanh toán nào. Việc cần làm là chọn đơn vị, và khách
+        # đọc câu ấy sẽ đi tìm một nút trả tiền không tồn tại. Cùng một gốc với
+        # ba lỗi đã ghi ở trên: model phải trả lời mà không được đưa dữ liệu.
+        de_xuat = response.provider_proposal
+        facts["dang_cho_ban_chon_don_vi"] = {
+            "don_vi": (de_xuat.get("provider") or {}).get("name"),
+            "gia": de_xuat.get("amount"),
+            "tien_te": de_xuat.get("currency"),
+            "ly_do": de_xuat.get("reason"),
+            "han_bao_gia": de_xuat.get("valid_until"),
+            "viec_can_lam": "Khách bấm đồng ý với đơn vị này. KHÔNG phải thanh toán.",
+        }
+
     if response.approval_actor == "PROVIDER":
         # Đúng những dữ kiện ĐƠN VỊ đang nhìn để quyết định — `approval_details`
         # đã bỏ định danh nội bộ trước khi ghim hàng đợi, nên đây không phải
@@ -2129,7 +2149,7 @@ def _terminal_stage_for(response: DemoWorkflowResponse) -> str:
     return "FINISHED"
 
 
-def answer_key(status: str, approval_actor: str | None = None) -> str:
+def answer_key(status: str, approval_actor: str | None = None, *, de_xuat_don_vi: bool = False) -> str:
     """Câu trả lời đang mô tả TÌNH HUỐNG nào — một luật, dùng ở mọi nơi.
 
     `status` một mình là chưa đủ. `WAITING_APPROVAL` mang HAI tình huống khác
@@ -2149,6 +2169,14 @@ def answer_key(status: str, approval_actor: str | None = None) -> str:
     dùng nó trong `_assistant_fields`.
     """
     if status == "WAITING_APPROVAL" and approval_actor:
+        # `USER` mang HAI tình huống nữa, và chúng cũng nối tiếp nhau trong
+        # cùng một workflow: khách CHỌN ĐƠN VỊ, rồi (sau khi đơn vị duyệt)
+        # khách XÁC NHẬN TIỀN. Cả hai đều `WAITING_APPROVAL:USER`, nên khoá hai
+        # chữ để câu của tình huống trước sống tiếp qua tình huống sau — đúng
+        # lỗi mà `approval_actor` đã được thêm vào đây để chữa, chỉ ở một tầng
+        # sâu hơn.
+        if de_xuat_don_vi:
+            return f"{status}:{approval_actor}:PROPOSAL"
         return f"{status}:{approval_actor}"
     return status
 
@@ -2306,7 +2334,9 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             if current is None:
                 return
         # Khoá gồm cả NGƯỜI đang được chờ: xem `answer_key`.
-        for_status = answer_key(current.status, current.approval_actor)
+        for_status = answer_key(
+            current.status, current.approval_actor, de_xuat_don_vi=current.provider_proposal is not None
+        )
 
         if not await _claim_answer_safely(workflow_id, for_status):
             # Trạng thái này đã có câu trả lời, hoặc một tiến trình khác đang
@@ -2394,8 +2424,19 @@ async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) 
     WAITING_APPROVAL trở thành sai ngay khi người dùng bấm duyệt — hiển thị lại
     nó nghĩa là nói với họ rằng vẫn đang chờ, trong khi tiền đã thu xong.
     """
+    # Đề xuất đơn vị GIỮ NGUYÊN câu hằng số, không nhận câu đã ghi.
+    #
+    # Câu ấy mang một tên công ty và một con số tiền; `_waiting_proposal_view`
+    # dựng nó bằng mã đúng lý do đó. Nhận bản đã ghi ở đây sẽ vô hiệu hoá chính
+    # điều vừa làm — đo được trên canary: một lượt sinh nền ghi đè lại, và
+    # `response_state` trả về `FALLBACK` cho một câu lẽ ra là tất định.
+    if response.provider_proposal is not None:
+        return response
+
     stored = await _load_answer_safely(workflow_id)
-    if stored.get("for_status") != answer_key(response.status, response.approval_actor):
+    if stored.get("for_status") != answer_key(
+        response.status, response.approval_actor, de_xuat_don_vi=response.provider_proposal is not None
+    ):
         return response
     return response.model_copy(
         update={
@@ -2516,6 +2557,14 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     # Cùng luật với đường polling: câu hỏi dành cho khách thắng "đang chờ đơn
     # vị". Hai đường dựng lại cùng một sự thật thì phải xếp hạng giống nhau;
     # lệch nhau nghĩa là poll và F5 kể hai câu chuyện khác nhau.
+    # Loại chờ THỨ TƯ: khách còn phải CHỌN đơn vị. Đặt TRƯỚC hàng đợi duyệt vì
+    # cùng một luật đã viết ở nhánh dưới — việc cần KHÁCH làm luôn được nói
+    # trước việc cần ĐƠN VỊ làm. Ở đây luật ấy còn chặt hơn: khi đề xuất còn
+    # chờ thì hàng đợi đơn vị CHƯA có gì, nên hai nhánh không thể cùng đúng.
+    pending_proposal = await _load_pending_proposal(workflow_id)
+    if pending_proposal is not None:
+        return _waiting_proposal_view(workflow_id, plan=plan, record=record, pending=pending_proposal, events=events)
+
     if not _has_open_repair(record):
         pending_services = await _load_pending_services(workflow_id)
         if pending_services:
@@ -2688,7 +2737,9 @@ async def _load_answer_safely(workflow_id: str) -> dict[str, Any]:
 async def _refresh_answer_from_db(job: dict[str, Any], workflow_id: str, current: DemoWorkflowResponse) -> None:
     """Lấy câu đã ghi cho ĐÚNG trạng thái hiện tại vào cache."""
     stored = await _load_answer_safely(workflow_id)
-    if stored.get("for_status") != answer_key(current.status, current.approval_actor) or not stored.get("answer"):
+    if stored.get("for_status") != answer_key(
+        current.status, current.approval_actor, de_xuat_don_vi=current.provider_proposal is not None
+    ) or not stored.get("answer"):
         return
     if job.get("response") is current:
         job["response"] = current.model_copy(
@@ -3581,18 +3632,14 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
         # lần — không ai bên kia nhận được việc, và khách thì đang được bảo là
         # không phải làm gì trong khi họ là người duy nhất còn phải làm.
         de_xuat = (state.get("policy_context") or {}).get("provider_proposal") or {}
-        don_vi = (de_xuat.get("provider") or {}).get("name") or "đơn vị phù hợp"
-        so_tien = de_xuat.get("amount")
+        cau = cau_de_xuat_don_vi(de_xuat)
         return DemoWorkflowResponse(
             status="WAITING_APPROVAL",
             workflow_id=state.get("workflow_id"),
-            summary=(
-                f"Mình tìm được {don_vi} với giá {so_tien:,.0f} VND. Bạn xác nhận để mình gửi yêu cầu nhé.".replace(
-                    ",", "."
-                )
-                if isinstance(so_tien, int)
-                else f"Mình đề xuất {don_vi}. Bạn xác nhận để mình gửi yêu cầu nhé."
-            ),
+            summary=cau,
+            # Hằng số, không do model soạn — xem `_waiting_proposal_view`.
+            answer=cau,
+            response_state="READY",
             provider_proposal=de_xuat,
             # KHÁCH quyết định. Giao diện đọc trường này để dựng nút xác nhận —
             # và để KHÔNG dựng màn hình chờ đơn vị.
@@ -4898,6 +4945,116 @@ def _waiting_service_view(
     )
 
 
+def cau_de_xuat_don_vi(de_xuat: dict[str, Any]) -> str:
+    """Câu nói với khách khi đang chờ họ chọn đơn vị. MỘT chỗ dựng.
+
+    Hai đường dựng response — chạy trong RAM, và dựng lại từ database — phải
+    nói ĐÚNG một câu. Viết inline ở cả hai là cách chắc chắn để chúng lệch
+    nhau, và lệch ở đây nghĩa là F5 đổi nội dung một lời chào giá.
+
+    Định dạng số TRƯỚC rồi mới ghép. `.replace(",", ".")` trên cả câu sẽ nuốt
+    luôn dấu phẩy của tiếng Việt — đo được trên canary ở `_ly_do`, cùng lỗi.
+    """
+    don_vi = (de_xuat.get("provider") or {}).get("name") or "đơn vị phù hợp"
+    so_tien = de_xuat.get("amount")
+    if not isinstance(so_tien, int):
+        return f"Mình đề xuất {don_vi}. Bạn xác nhận để mình gửi yêu cầu nhé."
+    so = f"{so_tien:,.0f}".replace(",", ".")
+    return f"Mình tìm được {don_vi} với giá {so} VND. Bạn xác nhận để mình gửi yêu cầu nhé."
+
+
+async def _load_pending_proposal(workflow_id: str) -> dict[str, Any] | None:
+    """Đề xuất đơn vị đang chờ KHÁCH bấm, đọc từ PostgreSQL.
+
+    Loại chờ THỨ TƯ, và nó ra đời sau ba loại kia — nên nó có đúng cùng một lỗ
+    hổng mà `_load_pending_services` đã phải vá: đường dựng response từ
+    database không có nhánh cho nó, và nó là loại DUY NHẤT không sống sót qua
+    restart.
+
+    Đo được trên canary `p118_e2e_db`: sau khi restart backend, `GET
+    /workflows/demo/{id}` trả `approval_actor=None` và `provider_proposal=None`
+    trong khi database vẫn giữ nguyên một đề xuất `PROPOSED` còn hạn. Giao diện
+    mất hẳn nút "đồng ý", và khách không có đường nào đi tiếp — trong khi lượt
+    xác nhận qua `/service-proposals` vẫn hoạt động hoàn hảo. Đúng loại lỗi tệ
+    nhất: dữ liệu đúng, hệ thống đúng, chỉ có người dùng là mắc kẹt.
+
+    Chỉ trả về khi CÒN BẤM ĐƯỢC. `status='PROPOSED'` một mình là fail-OPEN —
+    chứng từ có thể vừa hết hạn trong khi lượt dọn chưa chạy tới, và lúc ấy màn
+    hình dựng một cái nút bấm vào là lỗi.
+
+    DB lỗi trả `None`, cùng khuôn ba hàm kia: mất một khối trên màn hình còn
+    hơn mất cả workflow.
+    """
+    pool = None
+    try:
+        from src.db.proposal_repository import de_xuat_dang_cho
+        from src.orchestration.provider_matching import payload_cho_nguoi_dung
+
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        de_xuat = await de_xuat_dang_cho(pool, workflow_id=workflow_id, task_id=None)
+        if de_xuat is None:
+            return None
+        payload = await payload_cho_nguoi_dung(pool, de_xuat)
+        return payload if payload.get("can_confirm") else None
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load pending proposal failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+def _waiting_proposal_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    pending: dict[str, Any],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow đang chờ KHÁCH chọn đơn vị.
+
+    Cùng khuôn với ba view chờ kia: MỘT chỗ dựng, để đường RAM và đường restart
+    không lệch nhau. Ba lần trước mỗi lần một loại chờ mới ra đời là một lần
+    quên nhánh restart; đây là lần thứ tư, và nó được viết cùng lúc với nhánh
+    ấy.
+
+    `approval_actor="USER"` là thứ giao diện đọc để DỰNG nút xác nhận — ngược
+    hẳn với `_waiting_service_view`. Và câu chữ phải nói đúng ai: "đơn vị đang
+    xác nhận" lúc này là bảo khách không phải làm gì, trong khi họ là người duy
+    nhất còn phải làm.
+    """
+    tasks = _polling_task_views(plan, record, show_waiting=True)
+    summary = cau_de_xuat_don_vi(pending)
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_APPROVAL",
+        message=_STAGE_MESSAGES["WAITING_APPROVAL"],
+        summary=summary,
+        # Câu chat là HẰNG SỐ, không do model soạn — cùng lý do với câu đổi khu
+        # ở `_waiting_service_view`: nó mang một cái TÊN CÔNG TY và một CON SỐ
+        # TIỀN, và một bản diễn giải có thể nói sai cả hai.
+        #
+        # Đo được trên canary khi câu này còn do model viết, nguyên văn:
+        #
+        #     "Mình cần bạn xác nhận khoản thanh toán để chốt lịch chuyển nhà…"
+        #
+        # Không có khoản thanh toán nào. Việc cần làm là chọn đơn vị, và khách
+        # đọc câu ấy sẽ đi tìm một nút trả tiền không tồn tại.
+        answer=summary,
+        response_state="READY",
+        provider_proposal=pending,
+        approval_actor="USER",
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
+    )
+
+
 async def _load_pending_payment(workflow_id: str) -> dict[str, Any] | None:
     """Khoản thanh toán đang chờ duyệt của workflow, đọc từ PostgreSQL.
 
@@ -5403,6 +5560,23 @@ async def _demo_workflow_status(
     # Chờ đơn vị duyệt thì khách không phải làm gì; một câu hỏi thì có. Nên câu
     # hỏi thắng — dịch vụ kia vẫn nằm trong hàng đợi và vẫn được duyệt bình
     # thường, chỉ là nó không còn che mất phần khách phải trả lời.
+    # Loại chờ THỨ TƯ: khách còn phải CHỌN đơn vị. Đặt TRƯỚC hàng đợi duyệt vì
+    # cùng một luật đã viết ngay dưới — việc cần KHÁCH làm luôn được nói trước
+    # việc cần ĐƠN VỊ làm. Ở đây luật ấy còn chặt hơn: khi đề xuất còn chờ thì
+    # hàng đợi đơn vị CHƯA có gì, nên hai nhánh không thể cùng đúng.
+    pending_proposal = await _load_pending_proposal(workflow_id)
+    if pending_proposal is not None:
+        return await _with_stored_answer(
+            _waiting_proposal_view(
+                workflow_id,
+                plan=_plan_from_job_or_record(job, record),
+                record=record,
+                pending=pending_proposal,
+                events=_public_events(job) or await _read_events(workflow_id),
+            ),
+            workflow_id,
+        )
+
     if not _has_open_repair(record):
         pending_services = await _load_pending_services(workflow_id)
         if pending_services:

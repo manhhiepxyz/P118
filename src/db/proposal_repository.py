@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -185,14 +186,27 @@ async def doc_de_xuat(pool: asyncpg.Pool, proposal_id: str) -> DeXuat | None:
     return _to_de_xuat(row)
 
 
-async def de_xuat_dang_cho(pool: asyncpg.Pool, *, workflow_id: str, task_id: str) -> DeXuat | None:
-    """Đề xuất còn chờ khách bấm của một bước. Nhiều nhất một — ràng buộc ở database."""
+async def de_xuat_dang_cho(pool: asyncpg.Pool, *, workflow_id: str, task_id: str | None) -> DeXuat | None:
+    """Đề xuất còn chờ khách bấm. Nhiều nhất một mỗi bước — ràng buộc ở database.
+
+    `task_id=None` hỏi cho CẢ workflow, dùng ở đường dựng response: lúc ấy chỗ
+    gọi mới chỉ có `workflow_id` từ URL và chưa biết bước nào đang chờ. Bắt nó
+    tự đoán `"T1"` là dựng một giả định sẽ sai ngay khi có kế hoạch nào đặt tên
+    bước khác.
+
+    Cũ nhất trước, để một workflow (chưa thể) có hai bước cùng chờ vẫn cho ra
+    kết quả tất định thay vì phụ thuộc thứ tự đọc.
+    """
+    loc = "" if task_id is None else " AND task_id = $2"
+    tham_so: list[Any] = [_uuid(workflow_id)]
+    if task_id is not None:
+        tham_so.append(task_id)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             f"SELECT {_COT} FROM service_provider_proposals "  # noqa: S608
-            "WHERE workflow_id = $1 AND task_id = $2 AND status = 'PROPOSED'",
-            _uuid(workflow_id),
-            task_id,
+            f"WHERE workflow_id = $1 AND status = 'PROPOSED'{loc} "
+            "ORDER BY created_at ASC, task_id ASC LIMIT 1",
+            *tham_so,
         )
     return _to_de_xuat(row)
 
