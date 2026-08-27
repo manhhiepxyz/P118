@@ -1274,3 +1274,74 @@ BEGIN
             ON service_approvals (service_provider_id, status, created_at);
     END IF;
 END $$;
+
+
+-- ---------------------------------------------------------------------------
+-- Bước B — BÁO GIÁ CÓ DANH TÍNH
+-- ---------------------------------------------------------------------------
+-- Bước A khoá quyền sở hữu, nhưng đơn vị vẫn đến từ một bảng cứng trong mã.
+-- Ngay khi P-118 CHỌN đơn vị theo giá, phải trả lời được: lấy gì làm bằng
+-- chứng rằng đơn vị này đã báo giá này cho yêu cầu này? Không có bằng chứng
+-- thì `service_provider_id` chỉ là một chuỗi đi kèm request — và mọi thứ
+-- người dùng gửi được thì người dùng sửa được.
+--
+-- Bảng này là bằng chứng ấy. Nó KHÔNG lưu `goal`, prompt hay văn bản hội
+-- thoại: báo giá là chứng từ thương mại, nó chỉ cần dữ kiện định giá.
+--
+-- `request_fingerprint` là khoá của toàn bộ cơ chế: băm từ input canonical của
+-- dịch vụ. Đổi ngày/xe/thang máy/bốc xếp ra vân tay khác, nên báo giá cũ không
+-- dùng lại được cho yêu cầu đã đổi. `max_price` KHÔNG nằm trong vân tay và
+-- không bao giờ rời khỏi P-118.
+CREATE TABLE IF NOT EXISTS service_quotes (
+    -- ID nội bộ của P-118. Sinh ở đây, không nhận từ provider: một mã do bên
+    -- ngoài đặt là một mã bên ngoài có thể trùng, hoặc đoán.
+    quote_id            UUID         PRIMARY KEY,
+    -- Mã do provider đặt. Giữ nguyên chuỗi họ trả — đây là thứ để đối chiếu
+    -- khi có tranh chấp, nên không chuẩn hoá, không cắt, không viết hoa.
+    external_quote_id   VARCHAR(128) NOT NULL,
+    service_provider_id VARCHAR(32)  NOT NULL,
+    service_type        VARCHAR(64)  NOT NULL,
+    -- INTEGER, không phải NUMERIC/FLOAT. VND không có phần lẻ, và số thực làm
+    -- hai lần cộng cùng một hoá đơn ra hai kết quả.
+    amount              BIGINT       NOT NULL CHECK (amount > 0),
+    currency            VARCHAR(8)   NOT NULL CHECK (currency IN ('VND')),
+    request_fingerprint VARCHAR(64)  NOT NULL,
+    valid_until         TIMESTAMPTZ  NOT NULL,
+    status              VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE'
+                        CHECK (status IN ('ACTIVE', 'CONFIRMED', 'EXPIRED', 'SUPERSEDED')),
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    confirmed_at        TIMESTAMPTZ,
+    -- NGOÀI contract tối thiểu, và bắt buộc. Vân tay tính từ input, nên hai
+    -- workflow khác nhau xin cùng một việc có CÙNG vân tay. Không neo vào
+    -- workflow/task thì báo giá của người này dùng được cho yêu cầu của người
+    -- kia — đúng nghĩa IDOR, chỉ là trên chứng từ thay vì trên hàng đợi.
+    workflow_id         UUID,
+    task_id             VARCHAR(64),
+    -- CONFIRMED thì phải có mốc thời gian, và chưa CONFIRMED thì không được
+    -- có. Ràng buộc ở database chứ không ở tầng ứng dụng: một đường ghi mới
+    -- quên đặt `confirmed_at` sẽ vỡ ngay, chứ không để lại một chứng từ nói
+    -- "đã xác nhận" mà không nói lúc nào.
+    CONSTRAINT chk_service_quotes_confirmed_at
+        CHECK ((status = 'CONFIRMED') = (confirmed_at IS NOT NULL))
+);
+
+-- Tra theo BƯỚC: "báo giá nào đang sống cho bước này". Đây là truy vấn nóng —
+-- mọi lượt hiển thị và mọi lượt tiêu thụ đều đi qua nó.
+CREATE INDEX IF NOT EXISTS idx_service_quotes_task
+    ON service_quotes (workflow_id, task_id, status);
+
+-- Tra theo VÂN TAY: "yêu cầu này đã có báo giá nào rồi". Dùng khi một lượt sửa
+-- làm các báo giá của vân tay CŨ thành SUPERSEDED.
+CREATE INDEX IF NOT EXISTS idx_service_quotes_fingerprint
+    ON service_quotes (request_fingerprint, status);
+
+-- Một provider không được báo hai giá cho CÙNG một bước và CÙNG một yêu cầu.
+--
+-- Không có ràng buộc này thì một lượt xin báo giá chạy hai lần (retry sau
+-- timeout, hai tab, hai lượt poll) để lại hai dòng ACTIVE cùng đơn vị khác giá,
+-- và luật chọn sẽ lấy dòng rẻ hơn — tức hệ thống tự thưởng cho mình mỗi lần
+-- mạng chập chờn. `WHERE status = 'ACTIVE'` để lịch sử vẫn giữ được các báo
+-- giá đã hết hạn hay bị thay thế.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_active
+    ON service_quotes (workflow_id, task_id, service_provider_id, request_fingerprint)
+ WHERE status = 'ACTIVE';

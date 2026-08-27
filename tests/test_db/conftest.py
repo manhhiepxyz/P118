@@ -68,6 +68,10 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
         await conn.execute(
             """
             TRUNCATE TABLE
+                -- Chứng từ báo giá. Sót lại thì `bao_gia_dang_song` của test
+                -- sau đọc phải báo giá của test trước — và vì vân tay tính từ
+                -- input, hai test dùng cùng một yêu cầu mẫu sẽ trùng vân tay.
+                service_quotes,
                 -- Ai nhân danh đơn vị nào. Dọn cùng `users` chứ không dựa vào
                 -- CASCADE: một mapping sót lại cho phép tài khoản của test sau
                 -- thấy hàng đợi của test trước, và test ấy xanh vì lý do sai.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from threading import RLock
 
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.mock import schemas
 from src.mock.errors import install_error_handler, not_found
 from src.mock.ids import make_generator
+from src.mock.service_providers import DON_VI_CHUYEN_NHA, con_lich, gia_chuyen_nha
 
 resident_services_app = FastAPI(
     title="P-118 Resident Services Mock Provider",
@@ -30,6 +32,12 @@ _move_requests: dict[str, dict] = {}
 _lock = RLock()
 _new_maintenance_id = make_generator("MAINT")
 _new_move_id = make_generator("MOVE")
+_new_quote_id = make_generator("QMOV")
+
+# Báo giá sống bao lâu. Ngắn là CỐ Ý: một báo giá còn hiệu lực nghĩa là đơn vị
+# còn giữ chỗ cho ngày ấy, và không ai giữ chỗ vô hạn. Nó cũng làm nhánh hết
+# hạn chạy được trong một lượt demo thay vì chỉ tồn tại trên giấy.
+HIEU_LUC_BAO_GIA = timedelta(minutes=30)
 
 
 @resident_services_app.post(
@@ -67,6 +75,55 @@ def schedule_move(payload: schemas.ScheduleMoveRequest) -> schemas.ApiEnvelope:
     with _lock:
         _move_requests[move_request_id] = result
     return schemas.ApiEnvelope(success=True, data=result, message="Move scheduled")
+
+
+@resident_services_app.post(
+    "/api/resident-services/moves/quotes/{service_provider_id}",
+    summary="Xin báo giá chuyển nhà từ MỘT đơn vị",
+)
+def quote_move(service_provider_id: str, payload: schemas.QuoteMoveRequest) -> schemas.ApiEnvelope:
+    """Giá của đơn vị này cho đúng yêu cầu này, kèm hạn hiệu lực.
+
+    MỘT đơn vị mỗi lượt gọi, không phải một endpoint trả về cả danh sách. Ngoài
+    đời mỗi đơn vị là một hệ thống riêng với một hợp đồng riêng; gộp thành một
+    lời gọi là dựng sẵn một cái phễu mà sau này phải tháo ra. P-118 hỏi cả ba
+    đơn vị song song và tự chịu trách nhiệm khi một đơn vị im lặng.
+
+    Lịch trống là kiến thức CỦA ĐƠN VỊ, nên chính đơn vị nói "không nhận ngày
+    ấy" — P-118 không được tự suy từ một bảng lịch bên nó. Từ chối bằng
+    `NO_AVAILABILITY`, cùng mã canonical mà cổng duyệt đang dùng.
+    """
+    don_vi = next((d for d in DON_VI_CHUYEN_NHA if d.provider_id == service_provider_id), None)
+    if don_vi is None:
+        raise not_found("PROVIDER_NOT_FOUND", f"Không có đơn vị {service_provider_id}")
+    if not con_lich(don_vi, payload.move_date):
+        # 200 với `success=False`, không phải 4xx: đây là một câu trả lời
+        # NGHIỆP VỤ hợp lệ ("chúng tôi bận ngày đó"), không phải một lời gọi
+        # sai. Trả 4xx thì connector đọc nó thành sự cố và retry — retry một
+        # ngày nghỉ thì lần nào cũng nghỉ.
+        return schemas.ApiEnvelope(
+            success=False,
+            error_code="NO_AVAILABILITY",
+            message=f"{don_vi.ten} không nhận việc ngày {payload.move_date.isoformat()}",
+        )
+    gia = gia_chuyen_nha(
+        don_vi,
+        move_vehicle=payload.move_vehicle,
+        needs_elevator=payload.needs_elevator,
+        needs_loading_support=payload.needs_loading_support,
+    )
+    return schemas.ApiEnvelope(
+        success=True,
+        data={
+            "external_quote_id": _new_quote_id(),
+            "service_provider_id": don_vi.provider_id,
+            "provider_name": don_vi.ten,
+            "amount": gia,
+            "currency": "VND",
+            "valid_until": (datetime.now(UTC) + HIEU_LUC_BAO_GIA).isoformat(),
+        },
+        message="Quote issued",
+    )
 
 
 def _huy(kho: dict[str, dict], ma: str, o_trang_thai: str, ten: str) -> schemas.ApiEnvelope:

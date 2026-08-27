@@ -184,17 +184,130 @@ admin  /admin/requests/{B}      → MOV-02 "Vận tải Đại Tín"      | REJE
 khách  cả hai đường             → 403
 ```
 
-### B. Quote có danh tính
+### B. Quote có danh tính — **XONG** (27/08)
+
+Bước A khoá quyền sở hữu, nhưng đơn vị vẫn đến từ `don_vi_mac_dinh(tool)` — một
+bảng cứng trong mã. Ngay khi P-118 *chọn* đơn vị theo giá, câu hỏi đổi: lấy gì
+làm bằng chứng rằng đơn vị này đã báo giá này cho yêu cầu này? Không có bằng
+chứng thì `service_provider_id` chỉ là một chuỗi đi kèm request — và mọi thứ
+người dùng gửi được thì người dùng sửa được.
+
+**Nợ thiết kế được ghi nhận:** `service_provider_id` vẫn là chuỗi liên kết với
+danh mục trong mã, chưa có bảng provider canonical hay khoá ngoại. Chấp nhận
+cho A; B không thêm một chuỗi ID rời rạc nào nữa mà biến **quote** thành nguồn
+danh tính kiểm chứng được. Bảng provider canonical vẫn là việc chưa làm.
+
+#### Bảng `service_quotes`
+
+`quote_id` (nội bộ) · `external_quote_id` (do đơn vị đặt) · `service_provider_id`
+· `service_type` · `amount` (`BIGINT`, `CHECK > 0`) · `currency` (`CHECK IN
+('VND')`) · `request_fingerprint` · `valid_until` · `status` · `created_at` ·
+`confirmed_at`, cộng `workflow_id` / `task_id`.
+
+Hai ràng buộc ở tầng database, không ở tầng ứng dụng:
+
+- `CHECK ((status='CONFIRMED') = (confirmed_at IS NOT NULL))` — một đường ghi
+  mới quên đặt mốc thời gian thì vỡ ngay, chứ không để lại chứng từ nói "đã xác
+  nhận" mà không nói lúc nào.
+- `UNIQUE (workflow_id, task_id, service_provider_id, request_fingerprint)
+  WHERE status='ACTIVE'` — một lượt hỏi giá chạy hai lần (retry sau timeout,
+  hai tab) không được để lại hai dòng ACTIVE cùng đơn vị khác giá; luật chọn sẽ
+  lấy dòng rẻ hơn, tức hệ thống tự thưởng cho mình mỗi lần mạng chập chờn.
+
+Không lưu `goal`, prompt hay văn bản hội thoại. Báo giá là chứng từ thương mại.
+
+#### `request_fingerprint`
+
+SHA-256 của input canonical `schedule_move` — 5 field, JSON `sort_keys` +
+separator cố định. `date` và chuỗi ISO cho **cùng** vân tay (hai đường vào,
+một danh tính). Field thiếu khác field bằng `False`. Khoá nội bộ không ảnh
+hưởng. `max_price` bị **cấm** vào vân tay bằng một `ValueError` tường minh.
+
+#### Luồng — thứ tự là toàn bộ nội dung
 
 ```
-quote_id · service_provider_id · quoted_price · currency
-expires_at · request_fingerprint
+yêu cầu canonical
+  → hỏi TẤT CẢ đơn vị song song, KHÔNG gửi max_price
+  → đơn vị trả báo giá
+  → persist TỪNG báo giá
+  → rồi mới lọc theo max_price
+  → luật tất định chọn đề xuất
 ```
 
-Task nhận **`quote_id`**, không chỉ `provider_id`. Thiếu nó thì: giá hiển thị
-có thể khác giá thực hiện, không chứng minh được báo giá thuộc đúng ngày/yêu
-cầu, restart có thể tính ra đơn vị khác, và không có dấu vết cho câu *"P-118 đã
-chọn vì giá này"*.
+Đảo hai bước cuối lên trước là hỏng cả cơ chế. Gửi ngân sách đi thì đơn vị trả
+một con số sát ngân sách, và "đơn vị rẻ nhất" đo một thứ do chính P-118 tạo ra.
+Lọc trước khi persist thì báo giá bị loại không để lại dấu vết — và câu "không
+ai trong 500k, rẻ nhất là 620k" không có gì để dựa vào.
+
+**Hai hàng rào cho ngân sách.** Phía gửi: `payload_gui_provider()` là
+allowlist, nên field mới mặc định là *không gửi*. Phía nhận: mock provider dùng
+`extra="forbid"` và trả **422** cho `max_price`. Allowlist nằm cùng phía với
+đoạn mã sẽ vi phạm nó; hàng rào ở phía không do P-118 kiểm soát thì không.
+
+#### Bảy điều kiện tiêu thụ
+
+`kiem_bao_gia()` là cổng DUY NHẤT, kiểm từ thô tới tinh: tồn tại → ACTIVE →
+chưa hết hạn → đúng service → đúng provider → vân tay khớp → amount/currency
+khớp bản persist. Cộng hai điều kiện neo (`workflow_id`, `task_id`) — ngoài
+contract tối thiểu và bắt buộc: vân tay tính từ input, nên hai người xin cùng
+một việc có cùng vân tay, và không neo thì báo giá của người này dùng được cho
+yêu cầu của người kia.
+
+`amount` được **đối chiếu**, không phải **đọc ra**: caller đưa vào thứ họ định
+dùng. Nếu chỉ đọc ra thì một con số bị sửa ở task sẽ lặng lẽ bị thay thế và
+không ai biết đã có một lần thử.
+
+Đổi ngày/xe/thang máy/bốc xếp → báo giá đời cũ thành `SUPERSEDED` (không phải
+`EXPIRED` — hết hạn là thời gian trôi, bị thay thế là khách đổi ý). Đã
+`CONFIRMED` thì **không** bị viết đè: đó là cam kết đã xảy ra.
+
+#### Nghiệm thu
+
+**94 test mới**, tất cả xanh; toàn bộ suite 3898 xanh (3 lỗi baseline theo
+lịch). Mười hai mutation, mười hai cái cắn:
+
+| mutation | test bắt |
+|---|---|
+| payload gửi provider thành blocklist | rò `max_price` — 2 test |
+| provider bỏ `extra="forbid"` | `test_any_unexpected_field_is_refused` |
+| vân tay bỏ `move_vehicle` | 6 test |
+| xác nhận không nguyên tử | `test_two_simultaneous_confirms...` |
+| cổng bỏ kiểm hết hạn | 3 test |
+| cổng bỏ kiểm workflow | `test_a_quote_from_another_workflow...` |
+| cổng bỏ kiểm amount | `test_editing_the_amount_in_the_task...` |
+| lọc ngân sách trước khi persist | 2 test |
+| không dọn báo giá đời cũ | `test_changing_the_request_starts_a_clean_round` |
+| connector không ép kiểu `amount` | `test_a_numeric_string_amount...` |
+| bỏ kiểm đơn vị mạo danh | `test_a_provider_cannot_quote_on_behalf_of_another` |
+| bỏ ràng buộc `UNIQUE ... WHERE ACTIVE` | 2 test |
+
+**Canary trên `p118_db`** — connector thật → mock provider thật qua HTTP →
+PostgreSQL thật (dữ liệu gieo đã dọn):
+
+```
+1. MOV-03 420.000 · MOV-01 430.000 · MOV-02 470.000 (mã QMOV-*, hạn 30 phút)
+   ngân sách 440.000 → [MOV-03, MOV-01] → đề xuất MOV-03
+2. đọc lại bằng CHỈ quote_id → khớp, vân tay khớp
+3. sai đơn vị→WRONG_PROVIDER · sai giá→AMOUNT_MISMATCH
+   đổi yêu cầu→STALE_REQUEST · workflow khác→WRONG_WORKFLOW
+4. hai lượt xác nhận đồng thời → 1/2 thắng, status=CONFIRMED
+5. đổi sang xe tải → ACTIVE=3, SUPERSEDED=2, CONFIRMED=1 (không bị viết đè)
+   đề xuất đổi sang MOV-02 @ 560.000 — đơn vị rẻ nhất ĐỔI theo yêu cầu
+6. ngân sách 100.000 → không đề xuất, rẻ nhất thật 420.000,
+   hàng đợi duyệt=0, chứng từ đã chốt=0
+```
+
+Điểm 5 là bằng chứng cho thiết kế hệ số đan chéo: xe van thì MOV-03 rẻ nhất,
+xe tải thì MOV-02. Nếu xếp hạng không đổi theo tham số thì việc tính giá theo
+tham số chỉ là trang trí.
+
+#### Chưa làm trong B (đúng phạm vi)
+
+UI, trạng thái `PROPOSED`, vòng sửa lỗi, feature flag, và **chưa nối vào
+Planner**. Ranh giới với A khi C nối vào: task có quote hợp lệ → chủ sở hữu lấy
+từ quote đã persist; task cũ chưa có quote → tiếp tục `don_vi_mac_dinh`; không
+bao giờ lấy chủ sở hữu trực tiếp từ `provider_id` do model/biểu mẫu gửi; quote
+không hợp lệ → **không ghim approval**.
 
 ### C. Một đường chọn canonical
 

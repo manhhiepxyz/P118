@@ -211,6 +211,33 @@ class ScheduleMoveRequest(BaseModel):
         return _check_business_time(value, time(7, 0), time(20, 0))
 
 
+# ---- xin báo giá chuyển nhà ----
+class QuoteMoveRequest(BaseModel):
+    """Yêu cầu báo giá gửi tới MỘT đơn vị.
+
+    `extra="forbid"` không phải để bắt lỗi chính tả. Nó là hàng rào cho một
+    luật nghiệp vụ: NGÂN SÁCH CỦA KHÁCH KHÔNG ĐƯỢC RỜI KHỎI P-118. Gửi
+    `max_price` đi rồi nhận về một con số sát ngân sách là mời đơn vị định giá
+    theo túi tiền người hỏi thay vì theo công việc — và khi ấy "chọn đơn vị rẻ
+    nhất" đo một thứ do chính mình tạo ra.
+
+    P-118 đã có allowlist ở phía gửi (`quote.payload_gui_provider`). Hàng rào ở
+    đây là hàng rào THỨ HAI, phía nhận: nếu một ngày nào đó phía gửi rò ngân
+    sách, provider TỪ CHỐI cả yêu cầu thay vì lặng lẽ dùng nó. Một luật quan
+    trọng đến mức này thì một hàng rào là chưa đủ.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    move_date: date
+    move_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    needs_elevator: bool
+    needs_loading_support: bool
+    move_vehicle: Literal["none", "van", "truck"]
+
+    _quote_not_past = field_validator("move_date")(_reject_past)
+
+
 # ---- verify_ownership ----
 class VerifyOwnershipRequest(BaseModel):
     full_name: str = Field(..., min_length=1, description="Tên người yêu cầu xác minh")
