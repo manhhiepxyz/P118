@@ -204,6 +204,14 @@ class DemoWorkflowEvent(BaseModel):
         # ghi thành FAILED / UNKNOWN_EXTERNAL_ERROR, và khách đọc "Yêu cầu đã
         # dừng lại giữa chừng" trong khi hàng đợi duyệt đã có đủ hồ sơ.
         "WAITING_SERVICE_APPROVAL",
+        # Chờ CHÍNH KHÁCH chọn đơn vị — khác hẳn `WAITING_APPROVAL`
+        # (chờ khách trả tiền) và `WAITING_SERVICE_APPROVAL` (chờ đơn vị).
+        # Ba tình huống, ba câu, ba màn hình.
+        #
+        # Phải có ở CẢ HAI Literal `stage` — xem ghi chú ở
+        # `DemoWorkflowEvent`: lần trước thiếu một chỗ và mọi GET workflow
+        # mang sự kiện ấy trả HTTP 500.
+        "WAITING_PROVIDER_PROPOSAL",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",
@@ -368,6 +376,14 @@ class DemoWorkflowResponse(BaseModel):
             # Chờ đơn vị duyệt dịch vụ khác lịch tham quan. Xem ghi chú cùng
             # tên ở `DemoWorkflowEvent.stage` — giá trị này phải có ở CẢ HAI.
             "WAITING_SERVICE_APPROVAL",
+            # Chờ CHÍNH KHÁCH chọn đơn vị — khác hẳn `WAITING_APPROVAL`
+            # (chờ khách trả tiền) và `WAITING_SERVICE_APPROVAL` (chờ đơn vị).
+            # Ba tình huống, ba câu, ba màn hình.
+            #
+            # Phải có ở CẢ HAI Literal `stage` — xem ghi chú ở
+            # `DemoWorkflowEvent`: lần trước thiếu một chỗ và mọi GET workflow
+            # mang sự kiện ấy trả HTTP 500.
+            "WAITING_PROVIDER_PROPOSAL",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",
@@ -427,6 +443,17 @@ class DemoWorkflowResponse(BaseModel):
     # `status`: chứng từ có thể vừa hết hạn trong khi lượt dọn chưa chạy tới,
     # và lúc ấy cột vẫn ghi `PROPOSED`.
     provider_proposal: dict[str, Any] | None = None
+    # MỌI đề xuất khách còn phải quyết, thứ tự theo bước.
+    #
+    # Danh sách chứ không phải một cái: một kế hoạch được phép có hai bước
+    # `schedule_move` độc lập (đã kiểm — `TaskPlanValidator` cho qua), và khi
+    # ấy khách có HAI việc phải bấm. Trả về một rồi im lặng bỏ cái kia là nói
+    # dối về khối lượng công việc còn lại.
+    #
+    # `provider_proposal` ở trên là ALIAS, và chỉ có giá trị khi danh sách có
+    # ĐÚNG một phần tử. Nhiều hơn một thì nó là `None` — không âm thầm chọn cái
+    # đầu, vì "cái đầu" là một quyết định giao diện không ai chủ ý đưa ra.
+    service_proposals: list[dict[str, Any]] = Field(default_factory=list)
     # Mã lỗi ỔN ĐỊNH khi workflow hỏng: `LLM_CONFIGURATION_ERROR`,
     # `PROVIDER_UNAVAILABLE`, … Dùng để đối chiếu log server và cho admin đọc.
     # KHÔNG phải tên class exception — tên class là chi tiết cài đặt, đổi theo

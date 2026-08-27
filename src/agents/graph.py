@@ -741,14 +741,19 @@ def build_planner_graph(
             elif exc.code == "VIEWING_APPROVAL_REQUIRED":
                 await emit("WAITING_VIEWING_APPROVAL")
             elif exc.code == "PROVIDER_PROPOSAL_REQUIRED":
-                # Chờ KHÁCH chọn đơn vị — cùng loại với chờ duyệt thanh toán ở
-                # chỗ này: người dùng còn phải bấm một nút. Dùng lại
-                # `WAITING_APPROVAL` chứ không thêm giai đoạn mới, vì giai đoạn
-                # mới đi kèm hai chỗ nữa phải sửa (câu công khai trong
-                # `_STAGE_MESSAGES`, và giá trị hợp lệ của
-                # `DemoWorkflowResponse.stage`) — và thiếu chỗ thứ hai thì
-                # Pydantic từ chối cả response.
-                await emit("WAITING_APPROVAL")
+                # Giai đoạn RIÊNG, không dùng lại `WAITING_APPROVAL`.
+                #
+                # Câu công khai của `WAITING_APPROVAL` là "Đang chờ bạn xác
+                # nhận thanh toán" — dùng lại nó nghĩa là gọi việc chọn đơn vị
+                # là trả tiền, và khách đi tìm một nút không tồn tại. Đo được
+                # bằng bài kiểm regression: `summary` và `answer` đã đúng, chỉ
+                # `message` còn nói sai, vì nó lấy từ bảng theo giai đoạn.
+                #
+                # Giai đoạn mới đi kèm ba chỗ nữa: `_STAGE_MESSAGES`, và CẢ HAI
+                # Literal `stage` (`DemoWorkflowEvent` lẫn
+                # `DemoWorkflowResponse`). Thiếu chỗ thứ ba thì Pydantic từ
+                # chối cả response — đã xảy ra một lần với lịch tham quan.
+                await emit("WAITING_PROVIDER_PROPOSAL")
             elif exc.code == "SERVICE_APPROVAL_REQUIRED":
                 # Thiếu nhánh này, `ServiceApprovalBoundary` — cổng NGOÀI CÙNG,
                 # áp cho MỌI dịch vụ — rơi xuống `else` và mọi yêu cầu dịch vụ

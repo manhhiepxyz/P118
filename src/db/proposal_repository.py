@@ -254,6 +254,29 @@ async def trang_thai_hieu_luc(pool: asyncpg.Pool, de_xuat: DeXuat) -> tuple[str,
     return "PROPOSED", True
 
 
+async def moi_de_xuat_dang_cho(pool: asyncpg.Pool, *, workflow_id: str) -> list[DeXuat]:
+    """TẤT CẢ đề xuất còn chờ khách bấm của một workflow, thứ tự tất định.
+
+    Một kế hoạch được phép có hai bước `schedule_move` độc lập — đã kiểm:
+    `TaskPlanValidator` cho qua. Khi ấy khách có HAI việc phải quyết, và trả về
+    một cái rồi im lặng bỏ cái kia là nói dối về khối lượng công việc còn lại:
+    họ bấm xong một nút, màn hình lại hiện một nút nữa mà họ chưa từng được
+    báo, hoặc tệ hơn — bước thứ hai nằm im mãi mãi.
+
+    Sắp theo `task_id` chứ không theo `created_at`: hai đề xuất dựng trong cùng
+    một lượt `_park` có thể cùng mốc thời gian tới từng micro giây, và lúc ấy
+    thứ tự phụ thuộc kế hoạch thực thi của PostgreSQL. `task_id` đến từ kế
+    hoạch, nên nó là thứ tự người dùng đã nhìn thấy.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {_COT} FROM service_provider_proposals "  # noqa: S608
+            "WHERE workflow_id = $1 AND status = 'PROPOSED' ORDER BY task_id ASC",
+            _uuid(workflow_id),
+        )
+    return [d for d in (_to_de_xuat(r) for r in rows) if d is not None]
+
+
 async def xac_nhan_de_xuat(pool: asyncpg.Pool, proposal_id: str, *, owner_user_id: str) -> KetQuaXacNhanDeXuat:
     """Khách đồng ý → chứng từ chốt, đề xuất chốt, hàng đợi đơn vị mở. MỘT transaction.
 

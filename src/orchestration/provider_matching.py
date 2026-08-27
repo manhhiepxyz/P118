@@ -270,9 +270,18 @@ async def payload_cho_nguoi_dung(pool: asyncpg.Pool, de_xuat: DeXuat) -> dict[st
     bao_gia = await doc_bao_gia(pool, moi.quote_id)
     hieu_luc, con_bam_duoc = await trang_thai_hieu_luc(pool, moi)
     if bao_gia is None:  # pragma: no cover - khoá ngoại không cho chứng từ biến mất
-        return {"proposal_id": moi.proposal_id, "effective_status": hieu_luc, "can_confirm": False}
+        return {
+            "proposal_id": moi.proposal_id,
+            "task_id": moi.task_id,
+            "effective_status": hieu_luc,
+            "can_confirm": False,
+        }
     return {
         "proposal_id": moi.proposal_id,
+        # `task_id` là thứ nối một đề xuất với BƯỚC nó thuộc về. Thiếu nó, một
+        # response mang hai đề xuất không nói được cái nào cho việc nào — và
+        # giao diện chỉ còn cách đoán theo thứ tự.
+        "task_id": moi.task_id,
         "provider": {"id": bao_gia.service_provider_id, "name": ten_don_vi(bao_gia.service_provider_id)},
         "amount": bao_gia.amount,
         "currency": bao_gia.currency,

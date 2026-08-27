@@ -241,10 +241,10 @@ class ServiceApprovalBoundary:
         self._approved = approved
         self._repository = repository
         self._applicant = applicant or {}
-        # Đề xuất vừa dựng cho lượt này, nếu có. Chỉ sống trong một lượt gọi —
+        # Các đề xuất vừa dựng cho lượt này. Chỉ sống trong một lượt gọi —
         # nguồn sự thật nằm ở `service_provider_proposals`, và đây chỉ là đường
         # để `execute()` biết mình phải ném lỗi nào.
-        self._de_xuat: dict[str, Any] | None = None
+        self._de_xuat: list[dict[str, Any]] = []
 
     async def execute(
         self,
@@ -312,7 +312,7 @@ class ServiceApprovalBoundary:
                 return resolved_workflow_id, partial
 
         await self._park(resolved_workflow_id, plan, gated)
-        if self._de_xuat is not None:
+        if self._de_xuat:
             # Chờ KHÁCH đứng trước chờ đơn vị. Nếu lượt này vừa dựng một đề
             # xuất, đó là việc tiếp theo — kể cả khi trong cùng kế hoạch còn
             # bước khác đã vào hàng đợi đơn vị. Nói "đơn vị đang xác nhận" lúc
@@ -322,7 +322,7 @@ class ServiceApprovalBoundary:
                 "Customer must choose a provider.",
                 workflow_id=resolved_workflow_id,
                 partial_results=partial,
-                context={"provider_proposal": self._de_xuat},
+                context={"provider_proposals": self._de_xuat},
             )
         raise ServiceApprovalRequiredError(
             "Provider approval is required.",
@@ -391,7 +391,7 @@ class ServiceApprovalBoundary:
 
     async def _chuan_bi_de_xuat(
         self, workflow_id: str, by_id: dict[str, Any], qua_bao_gia: dict[str, str]
-    ) -> dict[str, Any] | None:
+    ) -> list[dict[str, Any]]:
         """Hỏi giá và ghim đề xuất cho các bước đi qua đường báo giá.
 
         Input lấy từ KẾ HOẠCH đã persist, không từ goal và không từ body. Đó là
@@ -399,12 +399,17 @@ class ServiceApprovalBoundary:
         hai nơi đọc hai nguồn thì vân tay sẽ lệch, và chứng từ vừa tạo xong đã
         không khớp chính yêu cầu sinh ra nó.
 
-        Trả về payload của đề xuất ĐẦU TIÊN chọn được. Bước này chỉ mở cho
-        `schedule_move`, và một kế hoạch không có hai lần chuyển nhà — nếu sau
-        này có, chỗ này phải trả về một danh sách.
+        Trả về payload của MỌI đề xuất chọn được, theo thứ tự bước.
 
-        Không chọn được thì trả `None`: KHÔNG ghim đề xuất giả, và cũng không
-        ghim hàng đợi đơn vị. Lý do đi lên qua `lua_chon` để tầng trên nói ra.
+        Bản đầu trả về cái ĐẦU TIÊN với lý do "một kế hoạch không có hai lần
+        chuyển nhà". Đã kiểm: `TaskPlanValidator` cho qua một kế hoạch có hai
+        bước `schedule_move` độc lập. Nên giả định ấy sai, và nó sai theo cách
+        im lặng — bước thứ hai được ghim vào database, không bao giờ xuất hiện
+        trên màn hình, và nằm `WAITING_APPROVAL` mãi mãi.
+
+        Không chọn được thì bước ấy KHÔNG có mặt trong danh sách: không ghim đề
+        xuất giả, không ghim hàng đợi đơn vị. Lý do đi lên qua `lua_chon` để
+        tầng trên nói ra.
         """
         from src.connectors.resident_services import ResidentServicesConnector
         from src.orchestration.provider_matching import (
@@ -415,7 +420,11 @@ class ServiceApprovalBoundary:
 
         pool = self._repository._pool  # noqa: SLF001 - composition root sở hữu pool
         connector = ResidentServicesConnector(base_url=get_settings().resident_services_service_url)
-        for task_id in qua_bao_gia:
+        da_de_xuat: list[dict[str, Any]] = []
+        # Thứ tự BƯỚC, không phải thứ tự dict: `gated` dựng từ kế hoạch nên nó
+        # đã đúng, nhưng sắp lại ở đây làm thứ tự không phụ thuộc vào cách một
+        # dict được xây ở tầng trên.
+        for task_id in sorted(qua_bao_gia):
             task = by_id.get(task_id)
             ket_qua = await chuan_bi_de_xuat(
                 pool,
@@ -438,9 +447,10 @@ class ServiceApprovalBoundary:
                 tuy_chon=KHONG_CO_TUY_CHON,
             )
             if ket_qua.de_xuat is not None:
-                return await payload_cho_nguoi_dung(pool, ket_qua.de_xuat)
+                da_de_xuat.append(await payload_cho_nguoi_dung(pool, ket_qua.de_xuat))
+                continue
             logger.info("bước %s chưa chọn được đơn vị: %s", task_id, ket_qua.lua_chon.ket_qua)
-        return None
+        return da_de_xuat
 
     async def _applicant_from_record(self, workflow_id: str) -> dict[str, Any]:
         """Người yêu cầu, đọc từ bảng `users` qua chủ sở hữu workflow.
