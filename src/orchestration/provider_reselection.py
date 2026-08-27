@@ -45,11 +45,13 @@ from uuid import UUID
 
 import asyncpg
 
-logger = logging.getLogger(__name__)
+from src.orchestration.task_attempt import (
+    cap_danh_tinh_lan_thu,
+    cung_mot_chuoi,
+    goc_chuoi_lan_thu,
+)
 
-# `T1` và `T1R2` là hai lần thử của CÙNG một việc. Tách phần gốc để tập loại
-# trừ phủ cả chuỗi, không chỉ lần cuối.
-_TACH_LAN_THU = "R"
+logger = logging.getLogger(__name__)
 
 
 class KetQuaChonLai(StrEnum):
@@ -69,17 +71,10 @@ class KetQuaChonLai(StrEnum):
     NO_ALTERNATIVE_PROVIDER = "NO_ALTERNATIVE_PROVIDER"
 
 
-def goc_lan_thu(task_id: str) -> str:
-    """`T1R3` → `T1`. Phần gốc là danh tính LOGIC của một việc.
-
-    Dùng để gom mọi lần thử của cùng một việc lại — tập loại trừ phải phủ cả
-    chuỗi, không chỉ lần cuối.
-    """
-    return task_id.split(_TACH_LAN_THU)[0]
-
-
-def cung_mot_viec(a: str, b: str) -> bool:
-    return goc_lan_thu(a) == goc_lan_thu(b)
+# Tên cũ, giữ cho các lối gọi trong module và trong test. Luật thật ở
+# `task_attempt` — xem `_allocate_task_id` ở `repair_attempt` cho cùng lý do.
+goc_lan_thu = goc_chuoi_lan_thu
+cung_mot_viec = cung_mot_chuoi
 
 
 @dataclass(frozen=True)
@@ -93,6 +88,9 @@ class LoiTuChoi:
     decided_by: str | None
     # Đã có lần thử mới cho việc này chưa. `True` nghĩa là lượt bấm đã xảy ra.
     da_mo_lan_moi: bool = False
+    # Đường xử lý theo policy: `RESELECT_PROVIDER` mới có nút "tìm đơn vị
+    # khác"; `TERMINAL_REVIEW` chỉ nói ra và dừng.
+    huong: str = "TERMINAL_REVIEW"
 
 
 @dataclass(frozen=True)
@@ -134,32 +132,30 @@ async def loi_tu_choi_dang_cho_khach(pool: asyncpg.Pool, *, workflow_id: str) ->
     Chỉ nhìn dòng có `service_provider_id`: một dòng không chủ là dòng chưa ai
     quyết định được, và nó không thể mang một lời từ chối thật.
 
-    CHỈ dịch vụ có hệ thống báo giá
-    -------------------------------
-    Phần lớn lời từ chối đã có một đường xử lý TỐT HƠN "tìm đơn vị khác": hệ
-    thống hỏi khách một ô cụ thể. Bãi xe hết chỗ Khu A thì câu đúng là "chọn
-    Khu B?", không phải "tìm bãi xe khác" — đơn vị vẫn là ban quản lý ấy, và
-    thứ đổi được là chỗ đỗ.
+    Trả về CẢ lời từ chối `TERMINAL_REVIEW` — thứ hệ thống không tự đi tiếp
+    được. Bỏ chúng đi thì workflow im lặng: không nút, không câu, và khách
+    không biết việc của mình đã dừng. `huong` nói đường nào, và giao diện đọc
+    nó để quyết định có dựng nút hay không.
 
-    Đo được khi chưa có giới hạn này: bốn bài kiểm của luồng sửa lỗi cũ chuyển
-    sang đỏ, vì màn hình bắt đầu mời "tìm đơn vị khác" cho một yêu cầu chỉ cần
-    đổi khu. Chọn lại đơn vị chỉ có nghĩa ở nơi ĐƠN VỊ là thứ thay thế được —
-    hôm nay là chuyển nhà, nơi có nhiều đối tác cùng làm một việc.
+    KHÔNG lọc theo `tool` ở đây nữa. `refusal_policy.huong_xu_ly` là chỗ DUY
+    NHẤT biết luật ấy, và một phép lọc thứ hai ở đây sẽ lệch với nó — đúng vào
+    lúc ai đó thêm một mã từ chối mới.
     """
-    from src.orchestration.provider_matching import DICH_VU_CO_BAO_GIA
+    from src.orchestration.refusal_policy import HuongXuLyTuChoi, huong_xu_ly
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT sa.task_id, sa.service_provider_id, sa.reject_code, sa.reject_reason, sa.decided_by
+            SELECT sa.task_id, sa.tool, sa.service_provider_id, sa.reject_code, sa.reject_reason,
+                   sa.decided_by, t.input_data
               FROM service_approvals sa
+              LEFT JOIN workflow_tasks t
+                     ON t.workflow_id = sa.workflow_id AND t.task_id = sa.task_id
              WHERE sa.workflow_id = $1 AND sa.status = 'REJECTED'
                AND sa.service_provider_id IS NOT NULL
-               AND sa.tool = ANY($2::varchar[])
              ORDER BY sa.decided_at DESC NULLS LAST, sa.task_id DESC
             """,
             UUID(workflow_id),
-            sorted(DICH_VU_CO_BAO_GIA),
         )
         moi_buoc = {
             str(r["task_id"])
@@ -172,12 +168,35 @@ async def loi_tu_choi_dang_cho_khach(pool: asyncpg.Pool, *, workflow_id: str) ->
         da_mo = any(khac != task_id and cung_mot_viec(khac, task_id) and len(khac) > len(task_id) for khac in moi_buoc)
         if da_mo:
             continue
+        import json as _json
+
+        vao = row["input_data"]
+        if isinstance(vao, str):
+            try:
+                vao = _json.loads(vao or "{}")
+            except _json.JSONDecodeError:
+                vao = {}
+        huong = huong_xu_ly(
+            tool=str(row["tool"]),
+            reject_code=row["reject_code"],
+            # `dang_hoi_khach` do tầng gọi quyết định: nó là thứ duy nhất biết
+            # câu hỏi có đang treo trên màn hình hay không. Ở đây coi như KHÔNG
+            # — tầng gọi đã chặn trước bằng `_has_open_repair`, và hỏi lại lần
+            # nữa từ đây sẽ đọc cùng một sự thật ở hai chỗ.
+            dang_hoi_khach=False,
+            task_input=dict(vao or {}),
+        )
+        if huong is HuongXuLyTuChoi.REPAIR_REQUEST:
+            # Có ô để hỏi → câu hỏi ấy là việc của luồng sửa lỗi, không phải
+            # của màn hình này.
+            continue
         return LoiTuChoi(
             task_id=task_id,
             provider_id=str(row["service_provider_id"]),
             reject_code=row["reject_code"],
             reason=row["reject_reason"],
             decided_by=row["decided_by"],
+            huong=str(huong),
         )
     return None
 
@@ -206,15 +225,17 @@ def loi_tu_choi_cong_khai(loi: LoiTuChoi, ten_don_vi: str | None) -> dict[str, A
         "rejected_provider": {"id": loi.provider_id, "name": ten_don_vi or loi.provider_id},
         "reject_code": loi.reject_code,
         "sanitized_reason": _lam_sach(loi.reason),
-        # Luôn `True` khi lời từ chối còn đang chờ khách: nút "tìm đơn vị khác"
-        # là hành động duy nhất ở trạng thái này, và giấu nó đi sẽ để lại một
-        # workflow không có đường nào đi tiếp.
+        # Nút "tìm đơn vị khác" CHỈ có ở `RESELECT_PROVIDER`.
+        #
+        # `TERMINAL_REVIEW` nghĩa là hệ thống chưa biết đi tiếp thế nào — dựng
+        # nút ở đó là hứa một đường không tồn tại, và khách bấm sẽ nhận một lỗi
+        # cho một việc họ làm đúng.
         #
         # "Còn đơn vị khác không" KHÔNG được kiểm ở đây: nó cần một vòng hỏi
-        # giá, và một lượt ĐỌC không được gọi ra ngoài. Nếu hết đơn vị thì lượt
-        # bấm trả `NO_ALTERNATIVE_PROVIDER` và nói ra — một câu trả lời thật,
-        # muộn hơn vài giây, tốt hơn một cái nút bị giấu vì một phép đoán.
-        "can_request_another_provider": True,
+        # giá, và một lượt ĐỌC không được gọi ra ngoài. Hết đơn vị thì lượt bấm
+        # trả `NO_ALTERNATIVE_PROVIDER` — một câu trả lời thật, muộn hơn vài
+        # giây, tốt hơn một cái nút bị giấu vì một phép đoán.
+        "can_request_another_provider": loi.huong == "RESELECT_PROVIDER",
     }
 
 
@@ -250,7 +271,6 @@ async def mo_lan_chon_lai(
     from src.orchestration.proposal_service import de_xuat_don_vi_cho_buoc
     from src.orchestration.quote import van_tay_yeu_cau
     from src.orchestration.quote_service import DICH_VU_CHUYEN_NHA, xin_bao_gia_chuyen_nha
-    from src.orchestration.repair_attempt import _allocate_task_id
 
     try:
         wid = UUID(workflow_id)
@@ -266,7 +286,8 @@ async def mo_lan_chon_lai(
             return KetQuaMoLanChonLai(KetQuaChonLai.NOT_FOUND)
 
         duyet = await conn.fetchrow(
-            "SELECT status, service_provider_id FROM service_approvals WHERE workflow_id = $1 AND task_id = $2",
+            "SELECT status, service_provider_id, reject_code FROM service_approvals "
+            "WHERE workflow_id = $1 AND task_id = $2",
             wid,
             task_id,
         )
@@ -292,6 +313,33 @@ async def mo_lan_chon_lai(
         return KetQuaMoLanChonLai(KetQuaChonLai.ALREADY_REOPENED)
 
     tool = str(buoc["tool"])
+
+    # CHÍNH SÁCH quyết định, không phải `status == 'REJECTED'` một mình.
+    #
+    # Giao diện đã không dựng nút cho `TERMINAL_REVIEW`, nhưng endpoint là một
+    # bề mặt riêng: kẻ gọi thẳng không đi qua giao diện, và luật phải đứng ở
+    # tầng dưới. Không có vế này thì một lời từ chối hệ thống KHÔNG hiểu vẫn mở
+    # được một lần thử mới — đúng thứ `TERMINAL_REVIEW` sinh ra để chặn.
+    import json as _json_policy
+
+    from src.orchestration.refusal_policy import HuongXuLyTuChoi, huong_xu_ly
+
+    vao_cu = buoc["input_data"]
+    if isinstance(vao_cu, str):
+        try:
+            vao_cu = _json_policy.loads(vao_cu or "{}")
+        except _json_policy.JSONDecodeError:
+            vao_cu = {}
+    huong = huong_xu_ly(
+        tool=tool,
+        reject_code=duyet["reject_code"],
+        dang_hoi_khach=False,
+        task_input=dict(vao_cu or {}),
+    )
+    if huong is not HuongXuLyTuChoi.RESELECT_PROVIDER:
+        logger.info("tu choi khong thuoc duong chon lai: %s", huong)
+        return KetQuaMoLanChonLai(KetQuaChonLai.NO_ALTERNATIVE_PROVIDER)
+
     if tool != DICH_VU_CHUYEN_NHA:
         # Chỉ chuyển nhà có hệ thống báo giá. Dịch vụ khác chưa chọn lại được,
         # và nói `NOT_REJECTED` sẽ nói sai — nên dùng mã "hết đơn vị": đúng về
@@ -308,7 +356,7 @@ async def mo_lan_chon_lai(
         # lần này khách mất thêm một vòng chờ.
         return KetQuaMoLanChonLai(KetQuaChonLai.NO_ALTERNATIVE_PROVIDER, da_loai=loai_tru)
 
-    task_moi = _allocate_task_id(task_id, cac_buoc)
+    task_moi = cap_danh_tinh_lan_thu(task_id, cac_buoc)
     if task_moi is None:
         logger.warning("khong cap duoc danh tinh cho lan thu moi")
         return KetQuaMoLanChonLai(KetQuaChonLai.NO_ALTERNATIVE_PROVIDER, da_loai=loai_tru)

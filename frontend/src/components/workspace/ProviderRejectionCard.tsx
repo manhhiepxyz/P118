@@ -95,10 +95,15 @@ export function ProviderRejectionCard({ rejection, onRequested }: Props) {
             {dangGui ? 'Đang tìm…' : 'Tìm đơn vị khác'}
           </button>
         ) : (
-          /* Không dựng nút không bấm được. Nói thẳng việc tiếp theo. */
-          <p className="mt-4 text-[13px] leading-[1.6] text-[var(--text-secondary)]">
-            Hiện chưa có đơn vị nào khác nhận được yêu cầu này. Bạn nhắn cho mình để đổi ngày, hoặc
-            liên hệ bộ phận hỗ trợ nhé.
+          /* TERMINAL_REVIEW — hệ thống chưa biết đi tiếp thế nào.
+             Không dựng nút: một cái nút mờ vẫn mời người ta bấm, rồi phải giải
+             thích vì sao bấm không có tác dụng.
+
+             Và KHÔNG dựng nút "liên hệ hỗ trợ": chưa có chức năng hỗ trợ nào
+             đứng sau nó, nên nó sẽ là một cái nút không làm gì — tệ hơn hẳn một
+             câu nói thẳng. */
+          <p data-testid="rejection-terminal" className="mt-4 text-[13px] leading-[1.6] text-[var(--text-secondary)]">
+            Mình chưa tự xử lý tiếp được yêu cầu này. Bạn nhắn cho mình nếu muốn đổi thông tin nhé.
           </p>
         )}
 

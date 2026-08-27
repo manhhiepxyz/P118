@@ -103,7 +103,7 @@ def da_bat(client, monkeypatch):
     return client
 
 
-async def _den_luc_bi_tu_choi(client, db_pool, ten: str, *, ly_do: str = LY_DO):
+async def _den_luc_bi_tu_choi(client, db_pool, ten: str, *, ly_do: str = LY_DO, ma: str = "SERVICE_UNAVAILABLE"):
     """Chạy tới trạng thái: khách đã đồng ý, và ĐƠN VỊ vừa từ chối."""
     token = await _register_and_login(client, ten)
     uid = await db_pool.fetchval("SELECT id FROM users WHERE username = $1", ten)
@@ -138,7 +138,7 @@ async def _den_luc_bi_tu_choi(client, db_pool, ten: str, *, ly_do: str = LY_DO):
     )
     res = await client.post(
         f"{DUYET}/{wid}/T1/decide",
-        json={"decision": "reject", "reject_code": "SERVICE_UNAVAILABLE", "reject_reason": ly_do},
+        json={"decision": "reject", "reject_code": ma, "reject_reason": ly_do},
         headers=_auth(tok_dv),
     )
     assert res.status_code == 200, res.text
@@ -588,6 +588,7 @@ async def test_the_history_keeps_both_attempts_in_their_own_roles(client, db_poo
 @pytest.mark.asyncio
 async def test_a_cold_read_at_every_gap_stays_on_the_same_state(client, db_pool, da_bat):
     """Ba khe restart, ba lần đọc nguội — không khe nào sinh thêm gì."""
+
     from src.api.routes import _DEMO_JOBS
 
     token, _, wid, _, _ = await _den_luc_bi_tu_choi(client, db_pool, "kh_ba_khe")
@@ -667,3 +668,79 @@ async def test_the_domain_call_is_idempotent_too(client, db_pool, da_bat):
     assert dau.ket_qua is KetQuaChonLai.PROPOSED
     assert lai.ket_qua is KetQuaChonLai.ALREADY_REOPENED
     assert (await _dem(db_pool, wid))["tasks"] == 2
+
+
+# ==================================================== 6. terminal review
+@pytest.mark.asyncio
+async def test_an_unclassifiable_refusal_stops_and_says_so(client, db_pool, da_bat):
+    """`OTHER` → nói ra lý do, KHÔNG nút "tìm đơn vị khác", không tạo gì mới.
+
+    Hệ thống chưa biết đi tiếp thế nào. Dựng nút ở đây là hứa một đường không
+    tồn tại, và khách bấm sẽ nhận một lỗi cho một việc họ làm đúng.
+
+    Và KHÔNG dựng một lời hứa "bộ phận hỗ trợ sẽ liên hệ": chưa có chức năng hỗ
+    trợ nào đứng sau câu ấy.
+    """
+    from src.api.routes import _DEMO_JOBS
+
+    token, _, wid, ma, _ = await _den_luc_bi_tu_choi(
+        client, db_pool, "kh_terminal", ly_do="Bên mình không nhận đơn loại này.", ma="OTHER"
+    )
+    truoc = await _dem(db_pool, wid)
+    _DEMO_JOBS.clear()
+
+    body = (await client.get(f"{DEMO}/{wid}", headers=_auth(token))).json()
+
+    assert body["stage"] == "WAITING_PROVIDER_RESELECTION", body["stage"]
+    tu_choi = body["provider_rejection"]
+    assert tu_choi is not None, "lời từ chối không phân loại được đã biến mất khỏi màn hình"
+    assert tu_choi["can_request_another_provider"] is False
+    assert tu_choi["rejected_provider"]["id"] == ma
+    assert tu_choi["sanitized_reason"] == "Bên mình không nhận đơn loại này."
+    for truong in ("message", "summary", "answer"):
+        cau = (body.get(truong) or "").lower()
+        assert "đang chờ" not in cau, f"{truong}: {body[truong]}"
+    assert "chưa tự xử lý tiếp được" in body["summary"]
+    assert await _dem(db_pool, wid) == truoc
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_refusal_cannot_be_forced_into_a_new_attempt(client, db_pool, da_bat):
+    """Gọi thẳng endpoint cho một lời từ chối `TERMINAL_REVIEW` → không mở gì.
+
+    Giao diện không dựng nút, nhưng endpoint là một bề mặt riêng. Kẻ gọi thẳng
+    không đi qua giao diện, và luật phải đứng ở tầng dưới.
+    """
+    token, _, wid, _, _ = await _den_luc_bi_tu_choi(client, db_pool, "kh_terminal_ep", ly_do="không nhận", ma="OTHER")
+    truoc = await _dem(db_pool, wid)
+
+    res = await client.post(
+        f"/api/v1/service-proposals/workflows/{wid}/request-another-provider",
+        json={"task_id": "T1"},
+        headers=_auth(token),
+    )
+
+    assert res.status_code == 409, res.text
+    assert await _dem(db_pool, wid) == truoc
+
+
+@pytest.mark.asyncio
+async def test_a_no_availability_refusal_keeps_the_date_question(client, db_pool, da_bat):
+    """`NO_AVAILABILITY` giữ nguyên đường sửa NGÀY — không mời đổi đơn vị.
+
+    Đơn vị vẫn nhận việc, chỉ không nhận ngày ấy, và đổi ngày rẻ hơn đổi đơn
+    vị. Cho khách chọn giữa hai đường là một quyết định sản phẩm chưa được đưa
+    ra — xem ghi chú NỢ ở `refusal_policy`.
+    """
+    from src.api.routes import _DEMO_JOBS
+
+    token, _, wid, _, _ = await _den_luc_bi_tu_choi(
+        client, db_pool, "kh_giu_sua_ngay", ly_do="Hết xe ngày đó.", ma="NO_AVAILABILITY"
+    )
+    _DEMO_JOBS.clear()
+
+    body = (await client.get(f"{DEMO}/{wid}", headers=_auth(token))).json()
+
+    assert body["provider_rejection"] is None, "lời từ chối sửa-được lại rơi vào màn chọn lại"
+    assert body["stage"] != "WAITING_PROVIDER_RESELECTION"
+    assert (await _dem(db_pool, wid))["tasks"] == 1

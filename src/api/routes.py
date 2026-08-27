@@ -5119,9 +5119,19 @@ def _waiting_reselection_view(
     tasks = _polling_task_views(plan, record, show_waiting=True)
     ten = (rejection.get("rejected_provider") or {}).get("name") or "Đơn vị"
     ly_do = rejection.get("sanitized_reason")
-    summary = (
-        f"{ten} đã từ chối yêu cầu này. Lý do họ đưa ra: {ly_do}" if ly_do else f"{ten} đã từ chối yêu cầu này."
-    ) + " Bạn muốn mình tìm đơn vị khác không?"
+    co_the_doi = bool(rejection.get("can_request_another_provider"))
+    dau = f"{ten} đã từ chối yêu cầu này. Lý do họ đưa ra: {ly_do}" if ly_do else f"{ten} đã từ chối yêu cầu này."
+    # Hai câu cho hai đường, và câu thứ hai KHÔNG hứa gì.
+    #
+    # `TERMINAL_REVIEW` nghĩa là hệ thống chưa biết đi tiếp thế nào. Nói "bạn
+    # muốn mình tìm đơn vị khác không?" ở đó là mời khách bấm một nút không tồn
+    # tại. Và không dựng lời hứa "bộ phận hỗ trợ sẽ liên hệ" khi chưa có chức
+    # năng hỗ trợ nào đứng sau nó.
+    summary = dau + (
+        " Bạn muốn mình tìm đơn vị khác không?"
+        if co_the_doi
+        else " Mình chưa tự xử lý tiếp được yêu cầu này. Bạn nhắn cho mình nếu muốn đổi thông tin nhé."
+    )
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status="WAITING_APPROVAL",
