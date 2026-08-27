@@ -22,6 +22,19 @@ mục — mỗi đơn vị có hệ số riêng, nên đơn vị rẻ nhất Đ�
 
 Lịch trống
 ----------
+Tên gọi
+-------
+`ten` là tên đầy đủ như trên biển hiệu; `ten_thuong_hieu` là phần RIÊNG của đơn
+vị sau khi bỏ mô tả loại hình ("Chuyển nhà", "Vận tải", "Điện lạnh"…).
+
+Tách ra là để `provider_resolver` khớp CHÍNH XÁC được cả hai, mà không phải
+dùng phép chứa-nhau. Phép ấy biến "chuyển nhà" — một mô tả loại hình, không
+phải một cái tên — thành `MOV-01`, tức biến một lượt trích nhầm của model thành
+một lựa chọn tài chính hợp lệ.
+
+Đây là thuộc tính của đơn vị trong CÙNG nguồn canonical, không phải một bảng
+tên/alias thứ hai.
+
 `nghi_thu` là ngày trong tuần đơn vị không nhận việc (0 = thứ Hai). Đây là
 quy tắc TẤT ĐỊNH theo ngày, nên bài kiểm không phải dựng trạng thái, và một
 lượt demo hai lần cho cùng kết quả.
@@ -44,6 +57,12 @@ HangMuc = Literal["air_conditioning", "electrical", "plumbing", "other"]
 class DonViChuyenNha:
     provider_id: str
     ten: str
+    # Tên THƯƠNG HIỆU — phần riêng của đơn vị, đã bỏ mô tả loại hình.
+    #
+    # Bắt buộc, không có mặc định: một đơn vị mới thêm mà quên khai sẽ vỡ ngay
+    # lúc dựng danh mục, chứ không lặng lẽ trở thành một đơn vị khách gọi tên
+    # ngắn thì không ai tra ra.
+    ten_thuong_hieu: str
     danh_gia: float
     gia_goc: int
     # Phụ phí theo phương tiện. `none` = khách tự lo xe.
@@ -57,6 +76,7 @@ class DonViChuyenNha:
 class DonViBaoTri:
     provider_id: str
     ten: str
+    ten_thuong_hieu: str
     danh_gia: float
     gia_goc: int
     phu_phi_hang_muc: dict[str, int]
@@ -86,16 +106,18 @@ DON_VI_CHUYEN_NHA: tuple[DonViChuyenNha, ...] = (
     DonViChuyenNha(
         provider_id="MOV-01",
         ten="Chuyển nhà Minh Phát",
+        ten_thuong_hieu="Minh Phát",
         danh_gia=4.6,
         gia_goc=250_000,
         phu_phi_xe={"none": 0, "van": 180_000, "truck": 320_000},
         phu_phi_thang_may=60_000,
         phu_phi_boc_xep=150_000,
-        nghi_thu=frozenset({6}),          # nghỉ Chủ nhật
+        nghi_thu=frozenset({6}),  # nghỉ Chủ nhật
     ),
     DonViChuyenNha(
         provider_id="MOV-02",
         ten="Vận tải Đại Tín",
+        ten_thuong_hieu="Đại Tín",
         danh_gia=4.8,
         gia_goc=320_000,
         phu_phi_xe={"none": 0, "van": 150_000, "truck": 240_000},
@@ -106,12 +128,13 @@ DON_VI_CHUYEN_NHA: tuple[DonViChuyenNha, ...] = (
     DonViChuyenNha(
         provider_id="MOV-03",
         ten="Dịch vụ An Khang",
+        ten_thuong_hieu="An Khang",
         danh_gia=4.3,
         gia_goc=200_000,
         phu_phi_xe={"none": 0, "van": 220_000, "truck": 400_000},
         phu_phi_thang_may=80_000,
         phu_phi_boc_xep=200_000,
-        nghi_thu=frozenset({0}),          # nghỉ thứ Hai
+        nghi_thu=frozenset({0}),  # nghỉ thứ Hai
     ),
 )
 
@@ -119,6 +142,7 @@ DON_VI_BAO_TRI: tuple[DonViBaoTri, ...] = (
     DonViBaoTri(
         provider_id="FIX-01",
         ten="Kỹ thuật Thành Đạt",
+        ten_thuong_hieu="Thành Đạt",
         danh_gia=4.7,
         gia_goc=150_000,
         phu_phi_hang_muc={"air_conditioning": 200_000, "electrical": 120_000, "plumbing": 140_000, "other": 80_000},
@@ -127,6 +151,7 @@ DON_VI_BAO_TRI: tuple[DonViBaoTri, ...] = (
     DonViBaoTri(
         provider_id="FIX-02",
         ten="Sửa chữa Hoà Bình",
+        ten_thuong_hieu="Hoà Bình",
         danh_gia=4.4,
         gia_goc=120_000,
         phu_phi_hang_muc={"air_conditioning": 260_000, "electrical": 90_000, "plumbing": 110_000, "other": 100_000},
@@ -135,10 +160,11 @@ DON_VI_BAO_TRI: tuple[DonViBaoTri, ...] = (
     DonViBaoTri(
         provider_id="FIX-03",
         ten="Điện lạnh Bách Khoa",
+        ten_thuong_hieu="Bách Khoa",
         danh_gia=4.9,
         gia_goc=180_000,
         phu_phi_hang_muc={"air_conditioning": 150_000, "electrical": 200_000, "plumbing": 240_000, "other": 160_000},
-        nghi_thu=frozenset({5, 6}),       # nghỉ cuối tuần
+        nghi_thu=frozenset({5, 6}),  # nghỉ cuối tuần
     ),
 )
 

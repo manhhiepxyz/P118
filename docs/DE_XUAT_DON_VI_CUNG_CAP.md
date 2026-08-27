@@ -378,10 +378,170 @@ từ quote đã persist; task cũ chưa có quote → tiếp tục `don_vi_mac_d
 bao giờ lấy chủ sở hữu trực tiếp từ `provider_id` do model/biểu mẫu gửi; quote
 không hợp lệ → **không ghim approval**.
 
-### C. Một đường chọn canonical
+### C. Một đường chọn canonical — **XONG** (27/08)
 
-Cả ba trường hợp đi qua **cùng quote engine**. `"Minh Phát"` → `MOV-01` bằng
-resolver, giống `project_id` — người dùng không phải gõ mã.
+Bước B cho chứng từ một danh tính kiểm chứng được. Bước C biến nó thành một
+lựa chọn — và luật quan trọng nhất ở đây là luật **không làm**.
+
+#### Resolver — chỉ TRÙNG KHỚP, không chứa nhau
+
+`src/orchestration/provider_resolver.py`. Nguồn canonical là
+`src/mock/service_providers.py` và **chỉ nó** — không bảng tên/alias/đơn vị song
+song, vì hai danh mục là hai chỗ để lệch nhau.
+
+Chuẩn hoá **chính tả**, không suy đoán ngữ nghĩa: bỏ dấu, bỏ hoa/thường, dấu
+câu thành khoảng trắng. `đ` phải xử lý riêng — nó không tách được bằng NFD, nên
+thiếu dòng ấy thì "Đại Tín" thành `đai tin` và không bao giờ khớp với người gõ
+không dấu, tức hỏng đúng với người gõ nhanh nhất.
+
+**Khớp CHÍNH XÁC với ba trường**: `provider_id`, `ten`, `ten_thuong_hieu`.
+Không chứa nhau, không khoảng cách chỉnh sửa, không điểm số, không ngưỡng.
+
+Bản đầu còn nhánh "chứa nhau" và nó mở một lỗ mà không bài kiểm nào lúc ấy bắt:
+
+```
+"chuyển nhà"  chỉ nằm trong "Chuyển nhà Minh Phát"  → MOV-01
+"vận tải"     chỉ nằm trong "Vận tải Đại Tín"       → MOV-02
+"dịch vụ"     chỉ nằm trong "Dịch vụ An Khang"      → MOV-03
+```
+
+Cả ba là **mô tả loại hình**, không phải tên khách chỉ định — và cụm đầu có mặt
+trong hầu hết câu về chuyển nhà, tức đúng thứ model dễ trích nhầm vào ô tên đơn
+vị nhất. Khi ấy resolver biến một lỗi trích thành một lựa chọn tài chính hợp
+lệ: vi phạm thẳng *"model đề xuất, code xác minh"* — code phải là chỗ lỗi ấy
+**dừng lại**, không phải chỗ nó được hợp thức hoá.
+
+`ten_thuong_hieu` là thứ cho phép bỏ hẳn phép chứa-nhau mà vẫn gọi được "Đại
+Tín". Nó là **thuộc tính của đơn vị trong cùng nguồn canonical** — bắt buộc,
+không mặc định, nên một đối tác mới quên khai sẽ vỡ lúc dựng danh mục thay vì
+lặng lẽ thành đơn vị gọi tên ngắn không ai tra ra.
+
+| | |
+|---|---|
+| `FOUND` | khớp đúng một đơn vị |
+| `AMBIGUOUS` | khớp nhiều — trả **danh sách ứng viên**, không chọn cái "khớp tốt hơn" |
+| `UNKNOWN` | không khớp gì |
+
+Phạm vi theo **dịch vụ** là bắt buộc: một câu về chuyển nhà không được resolve
+ra một đội bảo trì.
+
+**Sáu thất bại có chủ ý**, tất cả đều là thứ một bộ so khớp "thông minh" đoán
+được: `chuyển nhà` · `vận tải` · `dịch vụ` (loại hình) · `Minh` (nửa thương
+hiệu) · `MOV` (tiền tố mã) · `Đại Tính` (sai một chữ) · `đội Đại Tín bên quận
+7` (tên lẫn chữ khác). Tất cả → `UNKNOWN`, tầng trên hỏi lại.
+
+Hai bất biến của danh mục được khoá bằng test: không tên/mã/thương hiệu nào trỏ
+vào hai đơn vị; và `ten_thuong_hieu` phải **ngắn hơn** `ten` (khai cho có thì
+nó không thêm cách gọi nào).
+
+**Không có bảng cụm từ kích hoạt** trong toàn bộ file.
+
+#### Một hàm cho ba đường vào
+
+`src/orchestration/provider_selection.py`. Ba cách khách nói — chỉ rõ tên, nói
+ngân sách, không nói gì — khác nhau đúng **hai tham số** và đi qua **cùng một**
+chuỗi quyết định. Ba nhánh riêng là cách nhanh nhất để chúng lệch nhau, và chỗ
+lệch sẽ nằm ở luật phá thế hoà hoặc luật ngân sách: những chỗ không ai nhìn
+thấy cho tới khi hoá đơn sai.
+
+Thứ tự quyết định, **không đảo được**:
+
+1. Lọc chứng từ còn sống. Hết hạn không phải một lựa chọn, kể cả khi rẻ nhất —
+   và đây là chỗ dễ sai nhất, vì rẻ nhất cũng là thứ xếp đầu.
+2. Có chỉ đích danh? **Tra tên trước mọi thứ khác.** Một cái tên không tra ra
+   được thì ngân sách chưa liên quan gì; đảo thứ tự thì khách đi nâng ngân sách
+   để sửa một lỗi chính tả.
+3. Đơn vị ấy có báo giá không? Không có là **câu trả lời**, không phải lý do để
+   chọn bên khác.
+4. Vượt ngân sách? Nói ra **xung đột**.
+5. Không ai được chỉ định: lọc ngân sách rồi xếp hạng giá → đánh giá → mã.
+
+#### Luật không làm
+
+Khách nói *"cho tôi Đại Tín, trong 450 nghìn"* là hai điều kiện mâu thuẫn.
+Tự gỡ bằng cách chọn MOV-03 (420k, vừa ngân sách) là quyết định thay họ về
+tiền — và họ chỉ biết khi đọc hoá đơn mang tên một công ty họ không chọn.
+
+`OVER_BUDGET` vì thế trả **cả hai** con số: đơn vị được chỉ định báo bao nhiêu,
+và giá thật rẻ nhất là bao nhiêu. Tầng trên nói được đủ vế; khách tự quyết.
+
+Tương tự, đơn vị được chỉ định không báo giá → `NO_AVAILABLE_QUOTE` **kèm mã
+đơn vị**, không thay bằng bên khác. Và "hết hạn hết" khác "không ai trong ngân
+sách": hai tình huống dẫn tới hai hành động, gộp lại thì khách được bảo đi nâng
+ngân sách cho một việc chỉ cần bấm hỏi lại.
+
+#### Hai hàng rào ở biên
+
+Cả hai bắt **lỗi lập trình**, không phải tình huống của khách, nên chúng đứng
+ngoài chuỗi quyết định nghiệp vụ.
+
+**Đúng dịch vụ.** `chon_don_vi()` tự lọc chứng từ có `service_type` khác — kiểm
+ở hàm chọn chứ không chỉ ở wrapper đọc database, vì caller truyền thẳng một
+danh sách là đường vào hợp lệ và hàng rào chỉ ở wrapper là hàng rào chỉ có với
+một trong hai đường. Hai chứng từ cùng hình dạng, khác ngành; không có gì trong
+`BaoGia` tự nói ra điều đó. Loại + log `error`.
+
+**Ngân sách đọc được.** `max_price` phải là số nguyên **dương**; `bool`, số âm,
+số thực và chuỗi đều → `INVALID_BUDGET`. `max_price` đến từ một lượt trích của
+model, nên `"450000"`, `-1`, `True` đều có thể tới nơi — và cả ba đi lọt qua
+phép so sánh rồi ra `OVER_BUDGET`, tức một câu trả lời **sai về nghiệp vụ** cho
+một lỗi kiểu dữ liệu. `True` âm thầm nhất: `bool` là `int` trong Python, nên
+`True` = 1 và mọi báo giá đều "vượt ngân sách 1 đồng".
+
+#### Kết quả có kiểu
+
+`SELECTED` · `UNKNOWN_PROVIDER` · `AMBIGUOUS_PROVIDER` · `OVER_BUDGET` ·
+`NO_AVAILABLE_QUOTE` · `INVALID_BUDGET`. Tập **đóng** — một nhánh trả chuỗi lạ
+làm test đỏ.
+
+#### C chỉ ĐỌC
+
+Không xác nhận báo giá, không ghim hàng đợi duyệt, không gọi ra ngoài. Test
+chụp toàn bộ dấu vết có thể để lại (trạng thái chứng từ, hàng đợi duyệt, trạng
+thái bước) trước và sau **sáu** lượt chọn khác nhau và so bằng.
+
+#### Nghiệm thu
+
+**110 test mới**, suite **4033 xanh** (3 baseline theo lịch). **Hai mươi
+mutation, hai mươi cái cắn** — 13 ở vòng đầu, 7 sau khi vá lỗ chứa-nhau:
+
+`AMBIGUOUS`→chọn đại · bỏ giới hạn dịch vụ · bỏ xử lý `đ` · vượt ngân
+sách→âm thầm đổi · không báo giá→lấy bên khác · không lọc hết hạn · bỏ vế phá
+thế hoà · đọc không lọc vân tay · khớp fuzzy theo tiền tố · tên lạ vẫn đi tiếp
+xuống ngân sách · `OVER_BUDGET` không nói giá rẻ nhất · `NO_AVAILABLE_QUOTE`
+không nói đơn vị nào · hết hạn hết→gọi là `OVER_BUDGET` · **đưa lại phép
+chứa-nhau** (23 test đỏ) · **bỏ `ten_thuong_hieu` khỏi luật khớp** (17 đỏ) ·
+**bỏ hàng rào dịch vụ** · **bỏ hàng rào ngân sách** · **ngân sách nhận `bool`**
+· **ngân sách nhận số âm** · **`ten_thuong_hieu` khai bằng tên đầy đủ**.
+
+**Canary trên `p118_db`**, chứng từ thật từ mock provider qua HTTP:
+
+```
+chứng từ: MOV-03=420.000 · MOV-01=430.000 · MOV-02=470.000
+
+không nói gì                          → SELECTED            MOV-03 @ 420.000
+ngân sách 425k                        → SELECTED            MOV-03 @ 420.000
+ngân sách 100k                        → OVER_BUDGET         rẻ nhất 420.000
+'đại tín' / 'DAI TIN' / 'Vận tải Đại Tín'
+                                      → SELECTED            MOV-02 @ 470.000
+'Đại Tín' + 450k                      → OVER_BUDGET         MOV-02 @ 470.000, rẻ nhất 420.000
+'Đại Tín' + 500k                      → SELECTED            MOV-02 @ 470.000
+'MOV' · 'chuyển nhà' · 'vận tải' · 'dịch vụ' · 'Minh'
+'Đại Tính' · 'đội Đại Tín bên quận 7' · 'Thành Đạt'
+                                      → UNKNOWN_PROVIDER
+ngân sách -1 / '450000' / True        → INVALID_BUDGET
+
+chỉ đọc: database Y NGUYÊN trước/sau 20 lượt chọn
+```
+
+Hai dòng đáng nhìn nhất. `'Đại Tín' + 450k`: MOV-03 rẻ hơn **và** vừa ngân sách
+đang nằm ngay đó, hệ thống **không** lấy nó. `'chuyển nhà'`: một lượt trích
+nhầm của model dừng lại ở resolver thay vì thành một đơn hàng cho MOV-01.
+
+#### Nợ mang sang
+
+Bảng provider canonical + khoá ngoại cho `service_provider_id` — hoãn sau demo
+theo thống nhất. Trong C, `src/mock/service_providers.py` là nguồn duy nhất.
 
 ### D. Xác nhận của người dùng
 
