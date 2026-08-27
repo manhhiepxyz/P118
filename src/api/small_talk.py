@@ -700,7 +700,7 @@ def classify(message: str) -> SmallTalk | None:
     if _is_greeting(text):
         return SmallTalk(
             speech_type=SpeechType.GREETING,
-            reply="Xin chào! Mình là P-118, trợ lý bất động sản và dịch vụ cư dân. Bạn cần hỗ trợ gì hôm nay?",
+            reply="Xin chào! Mình là P-118, trợ lý dịch vụ cư dân. Bạn cần hỗ trợ gì hôm nay?",
         )
 
     if _is_about_agent(text):

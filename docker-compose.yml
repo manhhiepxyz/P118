@@ -63,6 +63,17 @@ services:
     env_file:
       - .env
     environment:
+      # Múi giờ Việt Nam. Container mặc định chạy UTC, nên từ 00:00 tới 07:00
+      # giờ VN `date.today()` trả về NGÀY HÔM TRƯỚC — và `validator.py` cho
+      # phép đặt lịch vào một ngày đã qua.
+      #
+      # Đo được lúc 00:40 ngày 27/08: host +07 thấy 27, container thấy 26.
+      #
+      # ĐÂY LÀ BẢN VÁ TẠM cho môi trường dev. Nó KHÔNG theo lên Render — biến
+      # này chỉ tồn tại trong compose. Bản đúng là một nguồn ngày duy nhất
+      # trong mã (`ZoneInfo("Asia/Ho_Chi_Minh")`) để múi giờ là quyết định của
+      # SẢN PHẨM, không phải thuộc tính của máy chủ.
+      TZ: Asia/Ho_Chi_Minh
       # Key KHÔNG bao giờ nằm trong file này — chỉ tham chiếu môi trường.
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -150,6 +161,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -174,6 +189,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -198,6 +217,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -222,6 +245,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -246,6 +273,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -273,6 +304,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -299,6 +334,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -326,6 +365,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -367,6 +410,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -399,6 +446,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
