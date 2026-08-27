@@ -1,5 +1,26 @@
 # P-118 Frontend — React (Vite)
 
+## Node runtime
+
+`vite` 8 chạy trên `rolldown`, và `rolldown` import `styleText` từ `node:util`
+— API chỉ có từ Node 20.12. Trên Node 18 lệnh `npm run build` chết ngay ở bước
+nạp module với `SyntaxError`, và thông điệp không nói gì về phiên bản Node.
+
+Khai `>=20.19` ở `package.json#engines` và `.nvmrc`. Hai chỗ vì chúng phục vụ
+hai người đọc: `engines` cho `npm` và cho người rà soát; `.nvmrc` cho `nvm use`
+của lập trình viên. CI (`.github/workflows/ci.yml`) đã dùng Node 20 — cùng
+major, nên khai báo này không đổi CI, nó chỉ làm máy cá nhân khớp với CI.
+
+`20.19` chứ không phải `20.12`: `styleText` xuất hiện từ 20.12, nhưng 20.19 là
+phiên bản ĐÃ CHẠY THỬ ở đây (`tsc` + `oxlint` + `vite build` đều sạch). Khai
+một mốc chưa ai chạy là hứa hộ một thứ chưa kiểm.
+
+```
+nvm use          # đọc .nvmrc
+npm ci
+npm run build
+```
+
 Giao diện người dùng cho **P-118 — AI Agent điều phối đa dịch vụ cư dân**.
 Theo `docs/ui-design-prompts.md` (Design System + các prompt màn hình).
 
