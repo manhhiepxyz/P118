@@ -114,6 +114,24 @@ services:
       # 0 = tắt (mặc định). Đặt >0 để demo một mình: lịch tham quan tự được
       # duyệt sau chừng ấy giây, không cần ai ngồi ở cổng /review.
       P118_AUTO_APPROVE_VIEWING_SECONDS: ${P118_AUTO_APPROVE_VIEWING_SECONDS:-0}
+      # Chọn đơn vị cung cấp theo ngân sách: báo giá → đề xuất → khách xác
+      # nhận → hàng đợi của đúng đơn vị. Mặc định TẮT vì nó đổi hình dạng màn
+      # hình của khách, và một tính năng đang làm dở không nên tự bật trên máy
+      # người khác.
+      #
+      # Chỉ đúng chuỗi "1" mới bật (xem `src/common/feature_flags.py`) — "true"
+      # hay "yes" đều là TẮT, để không ai bật nhầm bằng một giá trị trông giống
+      # bật.
+      #
+      # Bật để thử: đặt biến này thành chuỗi một trong `.env` rồi
+      # `docker compose up -d backend`.
+      #
+      # Chú thích ở đây cố ý KHÔNG viết ra cặp `TÊN=giá trị bật`:
+      # `tests/test_a_feature_flag_is_off_unless_it_says_one.py` quét từng dòng
+      # của file này theo tên cờ, và nó quét cả chú thích. Sự thô ấy là có
+      # chủ đích — một guard chỉ nhìn dòng cấu hình sẽ bỏ sót một cờ bị bật
+      # trong khối `x-` dùng lại, hay trong một service thứ hai.
+      SERVICE_PROVIDER_MATCHING: ${SERVICE_PROVIDER_MATCHING:-0}
     volumes:
       - ./data:/app/data
     depends_on:

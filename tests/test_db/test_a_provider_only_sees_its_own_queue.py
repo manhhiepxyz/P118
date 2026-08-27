@@ -185,6 +185,69 @@ async def test_one_account_can_hold_several_providers(client, db_pool):
 
 
 @pytest.mark.asyncio
+async def test_the_queue_says_which_unit_holds_each_row(client, db_pool):
+    """Mỗi dòng mang mã VÀ tên đơn vị giữ nó.
+
+    Một tài khoản kiêm nhiệm nhiều đơn vị đọc một hàng đợi trộn lẫn. Không có
+    hai trường này thì màn hình không chia được theo đơn vị, và người duyệt bấm
+    Duyệt mà không biết mình đang quyết định nhân danh đội nào.
+
+    Tên tính ở BACKEND. Để giao diện tự map mã → tên là dựng một bảng tên thứ
+    hai, và bảng thứ hai là bảng sẽ lệch khi danh mục đơn vị đổi.
+    """
+    _, khach_id = await _tai_khoan(client, db_pool, "chu_yc_ten")
+    tok, uid = await _tai_khoan(client, db_pool, "donvi_doc_ten", role="provider")
+    await _gan_don_vi(db_pool, uid, MOV_01)
+    await _gan_don_vi(db_pool, uid, MOV_02)
+    a = await _yeu_cau(db_pool, khach_id, MOV_01)
+    b = await _yeu_cau(db_pool, khach_id, MOV_02)
+
+    muc = {m["workflow_id"]: m for m in (await client.get(SERVICE, headers=_auth(tok))).json()["items"]}
+
+    assert muc[a]["service_provider_id"] == MOV_01
+    assert muc[b]["service_provider_id"] == MOV_02
+    # Tên THẬT, không phải chính cái mã in lại.
+    assert muc[a]["service_provider_name"] not in (None, "", MOV_01), muc[a]["service_provider_name"]
+    assert muc[a]["service_provider_name"] != muc[b]["service_provider_name"]
+
+
+@pytest.mark.asyncio
+async def test_the_total_counts_only_this_accounts_units(client, db_pool):
+    """`total` đếm phần của TÀI KHOẢN NÀY, không phải cả bảng.
+
+    Trước bản sửa, câu đếm không có mệnh đề đơn vị: một đơn vị có 2 việc đọc
+    được "2 / 290". Con số ấy vừa vô nghĩa vừa nguy hiểm — nó nói rằng còn 288
+    việc người duyệt chưa nhìn thấy, và không có chỗ nào để bấm xem.
+    """
+    _, khach_id = await _tai_khoan(client, db_pool, "chu_yc_tong")
+    tok, uid = await _tai_khoan(client, db_pool, "donvi_dem_tong", role="provider")
+    await _gan_don_vi(db_pool, uid, MOV_01)
+    cua_toi = await _yeu_cau(db_pool, khach_id, MOV_01)
+    await _yeu_cau(db_pool, khach_id, MOV_02)  # của đơn vị khác
+    await _yeu_cau(db_pool, khach_id, None)  # dòng cũ không chủ
+
+    body = (await client.get(SERVICE, headers=_auth(tok))).json()
+
+    assert body["total"] == len(body["items"]), f"total={body['total']} items={len(body['items'])}"
+    assert _ma_workflow(body) == {cua_toi}
+
+
+@pytest.mark.asyncio
+async def test_a_provider_with_no_mapping_is_told_zero_not_everything(client, db_pool):
+    """Chưa gắn đơn vị: hàng đợi rỗng VÀ tổng bằng 0.
+
+    Tách khỏi bài trên vì đây là nhánh fail-closed. Một `total` khác 0 trên một
+    danh sách rỗng nói rằng có việc đang bị giấu — và người duyệt sẽ đi tìm.
+    """
+    _, khach_id = await _tai_khoan(client, db_pool, "chu_yc_tong_0")
+    tok, _ = await _tai_khoan(client, db_pool, "donvi_tong_0", role="provider")
+    await _yeu_cau(db_pool, khach_id, MOV_01)
+
+    body = (await client.get(SERVICE, headers=_auth(tok))).json()
+    assert body["items"] == [] and body["total"] == 0, body["total"]
+
+
+@pytest.mark.asyncio
 async def test_an_admin_does_not_get_a_queue_of_its_own(client, db_pool):
     """Admin KHÔNG vào hàng đợi của đơn vị — kể cả chỉ để xem.
 

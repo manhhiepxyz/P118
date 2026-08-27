@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from src.api.deps import require_roles
 from src.config import get_settings
 from src.orchestration.demo_service import ResumeError, resume_after_service_decision
+from src.orchestration.provider_directory import ten_don_vi
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import (
     REJECT_CODES,
@@ -149,10 +150,19 @@ async def list_service_approvals(
         # vừa đủ, và mục mới — xếp cuối vì cũ-nhất-trước — nằm ngoài tầm nhìn
         # mà không dấu hiệu nào. Đo được: yêu cầu vào hàng đợi lúc 18:44:41
         # ở vị trí ~62/50; người duyệt không thấy, khách huỷ.
+        # Lọc theo ĐÚNG danh sách đơn vị của tài khoản, giống hệt truy vấn lấy
+        # dòng ở trên.
+        #
+        # Trước đây câu này không có mệnh đề đơn vị, nên nó đếm TOÀN BỘ bảng:
+        # một đơn vị có 3 việc đọc được "3 / 290". Con số ấy vừa vô nghĩa vừa
+        # nguy hiểm — nó nói với người duyệt rằng còn 287 việc họ chưa nhìn
+        # thấy, và không có chỗ nào để bấm xem.
         async with pool.acquire() as conn:
             total = await conn.fetchval(
-                "SELECT count(*) FROM service_approvals WHERE status = ANY($1::varchar[])",
+                "SELECT count(*) FROM service_approvals "
+                "WHERE status = ANY($1::varchar[]) AND service_provider_id = ANY($2::varchar[])",
                 list(wanted),
+                list(don_vi),
             )
     finally:
         await pool.close()
@@ -177,6 +187,17 @@ async def list_service_approvals(
                 "decided_at": row["decided_at"].isoformat() if row.get("decided_at") else None,
                 "reject_reason": row.get("reject_reason"),
                 "reject_code": row.get("reject_code"),
+                # AI chịu trách nhiệm dòng này. Một tài khoản có thể được gắn
+                # NHIỀU đơn vị (`service_provider_accounts` khoá chính là cặp
+                # `(user_id, service_provider_id)`), và khi đó một hàng đợi trộn
+                # việc của mấy đơn vị mà không dòng nào nói của ai.
+                #
+                # Trả cả mã lẫn TÊN: mã để lọc và đối chiếu log, tên để đọc.
+                # Tên tính ở backend từ `provider_directory.ten_don_vi` — một
+                # nguồn duy nhất. Để UI tự map là dựng một bảng tên thứ hai, và
+                # bảng thứ hai luôn là bảng lệch.
+                "service_provider_id": row.get("service_provider_id"),
+                "service_provider_name": ten_don_vi(row.get("service_provider_id")),
                 # UI không tự duy trì một bản sao policy theo tool. Nếu sau
                 # này thêm dịch vụ/mã mới, backend vẫn là nguồn duy nhất.
                 "allowed_reject_codes": list(allowed_reject_codes(str(row["tool"]))),

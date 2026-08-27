@@ -119,6 +119,8 @@ nó đúng là IDOR: một tổ chức quyết định trên đơn hàng của t
 | `decide` | kiểm quyền sở hữu **độc lập** với đường đọc danh sách, trả **404** (không phải 403 — 403 xác nhận dòng ấy tồn tại) |
 | Đường ghi | cả ba (`save_pending_service_approvals`, `save_service_request`, `viewing_approval`) gán đơn vị cụ thể qua `provider_directory.don_vi_mac_dinh()`. Tool chưa khai thì **ném**, không rơi về `LEGACY-DEFAULT` |
 | Ghim lại | `ON CONFLICT` cập nhật `service_provider_id` — ghim lại là yêu cầu MỚI, và bước B sẽ đổi đơn vị theo ngày |
+| Chia theo đơn vị | danh sách trả thêm `service_provider_id` + `service_provider_name`; giao diện chia hàng đợi trong từng loại dịch vụ. Tên tính ở BACKEND qua `provider_directory.ten_don_vi` — UI không dựng bảng tên thứ hai |
+| `total` | đếm theo ĐÚNG danh sách đơn vị của tài khoản. Trước đó nó đếm cả bảng: một đơn vị có 3 việc đọc được "3 / 290", tức là 287 việc bị giấu mà không có chỗ nào bấm xem |
 
 **Admin KHÔNG vào hàng đợi của đơn vị.** Yêu cầu ban đầu là "admin vẫn xem được
 toàn bộ"; nó được rút lại có chủ ý. Quyền duyệt là quyền *nhân danh* một đơn vị
@@ -129,6 +131,18 @@ cụ giám sát: nếu người giám sát tự tay giải quyết được hàn
 
 > Admin giám sát toàn cục qua `/admin/requests`; provider xử lý hàng đợi của
 > chính đơn vị qua `/service-approvals`.
+
+**Một tài khoản có thể giữ nhiều đơn vị — và điều đó KHÔNG phải một ngoại lệ.**
+`service_provider_accounts` có khoá chính là cặp `(user_id, service_provider_id)`,
+nên "một người quản mấy đội" là hình dạng bình thường của bảng, không phải một
+cửa sau. Cổng quyền không đổi một dòng: danh sách vẫn lọc theo đúng tập đơn vị
+của tài khoản, `decide` vẫn kiểm quyền sở hữu độc lập.
+
+Cái phải đổi là MÀN HÌNH. Một hàng đợi trộn việc của mấy đội mà không dòng nào
+nói của ai là mời người duyệt bấm Duyệt nhân danh một đội không phải của mình.
+Nên trong mỗi loại dịch vụ có một hàng chip đơn vị, mặc định "Tất cả", và khi
+đang xem lẫn thì mỗi thẻ ghi tên đơn vị giữ nó. Tài khoản chỉ giữ MỘT đơn vị
+không thấy hàng chip — với họ nó không nói thêm gì ngoài việc chiếm chỗ.
 
 Bù lại, `/admin/requests/{id}` nay trả `service_provider {id, name}` cho từng
 bước, cạnh `approval_status` và `decided_by` đã có. `None` ở đó là một câu trả

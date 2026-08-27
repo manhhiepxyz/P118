@@ -150,6 +150,12 @@ const DETAIL_LABELS: Record<string, string> = {
   preferred_time: 'Giờ mong muốn',
   move_date: 'Ngày chuyển',
   move_time: 'Giờ chuyển',
+  // Ba khoá này thiếu từ đầu, nên màn duyệt in ra `move_vehicle`,
+  // `needs_elevator`, `needs_loading_support` — từ vựng nội bộ, đứng ngay cạnh
+  // nút Duyệt. Người bên đơn vị chuyển nhà không có nghĩa vụ đọc tên biến.
+  move_vehicle: 'Phương tiện',
+  needs_elevator: 'Cần thang máy',
+  needs_loading_support: 'Cần bốc xếp',
   apartment_code: 'Căn hộ',
   residential_area: 'Khu đô thị',
   preferred_contact_time: 'Giờ liên hệ',
@@ -181,9 +187,26 @@ const SERVICE_ORDER = [
   'change_parking_zone',
 ]
 
-function detailText(value: string | number | boolean | null): string {
+/** Giá trị enum → tiếng Việt. Chỉ những khoá mà giá trị thô là từ vựng nội bộ.
+ *
+ *  Không map hết mọi giá trị: ngày, giờ, biển số, mô tả đều là dữ liệu người
+ *  gõ và dịch chúng là làm hỏng chúng. Ở đây chỉ có các enum đóng. */
+const VALUE_LABELS: Record<string, Record<string, string>> = {
+  move_vehicle: { none: 'Không cần xe', van: 'Xe tải nhỏ', truck: 'Xe tải lớn' },
+  issue_type: {
+    air_conditioning: 'Điều hoà',
+    electrical: 'Điện',
+    plumbing: 'Cấp thoát nước',
+    other: 'Khác',
+  },
+}
+
+function detailText(value: string | number | boolean | null, key?: string): string {
   if (value === null || value === '') return '—'
   if (typeof value === 'boolean') return value ? 'Có' : 'Không'
+  // Giá trị lạ trả về CHÍNH nó, không phải một chỗ trống: một enum mới chưa ai
+  // cập nhật ở đây vẫn phải đọc được, dù xấu.
+  if (key && typeof value === 'string') return VALUE_LABELS[key]?.[value] ?? value
   return String(value)
 }
 
@@ -205,6 +228,14 @@ export function ProviderReviewPage() {
   // đỗ xe phải cuộn qua hàng chục lịch tham quan để tìm phần của mình.
   // `null` = chưa chọn, sẽ tự chọn loại đầu tiên có việc.
   const [serviceTab, setServiceTab] = useState<string | null>(null)
+  // Đơn vị đang xem, TRONG loại dịch vụ đang chọn. `null` = tất cả đơn vị.
+  //
+  // Một tài khoản có thể được gắn nhiều đơn vị (`service_provider_accounts`
+  // khoá chính là cặp), và khi đó "Chuyển nhà" là hàng đợi của ba đội khác
+  // nhau nằm lẫn vào nhau. KHÔNG lưu ở đây phép kiểm hợp lệ: nếu đơn vị đang
+  // chọn không còn việc nào trong loại vừa đổi, giá trị này bị bỏ qua khi vẽ —
+  // cùng cách `serviceTab` đang làm, nên không cần một `useEffect` reset.
+  const [providerTab, setProviderTab] = useState<string | null>(null)
   // Hàng đợi hay LỊCH SỬ. Mặc định là hàng đợi — đó là thứ người duyệt mở màn
   // này để làm; tra lại là việc hiếm hơn nhiều.
   const [serviceView, setServiceView] = useState<'AWAITING' | 'decided'>('AWAITING')
@@ -364,7 +395,30 @@ export function ProviderReviewPage() {
     [...grouped.keys()].filter((tool) => !SERVICE_ORDER.includes(tool)),
   )
   const activeService = serviceTab && grouped.has(serviceTab) ? serviceTab : (serviceTabs[0] ?? null)
-  const shownServices = activeService ? (grouped.get(activeService) ?? []) : []
+  const trongLoai = activeService ? (grouped.get(activeService) ?? []) : []
+
+  // Các đơn vị CÓ VIỆC trong loại đang xem — không phải mọi đơn vị tài khoản
+  // được gắn. Một chip "Đại Tín (0)" là một chỗ để bấm vào rồi thấy trống.
+  //
+  // Dòng cũ chưa có đơn vị (`service_provider_id` null) gom vào một nhóm riêng
+  // dưới khoá `KHONG_RO`, không im lặng biến mất: một việc không ai nhận vẫn
+  // là một việc có người đang chờ.
+  const KHONG_RO = '\u0000'
+  const theoDonVi = new Map<string, ServiceApprovalRecord[]>()
+  for (const item of trongLoai) {
+    const ma = item.service_provider_id ?? KHONG_RO
+    const list = theoDonVi.get(ma) ?? []
+    list.push(item)
+    theoDonVi.set(ma, list)
+  }
+  const providerTabs = [...theoDonVi.keys()].sort()
+  const activeProvider = providerTab && theoDonVi.has(providerTab) ? providerTab : null
+  const shownServices = activeProvider ? (theoDonVi.get(activeProvider) ?? []) : trongLoai
+  // Tên đơn vị hiện TRÊN THẺ chỉ khi đang xem lẫn nhiều đơn vị. Khi đã lọc về
+  // một đơn vị, nhắc lại tên ấy trên từng thẻ là nhiễu — chip phía trên đã nói.
+  const cheoDonVi = activeProvider === null && providerTabs.length > 1
+  const tenDonVi = (ma: string) =>
+    ma === KHONG_RO ? 'Chưa gán đơn vị' : (theoDonVi.get(ma)?.[0]?.service_provider_name ?? ma)
 
   const emptyMessage =
     tab === 'service'
@@ -569,6 +623,51 @@ export function ProviderReviewPage() {
         </div>
       )}
 
+      {/* Hàng chip ĐƠN VỊ. Chỉ hiện khi loại đang xem có việc của nhiều hơn một
+          đơn vị — một tài khoản provider bình thường chỉ giữ một đơn vị, và
+          với họ hàng này không nói thêm gì ngoài việc chiếm chỗ. */}
+      {tab === 'service' && providerTabs.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="Đơn vị cung cấp">
+          <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Đơn vị</span>
+          {/* "Tất cả" đứng ĐẦU và là mặc định: mở màn ra phải thấy hết việc,
+              không phải thấy việc của một đơn vị được chọn hộ. */}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeProvider === null}
+            onClick={() => setProviderTab(null)}
+            className={
+              'rounded-full px-3 py-1.5 text-sm font-medium transition-colors ' +
+              (activeProvider === null
+                ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900'
+                : 'border border-gray-300 text-gray-700 dark:border-gray-700 dark:text-gray-200')
+            }
+          >
+            Tất cả ({trongLoai.length})
+          </button>
+          {providerTabs.map((ma) => {
+            const active = ma === activeProvider
+            return (
+              <button
+                key={ma}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setProviderTab(ma)}
+                className={
+                  'rounded-full px-3 py-1.5 text-sm font-medium transition-colors ' +
+                  (active
+                    ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900'
+                    : 'border border-gray-300 text-gray-700 dark:border-gray-700 dark:text-gray-200')
+                }
+              >
+                {tenDonVi(ma)} ({theoDonVi.get(ma)?.length ?? 0})
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       {tab === 'service' && (
         <ul className="space-y-3">
           {shownServices.map((record) => {
@@ -586,12 +685,20 @@ export function ProviderReviewPage() {
                     <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
                       {serviceTitle(record)}
                     </p>
+                    {/* Chỉ khi đang xem lẫn nhiều đơn vị. Không có dòng này thì
+                        người duyệt bấm Duyệt cho một việc mà không biết mình
+                        đang quyết định nhân danh đội nào. */}
+                    {cheoDonVi && (
+                      <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                        {tenDonVi(record.service_provider_id ?? KHONG_RO)}
+                      </p>
+                    )}
                     <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
                       {entries.map(([k, v]) => (
                         <Fragment key={k}>
                           <dt className="text-gray-500 dark:text-gray-400">{DETAIL_LABELS[k] ?? k}</dt>
                           <dd className="font-medium text-gray-900 dark:text-gray-100">
-                            {detailText(v)}
+                            {detailText(v, k)}
                           </dd>
                         </Fragment>
                       ))}

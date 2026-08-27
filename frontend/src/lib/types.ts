@@ -556,6 +556,19 @@ export interface ServiceApprovalRecord {
   reject_code?: 'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER' | null
   /** Allowlist canonical do backend tính theo tool; UI không tự suy policy. */
   allowed_reject_codes: Array<'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER'>
+  /**
+   * Đơn vị chịu trách nhiệm dòng này.
+   *
+   * Một tài khoản có thể được gắn NHIỀU đơn vị, và khi đó hàng đợi trộn việc
+   * của mấy đơn vị. Không có trường này thì màn hình không chia được, và người
+   * duyệt quyết định thay một đơn vị khác mà không biết.
+   *
+   * `null` cho dữ liệu có trước khi cột tồn tại — không phải lỗi, nhưng cũng
+   * KHÔNG được vẽ ra như một đơn vị tên rỗng.
+   */
+  service_provider_id?: string | null
+  /** Tên người đọc được, do backend tính. UI không tự map mã → tên. */
+  service_provider_name?: string | null
 }
 
 /** Body duyệt/từ chối lịch tham quan — từ chối bắt buộc lý do. */
