@@ -15,6 +15,7 @@ from src.api.auth_routes import users_router
 from src.api.middleware import RateLimitMiddleware
 from src.api.notification_routes import router as notification_router
 from src.api.observability import CorrelationIdMiddleware, setup_observability_logging
+from src.api.proposal_routes import router as proposal_router
 from src.api.readiness import evaluate_readiness
 from src.api.routes import router
 from src.api.service_approval_routes import router as service_approval_router
@@ -199,6 +200,9 @@ app.include_router(verification_router, prefix="/api/v1")
 # Yêu cầu lịch tham quan chờ duyệt — provider/admin quyết định trong /review.
 # Hàng đợi duyệt của đơn vị cho SÁU dịch vụ ngoài lịch tham quan.
 app.include_router(service_approval_router, prefix="/api/v1")
+# Khách xác nhận đề xuất đơn vị. Tách khỏi hàng đợi duyệt vì hai bề mặt phục vụ
+# hai vai: khách bấm ở đây, đơn vị bấm ở `/service-approvals`.
+app.include_router(proposal_router, prefix="/api/v1")
 app.include_router(viewing_approval_router, prefix="/api/v1")
 # Thông báo realtime: GET /api/v1/notifications/summary + /stream (SSE).
 app.include_router(notification_router, prefix="/api/v1")
