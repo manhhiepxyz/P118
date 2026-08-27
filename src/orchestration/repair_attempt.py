@@ -52,6 +52,7 @@ from typing import Any
 
 from src.common.enums import TaskStatus
 from src.common.task_plan import InputRef, Task, TaskPlan
+from src.orchestration.task_attempt import DAI_TOI_DA, DAU_LAN_THU, cap_danh_tinh_lan_thu
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,9 @@ TERMINAL_SUBMISSION_STATUSES = frozenset({"ACKNOWLEDGED", "UNKNOWN"})
 
 # `workflow_tasks.task_id` là VARCHAR(20). Hậu tố phải ngắn và phải đọc được
 # bằng mắt trong một bảng dữ liệu.
-_ATTEMPT_SEPARATOR = "R"
-_MAX_TASK_ID = 20
+# Giữ lại cho các chỗ đọc trong module; nguồn là `task_attempt`.
+_ATTEMPT_SEPARATOR = DAU_LAN_THU
+_MAX_TASK_ID = DAI_TOI_DA
 
 
 @dataclass(frozen=True)
@@ -136,17 +138,14 @@ def _needs_new_identity(row: dict[str, Any], task: Task, answered: dict[str, Any
 
 
 def _allocate_task_id(old_task_id: str, taken: set[str]) -> str | None:
-    """`T5` → `T5R2`, `T5R3`… Trả None khi không còn tên nào đủ ngắn.
+    """Alias mỏng — luật thật ở `task_attempt.cap_danh_tinh_lan_thu`.
 
-    Không cắt bớt để cho vừa: một `task_id` bị cắt có thể ĐỤNG một id đang có,
-    và khi đó lần thử mới ghi đè lên bằng chứng của một bước khác.
+    Ba đường ghi cần cấp danh tính cho một lần thử, và luật "không dài quá 20 ký
+    tự, không đụng id đang có" là một BẤT BIẾN CỦA SCHEMA. Một bất biến có ba
+    bản sao là một bất biến sẽ lệch — nên nó có một chỗ ở duy nhất, và chỗ này
+    chỉ còn giữ tên cũ cho các lối gọi trong module.
     """
-    goc = old_task_id.split(_ATTEMPT_SEPARATOR)[0]
-    for lan in range(2, 100):
-        ung_vien = f"{goc}{_ATTEMPT_SEPARATOR}{lan}"
-        if len(ung_vien) <= _MAX_TASK_ID and ung_vien not in taken:
-            return ung_vien
-    return None
+    return cap_danh_tinh_lan_thu(old_task_id, taken)
 
 
 def _rewrite(plan: TaskPlan, doi_ten: dict[str, str], input_cu: dict[str, dict[str, Any]]) -> TaskPlan:

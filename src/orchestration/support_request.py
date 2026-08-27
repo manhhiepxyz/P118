@@ -42,12 +42,14 @@ from typing import Any
 from src.common.enums import TaskStatus
 from src.common.results import StandardResult
 from src.orchestration.provider_gateway import ProviderCall, call_provider
+from src.orchestration.task_attempt import cap_danh_tinh
 
 logger = logging.getLogger(__name__)
 
 # `workflow_tasks.task_id` là VARCHAR(20). `T1` → `T1H2` — đọc được bằng mắt, và
 # không đụng hậu tố `R` (lần thử mới) hay `Z` (đổi khu).
 _CANCEL_SEPARATOR = "H"
+
 _MAX_TASK_ID = 20
 
 # (loại hồ sơ, tool của bước gốc) → (tool phải chạy, ô mang mã định danh).
@@ -80,17 +82,16 @@ def _as_dict(raw: Any) -> dict[str, Any]:
 
 
 def _allocate_task_id(source_task_id: str, taken: set[str]) -> str | None:
-    """Trả None khi không còn tên đủ ngắn — và khi đó KHÔNG làm gì cả.
+    """Alias mỏng — luật thật ở `task_attempt.cap_danh_tinh`.
 
-    Không cắt bớt cho vừa: một `task_id` bị cắt có thể ĐỤNG một id đang có, và
-    khi đó bước huỷ ghi đè bằng chứng của một bước khác.
+    Chuỗi HUỶ dùng ký tự `H`, khác chuỗi THỬ LẠI (`R`): hai chuỗi khác nhau
+    trên cùng một bước, và gộp chúng vào một tiền tố sẽ làm một lượt huỷ và một
+    lượt thử lại tranh nhau cùng một cái tên.
+
+    Luật độ dài và luật không-đụng-id thì chung — và một bất biến của schema
+    không được có ba bản sao.
     """
-    goc = source_task_id.split(_CANCEL_SEPARATOR)[0]
-    for lan in range(2, 100):
-        ung_vien = f"{goc}{_CANCEL_SEPARATOR}{lan}"
-        if len(ung_vien) <= _MAX_TASK_ID and ung_vien not in taken:
-            return ung_vien
-    return None
+    return cap_danh_tinh(source_task_id, taken, dau=_CANCEL_SEPARATOR)
 
 
 async def run_approved_requests(
