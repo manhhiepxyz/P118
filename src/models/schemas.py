@@ -417,6 +417,16 @@ class DemoWorkflowResponse(BaseModel):
     # `viewing_approval` khác null — một suy diễn sẽ sai ngay khi có loại chờ
     # thứ ba.
     approval_actor: Literal["USER", "PROVIDER", "ADMIN"] | None = None
+    # Đề xuất đơn vị đang chờ CHÍNH KHÁCH bấm đồng ý.
+    #
+    # Có mặt khi và chỉ khi `approval_actor == "USER"` vì lý do chọn đơn vị.
+    # Nội dung ghép lúc đọc từ đề xuất + chứng từ + danh mục đơn vị, nên nó
+    # không phải một bản sao — nó là một khung nhìn, và nó không thể cũ đi.
+    #
+    # Giao diện dựng nút "đồng ý" từ `can_confirm` bên trong, KHÔNG từ
+    # `status`: chứng từ có thể vừa hết hạn trong khi lượt dọn chưa chạy tới,
+    # và lúc ấy cột vẫn ghi `PROPOSED`.
+    provider_proposal: dict[str, Any] | None = None
     # Mã lỗi ỔN ĐỊNH khi workflow hỏng: `LLM_CONFIGURATION_ERROR`,
     # `PROVIDER_UNAVAILABLE`, … Dùng để đối chiếu log server và cho admin đọc.
     # KHÔNG phải tên class exception — tên class là chi tiết cài đặt, đổi theo

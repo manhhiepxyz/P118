@@ -3575,6 +3575,30 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             approval_actor="PROVIDER",
             plan=plan_view,
         )
+    if policy_error == "PROVIDER_PROPOSAL_REQUIRED":
+        # Chờ CHÍNH KHÁCH chọn đơn vị. Không phải chờ đơn vị duyệt, và câu chữ
+        # phải nói đúng ai: bảo "đơn vị đang xác nhận" lúc này là nói sai hai
+        # lần — không ai bên kia nhận được việc, và khách thì đang được bảo là
+        # không phải làm gì trong khi họ là người duy nhất còn phải làm.
+        de_xuat = (state.get("policy_context") or {}).get("provider_proposal") or {}
+        don_vi = (de_xuat.get("provider") or {}).get("name") or "đơn vị phù hợp"
+        so_tien = de_xuat.get("amount")
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            workflow_id=state.get("workflow_id"),
+            summary=(
+                f"Mình tìm được {don_vi} với giá {so_tien:,.0f} VND. Bạn xác nhận để mình gửi yêu cầu nhé.".replace(
+                    ",", "."
+                )
+                if isinstance(so_tien, int)
+                else f"Mình đề xuất {don_vi}. Bạn xác nhận để mình gửi yêu cầu nhé."
+            ),
+            provider_proposal=de_xuat,
+            # KHÁCH quyết định. Giao diện đọc trường này để dựng nút xác nhận —
+            # và để KHÔNG dựng màn hình chờ đơn vị.
+            approval_actor="USER",
+            plan=plan_view,
+        )
     if policy_error == "SERVICE_APPROVAL_REQUIRED":
         # Chờ ĐƠN VỊ nhận việc — không phải lỗi, và không có khoản tiền nào để
         # khách bấm xác nhận. Không có nhánh này thì mọi yêu cầu dịch vụ rơi

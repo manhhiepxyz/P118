@@ -20,6 +20,7 @@ KHÔNG cần duyệt trước, đưa các bước cần duyệt về `WAITING_AP
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -29,6 +30,7 @@ from src.common.enums import TaskStatus, WorkflowStatus
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import TaskPlan
+from src.config import get_settings
 from src.orchestration.payment_approval import persist_full_plan, plan_without
 from src.orchestration.provider_directory import don_vi_mac_dinh
 
@@ -50,6 +52,8 @@ from src.orchestration.provider_directory import don_vi_mac_dinh
 # `src.common.agent_tool_policy.PROVIDER_TOOLS` — một tập khác hẳn (mọi tool có
 # connector, 10 cái). Hai khái niệm khác nhau mang cùng một tên là cách hai
 # người đọc cùng một dòng rồi hiểu hai điều.
+logger = logging.getLogger(__name__)
+
 SERVICE_GATED_TOOLS: frozenset[str] = frozenset(
     {
         "register_vehicle",
@@ -142,6 +146,20 @@ class ServiceApprovalRequiredError(PolicyInterruptionError):
     code = "SERVICE_APPROVAL_REQUIRED"
 
 
+class ProviderProposalRequiredError(PolicyInterruptionError):
+    """Đang chờ KHÁCH chọn đơn vị, chưa phải chờ đơn vị duyệt.
+
+    Mã riêng vì đây là một người chờ KHÁC. `SERVICE_APPROVAL_REQUIRED` dựng câu
+    "đơn vị đang xác nhận, bạn chờ chút nhé" — nói câu ấy trước khi khách bấm
+    đồng ý là nói sai hai lần: không ai bên kia nhận được việc, và khách thì
+    đang được bảo là không phải làm gì.
+
+    Nó cũng quyết định `approval_actor`: `USER` ở đây, `PROVIDER` sau lượt bấm.
+    """
+
+    code = "PROVIDER_PROPOSAL_REQUIRED"
+
+
 class _ExecutionBoundary(Protocol):
     async def execute(
         self,
@@ -223,6 +241,10 @@ class ServiceApprovalBoundary:
         self._approved = approved
         self._repository = repository
         self._applicant = applicant or {}
+        # Đề xuất vừa dựng cho lượt này, nếu có. Chỉ sống trong một lượt gọi —
+        # nguồn sự thật nằm ở `service_provider_proposals`, và đây chỉ là đường
+        # để `execute()` biết mình phải ném lỗi nào.
+        self._de_xuat: dict[str, Any] | None = None
 
     async def execute(
         self,
@@ -290,6 +312,18 @@ class ServiceApprovalBoundary:
                 return resolved_workflow_id, partial
 
         await self._park(resolved_workflow_id, plan, gated)
+        if self._de_xuat is not None:
+            # Chờ KHÁCH đứng trước chờ đơn vị. Nếu lượt này vừa dựng một đề
+            # xuất, đó là việc tiếp theo — kể cả khi trong cùng kế hoạch còn
+            # bước khác đã vào hàng đợi đơn vị. Nói "đơn vị đang xác nhận" lúc
+            # này là bảo khách không phải làm gì, trong khi họ là người duy
+            # nhất còn phải làm.
+            raise ProviderProposalRequiredError(
+                "Customer must choose a provider.",
+                workflow_id=resolved_workflow_id,
+                partial_results=partial,
+                context={"provider_proposal": self._de_xuat},
+            )
         raise ServiceApprovalRequiredError(
             "Provider approval is required.",
             workflow_id=resolved_workflow_id,
@@ -307,6 +341,31 @@ class ServiceApprovalBoundary:
         for task_id in gated:
             await self._repository.update_task_status(workflow_id, task_id, TaskStatus.WAITING_APPROVAL)
         by_id = {task.task_id: task for task in plan.tasks}
+
+        # Bước đi qua đường BÁO GIÁ không được ghim hàng đợi ở đây.
+        #
+        # Hàng đợi của đơn vị chỉ mở sau khi khách bấm đồng ý. Ghim trước nghĩa
+        # là đơn vị nhận việc trước khi khách chọn họ — và lúc khách đổi ý thì
+        # bên kia đã bắt đầu xếp lịch.
+        #
+        # Khi cờ tắt, `dich_vu_di_qua_bao_gia` trả False cho mọi bước và dòng
+        # dưới đây không đổi gì: `qua_bao_gia` rỗng, `con_lai` bằng `gated`.
+        #
+        # Import muộn: `provider_matching` đọc `proposal_repository`, và
+        # `proposal_repository` đọc `SERVICE_LABELS` của chính file này. Vòng
+        # tròn ấy chỉ tồn tại ở thời điểm nạp module, không ở thời điểm chạy.
+        from src.orchestration.provider_matching import dich_vu_di_qua_bao_gia
+
+        qua_bao_gia = {tid: tool for tid, tool in gated.items() if dich_vu_di_qua_bao_gia(tool)}
+        con_lai = {tid: tool for tid, tool in gated.items() if tid not in qua_bao_gia}
+
+        if qua_bao_gia:
+            self._de_xuat = await self._chuan_bi_de_xuat(workflow_id, by_id, qua_bao_gia)
+
+        if not con_lai:
+            await self._repository.update_workflow_status(workflow_id, WorkflowStatus.WAITING_APPROVAL)
+            return
+
         await save_pending_service_approvals(
             self._repository._pool,  # noqa: SLF001 - composition root sở hữu pool
             workflow_id=workflow_id,
@@ -318,7 +377,7 @@ class ServiceApprovalBoundary:
                     "service_label": SERVICE_LABELS.get(tool, tool),
                     "details": approval_details(by_id.get(task_id)),
                 }
-                for task_id, tool in gated.items()
+                for task_id, tool in con_lai.items()
             ],
         )
         # Trạng thái của CHÍNH workflow, không chỉ của từng bước.
@@ -329,6 +388,42 @@ class ServiceApprovalBoundary:
         # "Đang chuẩn bị" cho một việc thật ra đang chờ đơn vị — và sweeper dọn
         # workflow mồ côi thì `PENDING` là đúng thứ nó tìm.
         await self._repository.update_workflow_status(workflow_id, WorkflowStatus.WAITING_APPROVAL)
+
+    async def _chuan_bi_de_xuat(
+        self, workflow_id: str, by_id: dict[str, Any], qua_bao_gia: dict[str, str]
+    ) -> dict[str, Any] | None:
+        """Hỏi giá và ghim đề xuất cho các bước đi qua đường báo giá.
+
+        Input lấy từ KẾ HOẠCH đã persist, không từ goal và không từ body. Đó là
+        cùng một nguồn mà `luu_bao_gia` dùng để buộc chứng từ neo đúng bước —
+        hai nơi đọc hai nguồn thì vân tay sẽ lệch, và chứng từ vừa tạo xong đã
+        không khớp chính yêu cầu sinh ra nó.
+
+        Trả về payload của đề xuất ĐẦU TIÊN chọn được. Bước này chỉ mở cho
+        `schedule_move`, và một kế hoạch không có hai lần chuyển nhà — nếu sau
+        này có, chỗ này phải trả về một danh sách.
+
+        Không chọn được thì trả `None`: KHÔNG ghim đề xuất giả, và cũng không
+        ghim hàng đợi đơn vị. Lý do đi lên qua `lua_chon` để tầng trên nói ra.
+        """
+        from src.connectors.resident_services import ResidentServicesConnector
+        from src.orchestration.provider_matching import chuan_bi_de_xuat, payload_cho_nguoi_dung
+
+        pool = self._repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        connector = ResidentServicesConnector(base_url=get_settings().resident_services_service_url)
+        for task_id in qua_bao_gia:
+            task = by_id.get(task_id)
+            ket_qua = await chuan_bi_de_xuat(
+                pool,
+                connector,
+                workflow_id=workflow_id,
+                task_id=task_id,
+                input_data=dict(getattr(task, "input", None) or {}),
+            )
+            if ket_qua.de_xuat is not None:
+                return await payload_cho_nguoi_dung(pool, ket_qua.de_xuat)
+            logger.info("bước %s chưa chọn được đơn vị: %s", task_id, ket_qua.lua_chon.ket_qua)
+        return None
 
     async def _applicant_from_record(self, workflow_id: str) -> dict[str, Any]:
         """Người yêu cầu, đọc từ bảng `users` qua chủ sở hữu workflow.
