@@ -2155,7 +2155,12 @@ class WorkflowRepository:
                 """
                 SELECT t.task_id, t.tool, t.status, t.depends_on, t.error_code, t.error_message,
                        t.provider_submission_status, t.created_at, t.updated_at,
-                       sa.status AS approval_status, sa.decided_by, sa.decided_at, sa.reject_reason
+                       sa.status AS approval_status, sa.decided_by, sa.decided_at, sa.reject_reason,
+                       -- ĐƠN VỊ nào chịu trách nhiệm bước này. Admin không vào
+                       -- được hàng đợi của đơn vị (đó là bề mặt có nút Duyệt),
+                       -- nên nếu không trả ra ở đây thì câu hỏi "đang chờ AI"
+                       -- không có chỗ nào trả lời được.
+                       sa.service_provider_id
                   FROM workflow_tasks t
                   LEFT JOIN service_approvals sa
                          ON sa.workflow_id = t.workflow_id AND sa.task_id = t.task_id

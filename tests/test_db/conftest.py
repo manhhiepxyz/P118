@@ -68,6 +68,10 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
         await conn.execute(
             """
             TRUNCATE TABLE
+                -- Ai nhân danh đơn vị nào. Dọn cùng `users` chứ không dựa vào
+                -- CASCADE: một mapping sót lại cho phép tài khoản của test sau
+                -- thấy hàng đợi của test trước, và test ấy xanh vì lý do sai.
+                service_provider_accounts,
                 -- Hàng đợi duyệt của MỌI dịch vụ. Sau khi gộp hai hàng đợi,
                 -- `viewing_approvals` chỉ còn là khung nhìn trên bảng này —
                 -- dọn khung nhìn thì không dọn được gì, và test sau đọc phải
@@ -167,6 +171,49 @@ async def _register_and_login(client: AsyncClient, username: str) -> str:
     )
     assert response.status_code == 200, response.text
     return response.json()["access_token"]
+
+
+# ---------------------------------------------------------------------------
+# Danh tính ĐƠN VỊ CUNG CẤP — dùng chung cho mọi test đi qua cổng duyệt.
+#
+# Từ khi cổng duyệt kiểm quyền sở hữu (fail-closed), một tài khoản `provider`
+# KHÔNG được gắn đơn vị nào thì thấy hàng đợi rỗng và không quyết định được gì.
+# Đó là hành vi đúng — nhưng nó khiến mọi test dựng provider bằng tay lặng lẽ
+# đổi nghĩa: chúng vẫn xanh ở phần 401/403, và đỏ ở phần "provider làm được".
+#
+# Nên chỉ có MỘT chỗ dựng danh tính ấy. Lặp lại đoạn INSERT này ở từng file
+# test là cách nhanh nhất để lần sau đổi luật phải sửa mười chỗ và quên hai.
+# ---------------------------------------------------------------------------
+
+
+async def dang_nhap_don_vi(
+    client: AsyncClient,
+    db_pool: asyncpg.Pool,
+    username: str,
+    *,
+    don_vi: tuple[str, ...] = ("BQL-PARK", "FIX-01", "MOV-01", "BQL-SHUTTLE", "BQL-SALES"),
+) -> tuple[str, str]:
+    """Tài khoản `provider` đã được gắn đơn vị. Trả `(token, user_id)`.
+
+    Mặc định gắn TẤT CẢ đơn vị mặc định, vì phần lớn test chỉ cần "một người
+    duyệt hợp lệ" chứ không kiểm ranh giới sở hữu. Test nào kiểm ranh giới thì
+    truyền `don_vi` hẹp lại — và khi ấy nó nói rõ mình đang kiểm cái gì.
+
+    Token cấp SAU khi role đã đổi: `require_roles` đọc vai từ JWT, nên một token
+    phát trước lúc promote sẽ mang vai cũ và test đo nhầm thứ nó tuyên bố.
+    """
+    await _register_and_login(client, username)
+    await db_pool.execute("UPDATE users SET role = 'provider' WHERE username = $1", username)
+    token = await _register_and_login(client, username)
+    user_id = await db_pool.fetchval("SELECT id FROM users WHERE username = $1", username)
+    for provider_id in don_vi:
+        await db_pool.execute(
+            "INSERT INTO service_provider_accounts (user_id, service_provider_id) "
+            "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            user_id,
+            provider_id,
+        )
+    return token, str(user_id)
 
 
 # ---------------------------------------------------------------------------

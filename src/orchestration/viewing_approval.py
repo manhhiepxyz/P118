@@ -36,6 +36,7 @@ from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
 from src.orchestration.payment_approval import persist_full_plan, plan_without
+from src.orchestration.provider_directory import don_vi_mac_dinh
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ async def save_pending_viewing_approval(
             -- nhìn tách chúng trở lại thành cột, nên truy vấn cũ không đổi.
             INSERT INTO service_approvals (
                 workflow_id, task_id, tool, service_label, details, status,
-                applicant_user_id, applicant_name, applicant_phone
+                applicant_user_id, applicant_name, applicant_phone, service_provider_id
             )
             VALUES (
                 $1, $2, 'schedule_property_viewing', 'Đặt lịch tham quan',
@@ -196,7 +197,7 @@ async def save_pending_viewing_approval(
                     'passenger_count', $7::int,
                     'wants_shuttle', $8::boolean
                 )),
-                'AWAITING', $9, $10, $11
+                'AWAITING', $9, $10, $11, $12
             )
             -- GHIM LẠI nghĩa là cần một quyết định MỚI.
             --
@@ -226,6 +227,8 @@ async def save_pending_viewing_approval(
                     reject_reason = NULL,
                     decided_by = NULL,
                     decided_at = NULL,
+                    -- Chủ sở hữu đi theo dữ kiện: ghim lại là một yêu cầu MỚI.
+                    service_provider_id = EXCLUDED.service_provider_id,
                     created_at = NOW()
             WHERE service_approvals.status IN ('AWAITING', 'EXPIRED')
             """,
@@ -240,6 +243,7 @@ async def save_pending_viewing_approval(
             applicant_user_id,
             applicant_name,
             applicant_phone,
+            don_vi_mac_dinh("schedule_property_viewing"),
         )
 
 

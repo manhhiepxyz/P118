@@ -42,7 +42,7 @@ from src.common.results import StandardResult
 from src.orchestration import demo_service
 from src.orchestration.repair import repair_missing_fields
 from src.orchestration.service_approval import pending_for_workflow, save_pending_service_approvals
-from tests.test_db.conftest import _register_and_login
+from tests.test_db.conftest import _register_and_login, dang_nhap_don_vi
 
 GOAL = "Đăng ký xe, giữ chỗ đỗ xe và báo bảo trì."
 
@@ -192,9 +192,15 @@ def _auth(t):
 
 
 async def _provider(client, db_pool, name="dv_tu_choi"):
-    await _register_and_login(client, name)
-    await db_pool.execute("UPDATE users SET role='provider' WHERE username=$1", name)
-    return await _register_and_login(client, name)
+    """Người duyệt hợp lệ: vai `provider` VÀ được gắn đơn vị.
+
+    Vai không còn đủ. Cổng duyệt kiểm quyền sở hữu và fail-closed, nên một
+    `provider` chưa gắn đơn vị nào nhận 404 ở mọi dòng — đúng luật, nhưng ở đây
+    nó sẽ biến mọi test "đơn vị từ chối thế nào" thành test "404 trông ra sao".
+    Dựng danh tính ở `conftest.dang_nhap_don_vi` để chỉ có một chỗ phải sửa.
+    """
+    token, _ = await dang_nhap_don_vi(client, db_pool, name)
+    return token
 
 
 async def _decide(client, token, wid, task_id, decision, *, code=None, reason=None):

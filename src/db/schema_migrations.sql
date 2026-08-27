@@ -1215,3 +1215,62 @@ BEGIN
         ON parking_bookings (vehicle_id, booking_date)
         WHERE status = 'ACTIVE';
 END $$;
+
+
+-- 2026-08 — Đơn vị cung cấp: quan hệ tài khoản ↔ đơn vị, và chủ sở hữu của
+-- mỗi dòng chờ duyệt.
+--
+-- Trước đây `/service-approvals` chỉ kiểm ROLE: mọi tài khoản `provider` thấy
+-- và quyết định được TOÀN BỘ hàng đợi. Điều đó đúng khi hệ thống chỉ có một
+-- đơn vị cung cấp — "toàn bộ hàng đợi" chính là "phần của mình".
+--
+-- Nó hết đúng từ lúc có nhiều đơn vị. Khi P-118 đề xuất một đội cụ thể mà bất
+-- kỳ tài khoản provider nào cũng bấm duyệt được, việc chọn đơn vị chỉ tồn tại
+-- trên dữ liệu chứ không tồn tại trong nghiệp vụ — và lúc đó nó ĐÚNG là IDOR.
+--
+-- BẢNG LIÊN KẾT, không phải một cột trên `users`: một tài khoản quản lý được
+-- nhiều đơn vị, và một đơn vị có nhiều nhân viên. Dùng role làm danh tính đơn
+-- vị thì thêm nhân viên thứ hai là phải đổi schema lần nữa.
+-- Bọc trong `to_regclass`: file migration còn được chạy trên database LEGACY
+-- chỉ có vài bảng (xem `test_schema_migrations_upgrades_legacy_table`), nơi
+-- `users` chưa tồn tại — và `REFERENCES users(id)` ở đó nổ ngay, kéo theo cả
+-- những migration phía sau. Cùng khuôn với khối `payments` bên trên.
+DO $$
+BEGIN
+    IF to_regclass('users') IS NOT NULL THEN
+        CREATE TABLE IF NOT EXISTS service_provider_accounts (
+            user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            service_provider_id VARCHAR(32) NOT NULL,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (user_id, service_provider_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_service_provider_accounts_provider
+            ON service_provider_accounts (service_provider_id);
+    END IF;
+END $$;
+
+-- Cột cho phép NULL để không phá dòng đã có. NULL nghĩa là "dòng có TRƯỚC khi
+-- có khái niệm đơn vị", và luật đọc phải FAIL-CLOSED với nó: KHÔNG AI thấy —
+-- không provider nào, và admin cũng không (admin giám sát qua `/admin/requests`,
+-- không qua hàng đợi của đơn vị).
+--
+-- Dòng NULL vì thế là dòng không ai quyết định được. Dọn chúng là việc NGHIỆP
+-- VỤ, không phải phép biến đổi schema, nên nó KHÔNG nằm ở đây: chạy tay một
+-- lần bằng `scripts/backfill_service_provider.py`, có người đọc con số trước
+-- khi ghi. Một migration đoán hộ nghĩa là mọi môi trường nhận cùng một cái
+-- đoán, kể cả môi trường mà cái đoán ấy sai.
+--
+-- Mặc định ngược lại — "chưa gán thì ai cũng thấy" — biến mọi dòng lịch sử
+-- thành một lỗ hổng ngay tại thời điểm migration chạy, và không ai để ý vì
+-- màn hình trông vẫn đúng.
+DO $$
+BEGIN
+    IF to_regclass('service_approvals') IS NOT NULL THEN
+        ALTER TABLE service_approvals
+            ADD COLUMN IF NOT EXISTS service_provider_id VARCHAR(32);
+
+        CREATE INDEX IF NOT EXISTS idx_service_approvals_provider
+            ON service_approvals (service_provider_id, status, created_at);
+    END IF;
+END $$;

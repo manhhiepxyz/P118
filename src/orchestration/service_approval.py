@@ -30,6 +30,7 @@ from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import TaskPlan
 from src.orchestration.payment_approval import persist_full_plan, plan_without
+from src.orchestration.provider_directory import don_vi_mac_dinh
 
 # Dịch vụ nào phải qua đơn vị duyệt.
 #
@@ -360,10 +361,15 @@ async def save_pending_service_approvals(
             """
             INSERT INTO service_approvals
                 (workflow_id, task_id, tool, service_label, details,
-                 applicant_user_id, applicant_name, applicant_phone)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+                 applicant_user_id, applicant_name, applicant_phone, service_provider_id)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
             ON CONFLICT (workflow_id, task_id) DO UPDATE SET
                 status = 'AWAITING',
+                -- Chủ sở hữu đi theo dữ kiện. Ghim LẠI là một yêu cầu MỚI, và
+                -- yêu cầu mới có thể thuộc đơn vị khác (bước B: đổi ngày →
+                -- đổi đơn vị còn lịch). Giữ chủ cũ nghĩa là đơn vị A phải
+                -- quyết định một việc đã chuyển sang cho đơn vị B.
+                service_provider_id = EXCLUDED.service_provider_id,
                 -- Dữ kiện phải theo lần chạy MỚI. Giữ bản cũ nghĩa là đơn vị
                 -- đọc ngày 05/10 rồi bấm duyệt cho một yêu cầu ngày 12/10.
                 details = EXCLUDED.details,
@@ -383,6 +389,7 @@ async def save_pending_service_approvals(
                     UUID(applicant["user_id"]) if applicant.get("user_id") else None,
                     applicant.get("full_name"),
                     applicant.get("phone"),
+                    don_vi_mac_dinh(str(row["tool"])),
                 )
                 for row in rows
             ],
@@ -499,8 +506,8 @@ async def save_support_request(
             """
             INSERT INTO service_approvals
                 (workflow_id, task_id, tool, service_label, details, kind,
-                 applicant_user_id, applicant_name, applicant_phone)
-            SELECT $1, $2, $3, $4, $5::jsonb, 'REQUEST', w.owner_user_id, u.full_name, u.phone
+                 applicant_user_id, applicant_name, applicant_phone, service_provider_id)
+            SELECT $1, $2, $3, $4, $5::jsonb, 'REQUEST', w.owner_user_id, u.full_name, u.phone, $6
               FROM workflows w
               LEFT JOIN users u ON u.id = w.owner_user_id
              WHERE w.workflow_id = $1
@@ -510,6 +517,9 @@ async def save_support_request(
             dich_vu,
             f"{_REQUEST_LABELS[kind]} — {SERVICE_LABELS.get(dich_vu, dich_vu)}",
             json.dumps({"loai": kind, "task_id": task_id, "ghi_chu": note or ""}, ensure_ascii=False),
+            # Cùng đơn vị với chính bước dịch vụ ấy: một yêu cầu huỷ/đổi phải
+            # về tay người đang giữ việc, không phải một hàng đợi khác.
+            don_vi_mac_dinh(dich_vu),
         )
     return ma
 
@@ -526,13 +536,65 @@ async def pending_for_workflow(pool: asyncpg.Pool, workflow_id: str) -> list[dic
     return [dict(row) for row in rows]
 
 
-async def list_awaiting(pool: asyncpg.Pool, limit: int = 50) -> list[dict[str, Any]]:
+def _uuid(value: str | UUID) -> UUID:
+    """asyncpg đòi UUID thật cho cột uuid; caller truyền chuỗi là chuyện thường."""
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
+async def don_vi_cua_tai_khoan(pool: asyncpg.Pool, user_id: str) -> list[str]:
+    """Các đơn vị mà tài khoản này nhân danh. Rỗng = chưa được gắn đơn vị nào.
+
+    Đọc từ PostgreSQL, không cache trong tiến trình: quyền sở hữu phải sống
+    sót qua restart, và một bản sao trong RAM là một nguồn sự thật thứ hai.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT service_provider_id FROM service_provider_accounts WHERE user_id = $1",
+            _uuid(user_id),
+        )
+    return [r["service_provider_id"] for r in rows]
+
+
+async def so_huu_boi(
+    pool: asyncpg.Pool, workflow_id: str, task_id: str, don_vi: list[str]
+) -> bool:
+    """Dòng chờ duyệt này có thuộc một trong các đơn vị ấy không.
+
+    Kiểm ĐỘC LẬP với đường đọc danh sách. Không được suy "nó không hiện trong
+    danh sách nên chắc không quyết định được": hai đường đọc khác nhau thì sớm
+    muộn lệch, và kẻ tấn công không đi qua danh sách.
+
+    `service_provider_id IS NULL` (dòng có trước khi có khái niệm đơn vị) trả
+    False cho MỌI đơn vị — fail-closed.
+    """
+    if not don_vi:
+        return False
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT service_provider_id FROM service_approvals "
+            "WHERE workflow_id = $1 AND task_id = $2",
+            _uuid(workflow_id),
+            task_id,
+        )
+    if row is None or row["service_provider_id"] is None:
+        return False
+    return row["service_provider_id"] in don_vi
+
+
+async def list_awaiting(
+    pool: asyncpg.Pool, limit: int = 50, *, don_vi: list[str] | None = None
+) -> list[dict[str, Any]]:
     """Hàng đợi của đơn vị: mọi bước đang chờ, cũ nhất trước.
 
     Cũ nhất trước, KHÔNG phải mới nhất: hàng đợi duyệt là hàng đợi phục vụ, và
     xếp mới-trước là để người chờ lâu nhất chờ mãi mãi.
+
+    `don_vi=None` nghĩa là KHÔNG lọc. KHÔNG route HTTP nào truyền `None` —
+    kể cả admin, vì admin giám sát qua `/admin/workflows` chứ không vào hàng
+    đợi của đơn vị. Nó còn lại cho công cụ nội bộ (backfill, kiểm kê) chạy
+    ngoài tầng request. Đường của provider luôn truyền danh sách, kể cả rỗng.
     """
-    return await list_by_status(pool, ("AWAITING",), limit=limit, newest_first=False)
+    return await list_by_status(pool, ("AWAITING",), limit=limit, newest_first=False, don_vi=don_vi)
 
 
 async def list_by_status(
@@ -541,6 +603,7 @@ async def list_by_status(
     *,
     limit: int = 50,
     newest_first: bool = True,
+    don_vi: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Hàng đợi hoặc LỊCH SỬ, tuỳ trạng thái được hỏi.
 
@@ -552,19 +615,29 @@ async def list_by_status(
     Lịch sử mang thêm `decided_by` và `decided_at`: một quyết định không ghi ai
     làm và lúc nào thì lúc có sự cố chỉ còn cách suy luận.
     """
+    # `don_vi is None` = không lọc, chỉ cho công cụ nội bộ — không route nào
+    # truyền. Danh sách RỖNG = provider chưa được gắn đơn vị nào →
+    # `= ANY('{}')` không khớp dòng nào, đúng ý fail-closed.
+    #
+    # `service_provider_id IS NULL` (dòng cũ) không bao giờ khớp `= ANY(...)`,
+    # nên nó tự động vô hình với mọi provider mà không cần mệnh đề riêng.
+    loc_don_vi = "" if don_vi is None else " AND service_provider_id = ANY($3::varchar[])"
+    tham_so: list[Any] = [list(statuses), limit]
+    if don_vi is not None:
+        tham_so.append(list(don_vi))
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
             SELECT workflow_id, task_id, tool, service_label, details, status, reject_code, reject_reason,
                    applicant_name, applicant_phone, created_at,
-                   decided_by, decided_at, reject_reason
+                   decided_by, decided_at, reject_reason, service_provider_id
               FROM service_approvals
-             WHERE status = ANY($1::varchar[])
+             WHERE status = ANY($1::varchar[]){loc_don_vi}
              ORDER BY COALESCE(decided_at, created_at) {"DESC" if newest_first else "ASC"}
              LIMIT $2
-            """,  # noqa: S608 - chiều sắp xếp là literal nội bộ, giá trị luôn là tham số
-            list(statuses),
-            limit,
+            """,  # noqa: S608 - chiều sắp xếp và mệnh đề lọc là literal nội bộ, giá trị luôn là tham số
+            *tham_so,
         )
     return [dict(row) for row in rows]
 

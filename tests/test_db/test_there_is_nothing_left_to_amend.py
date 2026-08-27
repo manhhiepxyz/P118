@@ -73,7 +73,7 @@ async def _seed(pool, *, session_id, owner_user_id, status="CANCELLED", with_tas
         if with_task:
             await conn.execute(
                 "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, input_data) "
-                "VALUES ($1,'T1','book_viewing',$2,$3::jsonb)",
+                "VALUES ($1,'T1','schedule_property_viewing',$2,$3::jsonb)",
                 wid,
                 status,
                 json.dumps({"project_id": "PRJ-001", "viewing_date": "2026-08-29", "viewing_time": "09:30"}),

@@ -23,8 +23,15 @@ Ba nhóm route đều là cùng một quyết định ấy, nên cả ba phải 
     /viewing-approvals      lịch tham quan
     /service-approvals      sáu dịch vụ còn lại
 
-Kiểm ROLE, không phải quyền sở hữu: người duyệt được quyết định TOÀN BỘ hàng
-đợi chứ không riêng phần "của mình", nên đây không phải IDOR.
+File này kiểm ROLE. Quyền SỞ HỮU — provider chỉ thấy và chỉ quyết định được
+phần của đơn vị mình — là một luật khác và có file riêng
+(`test_a_provider_only_sees_its_own_queue.py`). Hai luật phải cùng đúng: vai
+sai thì 403, vai đúng mà không phải chủ thì 404.
+
+Hệ quả với các test dưới đây: một tài khoản `provider` KHÔNG được gắn đơn vị
+nào thì thấy hàng đợi rỗng và không quyết định được gì. Nên mọi kiểm DƯƠNG phải
+dựng danh tính qua `conftest.dang_nhap_don_vi`, nếu không nó xanh/đỏ vì một lý
+do khác hẳn điều nó tuyên bố.
 """
 
 from __future__ import annotations
@@ -33,7 +40,7 @@ import uuid
 
 import pytest
 
-from tests.test_db.conftest import _register_and_login
+from tests.test_db.conftest import _register_and_login, dang_nhap_don_vi
 
 VERIFICATION = "/api/v1/verification-records"
 VIEWING = "/api/v1/viewing-approvals"
@@ -77,9 +84,12 @@ async def _awaiting_service(db_pool, owner_user_id: str) -> tuple[str, str]:
         task_id,
     )
     await db_pool.execute(
+        # `service_provider_id` là BẮT BUỘC với dòng mới: cổng duyệt fail-closed,
+        # nên một dòng không chủ là một dòng không ai quyết định được.
         "INSERT INTO service_approvals (workflow_id, task_id, tool, service_label, details, status, "
-        "applicant_user_id) VALUES ($1::uuid,$2,'create_maintenance_request','Báo bảo trì / sửa chữa',"
-        "'{}'::jsonb,'AWAITING',$3::uuid)",
+        "applicant_user_id, service_provider_id) "
+        "VALUES ($1::uuid,$2,'create_maintenance_request','Báo bảo trì / sửa chữa',"
+        "'{}'::jsonb,'AWAITING',$3::uuid,'FIX-01')",
         workflow_id,
         task_id,
         owner_user_id,
@@ -116,9 +126,10 @@ async def _awaiting_viewing(db_pool, owner_user_id: str) -> str:
     )
     await db_pool.execute(
         "INSERT INTO service_approvals (workflow_id, task_id, tool, service_label, details, status, "
-        "applicant_user_id) VALUES ($1::uuid,$2,'schedule_property_viewing','Lịch tham quan',"
+        "applicant_user_id, service_provider_id) "
+        "VALUES ($1::uuid,$2,'schedule_property_viewing','Lịch tham quan',"
         '\'{"project_id":"PRJ-001","viewing_date":"2030-07-15","viewing_time":"09:30"}\'::jsonb,'
-        "'AWAITING',$3::uuid)",
+        "'AWAITING',$3::uuid,'BQL-SALES')",
         workflow_id,
         task_id,
         owner_user_id,
@@ -175,7 +186,14 @@ async def test_a_customer_cannot_see_the_internal_queue(client, db_pool, path):
 @pytest.mark.parametrize("path", [VERIFICATION, VIEWING, SERVICE], ids=["verification", "viewing", "service"])
 @pytest.mark.asyncio
 async def test_an_admin_cannot_see_the_provider_queue(client, db_pool, path):
-    """Admin giám sát bằng số liệu ở `/admin`, không bằng hàng đợi của đơn vị."""
+    """Admin giám sát qua `/admin/workflows`, không bằng hàng đợi của đơn vị.
+
+    Luật này bị thách thức một lần khi thêm quyền sở hữu ("admin vẫn xem được
+    toàn bộ") và được giữ lại có chủ ý: `/admin/workflows` đã cho admin thấy
+    toàn cục — gồm `service_provider_id`, tên đơn vị và người quyết định — nên
+    mở thêm hàng đợi của đơn vị không thêm tầm nhìn nào, chỉ thêm một ngoại lệ
+    phải nhớ giữa ba hàng đợi.
+    """
     token, _ = await _user(client, db_pool, f"vai_admin_ds_{path.rsplit('/', 1)[-1][:8]}", role="admin")
     assert (await client.get(path, headers=_auth(token))).status_code == 403
 
@@ -259,7 +277,7 @@ async def test_a_refused_decision_is_403_not_a_404_about_a_missing_record(client
 
 @pytest.mark.asyncio
 async def test_the_provider_can_open_all_three_queues(client, db_pool):
-    token, _ = await _user(client, db_pool, "vai_don_vi_ds", role="provider")
+    token, _ = await dang_nhap_don_vi(client, db_pool, "vai_don_vi_ds")
 
     assert (await client.get(SERVICE, headers=_auth(token))).status_code == 200
     assert (await client.get(VIEWING, headers=_auth(token))).status_code == 200
@@ -271,7 +289,7 @@ async def test_the_provider_can_open_all_three_queues(client, db_pool):
 
 @pytest.mark.asyncio
 async def test_the_provider_decision_changes_the_right_row(client, db_pool):
-    token, _ = await _user(client, db_pool, "vai_don_vi_qd", role="provider")
+    token, _ = await dang_nhap_don_vi(client, db_pool, "vai_don_vi_qd")
     _, owner_id = await _user(client, db_pool, "vai_chu_cua_don_vi")
     workflow_id, task_id = await _awaiting_service(db_pool, owner_id)
     khac_wid, khac_tid = await _awaiting_service(db_pool, owner_id)

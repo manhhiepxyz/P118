@@ -5,13 +5,20 @@ dịch vụ còn lại: đăng ký xe, chỗ đỗ, bảo trì, chuyển nhà, x
 tư vấn. Trước đó chúng chạy thẳng — khách nhận kết quả trước khi có ai bên kia
 đồng ý.
 
-Quyền: `provider` hoặc `admin`, cùng cách cổng tham quan đang làm. Người dùng
-cuối KHÔNG được tự duyệt phần của mình — đó là lý do cổng tồn tại.
+Quyền: CHỈ `provider`, và chỉ thấy hàng đợi của đơn vị mình được gắn. Người
+dùng cuối không được tự duyệt phần của mình — đó là lý do cổng tồn tại.
+
+Admin cũng KHÔNG vào đây. Quyền duyệt là quyền nhân danh một đơn vị nhận việc;
+admin không có mặt bằng, không có đội bảo trì, không có xe. Cho admin vào còn
+phá chính công cụ giám sát: nếu người giám sát tự tay giải quyết được hàng đợi
+thì con số "đang chờ đơn vị" không còn đo cái gì. Admin giám sát toàn cục qua
+`/admin/workflows`, nơi thấy được cả `service_provider_id` lẫn người quyết định.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,10 +31,12 @@ from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import (
     REJECT_CODES,
     allowed_reject_codes,
+    don_vi_cua_tai_khoan,
     list_awaiting,
     list_by_status,
     pending_for_workflow,
     record_service_decision,
+    so_huu_boi,
 )
 
 
@@ -43,6 +52,8 @@ def _as_dict(value: Any) -> dict[str, Any]:
             return {}
     return {}
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/service-approvals", tags=["service-approvals"])
 
@@ -101,7 +112,7 @@ async def list_service_approvals(
     # người đang chờ.
     limit: int = 200,
     status: str = "AWAITING",
-    _reviewer: dict = Depends(require_roles("provider")),
+    reviewer: dict = Depends(require_roles("provider")),
 ) -> dict[str, Any]:
     """`status=AWAITING` (mặc định) là hàng đợi; `status=decided` là lịch sử.
 
@@ -119,10 +130,18 @@ async def list_service_approvals(
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
+        # Đơn vị đến từ TÀI KHOẢN, không bao giờ từ query string. Nhận nó từ
+        # request là để người gọi tự khai mình nhân danh ai.
+        #
+        # LUÔN là một danh sách, kể cả khi rỗng — chưa được gắn đơn vị nào thì
+        # hàng đợi rỗng, không phải thấy hết. `None` (không lọc) không còn
+        # đường nào đi tới đây được nữa, vì không vai nào được miễn lọc.
+        don_vi: list[str] = await don_vi_cua_tai_khoan(pool, str(reviewer["id"]))
+
         rows = (
-            await list_awaiting(pool, limit=limit)
+            await list_awaiting(pool, limit=limit, don_vi=don_vi)
             if wanted == ("AWAITING",)
-            else await list_by_status(pool, wanted, limit=limit)
+            else await list_by_status(pool, wanted, limit=limit, don_vi=don_vi)
         )
         # TỔNG số, không chỉ số đang hiển thị.
         #
@@ -188,6 +207,25 @@ async def decide_service_approval(
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
+        # QUYỀN SỞ HỮU, kiểm ĐỘC LẬP với đường đọc danh sách.
+        #
+        # Không được suy "nó không hiện trong danh sách nên chắc không quyết
+        # định được": danh sách và quyết định là hai đường đọc khác nhau, và
+        # hai đường khác nhau thì sớm muộn lệch. Kẻ tấn công không đi qua danh
+        # sách — họ gọi thẳng endpoint này với một `workflow_id` đoán được.
+        #
+        # 404 chứ không 403: 403 xác nhận rằng dòng đó CÓ TỒN TẠI, và đó là
+        # một mẩu thông tin miễn phí cho người đang dò.
+        don_vi = await don_vi_cua_tai_khoan(pool, str(reviewer["id"]))
+        if not await so_huu_boi(pool, workflow_id, task_id, don_vi):
+            logger.info(
+                "chặn quyết định ngoài quyền sở hữu user=%s workflow=%s task=%s",
+                reviewer.get("username"),
+                workflow_id,
+                task_id,
+            )
+            raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu duyệt này.")
+
         existing = [r for r in await pending_for_workflow(pool, workflow_id) if r["task_id"] == task_id]
         if not existing:
             raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu duyệt này.")

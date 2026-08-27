@@ -48,7 +48,7 @@ async def _seed(
         )
         await conn.execute(
             "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, input_data) "
-            "VALUES ($1,'T1','book_viewing',$2,$3::jsonb)",
+            "VALUES ($1,'T1','schedule_property_viewing',$2,$3::jsonb)",
             wid,
             status,
             json.dumps({"project_id": "PRJ-001", "viewing_date": viewing_date, "viewing_time": "09:30"}),
@@ -130,7 +130,7 @@ async def test_a_request_already_at_the_provider_is_never_the_target(client, db_
         rows=[
             {
                 "task_id": "T1",
-                "tool": "book_viewing",
+                "tool": "schedule_property_viewing",
                 "service_label": "Đặt lịch tham quan",
                 "details": {"viewing_date": "2026-08-29"},
             }

@@ -29,6 +29,7 @@ from src.db.verification_receipt_repository import (
     VerificationReceipts,
     VerificationRecoveryUnavailableError,
 )
+from src.orchestration.provider_directory import ten_don_vi
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import SERVICE_LABELS
 from src.orchestration.verification_views import enrich
@@ -529,6 +530,18 @@ async def get_admin_request(
                 "service_name": _service_label(step["tool"]),
                 "status": step.get("status"),
                 "approval_status": step.get("approval_status"),
+                # ĐANG CHỜ AI. Admin không có quyền vào hàng đợi của đơn vị —
+                # đó là bề mặt mang nút Duyệt — nên đây là chỗ duy nhất trả lời
+                # được câu hỏi ấy. Mã đi kèm tên: mã để đối chiếu log, tên để
+                # gọi điện.
+                "service_provider": (
+                    {
+                        "id": step["service_provider_id"],
+                        "name": ten_don_vi(step["service_provider_id"]),
+                    }
+                    if step.get("service_provider_id")
+                    else None
+                ),
                 # AI đã ký, dưới dạng người đọc được — không phải một UUID.
                 #
                 # `service_approvals.decided_by` lưu `username` của người duyệt
