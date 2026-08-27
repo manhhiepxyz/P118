@@ -505,6 +505,15 @@ export const WORKFLOW_STAGE: Record<AgentWorkflowStage, StageConfig> = {
     fallback: 'Đang chờ bạn xác nhận đơn vị và báo giá.',
     badge: 'text-amber-600 bg-amber-50',
   },
+  /* KHÔNG có chữ "đang chờ": ở trạng thái này không ai đang chờ ai. Đơn vị đã
+     trả lời, việc đã dừng, và khách là người duy nhất còn phải quyết định.
+     Nhãn nói "đang chờ đơn vị" sẽ đọc thành "bạn không phải làm gì" — và
+     workflow trở thành một ngõ cụt không ai bấm gì. */
+  WAITING_PROVIDER_RESELECTION: {
+    label: 'Đơn vị đã từ chối',
+    fallback: 'Đơn vị đã từ chối. Bạn chọn giúp mình bước tiếp theo nhé.',
+    badge: 'text-red-600 bg-red-50',
+  },
   EXECUTING: {
     label: 'Đang thực hiện',
     fallback: 'Đang thực hiện yêu cầu.',

@@ -559,6 +559,36 @@ export async function confirmServiceProposal(
 }
 
 /**
+ * Khách yêu cầu tìm ĐƠN VỊ KHÁC sau khi bị từ chối.
+ *
+ * Tên hàm nói đúng việc nó làm. Gọi nó là "confirm lần hai" sẽ che mất hai
+ * điều: đây là một lần thử KHÁC (bằng chứng cũ giữ nguyên), và đơn vị lần này
+ * là một đơn vị khác.
+ *
+ * Gửi ĐÚNG `task_id` — bước nào đang cần đơn vị khác. KHÔNG gửi `provider_id`,
+ * KHÔNG gửi giá: đơn vị nào được đề xuất là kết quả của luật chọn trên tập còn
+ * lại, không phải của một tham số. Backend từ chối mọi trường thừa.
+ *
+ * KHÔNG optimistic. Sau khi thành công, đọc lại workflow — trạng thái thật nằm
+ * ở backend, và bấm hai lần là chuyện bình thường (backend trả 200 với
+ * `ALREADY_REOPENED`, không phải lỗi).
+ */
+export async function requestAnotherProvider(
+  workflowId: string,
+  taskId: string,
+): Promise<void> {
+  await request<unknown>(
+    `/service-proposals/workflows/${encodeURIComponent(workflowId)}/request-another-provider`,
+    {
+      method: "POST",
+      body: { task_id: taskId },
+      conflictMessage:
+        "Hiện không còn đơn vị nào khác nhận được yêu cầu này. Bạn thử đổi ngày hoặc liên hệ hỗ trợ giúp mình nhé.",
+    },
+  );
+}
+
+/**
  * Huỷ một workflow chưa kết thúc.
  *
  * Backend giữ nguyên các bước đã SUCCESS; đây không phải rollback. Với workflow

@@ -24,6 +24,7 @@ import type { ChatTurn } from '../lib/journeyMock'
 import { ConversationStream } from '../components/workspace/ConversationStream'
 import { PendingCard } from '../components/workspace/PendingCard'
 import { ProviderProposalCards } from '../components/workspace/ProviderProposalCards'
+import { ProviderRejectionCard } from '../components/workspace/ProviderRejectionCard'
 import { extractValue, normalizeIntent, resolve, type PendingAction } from '../lib/pendingAction'
 import {
   FREE_TEXT_ANSWER_KEY,
@@ -1562,6 +1563,27 @@ export function JourneyWorkspacePage() {
                   Dựng từ `service_proposals`, KHÔNG từ `provider_proposal` —
                   trường ấy là alias và chỉ có giá trị khi đúng một việc, nên
                   màn hình sẽ trống trơn đúng lúc có nhiều việc nhất. */}
+              {/* Lời từ chối đứng TRƯỚC đề xuất, và hai thứ không bao giờ cùng
+                  hiện: backend trả `provider_rejection = null` ngay khi lần thử
+                  mới đã được mở. Nếu cả hai cùng có thì màn hình nói khách còn
+                  hai việc trong khi thật ra chỉ có một, và họ sẽ bấm "tìm đơn vị
+                  khác" thêm lần nữa. */}
+              {live?.provider_rejection && (
+                <ProviderRejectionCard
+                  rejection={live.provider_rejection}
+                  onRequested={async () => {
+                    const id = live.workflow_id
+                    if (!id) return
+                    const seq = beginFetch()
+                    try {
+                      absorbIfCurrent(seq, await getWorkflow(id))
+                    } catch {
+                      /* Đọc lại hỏng thì giữ màn hình cũ: nó cũ, nhưng một màn
+                         hình trống còn tệ hơn. */
+                    }
+                  }}
+                />
+              )}
               {live && live.service_proposals.length > 0 && (
                 <ProviderProposalCards
                   proposals={live.service_proposals}

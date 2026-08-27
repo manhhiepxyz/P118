@@ -86,6 +86,14 @@ export type AgentWorkflowStage =
    * tiền, và khách đi tìm một nút không tồn tại.
    */
   | 'WAITING_PROVIDER_PROPOSAL'
+  /**
+   * Đơn vị đã TỪ CHỐI và khách phải chọn bước tiếp theo.
+   *
+   * Khác ba giai đoạn chờ kia ở một điểm: KHÔNG ai đang chờ. Đơn vị đã trả
+   * lời, việc đã dừng, và khách là người duy nhất còn phải quyết định. Nhãn ở
+   * đây không được có chữ "đang chờ".
+   */
+  | 'WAITING_PROVIDER_RESELECTION'
   | 'EXECUTING'
   | 'FINISHED'
   | 'CHAT'
@@ -218,6 +226,24 @@ export interface AgentServiceProposal {
   can_confirm: boolean
 }
 
+/**
+ * Một đơn vị đã từ chối, kèm hành động khách có thể chọn.
+ *
+ * `sanitized_reason` là câu NGƯỜI của đơn vị gõ. Nó quan trọng vì nó có thể
+ * đổi quyết định của khách: "hết xe ngày ấy" mời họ đổi ngày, chứ không phải
+ * đổi đơn vị. Hiện nguyên văn, không tóm tắt.
+ */
+export interface AgentProviderRejection {
+  workflow_id: string
+  /** Bước bị từ chối — thứ phải gửi lại khi bấm "tìm đơn vị khác". */
+  rejected_task_id: string
+  rejected_provider: AgentServiceProposalProvider
+  /** Mã CANONICAL của nghiệp vụ, không phải tên một exception. */
+  reject_code: string | null
+  sanitized_reason: string | null
+  can_request_another_provider: boolean
+}
+
 export interface AgentWorkflowResponse {
   /* Union HIỂN THỊ: backend trả cả `CANCELLED` và các mã lỗi terminal.
      Dùng union hẹp hơn ở đây thì mọi phép so với 'CANCELLED' bị TypeScript báo
@@ -251,6 +277,15 @@ export interface AgentWorkflowResponse {
    * các lối gọi cũ đọc "có đúng một việc không".
    */
   provider_proposal: AgentServiceProposal | null
+  /**
+   * Lời từ chối khách còn phải xử lý. Khác `null` → hiện lý do và nút "tìm đơn
+   * vị khác", KHÔNG hiện màn chờ.
+   *
+   * `null` ngay khi lần thử mới đã được mở: lúc đó thứ khách cần thấy là ĐỀ
+   * XUẤT MỚI, không phải lời từ chối cũ. Để cả hai cùng hiện nghĩa là màn hình
+   * có hai việc trong khi thật ra chỉ có một.
+   */
+  provider_rejection: AgentProviderRejection | null
   /**
    * Cùng status WAITING_APPROVAL với thanh toán nhưng KHÁC loại chờ: lịch tham
    * quan đang chờ provider duyệt trong /review. Khác null → hiển thị màn chờ
