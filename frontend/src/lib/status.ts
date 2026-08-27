@@ -13,7 +13,7 @@ import {
   XCircle,
 } from 'lucide-react'
 
-import type { AgentDisplayTaskStatus, AgentDisplayWorkflowStatus } from './types'
+import type { AgentDisplayTaskStatus, AgentDisplayWorkflowStatus, AgentWorkflowStage } from './types'
 
 /* ---------------------------------------------------------------------------
    Status config — màu + icon + label VN theo docs/ui-design-prompts.md §1.
@@ -438,4 +438,92 @@ export function describeFailure(task: {
   const code = task.error_code
   if (!code) return 'Bước này chưa hoàn thành được.'
   return FAILURE_TEXT[code] ?? 'Bước này chưa hoàn thành được. Bạn thử lại giúp mình nhé.'
+}
+
+/* ---------------------------------------------------------------------------
+   Giai đoạn — nhãn + màu + câu dự phòng.
+
+   `Record<AgentWorkflowStage, …>` chứ không phải `Partial`: TypeScript bắt
+   thiếu ngay khi backend thêm một giai đoạn. Thiếu một entry ở đây nghĩa là
+   giao diện rơi về một nhãn mặc định, và nhãn mặc định luôn nói sai — nó nói
+   về một tình huống nào đó khác.
+
+   Đã xảy ra một lần ở backend: giai đoạn chờ khách CHỌN ĐƠN VỊ dùng lại câu
+   của giai đoạn chờ khách TRẢ TIỀN, và khách đi tìm một nút không tồn tại.
+--------------------------------------------------------------------------- */
+
+export interface StageConfig {
+  label: string
+  /** Câu hiện khi backend không gửi `message` — không bao giờ để trống. */
+  fallback: string
+  badge: string
+}
+
+export const WORKFLOW_STAGE: Record<AgentWorkflowStage, StageConfig> = {
+  PLANNING: {
+    label: 'Đang chuẩn bị',
+    fallback: 'P-118 đang chuẩn bị kế hoạch thực hiện.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  PLANNED: {
+    label: 'Đã có kế hoạch',
+    fallback: 'Đã xác định các bước cần thực hiện.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  VALIDATING: {
+    label: 'Đang kiểm tra',
+    fallback: 'Đang kiểm tra thông tin và điều kiện thực hiện.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  VALIDATED: {
+    label: 'Sẵn sàng',
+    fallback: 'Kế hoạch đã sẵn sàng.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  RESIDENT_CHECKING: {
+    label: 'Đang xác minh cư dân',
+    fallback: 'Đang kiểm tra liên kết cư dân với ban quản lý.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  RESIDENT_VERIFIED: {
+    label: 'Đã xác minh',
+    fallback: 'Đã xác nhận tài khoản cư dân.',
+    badge: 'text-emerald-600 bg-emerald-50',
+  },
+  WAITING_APPROVAL: {
+    label: 'Chờ bạn xác nhận thanh toán',
+    fallback: 'Đang chờ bạn xác nhận khoản thanh toán.',
+    badge: 'text-amber-600 bg-amber-50',
+  },
+  /* Chờ CHÍNH KHÁCH chọn đơn vị. Nhãn phải nói rõ là CHỌN ĐƠN VỊ:
+     "đang chờ đơn vị" đọc thành "bạn không phải làm gì" — sai, khách là người
+     duy nhất còn phải làm; "chờ thanh toán" gửi họ đi tìm một nút trả tiền
+     không tồn tại; và bất cứ nhãn nào nghe như đã xong đều che mất một việc
+     đang treo. */
+  WAITING_PROVIDER_PROPOSAL: {
+    label: 'Chờ bạn xác nhận đơn vị cung cấp',
+    fallback: 'Đang chờ bạn xác nhận đơn vị và báo giá.',
+    badge: 'text-amber-600 bg-amber-50',
+  },
+  EXECUTING: {
+    label: 'Đang thực hiện',
+    fallback: 'Đang thực hiện yêu cầu.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  FINISHED: {
+    label: 'Hoàn tất',
+    fallback: 'Yêu cầu đã hoàn tất.',
+    badge: 'text-emerald-600 bg-emerald-50',
+  },
+  CHAT: {
+    label: 'Trò chuyện',
+    fallback: 'P-118 đang trả lời.',
+    badge: 'text-slate-500 bg-slate-100',
+  },
+}
+
+/** Nhãn của một giai đoạn; `null`/lạ thì không đoán, trả `null`. */
+export function stageLabel(stage: AgentWorkflowStage | null | undefined): string | null {
+  if (!stage) return null
+  return WORKFLOW_STAGE[stage]?.label ?? null
 }

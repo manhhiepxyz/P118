@@ -23,6 +23,7 @@ import { ServiceLauncher } from '../components/workspace/ServiceLauncher'
 import type { ChatTurn } from '../lib/journeyMock'
 import { ConversationStream } from '../components/workspace/ConversationStream'
 import { PendingCard } from '../components/workspace/PendingCard'
+import { ProviderProposalCards } from '../components/workspace/ProviderProposalCards'
 import { extractValue, normalizeIntent, resolve, type PendingAction } from '../lib/pendingAction'
 import {
   FREE_TEXT_ANSWER_KEY,
@@ -1550,6 +1551,37 @@ export function JourneyWorkspacePage() {
               className="max-h-[45vh] w-full shrink-0 overflow-y-auto border-t border-[var(--border-subtle)] bg-[var(--surface-raised)] lg:max-h-none lg:w-[360px] lg:border-t-0 lg:border-l"
               aria-label="Chi tiết hành trình"
             >
+              {/* Đề xuất đơn vị đứng TRƯỚC `PendingCard`, và là loại việc riêng.
+                  `PendingCard` phục vụ ba loại: duyệt thanh toán, chờ đơn vị,
+                  và điền thông tin — cả ba đi qua đường trả lời hội thoại.
+                  Chọn đơn vị thì không: nó gọi một endpoint riêng với
+                  `proposal_id` của CHÍNH thẻ ấy, và có thể có nhiều thẻ cùng
+                  lúc. Nhét nó vào `PendingCard` nghĩa là ép một cơ chế một-việc
+                  phục vụ một tình huống nhiều-việc.
+
+                  Dựng từ `service_proposals`, KHÔNG từ `provider_proposal` —
+                  trường ấy là alias và chỉ có giá trị khi đúng một việc, nên
+                  màn hình sẽ trống trơn đúng lúc có nhiều việc nhất. */}
+              {live && live.service_proposals.length > 0 && (
+                <ProviderProposalCards
+                  proposals={live.service_proposals}
+                  onConfirmed={async () => {
+                    // Đọc lại từ backend, không đoán trạng thái tại chỗ. Sau
+                    // lượt bấm, thứ thay đổi không chỉ là một thẻ: hàng đợi
+                    // của đơn vị vừa mở, bước vừa đổi người chờ, và câu chat
+                    // vừa đổi nghĩa.
+                    const id = live.workflow_id
+                    if (!id) return
+                    const seq = beginFetch()
+                    try {
+                      absorbIfCurrent(seq, await getWorkflow(id))
+                    } catch {
+                      // Đọc lại hỏng thì giữ nguyên màn hình cũ: nó cũ, nhưng
+                      // một màn hình trống còn tệ hơn.
+                    }
+                  }}
+                />
+              )}
               {pending && (
                 <PendingCard
                   action={pending}

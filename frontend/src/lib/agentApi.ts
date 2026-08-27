@@ -530,6 +530,35 @@ export async function decidePayment(
 }
 
 /**
+ * Khách đồng ý với đơn vị được đề xuất cho MỘT bước.
+ *
+ * Gửi ĐÚNG `proposal_id` (đường dẫn) và `decision` (body). Không provider,
+ * không số tiền, không tên đơn vị — backend từ chối mọi trường thừa bằng
+ * `extra="forbid"`, và nó từ chối có lý do: mọi thứ client gửi được thì client
+ * sửa được, và đơn vị nào nhận việc là một quyết định có hệ quả tiền bạc.
+ *
+ * KHÔNG optimistic. Sau khi thành công, gọi lại `getWorkflow` — trạng thái
+ * thật nằm ở backend, và đoán trước nó nghĩa là màn hình nói "xong" cho một
+ * việc có thể vừa hỏng.
+ */
+export async function confirmServiceProposal(
+  proposalId: string,
+): Promise<void> {
+  await request<unknown>(
+    `/service-proposals/${encodeURIComponent(proposalId)}/confirm`,
+    {
+      method: "POST",
+      body: { decision: "confirm" },
+      // 409 = báo giá hết hạn, đã bị thay thế, hoặc đã xử lý rồi. Ba tình
+      // huống, một hành động tiếp theo: đọc lại từ backend rồi hiện thứ nó
+      // nói. Câu chữ chi tiết đến từ `detail` của backend.
+      conflictMessage:
+        "Đề xuất này không còn hiệu lực. Mình đang tải lại thông tin mới nhất.",
+    },
+  );
+}
+
+/**
  * Huỷ một workflow chưa kết thúc.
  *
  * Backend giữ nguyên các bước đã SUCCESS; đây không phải rollback. Với workflow

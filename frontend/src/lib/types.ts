@@ -77,6 +77,15 @@ export type AgentWorkflowStage =
   | 'RESIDENT_CHECKING'
   | 'RESIDENT_VERIFIED'
   | 'WAITING_APPROVAL'
+  /**
+   * Chờ CHÍNH KHÁCH chọn đơn vị cung cấp — khác hẳn `WAITING_APPROVAL` (chờ
+   * khách trả tiền) và chờ đơn vị duyệt. Ba tình huống, ba câu, ba màn hình.
+   *
+   * Backend tách giai đoạn này ra vì `WAITING_APPROVAL` mang câu "Đang chờ bạn
+   * xác nhận thanh toán" — dùng lại nó nghĩa là gọi việc chọn đơn vị là trả
+   * tiền, và khách đi tìm một nút không tồn tại.
+   */
+  | 'WAITING_PROVIDER_PROPOSAL'
   | 'EXECUTING'
   | 'FINISHED'
   | 'CHAT'
@@ -173,6 +182,42 @@ export interface AgentViewingApproval {
   wants_shuttle: boolean
 }
 
+/** Đơn vị cung cấp, ở dạng người đọc được. */
+export interface AgentServiceProposalProvider {
+  /** Mã nội bộ — dùng để đối chiếu log/hỗ trợ, KHÔNG vẽ ra màn hình. */
+  id: string
+  name: string
+}
+
+/**
+ * MỘT việc khách phải quyết: đồng ý với đơn vị này cho bước này.
+ *
+ * Không mang `quote_id` hay vân tay yêu cầu — chúng là chứng cứ nội bộ, và cái
+ * duy nhất cần gửi lại là `proposal_id`. Backend chặn chúng bằng
+ * `extra="forbid"`, nên nếu chúng xuất hiện ở đây thì response đã sai từ server.
+ */
+export interface AgentServiceProposal {
+  proposal_id: string
+  /** BƯỚC mà đề xuất này thuộc về — thứ phân biệt hai thẻ với nhau. */
+  task_id: string
+  provider: AgentServiceProposalProvider
+  amount: number
+  currency: string
+  reason: string
+  /** ISO. Sau mốc này báo giá hết hiệu lực và phải xin lại. */
+  valid_until: string
+  effective_status: 'PROPOSED' | 'CONFIRMED' | 'EXPIRED' | 'SUPERSEDED'
+  /**
+   * Còn bấm được không. ĐỌC TRƯỜNG NÀY để dựng nút, không suy từ
+   * `effective_status`.
+   *
+   * Hai trường vì hai câu hỏi khác nhau: "còn bấm được không" và "vì sao
+   * không". Suy cái thứ nhất từ cái thứ hai nghĩa là mỗi lần backend thêm một
+   * trạng thái là một lần phải sửa giao diện.
+   */
+  can_confirm: boolean
+}
+
 export interface AgentWorkflowResponse {
   /* Union HIỂN THỊ: backend trả cả `CANCELLED` và các mã lỗi terminal.
      Dùng union hẹp hơn ở đây thì mọi phép so với 'CANCELLED' bị TypeScript báo
@@ -188,6 +233,24 @@ export interface AgentWorkflowResponse {
   question: string | null
   missing_fields: string[]
   payment_quote: AgentPaymentQuote | null
+  /**
+   * MỌI việc khách còn phải quyết: đồng ý với đơn vị nào cho bước nào.
+   *
+   * MẢNG chứ không phải một cái. Một kế hoạch được phép có hai bước chuyển nhà
+   * độc lập, và khi ấy khách có hai việc phải bấm — vẽ một cái rồi im lặng bỏ
+   * cái kia là nói dối về khối lượng công việc còn lại.
+   *
+   * Giao diện dựng thẻ từ MẢNG NÀY, không từ `provider_proposal`.
+   */
+  service_proposals: AgentServiceProposal[]
+  /**
+   * Alias, và CHỈ có giá trị khi mảng có đúng một phần tử.
+   *
+   * Nhiều hơn một thì backend trả `null` — chọn cái đầu là một quyết định giao
+   * diện không ai chủ ý đưa ra. Đừng dùng trường này để render; nó tồn tại cho
+   * các lối gọi cũ đọc "có đúng một việc không".
+   */
+  provider_proposal: AgentServiceProposal | null
   /**
    * Cùng status WAITING_APPROVAL với thanh toán nhưng KHÁC loại chờ: lịch tham
    * quan đang chờ provider duyệt trong /review. Khác null → hiển thị màn chờ
