@@ -22,10 +22,27 @@ class MissingRequiredInputError(ValueError):
     `missing_fields` chỉ chứa tên field thuộc contract, không chứa dữ liệu do
     người dùng hoặc LLM sinh. Graph có thể dùng tín hiệu có kiểu này để hỏi bổ
     sung mà không phải phân tích chuỗi exception.
+
+    `reason` nói VÌ SAO ô này phải hỏi lại, khi lý do ấy KHÔNG phải "người dùng
+    chưa nói". Mã enum ổn định (`PAST_DATE`, `BEYOND_HORIZON`), không phải câu
+    tiếng Việt — tầng trên tự chọn câu chữ, và mã không bao giờ ra tới người
+    dùng.
+
+    Vì sao cần: ngày quá khứ bị đổi thành `MissingRequiredInputError` một cách
+    CỐ Ý (xem `_validate_business_rules`), nhưng bản trước vứt mất lý do. Câu
+    hỏi dựng lại từ tên field trống nghĩa, nên người dùng vừa đưa một ngày cụ
+    thể lại nghe "Bạn cho mình ngày cụ thể nhé" — và gõ lại đúng ngày cũ. Đo
+    được nguyên văn, hôm nay 2026-08-26:
+
+        Bạn:   ...tham quan Vinhome Ocean Park ngày 20/8/2026 lúc 12:00
+        P-118: Mình cần biết ngày bạn muốn tham quan... Bạn cho mình ngày cụ thể nhé!
+
+    `None` nghĩa là "thiếu bình thường" — không có gì để giải thích thêm.
     """
 
-    def __init__(self, missing_fields: tuple[str, ...]) -> None:
+    def __init__(self, missing_fields: tuple[str, ...], reason: str | None = None) -> None:
         self.missing_fields = missing_fields
+        self.reason = reason
         super().__init__(f"TaskPlan is missing required input fields: {list(missing_fields)}")
 
 
@@ -460,8 +477,13 @@ class TaskPlanValidator:
                 # Trần tương lai không thừa: không có nó thì "2199-12-31" là ngày
                 # hợp lệ — không nằm trong quá khứ nên mọi lớp kiểm cho qua, và
                 # chỗ đỗ năm 2199 vẫn được giữ thật, chiếm capacity thật.
-                if parsed_date < date.today() or parsed_date > date.today() + timedelta(days=cls.MAX_HORIZON_DAYS):
-                    raise MissingRequiredInputError((date_field,))
+                # Hai lý do KHÁC NHAU, hai mã khác nhau. Gộp một mã thì câu trả
+                # lời đúng một nửa: bảo "ngày đã qua" cho một lịch đặt năm 2037
+                # đọc như hệ thống hỏng, và người dùng không biết phải sửa gì.
+                if parsed_date < date.today():
+                    raise MissingRequiredInputError((date_field,), reason="PAST_DATE")
+                if parsed_date > date.today() + timedelta(days=cls.MAX_HORIZON_DAYS):
+                    raise MissingRequiredInputError((date_field,), reason="BEYOND_HORIZON")
 
         time_rule = cls.TIME_INPUTS.get(tool)
         if time_rule is None:

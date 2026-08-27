@@ -349,9 +349,34 @@ RESIDENT_LINK_REQUIRED_MESSAGE = (
 )
 
 
+# Vì sao ô này phải hỏi lại, khi lý do KHÔNG phải "người dùng chưa nói".
+#
+# Câu hỏi mặc định ("Bạn bổ sung giúp mình…") đọc như thể người dùng chưa nói
+# gì. Với một ngày họ ĐÃ nói rõ nhưng không dùng được, câu ấy vừa sai vừa tạo
+# vòng lặp: họ gõ lại đúng ngày cũ. Đo được, hôm nay 2026-08-26:
+#
+#     Bạn:   ...tham quan Vinhome Ocean Park ngày 20/8/2026 lúc 12:00
+#     P-118: Mình cần biết ngày bạn muốn tham quan… Bạn cho mình ngày cụ thể nhé!
+#
+# Cùng bệnh với vòng lặp "Khu D" mà `_unknown_zone_message` đã phá: hệ thống
+# BIẾT chính xác vấn đề và không nói ra.
+#
+# Câu ở đây là hằng số, không ghép dữ liệu người dùng vào — cùng luật với
+# `build_question`. Mã (`PAST_DATE`…) không bao giờ ra tới người dùng.
+_LY_DO_HOI_LAI: dict[str, str] = {
+    "PAST_DATE": (
+        "Ngày bạn chọn đã qua rồi nên mình chưa đặt được. Bạn chọn giúp mình một ngày từ hôm nay trở đi nhé."
+    ),
+    "BEYOND_HORIZON": (
+        "Ngày bạn chọn xa quá nên hệ thống chưa nhận đặt trước. Bạn chọn giúp mình một ngày gần hơn nhé."
+    ),
+}
+
+
 def needs_information_update(
     missing_fields: tuple[str, ...] | None,
     existing_context: dict[str, Any],
+    reason: str | None = None,
 ) -> dict:
     """Nguồn sự thật DUY NHẤT biến missing fields thành state hướng ra người dùng.
 
@@ -415,10 +440,13 @@ def needs_information_update(
             "plan_validated": False,
         }
 
+    # Có lý do cụ thể thì NÓI lý do, đừng hỏi lại như thể chưa ai nói gì.
+    # Không có thì giữ NGUYÊN câu cũ — nhánh này không đổi hành vi mặc định.
+    cau_hoi = _LY_DO_HOI_LAI.get(reason or "") or build_question(public_fields)
     return {
         "planner_status": "NEEDS_INFORMATION",
         "missing_fields": public_fields,
-        "question": build_question(public_fields),
+        "question": cau_hoi,
         "plan_validated": False,
     }
 
@@ -641,9 +669,14 @@ def build_planner_graph(
             TaskPlanValidator.validate(plan)
         except MissingRequiredInputError as exc:
             # Dùng chung policy với `plan_node` — hai nhánh không thể lệch nhau.
+            #
+            # `exc.reason` là đường DUY NHẤT để "ngày đã qua" tới được câu hỏi.
+            # Bỏ nó thì Validator biết chính xác vấn đề mà người dùng chỉ nghe
+            # "cho mình ngày cụ thể nhé" — rồi gõ lại đúng ngày cũ.
             update = needs_information_update(
                 exc.missing_fields,
                 state.get("existing_context", {}),
+                reason=exc.reason,
             )
             if update.get("clarification_error"):
                 await emit("VALIDATION_FAILED")
