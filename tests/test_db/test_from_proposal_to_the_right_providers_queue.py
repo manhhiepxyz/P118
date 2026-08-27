@@ -246,7 +246,7 @@ async def test_running_the_boundary_again_after_a_restart_reuses_the_same_propos
     with pytest.raises(ProviderProposalRequiredError) as loi:
         await boundary.execute(plan, wid)
 
-    assert (loi.value.context or {})["provider_proposal"]["proposal_id"] == proposal_id
+    assert (loi.value.context or {})["provider_proposals"][0]["proposal_id"] == proposal_id
     assert (
         await db_pool.fetchval(
             "SELECT count(*) FROM service_provider_proposals WHERE workflow_id=$1::uuid", uuid.UUID(wid)

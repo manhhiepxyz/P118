@@ -247,7 +247,7 @@ async def test_with_the_flag_on_the_queue_stays_empty_until_the_customer_says_ye
     assert dem["approvals"] == 0, "hàng đợi đơn vị đã mở trước khi khách bấm"
     assert bao_gia_that.so_luot == 3
 
-    payload = (loi.context or {})["provider_proposal"]
+    payload = (loi.context or {})["provider_proposals"][0]
     assert payload["provider"] == {"id": "MOV-03", "name": "Dịch vụ An Khang"}
     assert payload["amount"] == 420_000 and payload["currency"] == "VND"
     assert payload["can_confirm"] is True
@@ -314,7 +314,7 @@ async def test_running_again_after_confirming_does_not_make_a_second_proposal(
     repository = await acquire_repository()
     chu = await _khach(db_pool, "kh_sau_xac_nhan")
     wid, loi = await _chay(db_pool, _plan(), chu)
-    proposal_id = (loi.context or {})["provider_proposal"]["proposal_id"]
+    proposal_id = (loi.context or {})["provider_proposals"][0]["proposal_id"]
     await xac_nhan_de_xuat(db_pool, proposal_id, owner_user_id=chu)
 
     boundary = ServiceApprovalBoundary(_KhongChayGiCa(), approved=False, repository=repository)
@@ -467,7 +467,7 @@ async def test_no_preference_is_the_shipping_default(db_pool, monkeypatch, kho_t
     chu = await _khach(db_pool, "kh_mac_dinh")
     wid, loi = await _chay(db_pool, _plan(), chu)
     assert isinstance(loi, ProviderProposalRequiredError)
-    assert (loi.context or {})["provider_proposal"]["provider"]["id"] == "MOV-03"
+    assert (loi.context or {})["provider_proposals"][0]["provider"]["id"] == "MOV-03"
 
 
 @pytest.mark.asyncio
