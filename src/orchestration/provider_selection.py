@@ -127,7 +127,14 @@ def chon_don_vi(
     # Kết quả có kiểu riêng chứ không ném: biên này phải toàn phần, và tầng
     # trên cần phân biệt "ngân sách không đọc được" với "không ai vừa túi".
     if max_price is not None and (isinstance(max_price, bool) or not isinstance(max_price, int) or max_price <= 0):
-        logger.warning("ngân sách không dùng được: %r", max_price)
+        # KIỂU, không phải GIÁ TRỊ. Ngân sách là thông tin tài chính riêng của
+        # khách; log đi vào file, vào máy chủ log tập trung, vào ảnh chụp màn
+        # hình khi gỡ lỗi — những chỗ không có ai kiểm soát ai đọc.
+        #
+        # Kiểu đã đủ để sửa lỗi: nó nói `str` hay `bool` hay số âm, tức nói
+        # đúng thứ người sửa cần. Giá trị không thêm gì cho việc sửa, và thêm
+        # một chỗ rò cho việc khác.
+        logger.warning("ngân sách không dùng được, kiểu %s", type(max_price).__name__)
         return LuaChonDonVi("INVALID_BUDGET")
 
     # ĐÚNG DỊCH VỤ, kiểm ở đây chứ không chỉ ở wrapper đọc database.

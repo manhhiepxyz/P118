@@ -393,6 +393,31 @@ def test_an_unreadable_budget_is_caught_before_the_name_is_resolved():
     assert ket_qua.ket_qua == "INVALID_BUDGET"
 
 
+def test_the_budget_value_is_never_written_to_a_log(caplog):
+    """Log nói KIỂU, không nói GIÁ TRỊ.
+
+    Ngân sách là thông tin tài chính riêng của khách. Log đi vào file, vào máy
+    chủ log tập trung, vào ảnh chụp màn hình lúc gỡ lỗi — những chỗ không ai
+    kiểm soát được ai đọc. Và nhánh này chạy đúng lúc có sự cố, tức đúng lúc
+    log được đọc nhiều nhất.
+
+    Kiểu đã đủ để sửa lỗi: nó nói `str` hay `bool` hay số âm. Giá trị không
+    thêm gì cho việc sửa.
+    """
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    for hong in (-1, "450000", 999_888_777, 450_000.5):
+        chon_don_vi(BA_BAO_GIA, service_type=CHUYEN_NHA, max_price=hong)
+
+    da_ghi = caplog.text
+    assert da_ghi.strip(), "không ghi log nào — bài kiểm này sẽ xanh vì lý do sai"
+    for hong in ("-1", "450000", "999888777", "999_888_777", "450000.5"):
+        assert hong not in da_ghi, f"giá trị ngân sách {hong!r} lọt vào log"
+    # Kiểu thì phải có, nếu không log mất hết giá trị chẩn đoán.
+    assert "int" in da_ghi and "str" in da_ghi and "float" in da_ghi
+
+
 def test_no_budget_at_all_is_still_perfectly_valid():
     """`None` nghĩa là khách không nói ngân sách — khác hẳn ngân sách hỏng."""
     assert chon_don_vi(BA_BAO_GIA, service_type=CHUYEN_NHA, max_price=None).ket_qua == "SELECTED"
