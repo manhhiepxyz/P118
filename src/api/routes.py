@@ -38,6 +38,7 @@ from src.common.field_parsers import (
     _extract_vehicle_type,
     _unknown_zone,
     _unknown_zone_message,
+    extract_all_dates,
     is_bare_yes_no,
     parse_field,
 )
@@ -324,6 +325,32 @@ def _extract_follow_up_answers(
     mot_tieng_dap = is_bare_yes_no(text)
     da_nhan_mot_o = False
 
+    # Ô NGÀY nhận ngày theo ĐÚNG THỨ TỰ xuất hiện: ngày thứ i về ô ngày thứ i.
+    #
+    # Cùng loại lỗi với luật boolean ngay trên — một dấu hiệu mạnh nói được
+    # GIÁ TRỊ nhưng không nói được nó thuộc ô NÀO — nhưng ngày còn tệ hơn vì
+    # `_extract_date` dùng `re.search`: mọi ô ngày đều nhận ngày ĐẦU TIÊN, và
+    # ngày thứ hai người dùng gõ không bao giờ được đọc tới.
+    #
+    # Đo được, câu hỏi gộp `viewing_date` + `booking_date`, cả hai ngày hợp lệ:
+    #
+    #     "…ngày 27/8/2026 … ngày 29/8/2026, khu A"
+    #       → viewing_date = 2026-08-27
+    #         booking_date = 2026-08-27    ← giữ chỗ đỗ SAI NGÀY, im lặng
+    #
+    # Đây là lỗi ĐÚNG DỮ LIỆU: chỗ đỗ được giữ thật vào ngày người dùng chưa
+    # từng nói, phí vẫn tính, không màn hình nào nói ra.
+    #
+    # Thứ tự là cách đọc tự nhiên VÀ là thứ tự chính câu hỏi vừa liệt kê. Ít
+    # ngày hơn số ô thì ô sau để trống — KHÔNG nhân bản ngày đầu, vì nhân bản
+    # chính là bug đang sửa.
+    #
+    # Chỉ đổi khi có TỪ HAI ô ngày trở lên: một ô ngày thì hành vi cũ (đọc cả
+    # câu) đã đúng và đang được nhiều test khoá lại.
+    o_ngay = [f for f in missing_fields if f in DATE_FIELDS]
+    ngay_theo_thu_tu = extract_all_dates(text) if len(o_ngay) > 1 else []
+    hang_doi_ngay = list(ngay_theo_thu_tu)
+
     answers: dict[str, Any] = {}
     unresolved: list[str] = []
     for field in missing_fields:
@@ -338,6 +365,11 @@ def _extract_follow_up_answers(
             value = None if da_nhan_mot_boolean else parse_field(field, text)
             if value is not None:
                 da_nhan_mot_boolean = True
+        elif ngay_theo_thu_tu and field in DATE_FIELDS:
+            # Mỗi ô nhận ĐÚNG một ngày, rồi vẫn đi qua bộ đọc của chính ô đó —
+            # chính sách lịch không bị nới chỗ nào.
+            rieng = hang_doi_ngay.pop(0) if hang_doi_ngay else None
+            value = parse_field(field, rieng) if rieng else None
         else:
             value = parse_field(field, text)
         if value is None:

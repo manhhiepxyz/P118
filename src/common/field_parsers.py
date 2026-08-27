@@ -156,6 +156,35 @@ def _extract_time(text: str) -> str | None:
     return None
 
 
+# Cả hai cách viết ngày, gộp một mẫu để giữ ĐÚNG THỨ TỰ xuất hiện.
+#
+# Tách hai `finditer` rồi nối lại sẽ cho thứ tự sai khi một câu trộn cả hai
+# dạng ("tham quan 2026-09-02 rồi đỗ xe 5/9/2026") — mọi ngày ISO sẽ đứng
+# trước mọi ngày d/m/Y bất kể chúng nằm đâu trong câu.
+_MOI_NGAY = re.compile(r"\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{4})\b")
+
+
+def extract_all_dates(text: str) -> list[str]:
+    """Mọi ngày trong câu, THEO THỨ TỰ xuất hiện, dạng nguyên văn người dùng gõ.
+
+    `_extract_date` dùng `re.search` nên chỉ thấy ngày ĐẦU TIÊN. Đúng khi
+    chuỗi đưa vào đã được tách riêng cho một ô; sai khi một câu mang nhiều ô
+    ngày cùng lúc — lúc đó MỌI ô đều nhận cùng một ngày.
+
+    Đo được, câu hỏi gộp `viewing_date` + `booking_date` (luồng "tham quan và
+    chỗ đỗ xe"), cả hai ngày đều hợp lệ:
+
+        "…ngày 27/8/2026 … ngày 29/8/2026, khu A"
+          → viewing_date = 2026-08-27
+            booking_date = 2026-08-27   ← chỗ đỗ giữ SAI NGÀY, im lặng
+
+    Trả về chuỗi NGUYÊN VĂN chứ không phải ISO đã chuẩn hoá: caller còn phải
+    đưa từng chuỗi qua bộ đọc của đúng ô đó, để chính sách lịch (không quá
+    khứ, không quá xa) vẫn chạy nguyên vẹn cho từng ô.
+    """
+    return _MOI_NGAY.findall(text)
+
+
 def _extract_parking_zone(text: str) -> str | None:
     match = re.search(r"\b(?:zone|khu)[ _-]*([ab])\b", text, re.IGNORECASE)
     return f"ZONE_{match.group(1).upper()}" if match else None
