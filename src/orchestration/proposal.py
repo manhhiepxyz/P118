@@ -22,28 +22,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Literal
 
 TrangThaiDeXuat = Literal["PROPOSED", "CONFIRMED", "EXPIRED", "SUPERSEDED"]
 
-# Kết quả một lượt xác nhận. Tập ĐÓNG, và mỗi mã dẫn tới một hành động khác
-# nhau ở tầng trên — gộp chúng lại là bắt người dùng đoán.
-KetQuaXacNhan = Literal[
-    "CONFIRMED",
+
+class KetQuaXacNhan(StrEnum):
+    """Kết quả một lượt xác nhận. Tập ĐÓNG, và mỗi mã dẫn tới một hành động khác.
+
+    `StrEnum` chứ không phải `Literal[...]` vì tầng HTTP phải ánh xạ HẾT sang
+    mã trạng thái và câu chữ. Với `Literal` thì "hết" là một lời hứa; với một
+    enum liệt kê được, bài kiểm parity đối chiếu `set(_HTTP) == set(KetQuaXacNhan)`
+    và thêm một kết quả mà quên ánh xạ sẽ đỏ TRƯỚC khi phát hành — thay vì nổ
+    `KeyError` ở request đầu tiên chạm vào nhánh mới.
+    """
+
+    CONFIRMED = "CONFIRMED"
     # Không có đề xuất ấy, HOẶC nó không thuộc người đang hỏi. Một mã cho hai
     # tình huống là cố ý: phân biệt chúng nghĩa là xác nhận với người đang dò
     # rằng một `proposal_id` nào đó có thật.
-    "NOT_FOUND",
+    NOT_FOUND = "NOT_FOUND"
     # Đã xác nhận, đã hết hạn, hoặc đã bị một đề xuất mới thay thế.
-    "ALREADY_DECIDED",
+    ALREADY_DECIDED = "ALREADY_DECIDED"
     # Chứng từ hết hiệu lực giữa lúc chờ. Đề xuất chuyển EXPIRED — khách phải
     # xin báo giá mới, và đó là một việc khác hẳn "bấm lại lần nữa".
-    "QUOTE_EXPIRED",
+    QUOTE_EXPIRED = "QUOTE_EXPIRED"
     # Chứng từ không dùng được vì lý do khác: đã chốt, đã bị thay thế, hoặc
     # neo sang bước khác. Tách khỏi `QUOTE_EXPIRED` vì hết hạn thì hỏi lại là
     # đủ, còn đây là dấu hiệu có gì đó sai trong luồng.
-    "QUOTE_NOT_USABLE",
-]
+    QUOTE_NOT_USABLE = "QUOTE_NOT_USABLE"
 
 
 @dataclass(frozen=True)
@@ -85,4 +93,4 @@ class KetQuaXacNhanDeXuat:
 
     @property
     def thanh_cong(self) -> bool:
-        return self.ket_qua == "CONFIRMED"
+        return self.ket_qua is KetQuaXacNhan.CONFIRMED

@@ -24,8 +24,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.api.deps import require_roles
-from src.db.proposal_repository import doc_de_xuat, xac_nhan_de_xuat
+from src.db.proposal_repository import doc_de_xuat, trang_thai_hieu_luc, xac_nhan_de_xuat
 from src.db.quote_repository import doc_bao_gia
+from src.orchestration.proposal import KetQuaXacNhan
 from src.orchestration.provider_directory import ten_don_vi
 from src.orchestration.runtime_provider import acquire_repository
 
@@ -33,25 +34,40 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/service-proposals", tags=["service-proposals"])
 
-# Mã kết quả → mã HTTP. Bảng CHỨ KHÔNG phải chuỗi `if`: thêm một kết quả mà
-# quên ánh xạ thì `KeyError` ở đây, chứ không rơi vào một nhánh mặc định trả
-# 200 cho một việc chưa xảy ra.
-_HTTP = {
-    "CONFIRMED": 200,
+# Mã kết quả → mã HTTP, và → câu chữ. Hai bảng, và cả hai phải PHỦ HẾT.
+#
+# Bản đầu để `_HTTP[ket_qua]` nổ `KeyError` khi thêm một kết quả mới, với lý do
+# "vỡ to hơn im lặng". Nó vỡ đúng chỗ sai: ở request đầu tiên chạm vào nhánh
+# mới, trên máy chủ thật, cho một khách thật. `KetQuaXacNhan` là enum liệt kê
+# được, nên bài kiểm parity đối chiếu `set(_HTTP) == set(KetQuaXacNhan)` và
+# thiếu một mã sẽ đỏ TRƯỚC khi phát hành.
+#
+# Runtime vẫn phải chịu được điều không nên xảy ra: `.get()` với một mặc định
+# an toàn (500 + câu chữ chung), vì một 500 có log tốt hơn một stack trace lọt
+# ra ngoài.
+_HTTP: dict[KetQuaXacNhan, int] = {
+    KetQuaXacNhan.CONFIRMED: 200,
     # 404 dùng chung cho "không có" và "không phải của bạn" — phân biệt chúng
     # là xác nhận với người đang dò rằng một mã nào đó có thật.
-    "NOT_FOUND": 404,
-    "ALREADY_DECIDED": 409,
-    "QUOTE_EXPIRED": 409,
-    "QUOTE_NOT_USABLE": 409,
+    KetQuaXacNhan.NOT_FOUND: 404,
+    KetQuaXacNhan.ALREADY_DECIDED: 409,
+    KetQuaXacNhan.QUOTE_EXPIRED: 409,
+    KetQuaXacNhan.QUOTE_NOT_USABLE: 409,
 }
 
-_THONG_DIEP = {
-    "NOT_FOUND": "Không tìm thấy đề xuất này.",
-    "ALREADY_DECIDED": "Đề xuất này đã được xử lý trước đó.",
-    "QUOTE_EXPIRED": "Báo giá đã hết hiệu lực. Bạn để mình hỏi lại giá mới nhé.",
-    "QUOTE_NOT_USABLE": "Báo giá này không còn dùng được.",
+_THONG_DIEP: dict[KetQuaXacNhan, str] = {
+    KetQuaXacNhan.CONFIRMED: "Đã xác nhận.",
+    KetQuaXacNhan.NOT_FOUND: "Không tìm thấy đề xuất này.",
+    KetQuaXacNhan.ALREADY_DECIDED: "Đề xuất này đã được xử lý trước đó.",
+    KetQuaXacNhan.QUOTE_EXPIRED: "Báo giá đã hết hiệu lực. Bạn để mình hỏi lại giá mới nhé.",
+    KetQuaXacNhan.QUOTE_NOT_USABLE: "Báo giá này không còn dùng được.",
 }
+
+# Câu chữ cho một mã không có trong bảng. Không nhắc tới mã ấy: người đọc là
+# khách, và một mã lạ trên màn hình của họ chỉ là tiếng ồn.
+_KHONG_XU_LY_DUOC = "Mình chưa xử lý được yêu cầu này. Bạn thử lại sau giúp mình nhé."
+
+_KHONG_TIM_THAY = _THONG_DIEP[KetQuaXacNhan.NOT_FOUND]
 
 
 class _ConfirmBody(BaseModel):
@@ -70,13 +86,24 @@ async def _cong_khai(pool: Any, de_xuat: Any) -> dict[str, Any]:
     Đề xuất không giữ bản sao của chúng (xem `service_provider_proposals`), nên
     đây là chỗ hai mảnh được ghép lại — và ghép lúc ĐỌC nghĩa là không bao giờ
     có một bản sao cũ để lệch.
+
+    `effective_status` và `can_confirm` tính từ CẢ HAI phía. `status` một mình
+    là fail-OPEN: chứng từ có thể vừa hết hạn trong khi lượt dọn chưa chạy tới,
+    và lúc ấy cột vẫn ghi `PROPOSED` còn màn hình vẫn dựng nút "đồng ý" cho một
+    cái giá không còn tồn tại.
     """
     bao_gia = await doc_bao_gia(pool, de_xuat.quote_id)
+    hieu_luc, con_bam_duoc = await trang_thai_hieu_luc(pool, de_xuat)
     return {
         "proposal_id": de_xuat.proposal_id,
         "workflow_id": de_xuat.workflow_id,
         "task_id": de_xuat.task_id,
+        # `status` là thứ đang nằm trong cột; `effective_status` là sự thật sau
+        # khi hỏi cả chứng từ. Trả cả hai để màn hình dùng cái thứ hai mà người
+        # gỡ lỗi vẫn thấy được cái thứ nhất.
         "status": de_xuat.status,
+        "effective_status": hieu_luc,
+        "can_confirm": con_bam_duoc,
         "provider": (
             {
                 "id": bao_gia.service_provider_id,
@@ -105,13 +132,13 @@ async def get_proposal(
     try:
         de_xuat = await doc_de_xuat(pool, proposal_id)
         if de_xuat is None:
-            raise HTTPException(status_code=404, detail=_THONG_DIEP["NOT_FOUND"])
+            raise HTTPException(status_code=404, detail=_KHONG_TIM_THAY)
         chu = await pool.fetchval(
             "SELECT owner_user_id FROM workflows WHERE workflow_id = $1::uuid", de_xuat.workflow_id
         )
         if chu is None or str(chu) != str(user["id"]):
             logger.info("chặn đọc đề xuất ngoài quyền sở hữu")
-            raise HTTPException(status_code=404, detail=_THONG_DIEP["NOT_FOUND"])
+            raise HTTPException(status_code=404, detail=_KHONG_TIM_THAY)
         return await _cong_khai(pool, de_xuat)
     finally:
         await pool.close()
@@ -141,7 +168,10 @@ async def confirm_proposal(
     try:
         ket_qua = await xac_nhan_de_xuat(pool, proposal_id, owner_user_id=str(user["id"]))
         if not ket_qua.thanh_cong:
-            raise HTTPException(status_code=_HTTP[ket_qua.ket_qua], detail=_THONG_DIEP[ket_qua.ket_qua])
+            raise HTTPException(
+                status_code=_HTTP.get(ket_qua.ket_qua, 500),
+                detail=_THONG_DIEP.get(ket_qua.ket_qua, _KHONG_XU_LY_DUOC),
+            )
 
         cong_khai = await _cong_khai(pool, ket_qua.de_xuat)
     finally:

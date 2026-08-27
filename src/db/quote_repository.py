@@ -284,26 +284,92 @@ async def het_han_bao_gia_qua_han(pool: asyncpg.Pool, *, workflow_id: str, task_
     return int(str(ket_qua).rsplit(" ", 1)[-1])
 
 
-async def thay_the_bao_gia_cu(pool: asyncpg.Pool, *, workflow_id: str, task_id: str, van_tay_moi: str) -> int:
-    """Yêu cầu đã đổi → mọi báo giá ACTIVE của vân tay CŨ thành SUPERSEDED.
+def _so_dong(command_tag: object) -> int:
+    """Số dòng một lệnh vừa đụng tới, đọc từ command tag của PostgreSQL."""
+    return int(str(command_tag).rsplit(" ", 1)[-1])
 
-    SUPERSEDED chứ không xoá, và không phải EXPIRED: ba trạng thái ấy nói ba
-    điều khác nhau. Hết hạn là thời gian trôi qua; bị thay thế là khách đổi ý.
-    Gộp chúng thì lúc có sự cố không phân biệt được "đơn vị báo giá quá ngắn"
-    với "khách đổi ngày ba lần".
 
-    Chỉ đụng ACTIVE: một báo giá đã CONFIRMED là một cam kết đã xảy ra, và viết
-    đè lên nó là xoá dấu vết của một việc có thật.
+async def _dong_bo_de_xuat_theo_bao_gia(conn: asyncpg.Connection, *, workflow_id: UUID, task_id: str) -> int:
+    """Đề xuất đang chờ đi theo số phận của CHỨNG TỪ nó trỏ vào.
+
+    Chứng từ SUPERSEDED → đề xuất SUPERSEDED. Chứng từ EXPIRED → đề xuất
+    EXPIRED. Chỉ đụng đề xuất còn `PROPOSED`: một cái đã CONFIRMED là quyết
+    định đã xảy ra và đã sinh ra một dòng trong hàng đợi của đơn vị.
+
+    Nhận `conn` chứ không nhận `pool`: hàm này KHÔNG được gọi ngoài một
+    transaction. Chứng từ chết mà đề xuất còn sống là một trạng thái nửa
+    chừng — màn hình vẫn mời khách bấm đồng ý cho một cái giá không còn tồn
+    tại — và một khe nửa chừng thì sớm muộn sẽ có một lượt poll rơi vào.
     """
-    async with pool.acquire() as conn:
-        ket_qua = await conn.execute(
-            """
-            UPDATE service_quotes SET status = 'SUPERSEDED'
-             WHERE workflow_id = $1 AND task_id = $2
-               AND status = 'ACTIVE' AND request_fingerprint <> $3
-            """,
-            UUID(workflow_id),
-            task_id,
-            van_tay_moi,
+    ket_qua = await conn.execute(
+        """
+        UPDATE service_provider_proposals p
+           SET status = q.status
+          FROM service_quotes q
+         WHERE p.quote_id = q.quote_id
+           AND p.workflow_id = $1
+           AND p.task_id = $2
+           AND p.status = 'PROPOSED'
+           AND q.status IN ('SUPERSEDED', 'EXPIRED')
+        """,
+        workflow_id,
+        task_id,
+    )
+    return _so_dong(ket_qua)
+
+
+async def don_bao_gia_va_de_xuat(
+    pool: asyncpg.Pool, *, workflow_id: str, task_id: str, van_tay_moi: str | None = None
+) -> dict[str, int]:
+    """MỘT transaction dọn cả chứng từ lẫn đề xuất của một bước.
+
+    Đây là đường dọn CANONICAL, và là đường duy nhất. Trước đó có hai hàm rời
+    nhau — thay thế theo vân tay, và quét hết hạn — mỗi hàm một transaction, và
+    đề xuất thì không hàm nào đụng tới. Ba lượt ghi rời nhau nghĩa là có hai
+    khe mà chứng từ đã chết trong khi đề xuất vẫn `PROPOSED`, và trong khe ấy
+    màn hình còn nguyên nút "đồng ý" cho một cái giá không còn tồn tại.
+
+    Ba việc, một `BEGIN`:
+
+      1. vân tay đổi  → chứng từ đời cũ `SUPERSEDED`
+      2. quá hạn      → chứng từ `EXPIRED`
+      3. đề xuất đang chờ đi theo chứng từ của nó
+
+    `van_tay_moi=None` nghĩa là chỉ dọn hạn — dùng khi yêu cầu không đổi.
+
+    Khoá `workflows` trước, cùng thứ tự với `xac_nhan_de_xuat` và với mọi người
+    ghi hàng đợi duyệt. Khác thứ tự là công thức của một deadlock hiện ra như
+    "một test khác nhau mỗi lượt".
+    """
+    khoa_wf = UUID(workflow_id)
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.fetchrow("SELECT workflow_id FROM workflows WHERE workflow_id = $1 FOR UPDATE", khoa_wf)
+
+        da_thay_the = 0
+        if van_tay_moi is not None:
+            ket_qua = await conn.execute(
+                """
+                UPDATE service_quotes SET status = 'SUPERSEDED'
+                 WHERE workflow_id = $1 AND task_id = $2
+                   AND status = 'ACTIVE' AND request_fingerprint <> $3
+                """,
+                khoa_wf,
+                task_id,
+                van_tay_moi,
+            )
+            da_thay_the = _so_dong(ket_qua)
+
+        het_han = _so_dong(
+            await conn.execute(
+                """
+                UPDATE service_quotes SET status = 'EXPIRED'
+                 WHERE workflow_id = $1 AND task_id = $2
+                   AND status = 'ACTIVE' AND valid_until <= NOW()
+                """,
+                khoa_wf,
+                task_id,
+            )
         )
-    return int(str(ket_qua).rsplit(" ", 1)[-1])
+        de_xuat_theo = await _dong_bo_de_xuat_theo_bao_gia(conn, workflow_id=khoa_wf, task_id=task_id)
+
+    return {"thay_the": da_thay_the, "het_han": het_han, "de_xuat": de_xuat_theo}

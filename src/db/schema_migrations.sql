@@ -1388,7 +1388,8 @@ CREATE INDEX IF NOT EXISTS idx_service_quotes_fingerprint
 -- Kèm theo nó là một NGHĨA VỤ: dòng hết hạn phải được chuyển sang EXPIRED
 -- trước khi xin báo giá mới. Nếu không, một dòng quá hạn vẫn mang `ACTIVE` và
 -- chặn vĩnh viễn mọi lượt hỏi lại của cùng đơn vị cho cùng yêu cầu — ràng buộc
--- an toàn biến thành ngõ cụt. Xem `het_han_bao_gia_qua_han()`.
+-- an toàn biến thành ngõ cụt. Xem `don_bao_gia_va_de_xuat()` — cùng một
+-- transaction dọn cả chứng từ lẫn đề xuất đang trỏ vào chúng.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_active
     ON service_quotes (workflow_id, task_id, service_provider_id, request_fingerprint)
  WHERE status = 'ACTIVE';
@@ -1477,3 +1478,52 @@ CREATE INDEX IF NOT EXISTS idx_proposals_task
 -- Tra ngược từ chứng từ: "báo giá này đã được đề xuất chưa".
 CREATE INDEX IF NOT EXISTS idx_proposals_quote
     ON service_provider_proposals (quote_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Bước D (đóng) — KHOÁ NEO Ở DATABASE
+-- ---------------------------------------------------------------------------
+-- Tầng ứng dụng đã kiểm "chứng từ phải thuộc đúng workflow/task này" ở cả hai
+-- đường (lúc ghim đề xuất và lúc xác nhận). Nhưng schema vẫn cho chèn thẳng
+-- một đề xuất trỏ vào chứng từ của bước khác — và một luật chỉ tồn tại ở tầng
+-- ứng dụng là một luật mà mọi đường ghi MỚI phải nhớ lại từ đầu.
+--
+-- `quote_id` đã là khoá chính nên ràng buộc dưới đây không thêm tính duy nhất
+-- nào. Nó tồn tại vì PostgreSQL đòi một ràng buộc duy nhất trên ĐÚNG bộ cột mà
+-- khoá ngoại tổng hợp trỏ tới.
+DO $$
+BEGIN
+    IF to_regclass('service_quotes') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_service_quotes_anchor')
+    THEN
+        ALTER TABLE service_quotes
+            ADD CONSTRAINT uq_service_quotes_anchor UNIQUE (quote_id, workflow_id, task_id);
+    END IF;
+END $$;
+
+-- Khoá ngoại TỔNG HỢP: đề xuất và chứng từ phải nói cùng một bước.
+--
+-- Nếu không có nó thì `INSERT INTO service_provider_proposals` với `quote_id`
+-- của bước khác vẫn qua — khoá ngoại đơn `quote_id` chỉ nói "chứng từ này có
+-- thật", không nói "nó thuộc bước này".
+DO $$
+BEGIN
+    IF to_regclass('service_provider_proposals') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_proposals_quote_anchor')
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_service_quotes_anchor')
+    THEN
+        -- Dọn dòng lệch trước khi siết: không có dòng nào như vậy ngoài môi
+        -- trường dev của tuần này (bảng trẻ hơn chính ràng buộc đang thêm), và
+        -- một đề xuất trỏ sai bước thì `xac_nhan_de_xuat` đã chặn ở mọi đường
+        -- — nó không phải dữ liệu, nó là rác.
+        DELETE FROM service_provider_proposals p
+         USING service_quotes q
+         WHERE p.quote_id = q.quote_id
+           AND (p.workflow_id <> q.workflow_id OR p.task_id <> q.task_id);
+
+        ALTER TABLE service_provider_proposals
+            ADD CONSTRAINT fk_proposals_quote_anchor
+            FOREIGN KEY (quote_id, workflow_id, task_id)
+            REFERENCES service_quotes (quote_id, workflow_id, task_id);
+    END IF;
+END $$;

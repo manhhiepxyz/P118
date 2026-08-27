@@ -33,9 +33,8 @@ import pytest
 from src.db.quote_repository import (
     bao_gia_dang_song,
     doc_bao_gia,
-    het_han_bao_gia_qua_han,
+    don_bao_gia_va_de_xuat,
     luu_bao_gia,
-    thay_the_bao_gia_cu,
     xac_nhan_bao_gia,
 )
 from src.orchestration.quote import QuoteInvalidError, kiem_bao_gia, van_tay_yeu_cau
@@ -155,9 +154,7 @@ async def test_two_different_moves_get_two_different_quotes(db_pool):
     b = await _bao_gia(db_pool, wid, gia=680_000, van_tay=van_tay_xe_tai)
 
     assert a.request_fingerprint != b.request_fingerprint
-    chi_xe_van = await bao_gia_dang_song(
-        db_pool, workflow_id=wid, task_id="T1", request_fingerprint=VAN_TAY
-    )
+    chi_xe_van = await bao_gia_dang_song(db_pool, workflow_id=wid, task_id="T1", request_fingerprint=VAN_TAY)
     assert [q.quote_id for q in chi_xe_van] == [a.quote_id]
 
 
@@ -197,9 +194,9 @@ async def test_a_quote_cannot_be_persisted_for_a_step_that_does_not_exist(db_poo
     wid = await _mot_workflow(db_pool)
     with pytest.raises(ValueError):
         await _bao_gia(db_pool, wid, task="T99")
-    assert await db_pool.fetchval(
-        "SELECT count(*) FROM service_quotes WHERE workflow_id = $1::uuid", uuid.UUID(wid)
-    ) == 0
+    assert (
+        await db_pool.fetchval("SELECT count(*) FROM service_quotes WHERE workflow_id = $1::uuid", uuid.UUID(wid)) == 0
+    )
 
 
 @pytest.mark.asyncio
@@ -360,16 +357,12 @@ async def test_confirming_at_the_expiry_boundary_has_exactly_one_valid_outcome(d
     wid = await _mot_workflow(db_pool)
     bao_gia = await _bao_gia(db_pool, wid)
     # Hạn đúng "ngay bây giờ": lệnh chạy sau đó vài micro giây nên nó đã qua.
-    await db_pool.execute(
-        "UPDATE service_quotes SET valid_until = NOW() WHERE quote_id = $1::uuid", bao_gia.quote_id
-    )
+    await db_pool.execute("UPDATE service_quotes SET valid_until = NOW() WHERE quote_id = $1::uuid", bao_gia.quote_id)
 
     ket_qua = await xac_nhan_bao_gia(db_pool, bao_gia.quote_id, **_tieu_thu(bao_gia))
     sau = await doc_bao_gia(db_pool, bao_gia.quote_id)
 
-    assert (ket_qua is not None) == (sau.status == "CONFIRMED"), (
-        "lệnh nói một đằng, trạng thái một nẻo"
-    )
+    assert (ket_qua is not None) == (sau.status == "CONFIRMED"), "lệnh nói một đằng, trạng thái một nẻo"
     assert (sau.confirmed_at is not None) == (sau.status == "CONFIRMED")
 
 
@@ -386,7 +379,7 @@ async def test_an_expired_row_does_not_block_a_new_quote_forever(db_pool):
     cu = await _bao_gia(db_pool, wid, don_vi="MOV-02", gia=470_000)
     await _lam_cho_het_han(db_pool, cu.quote_id)
 
-    da_quet = await het_han_bao_gia_qua_han(db_pool, workflow_id=wid, task_id="T1")
+    da_quet = (await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1"))["het_han"]
     moi = await _bao_gia(db_pool, wid, don_vi="MOV-02", gia=520_000)
 
     assert da_quet == 1
@@ -404,7 +397,7 @@ async def test_the_sweep_never_touches_a_quote_that_is_still_alive(db_pool):
     het = await _bao_gia(db_pool, wid, don_vi="MOV-02")
     await _lam_cho_het_han(db_pool, het.quote_id)
 
-    assert await het_han_bao_gia_qua_han(db_pool, workflow_id=wid, task_id="T1") == 1
+    assert (await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1"))["het_han"] == 1
     assert (await doc_bao_gia(db_pool, con_han.quote_id)).status == "ACTIVE"
 
 
@@ -444,7 +437,7 @@ async def test_changing_the_request_supersedes_the_old_quotes(db_pool):
     cu = await _bao_gia(db_pool, wid)
     van_tay_moi = van_tay_yeu_cau({**YEU_CAU, "move_date": "2026-10-05"})
 
-    da_doi = await thay_the_bao_gia_cu(db_pool, workflow_id=wid, task_id="T1", van_tay_moi=van_tay_moi)
+    da_doi = (await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1", van_tay_moi=van_tay_moi))["thay_the"]
 
     assert da_doi == 1
     assert (await doc_bao_gia(db_pool, cu.quote_id)).status == "SUPERSEDED"
@@ -458,10 +451,10 @@ async def test_a_confirmed_quote_is_never_rewritten_by_a_later_change(db_pool):
     da_chot = await _bao_gia(db_pool, wid)
     await xac_nhan_bao_gia(db_pool, da_chot.quote_id, **_tieu_thu(da_chot))
 
-    await thay_the_bao_gia_cu(
+    await don_bao_gia_va_de_xuat(
         db_pool, workflow_id=wid, task_id="T1", van_tay_moi=van_tay_yeu_cau({**YEU_CAU, "move_time": "15:00"})
     )
-    await het_han_bao_gia_qua_han(db_pool, workflow_id=wid, task_id="T1")
+    await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1")
 
     assert (await doc_bao_gia(db_pool, da_chot.quote_id)).status == "CONFIRMED"
 
@@ -620,7 +613,7 @@ async def test_two_simultaneous_confirms_leave_exactly_one_winner(db_pool):
 async def test_a_superseded_quote_is_not_active_anymore(db_pool):
     wid = await _mot_workflow(db_pool)
     cu = await _bao_gia(db_pool, wid)
-    await thay_the_bao_gia_cu(
+    await don_bao_gia_va_de_xuat(
         db_pool, workflow_id=wid, task_id="T1", van_tay_moi=van_tay_yeu_cau({**YEU_CAU, "move_time": "15:00"})
     )
 
@@ -697,7 +690,7 @@ async def test_a_replacement_quote_is_allowed_after_the_old_one_is_superseded(db
     wid = await _mot_workflow(db_pool)
     await _bao_gia(db_pool, wid, don_vi="MOV-02")
     van_tay_moi = van_tay_yeu_cau({**YEU_CAU, "move_date": "2026-10-05"})
-    await thay_the_bao_gia_cu(db_pool, workflow_id=wid, task_id="T1", van_tay_moi=van_tay_moi)
+    await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1", van_tay_moi=van_tay_moi)
 
     moi = await _bao_gia(db_pool, wid, don_vi="MOV-02", van_tay=van_tay_moi)
     assert moi.status == "ACTIVE"

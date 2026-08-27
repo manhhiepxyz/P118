@@ -26,6 +26,7 @@ import pytest
 
 from src.db.proposal_repository import doc_de_xuat, ghim_de_xuat
 from src.db.quote_repository import luu_bao_gia
+from src.orchestration.proposal import KetQuaXacNhan
 from src.orchestration.quote import van_tay_yeu_cau
 from tests.test_db.conftest import _register_and_login, dang_nhap_don_vi
 
@@ -39,6 +40,13 @@ YEU_CAU = {
 }
 VAN_TAY = van_tay_yeu_cau(YEU_CAU)
 GOC = "/api/v1/service-proposals"
+
+
+def _dsn() -> str:
+    """DSN của database test, đọc từ môi trường — không hardcode, không in ra."""
+    import os
+
+    return os.environ["TEST_DATABASE_URL"]
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -91,9 +99,7 @@ async def test_the_owner_confirms_and_the_queue_opens(client, db_pool):
     """Kiểm DƯƠNG. Thiếu nó thì mọi 401/403/404 bên dưới có thể đúng vì route hỏng."""
     token, wid, bao_gia, de_xuat = await _dat_hang(client, db_pool, "kh_chu_that")
 
-    res = await client.post(
-        f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token)
-    )
+    res = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token))
 
     assert res.status_code == 200, res.text
     body = res.json()
@@ -126,8 +132,7 @@ async def test_another_customer_gets_404_not_403(client, db_pool):
     assert res.status_code == 404, res.text
     assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
     assert (
-        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid))
-        == 0
+        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == 0
     )
 
 
@@ -148,15 +153,12 @@ async def test_a_provider_does_not_confirm_on_behalf_of_the_customer(client, db_
     _, wid, _, de_xuat = await _dat_hang(client, db_pool, "kh_chu_vs_dv")
     tok_dv, _ = await dang_nhap_don_vi(client, db_pool, "dv_bam_ho")
 
-    res = await client.post(
-        f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(tok_dv)
-    )
+    res = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(tok_dv))
 
     assert res.status_code == 403, res.text
     assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
     assert (
-        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid))
-        == 0
+        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == 0
     )
 
 
@@ -167,9 +169,7 @@ async def test_an_admin_does_not_confirm_on_behalf_of_anyone(client, db_pool):
     await db_pool.execute("UPDATE users SET role='admin' WHERE username='qt_bam_ho'")
     tok = await _register_and_login(client, "qt_bam_ho")
 
-    res = await client.post(
-        f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(tok)
-    )
+    res = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(tok))
 
     assert res.status_code == 403, res.text
     assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
@@ -197,8 +197,7 @@ async def test_a_body_that_names_a_provider_or_a_price_is_refused(client, db_poo
 
     assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
     assert (
-        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid))
-        == 0
+        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == 0
     )
 
 
@@ -211,9 +210,7 @@ async def test_a_decision_other_than_confirm_is_refused(client, db_pool):
     """
     token, _, _, de_xuat = await _dat_hang(client, db_pool, "kh_tu_choi")
     for quyet in ("reject", "cancel", "", "CONFIRM"):
-        res = await client.post(
-            f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": quyet}, headers=_auth(token)
-        )
+        res = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": quyet}, headers=_auth(token))
         assert res.status_code == 422, f"{quyet!r} → {res.status_code}"
 
 
@@ -222,17 +219,12 @@ async def test_a_decision_other_than_confirm_is_refused(client, db_pool):
 async def test_pressing_twice_gets_409_and_leaves_one_approval(client, db_pool):
     token, wid, _, de_xuat = await _dat_hang(client, db_pool, "kh_bam_hai_lan")
 
-    dau = await client.post(
-        f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token)
-    )
-    lai = await client.post(
-        f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token)
-    )
+    dau = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token))
+    lai = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token))
 
     assert (dau.status_code, lai.status_code) == (200, 409)
     assert (
-        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid))
-        == 1
+        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == 1
     )
 
 
@@ -249,16 +241,13 @@ async def test_an_expired_quote_is_409_with_a_reason_the_customer_can_act_on(cli
         uuid.UUID(bao_gia.quote_id),
     )
 
-    res = await client.post(
-        f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token)
-    )
+    res = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token))
 
     assert res.status_code == 409, res.text
     assert "hết hiệu lực" in res.json()["detail"]
     assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "EXPIRED"
     assert (
-        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid))
-        == 0
+        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == 0
     )
 
 
@@ -280,18 +269,118 @@ async def test_the_reader_sees_user_before_and_provider_after(client, db_pool):
     assert truoc.status_code == 200, truoc.text
     assert truoc.json()["status"] == "PROPOSED"
     assert (
-        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid))
-        == 0
+        await db_pool.fetchval("SELECT count(*) FROM service_approvals WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == 0
     ), "chưa bấm mà hàng đợi đơn vị đã mở"
 
-    sau = await client.post(
-        f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token)
-    )
+    sau = await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token))
     assert sau.json()["approval_actor"] == "PROVIDER"
     assert sau.json()["waiting_for"] == "provider"
 
     doc_lai = await client.get(f"{GOC}/{de_xuat.proposal_id}", headers=_auth(token))
     assert doc_lai.json()["status"] == "CONFIRMED"
+
+
+# ------------------------------------------------ hợp đồng mã kết quả ↔ HTTP
+def test_every_domain_result_has_an_http_code_and_a_message():
+    """Hai bảng ánh xạ phải PHỦ HẾT tập kết quả — kiểm được, không phải lời hứa.
+
+    Bản đầu để `_HTTP[ket_qua]` nổ `KeyError` khi thêm một kết quả mới, với lý
+    do "vỡ to hơn im lặng". Nó vỡ đúng chỗ SAI: ở request đầu tiên chạm vào
+    nhánh mới, trên máy chủ thật, cho một khách thật.
+
+    `KetQuaXacNhan` là enum liệt kê được, nên chỗ vỡ đúng là ở đây — trước khi
+    phát hành. Thêm một mã mà quên ánh xạ thì bài kiểm này đỏ.
+    """
+    from src.api.proposal_routes import _HTTP, _THONG_DIEP
+
+    assert set(_HTTP) == set(KetQuaXacNhan), f"thiếu mã HTTP: {set(KetQuaXacNhan) - set(_HTTP)}"
+    assert set(_THONG_DIEP) == set(KetQuaXacNhan), f"thiếu câu chữ: {set(KetQuaXacNhan) - set(_THONG_DIEP)}"
+    assert all(200 <= ma < 600 for ma in _HTTP.values())
+    assert all(cau.strip() for cau in _THONG_DIEP.values())
+
+
+def test_an_unmapped_result_degrades_safely_instead_of_crashing():
+    """Runtime vẫn phải chịu được điều không nên xảy ra.
+
+    Bài kiểm parity ở trên chặn nguyên nhân; đây là lưới đỡ cho trường hợp một
+    mã lạ vẫn tới nơi (một nhánh mới nối vào lúc merge, một enum mở rộng ở
+    nhánh khác). Một 500 có log tốt hơn một stack trace lọt ra ngoài, và câu
+    chữ chung không nhắc tới mã — người đọc là khách, mã lạ chỉ là tiếng ồn.
+    """
+    from src.api.proposal_routes import _HTTP, _KHONG_XU_LY_DUOC, _THONG_DIEP
+
+    la = "MOT_MA_CHUA_TUNG_CO"
+    assert _HTTP.get(la, 500) == 500
+    assert _THONG_DIEP.get(la, _KHONG_XU_LY_DUOC) == _KHONG_XU_LY_DUOC
+    assert la not in _KHONG_XU_LY_DUOC
+
+
+# -------------------------------------------- đọc fail-CLOSED qua HTTP thật
+@pytest.mark.asyncio
+async def test_a_stale_proposal_offers_no_confirm_button(client, db_pool):
+    """`can_confirm=false` khi chứng từ đã chết, KỂ CẢ khi lượt dọn chưa chạy.
+
+    Đây là hợp đồng của giao diện: nút "đồng ý" được dựng từ `can_confirm`, chứ
+    không phải từ `status`. Tin `status` một mình là fail-OPEN — cột vẫn ghi
+    `PROPOSED` cho tới khi có ai đó dọn, và đến lúc ấy khách đã bấm ba lần.
+    """
+    token, wid, bao_gia, de_xuat = await _dat_hang(client, db_pool, "kh_stale")
+    await db_pool.execute(
+        "UPDATE service_quotes SET valid_until = NOW() - INTERVAL '1 min' WHERE quote_id = $1::uuid",
+        uuid.UUID(bao_gia.quote_id),
+    )
+
+    body = (await client.get(f"{GOC}/{de_xuat.proposal_id}", headers=_auth(token))).json()
+
+    assert body["can_confirm"] is False
+    assert body["effective_status"] == "EXPIRED"
+    # Cột vẫn `PROPOSED` — chưa ai dọn, và một lượt ĐỌC không được dọn hộ.
+    assert body["status"] == "PROPOSED"
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
+
+
+@pytest.mark.asyncio
+async def test_a_live_proposal_offers_the_confirm_button(client, db_pool):
+    """Kiểm DƯƠNG cho `can_confirm` — thiếu nó thì `False` cứng cũng xanh."""
+    token, _, _, de_xuat = await _dat_hang(client, db_pool, "kh_song")
+    body = (await client.get(f"{GOC}/{de_xuat.proposal_id}", headers=_auth(token))).json()
+    assert body["can_confirm"] is True
+    assert body["effective_status"] == "PROPOSED"
+
+
+@pytest.mark.asyncio
+async def test_after_confirming_the_button_is_gone(client, db_pool):
+    token, _, _, de_xuat = await _dat_hang(client, db_pool, "kh_sau_bam")
+    await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token))
+
+    body = (await client.get(f"{GOC}/{de_xuat.proposal_id}", headers=_auth(token))).json()
+
+    assert body["can_confirm"] is False
+    assert body["effective_status"] == "CONFIRMED"
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_read_back_after_a_fresh_pool_is_the_same(client, db_pool):
+    """Đọc lại bằng một kết nối mới cho đúng trạng thái — không có cache nào.
+
+    Restart, worker thứ hai, một lượt deploy: cả ba là "một tiến trình khác đọc
+    lại cùng dữ liệu". Nếu có bất cứ thứ gì sống trong bộ nhớ thì đây là chỗ nó
+    lộ ra.
+    """
+    import asyncpg as _pg
+
+    from src.db.proposal_repository import trang_thai_hieu_luc
+
+    token, _, _, de_xuat = await _dat_hang(client, db_pool, "kh_pool_moi")
+    await client.post(f"{GOC}/{de_xuat.proposal_id}/confirm", json={"decision": "confirm"}, headers=_auth(token))
+
+    pool_moi = await _pg.create_pool(_dsn(), min_size=1, max_size=2)
+    try:
+        doc_lai = await doc_de_xuat(pool_moi, de_xuat.proposal_id)
+        assert doc_lai.status == "CONFIRMED"
+        assert await trang_thai_hieu_luc(pool_moi, doc_lai) == ("CONFIRMED", False)
+    finally:
+        await pool_moi.close()
 
 
 @pytest.mark.asyncio

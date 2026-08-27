@@ -39,9 +39,8 @@ from src.db.quote_repository import (
 )
 from src.db.quote_repository import (
     bao_gia_dang_song,
-    het_han_bao_gia_qua_han,
+    don_bao_gia_va_de_xuat,
     luu_bao_gia,
-    thay_the_bao_gia_cu,
 )
 from src.mock.service_providers import DON_VI_CHUYEN_NHA
 from src.orchestration.quote import (
@@ -145,17 +144,24 @@ async def xin_bao_gia_chuyen_nha(
     van_tay = van_tay_yeu_cau(input_data)
     payload = payload_gui_provider(input_data)
 
-    da_thay_the = await thay_the_bao_gia_cu(pool, workflow_id=workflow_id, task_id=task_id, van_tay_moi=van_tay)
-    if da_thay_the:
-        logger.info("yêu cầu đã đổi, %d báo giá cũ chuyển SUPERSEDED", da_thay_the)
-
-    # Dọn hạn TRƯỚC khi ghi. Thời gian trôi qua không tự đổi `status`, nên một
-    # dòng quá hạn vẫn mang `ACTIVE` và đụng ràng buộc duy nhất — tức chặn
-    # vĩnh viễn chính lượt hỏi lại này. Không dọn thì một báo giá 30 phút biến
-    # thành một cái khoá 30 phút trở lên.
-    da_het_han = await het_han_bao_gia_qua_han(pool, workflow_id=workflow_id, task_id=task_id)
-    if da_het_han:
-        logger.info("%d báo giá quá hạn chuyển EXPIRED trước khi hỏi lại", da_het_han)
+    # MỘT lượt dọn, một transaction: chứng từ đời cũ thành SUPERSEDED, chứng
+    # từ quá hạn thành EXPIRED, và đề xuất đang chờ đi theo chứng từ của nó.
+    #
+    # Ba việc này từng là ba lượt ghi rời nhau, và giữa chúng có những khe mà
+    # chứng từ đã chết trong khi đề xuất vẫn `PROPOSED` — trong khe ấy màn hình
+    # còn nguyên nút "đồng ý" cho một cái giá không còn tồn tại.
+    #
+    # Dọn hạn TRƯỚC khi ghi cũng là bắt buộc: thời gian trôi qua không tự đổi
+    # `status`, nên một dòng quá hạn vẫn mang `ACTIVE` và đụng ràng buộc duy
+    # nhất — tức chặn vĩnh viễn chính lượt hỏi lại này.
+    da_don = await don_bao_gia_va_de_xuat(pool, workflow_id=workflow_id, task_id=task_id, van_tay_moi=van_tay)
+    if any(da_don.values()):
+        logger.info(
+            "dọn trước khi hỏi giá: %d thay thế, %d hết hạn, %d đề xuất đi theo",
+            da_don["thay_the"],
+            da_don["het_han"],
+            da_don["de_xuat"],
+        )
 
     ma_don_vi = [d.provider_id for d in DON_VI_CHUYEN_NHA]
     phan_hoi = await asyncio.gather(

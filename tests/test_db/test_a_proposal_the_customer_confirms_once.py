@@ -26,14 +26,15 @@ import asyncpg
 import pytest
 
 from src.db.proposal_repository import (
+    DeXuatBatNhatQuanError,
     KhongGhimDuocDeXuatError,
     de_xuat_dang_cho,
     doc_de_xuat,
     ghim_de_xuat,
-    thay_the_de_xuat_dang_cho,
+    trang_thai_hieu_luc,
     xac_nhan_de_xuat,
 )
-from src.db.quote_repository import luu_bao_gia
+from src.db.quote_repository import don_bao_gia_va_de_xuat, luu_bao_gia
 from src.orchestration.quote import van_tay_yeu_cau
 
 DICH_VU = "schedule_move"
@@ -385,6 +386,154 @@ async def test_a_confirm_that_arrives_late_never_rewrites_the_winner(db_pool):
     )
 
 
+# ----------------------------------------- 1. vòng đời quote ↔ proposal
+@pytest.mark.asyncio
+async def test_superseding_a_quote_supersedes_its_proposal_in_one_transaction(db_pool):
+    """Chứng từ chết thì đề xuất chết THEO, trong CÙNG một transaction.
+
+    Trước đây đây là hai hàm rời nhau, và đề xuất thì không hàm nào đụng tới.
+    Giữa hai lượt ghi có một khe mà chứng từ đã `SUPERSEDED` trong khi đề xuất
+    vẫn `PROPOSED` — và trong khe ấy màn hình còn nguyên nút "đồng ý" cho một
+    cái giá không còn tồn tại. Khe nhỏ, nhưng một lượt poll sẽ rơi vào.
+    """
+    chu = await _khach(db_pool, "kh_vong_doi_st")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+
+    da_don = await don_bao_gia_va_de_xuat(
+        db_pool, workflow_id=wid, task_id="T1", van_tay_moi="mot van tay hoan toan khac"
+    )
+
+    assert da_don == {"thay_the": 1, "het_han": 0, "de_xuat": 1}
+    assert (
+        await db_pool.fetchval("SELECT status FROM service_quotes WHERE quote_id=$1::uuid", uuid.UUID(bao_gia.quote_id))
+        == "SUPERSEDED"
+    )
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "SUPERSEDED"
+
+
+@pytest.mark.asyncio
+async def test_expiring_a_quote_expires_its_proposal_in_one_transaction(db_pool):
+    """Hết hạn cũng vậy, và trạng thái đi theo phải ĐÚNG loại.
+
+    `SUPERSEDED` và `EXPIRED` nói hai chuyện: khách đổi ý, và thời gian trôi.
+    Đề xuất phải mang đúng loại của chứng từ nó trỏ vào, nếu không thì lúc có
+    sự cố không phân biệt được "đơn vị báo giá quá ngắn" với "khách đổi ba lần".
+    """
+    chu = await _khach(db_pool, "kh_vong_doi_hh")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+    await _het_han(db_pool, bao_gia.quote_id)
+
+    da_don = await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1")
+
+    assert da_don == {"thay_the": 0, "het_han": 1, "de_xuat": 1}
+    assert (
+        await db_pool.fetchval("SELECT status FROM service_quotes WHERE quote_id=$1::uuid", uuid.UUID(bao_gia.quote_id))
+        == "EXPIRED"
+    )
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "EXPIRED"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_never_touches_a_confirmed_proposal(db_pool):
+    """Đã xác nhận là quyết định ĐÃ XẢY RA, và nó đã sinh ra một dòng hàng đợi."""
+    chu = await _khach(db_pool, "kh_don_khong_dung")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+    await xac_nhan_de_xuat(db_pool, de_xuat.proposal_id, owner_user_id=chu)
+
+    await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1", van_tay_moi="khac han")
+
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "CONFIRMED"
+    assert len(await _duyet(db_pool, wid)) == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_never_downgrades_a_confirmed_proposal_even_if_its_quote_dies(db_pool):
+    """Hàng rào THỨ HAI của phép dọn, kiểm độc lập với hàng rào thứ nhất.
+
+    Bài kiểm trên đi qua đường thật, và ở đó chứng từ của một đề xuất đã xác
+    nhận luôn là `CONFIRMED` — nên mệnh đề `q.status IN ('SUPERSEDED','EXPIRED')`
+    đã chặn sẵn, và guard `p.status = 'PROPOSED'` không mang trách nhiệm nào.
+    Đo được bằng mutation: bỏ guard ấy thì không bài kiểm nào đỏ.
+
+    Ở đây trạng thái được gieo THẲNG — chứng từ `SUPERSEDED` trong khi đề xuất
+    đã `CONFIRMED` — để guard phải tự đứng. Nó quan trọng vì hạ một đề xuất đã
+    xác nhận xuống `SUPERSEDED` nghĩa là hàng đợi đơn vị đã mở mà chứng từ nói
+    việc này chưa từng được đồng ý.
+    """
+    chu = await _khach(db_pool, "kh_don_khong_ha_cap")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+    await xac_nhan_de_xuat(db_pool, de_xuat.proposal_id, owner_user_id=chu)
+    await db_pool.execute(
+        "UPDATE service_quotes SET status = 'SUPERSEDED', confirmed_at = NULL WHERE quote_id = $1::uuid",
+        uuid.UUID(bao_gia.quote_id),
+    )
+
+    da_don = await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1")
+
+    assert da_don["de_xuat"] == 0, "phép dọn đã hạ cấp một đề xuất đã xác nhận"
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "CONFIRMED"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stays_inside_its_own_step(db_pool):
+    """Dọn bước T1 không được đụng chứng từ hay đề xuất của T5."""
+    chu = await _khach(db_pool, "kh_don_dung_buoc")
+    wid = await _workflow(db_pool, chu, tasks=(("T1", DICH_VU), ("T5", DICH_VU)))
+    cua_t5 = await _bao_gia(db_pool, wid, task="T5")
+    de_xuat_t5 = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T5", quote_id=cua_t5.quote_id)
+    await _bao_gia(db_pool, wid, don_vi="MOV-01", task="T1")
+
+    await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1", van_tay_moi="khac han")
+
+    assert (await doc_de_xuat(db_pool, de_xuat_t5.proposal_id)).status == "PROPOSED"
+    assert (
+        await db_pool.fetchval("SELECT status FROM service_quotes WHERE quote_id=$1::uuid", uuid.UUID(cua_t5.quote_id))
+        == "ACTIVE"
+    )
+
+
+# ------------------------------------ 2. ghim hỏng không được cướp chỗ cái cũ
+@pytest.mark.asyncio
+async def test_a_failed_new_proposal_leaves_the_old_one_still_waiting(db_pool):
+    """Chứng từ mới không dùng được → đề xuất CŨ vẫn `PROPOSED`.
+
+    Bản đầu làm ngược thứ tự: thay thế cái cũ, rồi `INSERT ... SELECT` cái mới,
+    rồi ném ở NGOÀI transaction nếu không có dòng nào. Transaction thoát bình
+    thường và COMMIT — đề xuất cũ đã mất `PROPOSED` mà không có gì thay chỗ.
+    Khách mất nút "đồng ý" cho một đề xuất vẫn còn hiệu lực, vì một lượt ghim
+    MỚI đã hỏng.
+
+    Ba cách chứng từ mới hỏng, cả ba phải để cái cũ nguyên vẹn.
+    """
+    chu = await _khach(db_pool, "kh_ghim_hong")
+    wid = await _workflow(db_pool, chu, tasks=(("T1", DICH_VU), ("T5", DICH_VU)))
+    con_song = await _bao_gia(db_pool, wid, don_vi="MOV-02")
+    cu = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=con_song.quote_id)
+
+    da_chet = await _bao_gia(db_pool, wid, don_vi="MOV-01")
+    await _het_han(db_pool, da_chet.quote_id)
+    cua_buoc_khac = await _bao_gia(db_pool, wid, task="T5")
+
+    for quote_id, ten in (
+        (da_chet.quote_id, "chứng từ đã hết hạn"),
+        (cua_buoc_khac.quote_id, "chứng từ của bước khác"),
+        (str(uuid.uuid4()), "mã bịa ra"),
+    ):
+        with pytest.raises(KhongGhimDuocDeXuatError):
+            await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=quote_id)
+        con_lai = await de_xuat_dang_cho(db_pool, workflow_id=wid, task_id="T1")
+        assert con_lai is not None, f"{ten}: đề xuất cũ đã mất PROPOSED"
+        assert con_lai.proposal_id == cu.proposal_id, f"{ten}: đề xuất cũ bị thay bởi hư vô"
+
+
 # ------------------------------------------------------------------- 5. rollback
 @pytest.mark.asyncio
 async def test_a_failed_approval_write_rolls_back_the_confirmations(db_pool, monkeypatch):
@@ -425,7 +574,7 @@ async def test_a_failed_approval_write_rolls_back_the_confirmations(db_pool, mon
 async def test_a_quote_superseded_while_waiting_cannot_be_confirmed(db_pool):
     """Chứng từ bị THAY THẾ trong lúc chờ → `QUOTE_NOT_USABLE`, không phải hết hạn.
 
-    Ca thật và có thật: khách đổi ngày, `thay_the_bao_gia_cu` đẩy chứng từ đời
+    Ca thật và có thật: khách đổi ngày, `don_bao_gia_va_de_xuat` đẩy chứng từ đời
     cũ sang SUPERSEDED, nhưng tab đang mở vẫn còn nút "đồng ý" cho đề xuất cũ.
     Bấm nó nghĩa là chốt một cái giá cho một yêu cầu khách không còn hỏi.
 
@@ -433,13 +582,14 @@ async def test_a_quote_superseded_while_waiting_cannot_be_confirmed(db_pool):
     mới cho CÙNG yêu cầu; bị thay thế thì yêu cầu đã đổi, và đề xuất mới đã
     được dựng ở đâu đó rồi.
     """
-    from src.db.quote_repository import thay_the_bao_gia_cu
-
     chu = await _khach(db_pool, "kh_bi_thay")
     wid = await _workflow(db_pool, chu)
     bao_gia = await _bao_gia(db_pool, wid)
     de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
-    await thay_the_bao_gia_cu(db_pool, workflow_id=wid, task_id="T1", van_tay_moi="mot van tay khac")
+    await db_pool.execute(
+        "UPDATE service_quotes SET status = 'SUPERSEDED' WHERE quote_id = $1::uuid",
+        uuid.UUID(bao_gia.quote_id),
+    )
 
     ket_qua = await xac_nhan_de_xuat(db_pool, de_xuat.proposal_id, owner_user_id=chu)
 
@@ -451,36 +601,218 @@ async def test_a_quote_superseded_while_waiting_cannot_be_confirmed(db_pool):
 
 
 @pytest.mark.asyncio
-async def test_a_proposal_pointing_at_another_steps_quote_cannot_be_confirmed(db_pool):
-    """Hàng rào NEO ở lượt xác nhận, đứng độc lập với hàng rào ở lượt ghim.
+async def test_postgres_refuses_a_proposal_pointing_at_another_steps_quote(db_pool):
+    """Neo lệch bị chặn ở DATABASE, không chỉ ở tầng ứng dụng.
 
-    `ghim_de_xuat` đã từ chối neo sang chứng từ của bước khác. Ở đây đề xuất
-    được gieo THẲNG vào database, vòng qua hàng rào thứ nhất, để kiểm rằng
-    hàng rào thứ hai tự đứng chứ không dựa vào hàng rào thứ nhất.
+    `ghim_de_xuat` đã từ chối, và `xac_nhan_de_xuat` cũng kiểm lại. Nhưng một
+    luật chỉ sống ở tầng ứng dụng là một luật mà MỌI đường ghi mới phải nhớ lại
+    từ đầu — và một lượt sửa dữ liệu bằng tay thì không nhớ gì cả.
 
-    Không có nó thì một đường ghi mới — hoặc một lượt sửa dữ liệu bằng tay —
-    sinh ra được một lượt xác nhận ghim việc vào sai bước.
+    Khoá ngoại tổng hợp `(quote_id, workflow_id, task_id)` làm trạng thái ấy
+    không tồn tại được. Khoá ngoại đơn trên `quote_id` không đủ: nó chỉ nói
+    "chứng từ này có thật", không nói "nó thuộc bước này".
     """
     chu = await _khach(db_pool, "kh_neo_lech")
     wid = await _workflow(db_pool, chu, tasks=(("T1", DICH_VU), ("T5", DICH_VU)))
     cua_t5 = await _bao_gia(db_pool, wid, task="T5")
-    proposal_id = uuid.uuid4()
-    await db_pool.execute(
-        "INSERT INTO service_provider_proposals (proposal_id, workflow_id, task_id, quote_id, status) "
-        "VALUES ($1::uuid, $2::uuid, 'T1', $3::uuid, 'PROPOSED')",
-        proposal_id,
-        uuid.UUID(wid),
-        uuid.UUID(cua_t5.quote_id),
-    )
 
-    ket_qua = await xac_nhan_de_xuat(db_pool, str(proposal_id), owner_user_id=chu)
+    with pytest.raises(asyncpg.ForeignKeyViolationError):
+        await db_pool.execute(
+            "INSERT INTO service_provider_proposals (proposal_id, workflow_id, task_id, quote_id, status) "
+            "VALUES (gen_random_uuid(), $1::uuid, 'T1', $2::uuid, 'PROPOSED')",
+            uuid.UUID(wid),
+            uuid.UUID(cua_t5.quote_id),
+        )
+    assert await de_xuat_dang_cho(db_pool, workflow_id=wid, task_id="T1") is None
 
-    assert ket_qua.ket_qua == "QUOTE_NOT_USABLE"
-    assert list(await _duyet(db_pool, wid)) == [], "ghim việc vào bước không phải của chứng từ"
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_business_updates_rolls_everything_back(db_pool, monkeypatch):
+    """Bất biến vỡ SAU khi chứng từ đã chốt → NÉM, và cả ba quay về như cũ.
+
+    Đây là luật quan trọng nhất của lượt xác nhận: từ lệnh ghi đầu tiên trở đi
+    không còn `return` nào cho nhánh hỏng. Một `return` ở đó COMMIT trạng thái
+    nửa chừng — chứng từ đã chốt, tiền đã có chủ, và không ai bên kia nhận được
+    việc. Khách thấy màn hình chờ đơn vị; đơn vị không có gì trong hàng đợi.
+
+    Ép vỡ bằng cách làm lệnh ghim hàng đợi đụng 0 dòng — cùng hình dạng với một
+    ràng buộc `WHERE` bị sửa nhầm, và nó xảy ra SAU cả hai lệnh `UPDATE`.
+    """
+    chu = await _khach(db_pool, "kh_vo_sau_ghi")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+
+    import src.db.proposal_repository as kho
+
+    goc = kho._so_dong
+
+    def dem_gia(command_tag):
+        # Chỉ nói dối về lệnh INSERT — hai lệnh UPDATE phải chạy thật để bài
+        # kiểm chứng minh được chúng bị CUỐN THEO khi rollback.
+        if str(command_tag).startswith("INSERT"):
+            return 0
+        return goc(command_tag)
+
+    monkeypatch.setattr(kho, "_so_dong", dem_gia)
+
+    with pytest.raises(DeXuatBatNhatQuanError):
+        await xac_nhan_de_xuat(db_pool, de_xuat.proposal_id, owner_user_id=chu)
+
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
     assert (
-        await db_pool.fetchval("SELECT status FROM service_quotes WHERE quote_id=$1::uuid", uuid.UUID(cua_t5.quote_id))
+        await db_pool.fetchval("SELECT status FROM service_quotes WHERE quote_id=$1::uuid", uuid.UUID(bao_gia.quote_id))
         == "ACTIVE"
     )
+    assert list(await _duyet(db_pool, wid)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_update_that_touches_no_row_rolls_back_the_quote(db_pool, monkeypatch):
+    """Mốc thứ hai: lệnh chốt đề xuất đụng 0 dòng → chứng từ cũng quay lại."""
+    chu = await _khach(db_pool, "kh_vo_giua_ghi")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+
+    import src.db.proposal_repository as kho
+
+    goc = kho._so_dong
+    da_thay_update = {"n": 0}
+
+    def dem_gia(command_tag):
+        if str(command_tag).startswith("UPDATE"):
+            da_thay_update["n"] += 1
+            # Lệnh UPDATE thứ hai là lệnh chốt đề xuất.
+            if da_thay_update["n"] == 2:
+                return 0
+        return goc(command_tag)
+
+    monkeypatch.setattr(kho, "_so_dong", dem_gia)
+
+    with pytest.raises(DeXuatBatNhatQuanError):
+        await xac_nhan_de_xuat(db_pool, de_xuat.proposal_id, owner_user_id=chu)
+
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
+    assert (
+        await db_pool.fetchval("SELECT status FROM service_quotes WHERE quote_id=$1::uuid", uuid.UUID(bao_gia.quote_id))
+        == "ACTIVE"
+    )
+    assert list(await _duyet(db_pool, wid)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_step_whose_tool_no_longer_matches_the_quote_is_refused(db_pool):
+    """Bước đổi `tool` sau khi chứng từ được phát → từ chối, và KHÔNG ghi gì.
+
+    `luu_bao_gia` buộc `tool` của bước trùng `service_type` của chứng từ lúc
+    ghi, nên trạng thái này không sinh ra được qua đường thật. Nó sinh ra được
+    qua một lượt SỬA: vòng sửa lỗi viết lại bước, một migration dữ liệu, một
+    lệnh tay lúc trực sự cố.
+
+    Kiểm này phải nằm TRƯỚC lượt ghi đầu tiên — nó là kiểm cuối cùng còn được
+    phép `return`. Sau đó thì chỉ còn đường ném, vì chứng từ đã chốt.
+    """
+    chu = await _khach(db_pool, "kh_tool_lech")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+    await db_pool.execute(
+        "UPDATE workflow_tasks SET tool = 'create_maintenance_request' WHERE workflow_id = $1::uuid AND task_id = 'T1'",
+        uuid.UUID(wid),
+    )
+
+    ket_qua = await xac_nhan_de_xuat(db_pool, de_xuat.proposal_id, owner_user_id=chu)
+
+    assert ket_qua.ket_qua == "QUOTE_NOT_USABLE"
+    assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED"
+    assert (
+        await db_pool.fetchval("SELECT status FROM service_quotes WHERE quote_id=$1::uuid", uuid.UUID(bao_gia.quote_id))
+        == "ACTIVE"
+    )
+    assert list(await _duyet(db_pool, wid)) == [], "ghim một dòng duyệt không biết mình là việc gì"
+
+
+# ---------------------------------------- 5. đọc phải fail-CLOSED với đề xuất cũ
+@pytest.mark.asyncio
+async def test_a_live_proposal_says_it_can_be_confirmed(db_pool):
+    chu = await _khach(db_pool, "kh_con_bam_duoc")
+    wid = await _workflow(db_pool, chu)
+    de_xuat = await ghim_de_xuat(
+        db_pool, workflow_id=wid, task_id="T1", quote_id=(await _bao_gia(db_pool, wid)).quote_id
+    )
+    assert await trang_thai_hieu_luc(db_pool, de_xuat) == ("PROPOSED", True)
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_whose_quote_died_says_it_cannot_be_confirmed(db_pool):
+    """Cột nói `PROPOSED`, sự thật nói khác — và người đọc phải nghe sự thật.
+
+    Tin `proposal.status` một mình là fail-OPEN: chứng từ có thể vừa hết hạn
+    hoặc vừa bị thay thế trong khi lượt dọn CHƯA CHẠY TỚI, và lúc ấy màn hình
+    vẫn dựng nút "đồng ý" cho một cái giá không còn tồn tại. Khách bấm, nhận
+    lỗi, bấm lại, nhận lỗi.
+
+    Ba cách chứng từ chết, và trạng thái hiệu lực phải nói ĐÚNG loại — vì hết
+    hạn thì xin giá mới, còn bị thay thế thì yêu cầu đã đổi.
+    """
+    for ten, sql, mong_doi in (
+        ("hết hạn", "UPDATE service_quotes SET valid_until = NOW() - INTERVAL '1 min'", "EXPIRED"),
+        ("đánh dấu EXPIRED", "UPDATE service_quotes SET status = 'EXPIRED'", "EXPIRED"),
+        ("bị thay thế", "UPDATE service_quotes SET status = 'SUPERSEDED'", "SUPERSEDED"),
+    ):
+        chu = await _khach(db_pool, f"kh_chet_{mong_doi}_{ten[:4]}")
+        wid = await _workflow(db_pool, chu)
+        bao_gia = await _bao_gia(db_pool, wid)
+        de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+        await db_pool.execute(f"{sql} WHERE quote_id = $1::uuid", uuid.UUID(bao_gia.quote_id))
+
+        hieu_luc, con_bam = await trang_thai_hieu_luc(db_pool, de_xuat)
+
+        assert (hieu_luc, con_bam) == (mong_doi, False), f"{ten}: {hieu_luc}/{con_bam}"
+        assert (await doc_de_xuat(db_pool, de_xuat.proposal_id)).status == "PROPOSED", (
+            f"{ten}: một lượt ĐỌC đã đổi dữ liệu"
+        )
+
+
+@pytest.mark.asyncio
+async def test_reading_the_effective_status_never_writes(db_pool):
+    """Một `GET` chữa dữ liệu là một `GET` đổi trạng thái — từ một tab đang mở,
+    từ một lượt poll, từ một con bot quét link. Việc dọn thuộc về đường dọn."""
+    chu = await _khach(db_pool, "kh_doc_khong_ghi")
+    wid = await _workflow(db_pool, chu)
+    bao_gia = await _bao_gia(db_pool, wid)
+    de_xuat = await ghim_de_xuat(db_pool, workflow_id=wid, task_id="T1", quote_id=bao_gia.quote_id)
+    await _het_han(db_pool, bao_gia.quote_id)
+
+    truoc = await db_pool.fetchrow(
+        "SELECT (SELECT status FROM service_quotes WHERE quote_id=$1::uuid) q, "
+        "       (SELECT status FROM service_provider_proposals WHERE proposal_id=$2::uuid) p",
+        uuid.UUID(bao_gia.quote_id),
+        uuid.UUID(de_xuat.proposal_id),
+    )
+    for _ in range(3):
+        await trang_thai_hieu_luc(db_pool, de_xuat)
+    sau = await db_pool.fetchrow(
+        "SELECT (SELECT status FROM service_quotes WHERE quote_id=$1::uuid) q, "
+        "       (SELECT status FROM service_provider_proposals WHERE proposal_id=$2::uuid) p",
+        uuid.UUID(bao_gia.quote_id),
+        uuid.UUID(de_xuat.proposal_id),
+    )
+    assert dict(truoc) == dict(sau)
+
+
+@pytest.mark.asyncio
+async def test_a_decided_proposal_can_never_be_confirmed_again(db_pool):
+    chu = await _khach(db_pool, "kh_da_quyet")
+    wid = await _workflow(db_pool, chu)
+    de_xuat = await ghim_de_xuat(
+        db_pool, workflow_id=wid, task_id="T1", quote_id=(await _bao_gia(db_pool, wid)).quote_id
+    )
+    await xac_nhan_de_xuat(db_pool, de_xuat.proposal_id, owner_user_id=chu)
+
+    da_chot = await doc_de_xuat(db_pool, de_xuat.proposal_id)
+    assert await trang_thai_hieu_luc(db_pool, da_chot) == ("CONFIRMED", False)
 
 
 # ------------------------------------------------------ 6/7. thay thế, không mở lại
@@ -537,7 +869,7 @@ async def test_a_confirmed_proposal_is_never_reopened(db_pool):
     await ghim_de_xuat(
         db_pool, workflow_id=wid, task_id="T1", quote_id=(await _bao_gia(db_pool, wid, don_vi="MOV-01")).quote_id
     )
-    await thay_the_de_xuat_dang_cho(db_pool, workflow_id=wid, task_id="T1")
+    await don_bao_gia_va_de_xuat(db_pool, workflow_id=wid, task_id="T1", van_tay_moi="mot van tay khac")
 
     assert (await doc_de_xuat(db_pool, da_chot.proposal_id)).status == "CONFIRMED"
     assert (await doc_de_xuat(db_pool, da_chot.proposal_id)).confirmed_at is not None
