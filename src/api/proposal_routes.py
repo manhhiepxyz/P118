@@ -24,10 +24,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.api.deps import require_roles
+from src.config import get_settings
 from src.db.proposal_repository import doc_de_xuat, trang_thai_hieu_luc, xac_nhan_de_xuat
 from src.db.quote_repository import doc_bao_gia
 from src.orchestration.proposal import KetQuaXacNhan
 from src.orchestration.provider_directory import ten_don_vi
+from src.orchestration.provider_reselection import KetQuaChonLai, mo_lan_chon_lai
 from src.orchestration.runtime_provider import acquire_repository
 
 logger = logging.getLogger(__name__)
@@ -194,4 +196,111 @@ async def confirm_proposal(
         # có chỗ nào để hai câu trả lời lệch nhau.
         "approval_actor": "PROVIDER",
         "waiting_for": "provider",
+    }
+
+
+# Mã kết quả chọn lại → mã HTTP và câu chữ. Hai bảng PHỦ HẾT tập kết quả, và có
+# bài kiểm parity — cùng khuôn với bảng của lượt xác nhận, và cùng lý do: một
+# `KeyError` ở đây sẽ nổ ở request đầu tiên chạm vào nhánh mới, trên máy chủ
+# thật, cho một khách thật.
+_HTTP_CHON_LAI = {
+    KetQuaChonLai.PROPOSED: 200,
+    KetQuaChonLai.ALREADY_REOPENED: 200,
+    KetQuaChonLai.NOT_FOUND: 404,
+    KetQuaChonLai.NOT_REJECTED: 409,
+    KetQuaChonLai.NO_ALTERNATIVE_PROVIDER: 409,
+}
+
+_THONG_DIEP_CHON_LAI = {
+    KetQuaChonLai.PROPOSED: "Mình đã tìm được đơn vị khác cho bạn.",
+    # 200, không phải lỗi: lượt bấm thứ hai không làm gì thêm, và thứ khách cần
+    # thấy là đề xuất đã có.
+    KetQuaChonLai.ALREADY_REOPENED: "Mình đang tìm đơn vị khác cho bạn rồi.",
+    KetQuaChonLai.NOT_FOUND: "Không tìm thấy yêu cầu này.",
+    KetQuaChonLai.NOT_REJECTED: "Yêu cầu này chưa bị đơn vị nào từ chối.",
+    KetQuaChonLai.NO_ALTERNATIVE_PROVIDER: (
+        "Hiện không còn đơn vị nào khác nhận được yêu cầu này. "
+        "Bạn thử đổi ngày hoặc liên hệ bộ phận hỗ trợ giúp mình nhé."
+    ),
+}
+
+
+class _ChonLaiBody(BaseModel):
+    """Đúng MỘT trường: bước nào đang cần đơn vị khác.
+
+    KHÔNG nhận `provider_id`, KHÔNG nhận giá. Đơn vị nào được đề xuất là kết
+    quả của luật chọn trên tập còn lại, không phải của một tham số — và một
+    tham số nhận được thì sớm muộn sẽ có người tin nó.
+
+    `task_id` là định danh khách ĐÃ NHÌN THẤY trong response (`rejected_task_id`),
+    và server kiểm lại rằng nó thuộc workflow này và thật sự đã bị từ chối. Suy
+    nó ra ở server nghe an toàn hơn nhưng sai khi một workflow có hai bước bị
+    từ chối — lúc ấy server phải đoán khách đang nói về bước nào.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=20)
+
+
+@router.post(
+    "/workflows/{workflow_id}/request-another-provider",
+    summary="Khách yêu cầu tìm đơn vị khác sau khi bị từ chối",
+)
+async def request_another_provider(
+    workflow_id: str,
+    body: _ChonLaiBody,
+    user: dict = Depends(require_roles("customer")),
+) -> dict[str, Any]:
+    """Mở một lần thử MỚI cho bước vừa bị từ chối, với một đơn vị khác.
+
+    Tên endpoint nói đúng việc nó làm. Gọi nó là "confirm lần hai" sẽ che mất
+    hai điều: đây là một lần thử KHÁC (bằng chứng cũ giữ nguyên), và đơn vị lần
+    này là một đơn vị khác.
+
+    CHỈ `customer`. Đơn vị và admin không bấm hộ: chính khách là người phải
+    quyết định giữa "tìm đơn vị khác" và "đổi ngày rồi hỏi lại chính đơn vị
+    này" — và lý do từ chối là thứ giúp họ chọn.
+
+    Bấm hai lần trả 200 với `ALREADY_REOPENED`, không phải 409: lượt thứ hai
+    không làm gì thêm, và thứ khách cần thấy là đề xuất đã có. Trả lỗi ở đây
+    biến một cú bấm đúp thành một thông báo đỏ cho một việc đã thành công.
+    """
+    from src.connectors.resident_services import ResidentServicesConnector
+
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        ket_qua = await mo_lan_chon_lai(
+            pool,
+            repository,
+            ResidentServicesConnector(base_url=get_settings().resident_services_service_url),
+            workflow_id=workflow_id,
+            task_id=body.task_id,
+            owner_user_id=str(user["id"]),
+        )
+    finally:
+        await pool.close()
+
+    ma = _HTTP_CHON_LAI.get(ket_qua.ket_qua, 500)
+    if ma >= 400:
+        raise HTTPException(status_code=ma, detail=_THONG_DIEP_CHON_LAI.get(ket_qua.ket_qua, _KHONG_XU_LY_DUOC))
+
+    # Câu trả lời đang cache được dựng lúc còn hiện lời từ chối. Không bỏ đi thì
+    # mọi lượt poll sau vẫn nói "đơn vị đã từ chối" dù đã có đề xuất mới.
+    from src.api.routes import _DEMO_JOBS, request_fresh_answer
+
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+    request_fresh_answer(workflow_id, job=job)
+
+    return {
+        "workflow_id": workflow_id,
+        "outcome": str(ket_qua.ket_qua),
+        "new_task_id": ket_qua.task_id_moi,
+        "proposal_id": ket_qua.proposal_id,
+        "message": _THONG_DIEP_CHON_LAI[ket_qua.ket_qua],
+        # Người chờ đổi lại về KHÁCH: có một đề xuất mới cần họ bấm.
+        "approval_actor": "USER",
     }

@@ -98,6 +98,7 @@ def chon_don_vi(
     service_type: str,
     ten_don_vi_khach_noi: str | None = None,
     max_price: int | None = None,
+    loai_tru: frozenset[str] = frozenset(),
 ) -> LuaChonDonVi:
     """Chọn một báo giá, hoặc nói rõ vì sao không chọn được.
 
@@ -111,6 +112,9 @@ def chon_don_vi(
          một lý do để chọn bên khác.
       4. Vượt ngân sách? Nói ra xung đột. Không tự gỡ.
       5. Không ai được chỉ định: lọc theo ngân sách rồi xếp hạng tất định.
+
+    `loai_tru` cắt trước cả bước 1: một đơn vị đã từ chối không phải là "lựa
+    chọn đắt hơn", nó không còn là lựa chọn.
 
     Trước cả năm bước: ngân sách phải đọc được, và chứng từ phải đúng dịch vụ.
     Hai hàng rào ấy bắt lỗi LẬP TRÌNH chứ không phải tình huống của khách, nên
@@ -154,7 +158,19 @@ def chon_don_vi(
             service_type,
         )
 
-    con_song = [q for q in dung_dich_vu if q.status == "ACTIVE" and not q.het_han]
+    # ĐƠN VỊ ĐÃ TỪ CHỐI bị loại khỏi mọi lượt chọn sau.
+    #
+    # Tập loại trừ đến từ dữ liệu đã persist (`service_approvals` REJECTED),
+    # KHÔNG từ client và không từ model — "đơn vị nào đã từ chối" là một sự
+    # kiện có bản ghi, và mọi cách khác để trả lời nó đều là đoán.
+    #
+    # Loại ở tầng CHỌN chứ không ở tầng hỏi giá: báo giá của họ vẫn được ghim
+    # làm bằng chứng (nó trả lời "giá thị trường lúc ấy là bao nhiêu"), chỉ là
+    # nó không còn là một lựa chọn. Không hỏi giá họ nữa sẽ làm câu "rẻ nhất
+    # đang có" nói về một thị trường đã bị cắt xén.
+    con_song = [
+        q for q in dung_dich_vu if q.status == "ACTIVE" and not q.het_han and q.service_provider_id not in loai_tru
+    ]
     re_nhat = min((q.amount for q in con_song), default=None)
 
     if ten_don_vi_khach_noi is not None and ten_don_vi_khach_noi.strip():
@@ -203,6 +219,7 @@ async def chon_don_vi_cho_buoc(
     request_fingerprint: str,
     ten_don_vi_khach_noi: str | None = None,
     max_price: int | None = None,
+    loai_tru: frozenset[str] = frozenset(),
 ) -> LuaChonDonVi:
     """Đọc chứng từ của bước rồi chọn. Không ghi gì.
 
@@ -218,4 +235,5 @@ async def chon_don_vi_cho_buoc(
         service_type=service_type,
         ten_don_vi_khach_noi=ten_don_vi_khach_noi,
         max_price=max_price,
+        loai_tru=loai_tru,
     )

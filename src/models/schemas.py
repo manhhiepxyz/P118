@@ -233,6 +233,32 @@ class ServiceProposalActionView(BaseModel):
     can_confirm: StrictBool
 
 
+class ProviderRejectionView(BaseModel):
+    """Một đơn vị đã TỪ CHỐI, và khách phải quyết định làm gì tiếp.
+
+    Đây là một trạng thái có hành động, không phải một ngõ cụt. Không có nó thì
+    workflow nằm lại `WAITING_APPROVAL` với một dòng `REJECTED` mà màn hình
+    không nói gì — khách thấy "đang chờ đơn vị" cho một việc không còn ai làm.
+
+    `sanitized_reason` là câu NGƯỜI của đơn vị gõ, đã cắt ký tự điều khiển. Nó
+    quan trọng vì nó có thể đổi quyết định của khách: "hết xe ngày ấy" mời họ
+    đổi ngày, chứ không phải đổi đơn vị.
+
+    KHÔNG mang payload gửi provider, token, câu SQL hay mã lỗi nội bộ.
+    `reject_code` là mã CANONICAL của nghiệp vụ (`NO_AVAILABILITY`,
+    `SERVICE_UNAVAILABLE`…), không phải tên một exception.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str = Field(min_length=1)
+    rejected_task_id: str = Field(min_length=1)
+    rejected_provider: ServiceProposalProviderView
+    reject_code: str | None = None
+    sanitized_reason: str | None = None
+    can_request_another_provider: StrictBool
+
+
 class DemoWorkflowEvent(BaseModel):
     sequence: int = Field(..., ge=1)
     stage: Literal[
@@ -265,6 +291,10 @@ class DemoWorkflowEvent(BaseModel):
         # `DemoWorkflowEvent`: lần trước thiếu một chỗ và mọi GET workflow
         # mang sự kiện ấy trả HTTP 500.
         "WAITING_PROVIDER_PROPOSAL",
+        # Đơn vị đã TỪ CHỐI và khách phải chọn làm gì tiếp. Giai đoạn
+        # riêng vì ba giai đoạn kia đều nói "đang chờ" một ai đó — ở đây
+        # KHÔNG ai đang chờ, việc đã dừng, và khách là người phải bấm.
+        "WAITING_PROVIDER_RESELECTION",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",
@@ -437,6 +467,10 @@ class DemoWorkflowResponse(BaseModel):
             # `DemoWorkflowEvent`: lần trước thiếu một chỗ và mọi GET workflow
             # mang sự kiện ấy trả HTTP 500.
             "WAITING_PROVIDER_PROPOSAL",
+            # Đơn vị đã TỪ CHỐI và khách phải chọn làm gì tiếp. Giai đoạn
+            # riêng vì ba giai đoạn kia đều nói "đang chờ" một ai đó — ở đây
+            # KHÔNG ai đang chờ, việc đã dừng, và khách là người phải bấm.
+            "WAITING_PROVIDER_RESELECTION",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",
@@ -507,6 +541,9 @@ class DemoWorkflowResponse(BaseModel):
     # ĐÚNG một phần tử. Nhiều hơn một thì nó là `None` — không âm thầm chọn cái
     # đầu, vì "cái đầu" là một quyết định giao diện không ai chủ ý đưa ra.
     service_proposals: list[ServiceProposalActionView] = Field(default_factory=list)
+    # Lời từ chối khách còn phải xử lý. Khác `None` → màn hình hiện lý do và
+    # nút "tìm đơn vị khác", KHÔNG hiện màn chờ.
+    provider_rejection: ProviderRejectionView | None = None
     # Mã lỗi ỔN ĐỊNH khi workflow hỏng: `LLM_CONFIGURATION_ERROR`,
     # `PROVIDER_UNAVAILABLE`, … Dùng để đối chiếu log server và cho admin đọc.
     # KHÔNG phải tên class exception — tên class là chi tiết cài đặt, đổi theo

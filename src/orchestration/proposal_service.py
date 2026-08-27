@@ -35,6 +35,7 @@ async def de_xuat_don_vi_cho_buoc(
     request_fingerprint: str,
     ten_don_vi_khach_noi: str | None = None,
     max_price: int | None = None,
+    loai_tru: frozenset[str] = frozenset(),
 ) -> tuple[LuaChonDonVi, DeXuat | None]:
     """Chọn rồi ghim. Trả về CẢ HAI: lựa chọn và đề xuất (nếu có).
 
@@ -54,6 +55,7 @@ async def de_xuat_don_vi_cho_buoc(
         request_fingerprint=request_fingerprint,
         ten_don_vi_khach_noi=ten_don_vi_khach_noi,
         max_price=max_price,
+        loai_tru=loai_tru,
     )
     # `da_chon`, KHÔNG phải `bao_gia is not None`. `OVER_BUDGET` cũng mang một
     # báo giá — của đơn vị khách chỉ định, để nói ra nó đắt bao nhiêu — và ghim

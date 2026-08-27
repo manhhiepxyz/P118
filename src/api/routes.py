@@ -68,6 +68,7 @@ from src.models.schemas import (
     DemoWorkflowListResponse,
     DemoWorkflowRequest,
     DemoWorkflowResponse,
+    ProviderRejectionView,
     ServiceProposalActionView,
 )
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
@@ -778,6 +779,9 @@ _STAGE_MESSAGES = {
     # khách đi tìm một nút không tồn tại. Đo được bằng bài kiểm regression:
     # `summary` và `answer` đã đúng, chỉ `message` còn nói sai.
     "WAITING_PROVIDER_PROPOSAL": "Đang chờ bạn xác nhận đơn vị và báo giá.",
+    # KHÔNG có chữ "đang chờ": ở trạng thái này không ai đang chờ ai. Đơn vị đã
+    # trả lời, việc đã dừng, và khách là người duy nhất còn phải quyết định.
+    "WAITING_PROVIDER_RESELECTION": "Đơn vị đã từ chối. Bạn chọn giúp mình bước tiếp theo nhé.",
     "EXECUTING": "Đang thực hiện yêu cầu.",
     "TASK_RUNNING": "Đang thực hiện một bước trong yêu cầu.",
     "TASK_SUCCESS": "Đã hoàn thành một bước trong yêu cầu.",
@@ -2155,6 +2159,8 @@ def _terminal_stage_for(response: DemoWorkflowResponse) -> str:
         # thứ phân biệt chúng là có đề xuất hay không.
         if response.service_proposals:
             return "WAITING_PROVIDER_PROPOSAL"
+        if response.provider_rejection:
+            return "WAITING_PROVIDER_RESELECTION"
         if response.approval_actor == "PROVIDER":
             return "WAITING_SERVICE_APPROVAL"
         return "WAITING_APPROVAL"
@@ -2165,7 +2171,13 @@ def _terminal_stage_for(response: DemoWorkflowResponse) -> str:
     return "FINISHED"
 
 
-def answer_key(status: str, approval_actor: str | None = None, *, de_xuat_don_vi: bool = False) -> str:
+def answer_key(
+    status: str,
+    approval_actor: str | None = None,
+    *,
+    de_xuat_don_vi: bool = False,
+    tu_choi_don_vi: bool = False,
+) -> str:
     """Câu trả lời đang mô tả TÌNH HUỐNG nào — một luật, dùng ở mọi nơi.
 
     `status` một mình là chưa đủ. `WAITING_APPROVAL` mang HAI tình huống khác
@@ -2193,6 +2205,8 @@ def answer_key(status: str, approval_actor: str | None = None, *, de_xuat_don_vi
         # sâu hơn.
         if de_xuat_don_vi:
             return f"{status}:{approval_actor}:PROPOSAL"
+        if tu_choi_don_vi:
+            return f"{status}:{approval_actor}:REJECTION"
         return f"{status}:{approval_actor}"
     return status
 
@@ -2350,7 +2364,12 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             if current is None:
                 return
         # Khoá gồm cả NGƯỜI đang được chờ: xem `answer_key`.
-        for_status = answer_key(current.status, current.approval_actor, de_xuat_don_vi=bool(current.service_proposals))
+        for_status = answer_key(
+            current.status,
+            current.approval_actor,
+            de_xuat_don_vi=bool(current.service_proposals),
+            tu_choi_don_vi=current.provider_rejection is not None,
+        )
 
         if not await _claim_answer_safely(workflow_id, for_status):
             # Trạng thái này đã có câu trả lời, hoặc một tiến trình khác đang
@@ -2444,12 +2463,15 @@ async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) 
     # dựng nó bằng mã đúng lý do đó. Nhận bản đã ghi ở đây sẽ vô hiệu hoá chính
     # điều vừa làm — đo được trên canary: một lượt sinh nền ghi đè lại, và
     # `response_state` trả về `FALLBACK` cho một câu lẽ ra là tất định.
-    if response.service_proposals:
+    if response.service_proposals or response.provider_rejection is not None:
         return response
 
     stored = await _load_answer_safely(workflow_id)
     if stored.get("for_status") != answer_key(
-        response.status, response.approval_actor, de_xuat_don_vi=bool(response.service_proposals)
+        response.status,
+        response.approval_actor,
+        de_xuat_don_vi=bool(response.service_proposals),
+        tu_choi_don_vi=response.provider_rejection is not None,
     ):
         return response
     return response.model_copy(
@@ -2578,6 +2600,12 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     pending_proposals = await _load_pending_proposals(workflow_id)
     if pending_proposals:
         return _waiting_proposal_view(workflow_id, plan=plan, record=record, pending=pending_proposals, events=events)
+
+    # Loại chờ THỨ NĂM — cùng thứ hạng với đường `GET`. Hai đường dựng lại cùng
+    # một sự thật thì phải xếp hạng giống nhau.
+    rejection = None if _has_open_repair(record) else await _load_provider_rejection(workflow_id)
+    if rejection is not None:
+        return _waiting_reselection_view(workflow_id, plan=plan, record=record, rejection=rejection, events=events)
 
     if not _has_open_repair(record):
         pending_services = await _load_pending_services(workflow_id)
@@ -2752,7 +2780,10 @@ async def _refresh_answer_from_db(job: dict[str, Any], workflow_id: str, current
     """Lấy câu đã ghi cho ĐÚNG trạng thái hiện tại vào cache."""
     stored = await _load_answer_safely(workflow_id)
     if stored.get("for_status") != answer_key(
-        current.status, current.approval_actor, de_xuat_don_vi=bool(current.service_proposals)
+        current.status,
+        current.approval_actor,
+        de_xuat_don_vi=bool(current.service_proposals),
+        tu_choi_don_vi=current.provider_rejection is not None,
     ) or not stored.get("answer"):
         return
     if job.get("response") is current:
@@ -5029,6 +5060,90 @@ def _khoi_de_xuat(danh_sach: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+async def _load_provider_rejection(workflow_id: str) -> dict[str, Any] | None:
+    """Lời từ chối khách còn phải xử lý, đọc từ PostgreSQL.
+
+    Loại chờ THỨ NĂM, và nó khác bốn loại kia ở một điểm: KHÔNG ai đang chờ.
+    Đơn vị đã trả lời, việc đã dừng, và khách là người duy nhất còn phải quyết
+    định. Không có nhánh này thì workflow nằm lại với một dòng `REJECTED` mà
+    màn hình vẫn nói "đang chờ đơn vị cung cấp dịch vụ xác nhận" — một câu đã
+    hết đúng từ lúc đơn vị bấm từ chối.
+
+    Trả `None` khi việc ấy đã được mở lần thử mới: lúc đó thứ khách cần thấy là
+    ĐỀ XUẤT MỚI, không phải lời từ chối cũ.
+    """
+    pool = None
+    try:
+        from src.orchestration.provider_reselection import (
+            loi_tu_choi_cong_khai,
+            loi_tu_choi_dang_cho_khach,
+        )
+
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        from src.orchestration.provider_directory import ten_don_vi as _ten_don_vi
+
+        loi = await loi_tu_choi_dang_cho_khach(pool, workflow_id=workflow_id)
+        if loi is None:
+            return None
+        return {
+            "workflow_id": workflow_id,
+            **loi_tu_choi_cong_khai(loi, _ten_don_vi(loi.provider_id)),
+        }
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load provider rejection failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+def _waiting_reselection_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    rejection: dict[str, Any],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow vừa bị đơn vị từ chối.
+
+    `approval_actor="USER"`: khách là người phải quyết định. Đặt `PROVIDER` ở
+    đây sẽ dựng màn chờ cho một việc không còn ai làm — đúng lỗi mà giai đoạn
+    riêng này ra đời để chặn.
+
+    Câu nói ra LÝ DO của đơn vị, nguyên văn họ gõ (đã làm sạch ký tự điều
+    khiển). Nó có thể đổi quyết định của khách: "hết xe ngày ấy" mời họ đổi
+    ngày, chứ không phải đổi đơn vị.
+    """
+    tasks = _polling_task_views(plan, record, show_waiting=True)
+    ten = (rejection.get("rejected_provider") or {}).get("name") or "Đơn vị"
+    ly_do = rejection.get("sanitized_reason")
+    summary = (
+        f"{ten} đã từ chối yêu cầu này. Lý do họ đưa ra: {ly_do}" if ly_do else f"{ten} đã từ chối yêu cầu này."
+    ) + " Bạn muốn mình tìm đơn vị khác không?"
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_PROVIDER_RESELECTION",
+        message=_STAGE_MESSAGES["WAITING_PROVIDER_RESELECTION"],
+        summary=summary,
+        # HẰNG SỐ, không do model soạn — cùng lý do với câu đề xuất: nó mang
+        # tên một công ty và một lời từ chối, và một bản diễn giải có thể nói
+        # sai cả hai. Ở đây nặng hơn: diễn giải sai một LÝ DO nghĩa là khách
+        # quyết định sai việc tiếp theo.
+        answer=summary,
+        response_state="READY",
+        provider_rejection=ProviderRejectionView.model_validate(rejection),
+        approval_actor="USER",
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
+    )
+
+
 async def _load_pending_proposals(workflow_id: str) -> list[dict[str, Any]]:
     """MỌI đề xuất đơn vị đang chờ KHÁCH bấm, đọc từ PostgreSQL.
 
@@ -5647,6 +5762,29 @@ async def _demo_workflow_status(
                 plan=_plan_from_job_or_record(job, record),
                 record=record,
                 pending=pending_proposals,
+                events=_public_events(job) or await _read_events(workflow_id),
+            ),
+            workflow_id,
+        )
+
+    # Loại chờ THỨ NĂM: đơn vị đã TỪ CHỐI và khách phải chọn bước tiếp theo.
+    #
+    # Đặt TRƯỚC hàng đợi duyệt vì cùng luật: việc cần KHÁCH làm được nói trước
+    # việc cần ĐƠN VỊ làm. Và đặt SAU đề xuất vì khi đã có đề xuất mới thì lời
+    # từ chối cũ đã được xử lý — `loi_tu_choi_dang_cho_khach` cũng tự loại nó,
+    # nên hai tầng cùng một luật.
+    #
+    # Và đặt SAU `_has_open_repair`: một lời từ chối mà hệ thống đã hỏi được
+    # khách một ô cụ thể ("chọn Khu B?") thì câu hỏi ấy thắng. Chọn lại đơn vị
+    # là đường CUỐI, dành cho lời từ chối không có ô nào để sửa.
+    rejection = None if _has_open_repair(record) else await _load_provider_rejection(workflow_id)
+    if rejection is not None:
+        return await _with_stored_answer(
+            _waiting_reselection_view(
+                workflow_id,
+                plan=_plan_from_job_or_record(job, record),
+                record=record,
+                rejection=rejection,
                 events=_public_events(job) or await _read_events(workflow_id),
             ),
             workflow_id,
