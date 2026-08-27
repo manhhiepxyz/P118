@@ -584,11 +584,20 @@ async def test_the_history_keeps_both_attempts_in_their_own_roles(client, db_poo
     assert de_xuat == {"T1": "CONFIRMED", "T1R2": "PROPOSED"}
 
 
-# ==================================================== 5. restart
+# ============================================ 5. đọc nguội (KHÔNG phải restart)
 @pytest.mark.asyncio
 async def test_a_cold_read_at_every_gap_stays_on_the_same_state(client, db_pool, da_bat):
-    """Ba khe restart, ba lần đọc nguội — không khe nào sinh thêm gì."""
+    """Ba khe, ba lần ĐỌC NGUỘI — không khe nào sinh thêm gì.
 
+    Đọc nguội KHÔNG phải restart tiến trình. `_DEMO_JOBS.clear()` chỉ xoá cache
+    trong RAM; tiến trình vẫn sống, nên mọi thứ dựng lúc startup — pool, migration,
+    biến cấu hình đã đọc — vẫn nguyên. Bài này trả lời "màn hình có dựng lại được
+    từ database không", và đó là một câu hỏi thật, đáng giữ.
+
+    Câu nó KHÔNG trả lời được là "một tiến trình THỨ HAI đọc dữ liệu này thì thấy
+    gì". Chỉ `tests/e2e/reselection_across_restarts.mjs` trả lời được — nó giết
+    backend và khởi động lại ở đúng ba khe này.
+    """
     from src.api.routes import _DEMO_JOBS
 
     token, _, wid, _, _ = await _den_luc_bi_tu_choi(client, db_pool, "kh_ba_khe")
