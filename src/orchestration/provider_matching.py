@@ -56,13 +56,54 @@ logger = logging.getLogger(__name__)
 # một luồng đang chạy để mở một luồng chưa chạy.
 DICH_VU_CO_BAO_GIA: frozenset[str] = frozenset({DICH_VU_CHUYEN_NHA})
 
-# Hai mẩu model được phép trích, và cả hai chỉ là ĐỀ NGHỊ.
-#
-# `ten_don_vi_khach_noi` đi qua resolver (khớp chính xác, không đoán);
-# `max_price` đi qua hàng rào kiểu ở `chon_don_vi`. Không mẩu nào tự nó quyết
-# định được gì — đó là ranh giới giữa "model đề xuất" và "code quyết định".
-O_TEN_DON_VI = "provider_name_said"
-O_NGAN_SACH = "max_price"
+
+@dataclass(frozen=True)
+class TuyChonChonDonVi:
+    """Sở thích chọn đơn vị của khách. KHÔNG phải input nghiệp vụ của dịch vụ.
+
+    Đây là ranh giới quan trọng nhất của file này, và nó dễ bị xoá nhầm.
+
+    `schedule_move` có đúng năm input theo hợp đồng: ngày, giờ, xe, thang máy,
+    bốc xếp. Đó là những gì ĐƠN VỊ cần để làm việc. "Cho tôi bên Đại Tín" và
+    "trong khoảng 450 nghìn" thì không — chúng là cách P-118 chọn giúp khách,
+    và đơn vị không bao giờ được nhìn thấy chúng:
+
+      * ngân sách rời khỏi P-118 nghĩa là đơn vị định giá theo túi tiền người
+        hỏi thay vì theo công việc — đúng điều bước B dựng hai hàng rào để chặn;
+      * tên đơn vị khách nói là một mẩu chưa xác minh, và nó chỉ có nghĩa với
+        resolver, không có nghĩa với bất kỳ ai bên ngoài.
+
+    Nên chúng KHÔNG được nới vào schema `schedule_move`, KHÔNG được ghi vào
+    `task.input_data`, và KHÔNG có mặt trong payload gửi provider. Nới schema
+    là mở một đường cho Planner ghi chúng vào bước, và từ đó chúng đi theo bước
+    tới mọi nơi bước đi — kể cả ra ngoài.
+
+    Hôm nay KHÔNG có nguồn nào cấp hai giá trị này, và mặc định là `None`. Đó
+    là trạng thái đúng, không phải một chỗ chưa làm xong: nhánh "khách không
+    nói gì → chọn đơn vị hợp lý nhất" đã chạy đầy đủ qua đường thật. Nhận sở
+    thích bằng ngôn ngữ tự nhiên là một hợp đồng RIÊNG — nó cần một chỗ lưu
+    riêng (không phải `task.input_data`), một luật vòng đời riêng khi khách đổi
+    ý, và một lượt canary trước khi nối. Thiết kế nó sau canary này.
+    """
+
+    ten_don_vi: str | None = None
+    max_price: int | None = None
+
+    @property
+    def ngan_sach_dung_duoc(self) -> int | None:
+        """Ngân sách ở dạng `chon_don_vi` nhận được, hoặc `None`.
+
+        `bool` là `int` trong Python, nên `True` sẽ lọt qua một phép kiểm kiểu
+        ngây thơ và thành "ngân sách 1 đồng" — mọi báo giá đều vượt. Hàng rào
+        thật nằm ở `chon_don_vi` (trả `INVALID_BUDGET`); đây chỉ là chỗ không
+        biến một giá trị rác thành một con số trông hợp lệ trên đường đi.
+        """
+        if isinstance(self.max_price, bool) or not isinstance(self.max_price, int):
+            return None
+        return self.max_price
+
+
+KHONG_CO_TUY_CHON = TuyChonChonDonVi()
 
 
 @dataclass(frozen=True)
@@ -153,6 +194,7 @@ async def chuan_bi_de_xuat(
     workflow_id: str,
     task_id: str,
     input_data: dict[str, Any],
+    tuy_chon: TuyChonChonDonVi = KHONG_CO_TUY_CHON,
 ) -> KetQuaGhepDonVi:
     """Chuẩn bị một đề xuất cho bước này, hoặc nói rõ vì sao không có.
 
@@ -188,14 +230,17 @@ async def chuan_bi_de_xuat(
 
     # Hỏi giá dọn luôn chứng từ đời cũ và chứng từ quá hạn, cùng với đề xuất
     # đang trỏ vào chúng — một transaction, xem `don_bao_gia_va_de_xuat`.
-    ngan_sach = input_data.get(O_NGAN_SACH)
+    #
+    # `input_data` đi vào đây để tính vân tay và dựng payload gửi đơn vị; sở
+    # thích đi bằng một tham số RIÊNG. Trộn chúng vào một dict là cách nhanh
+    # nhất để một ngày nào đó `max_price` theo `input_data` ra tới connector.
     await xin_bao_gia_chuyen_nha(
         pool,
         connector,
         workflow_id=workflow_id,
         task_id=task_id,
         input_data=input_data,
-        max_price=ngan_sach if isinstance(ngan_sach, int) and not isinstance(ngan_sach, bool) else None,
+        max_price=tuy_chon.ngan_sach_dung_duoc,
     )
     lua_chon, de_xuat = await de_xuat_don_vi_cho_buoc(
         pool,
@@ -203,8 +248,8 @@ async def chuan_bi_de_xuat(
         task_id=task_id,
         service_type=DICH_VU_CHUYEN_NHA,
         request_fingerprint=van_tay,
-        ten_don_vi_khach_noi=input_data.get(O_TEN_DON_VI),
-        max_price=ngan_sach,
+        ten_don_vi_khach_noi=tuy_chon.ten_don_vi,
+        max_price=tuy_chon.max_price,
     )
     return KetQuaGhepDonVi(lua_chon=lua_chon, de_xuat=de_xuat)
 
@@ -239,5 +284,15 @@ async def payload_cho_nguoi_dung(pool: asyncpg.Pool, de_xuat: DeXuat) -> dict[st
 
 
 def _ly_do(so_tien: int) -> str:
-    """Câu giải thích, dựng từ dữ kiện — không gọi model, không ghép goal."""
-    return f"Đơn vị phù hợp nhất với yêu cầu của bạn, báo giá {so_tien:,.0f} VND.".replace(",", ".")
+    """Câu giải thích, dựng từ dữ kiện — không gọi model, không ghép goal.
+
+    Định dạng số TRƯỚC rồi mới ghép vào câu. Bản đầu ghép trước rồi
+    `.replace(",", ".")` trên cả câu — và nó nuốt luôn dấu phẩy của tiếng Việt:
+
+        "Đơn vị phù hợp nhất với yêu cầu của bạn. báo giá 420.000 VND."
+
+    Đo được trên canary. Một chỗ thay thế mù trên cả câu sẽ luôn tìm thấy nhiều
+    hơn thứ nó định tìm.
+    """
+    so = f"{so_tien:,.0f}".replace(",", ".")
+    return f"Đơn vị phù hợp nhất với yêu cầu của bạn, báo giá {so} VND."

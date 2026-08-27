@@ -135,6 +135,24 @@ async def _khach(db_pool, ten: str) -> str:
     return str(uid)
 
 
+async def _mot_workflow_va_buoc(db_pool, chu: str) -> str:
+    """Workflow + bước `schedule_move` thật, không chạy qua boundary."""
+    wid = str(uuid.uuid4())
+    await db_pool.execute(
+        "INSERT INTO workflows (workflow_id, goal, status, owner_user_id) "
+        "VALUES ($1::uuid, 'chuyển nhà', 'PENDING', $2::uuid)",
+        wid,
+        chu,
+    )
+    await db_pool.execute(
+        "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, depends_on, input_data) "
+        "VALUES ($1::uuid, 'T1', 'schedule_move', 'PENDING', '[]'::jsonb, $2::jsonb)",
+        wid,
+        __import__("json").dumps(YEU_CAU),
+    )
+    return wid
+
+
 async def _chay(db_pool, plan, chu: str) -> tuple[str, Exception | None]:
     """Chạy qua ĐÚNG cổng dịch vụ của production, trả (workflow_id, lỗi ngắt)."""
     repository = await acquire_repository()
@@ -374,39 +392,147 @@ async def test_over_budget_never_switches_provider_and_never_opens_the_queue(
     Bên rẻ hơn đang nằm ngay đó và hệ thống KHÔNG lấy nó: hai điều kiện của
     khách mâu thuẫn nhau là chuyện của khách, và tự gỡ hộ là quyết định thay họ
     về tiền.
+
+    Sở thích đi bằng THAM SỐ RIÊNG, không qua `task.input`. Đó là lý do bài
+    kiểm này gọi thẳng `chuan_bi_de_xuat` thay vì đi qua `_park`: hôm nay chưa
+    có nguồn nào cấp sở thích cho một bước, và giả vờ có bằng cách nhét hai
+    khoá lạ vào `input` sẽ kiểm một đường không tồn tại.
     """
+    from src.orchestration.provider_matching import TuyChonChonDonVi, chuan_bi_de_xuat
+
     chu = await _khach(db_pool, "kh_vuot_ngan_sach")
+    wid = await _mot_workflow_va_buoc(db_pool, chu)
 
-    wid, loi = await _chay(db_pool, _plan({"provider_name_said": "Đại Tín", "max_price": 450_000}), chu)
+    ket_qua = await chuan_bi_de_xuat(
+        db_pool,
+        bao_gia_that,
+        workflow_id=wid,
+        task_id="T1",
+        input_data=dict(YEU_CAU),
+        tuy_chon=TuyChonChonDonVi(ten_don_vi="Đại Tín", max_price=450_000),
+    )
 
-    assert isinstance(loi, ServiceApprovalRequiredError)
-    assert not isinstance(loi, ProviderProposalRequiredError)
+    assert ket_qua.lua_chon.ket_qua == "OVER_BUDGET"
+    assert ket_qua.de_xuat is None, "một lời từ chối đã thành đề xuất"
     dem = await _dem(db_pool, wid)
-    assert dem["proposals"] == 0, "một lời từ chối đã thành đề xuất"
     assert dem["quotes"] == 3, "báo giá phải được ghim làm bằng chứng"
+    assert dem["proposals"] == 0
     assert dem["approvals"] == 0, "vượt ngân sách mà vẫn gửi việc tới /review"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("them", "ly_do"),
+    ("tuy_chon", "ly_do"),
     [
-        ({"provider_name_said": "chuyển nhà"}, "UNKNOWN_PROVIDER"),
-        ({"provider_name_said": "Chuyển nhà Thành Công"}, "UNKNOWN_PROVIDER"),
+        ({"ten_don_vi": "chuyển nhà"}, "UNKNOWN_PROVIDER"),
+        ({"ten_don_vi": "Chuyển nhà Thành Công"}, "UNKNOWN_PROVIDER"),
         ({"max_price": -1}, "INVALID_BUDGET"),
     ],
 )
 async def test_a_refusal_never_becomes_a_proposal_or_a_queue_entry(
-    db_pool, monkeypatch, kho_that, co_bat, bao_gia_that, them, ly_do
+    db_pool, monkeypatch, kho_that, co_bat, bao_gia_that, tuy_chon, ly_do
 ):
     """Fail-closed theo contract C: không đề xuất giả, không việc cho đơn vị."""
+    from src.orchestration.provider_matching import TuyChonChonDonVi, chuan_bi_de_xuat
+
     chu = await _khach(db_pool, f"kh_tu_choi_{uuid.uuid4().hex[:6]}")
+    wid = await _mot_workflow_va_buoc(db_pool, chu)
 
-    wid, loi = await _chay(db_pool, _plan(them), chu)
+    ket_qua = await chuan_bi_de_xuat(
+        db_pool,
+        bao_gia_that,
+        workflow_id=wid,
+        task_id="T1",
+        input_data=dict(YEU_CAU),
+        tuy_chon=TuyChonChonDonVi(**tuy_chon),
+    )
 
-    assert not isinstance(loi, ProviderProposalRequiredError), ly_do
+    assert ket_qua.lua_chon.ket_qua == ly_do
+    assert ket_qua.de_xuat is None
     dem = await _dem(db_pool, wid)
     assert dem["proposals"] == 0 and dem["approvals"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_preference_is_the_shipping_default(db_pool, monkeypatch, kho_that, co_bat, bao_gia_that):
+    """Đường thật hôm nay chạy với sở thích RỖNG — và nó chọn được.
+
+    Đây là khẳng định quan trọng của E2: nhánh mặc định không phải "chưa làm
+    xong", nó là nhánh đang phục vụ. Không có nguồn nào cấp sở thích, và không
+    cần có để tính năng chạy.
+    """
+    from src.orchestration.provider_matching import KHONG_CO_TUY_CHON
+
+    assert (KHONG_CO_TUY_CHON.ten_don_vi, KHONG_CO_TUY_CHON.max_price) == (None, None)
+    chu = await _khach(db_pool, "kh_mac_dinh")
+    wid, loi = await _chay(db_pool, _plan(), chu)
+    assert isinstance(loi, ProviderProposalRequiredError)
+    assert (loi.context or {})["provider_proposal"]["provider"]["id"] == "MOV-03"
+
+
+@pytest.mark.asyncio
+async def test_preferences_never_reach_the_provider_or_the_step(db_pool, monkeypatch, kho_that, co_bat):
+    """Sở thích KHÔNG có mặt trong payload gửi đơn vị, và KHÔNG ghi vào bước.
+
+    Hai luật, một bài kiểm, vì chúng là hai nửa của cùng một ranh giới. Ngân
+    sách rời khỏi P-118 nghĩa là đơn vị định giá theo túi tiền người hỏi; sở
+    thích ghi vào `task.input_data` nghĩa là nó đi theo bước tới mọi nơi bước
+    đi — kể cả ra ngoài.
+    """
+    from src.orchestration.provider_matching import TuyChonChonDonVi, chuan_bi_de_xuat
+
+    class ConnectorGhiLai(ConnectorBaoGia):
+        def __init__(self) -> None:
+            super().__init__()
+            self.payload: list[dict] = []
+
+        async def xin_bao_gia_chuyen_nha(self, service_provider_id, payload):
+            self.payload.append(dict(payload))
+            return await super().xin_bao_gia_chuyen_nha(service_provider_id, payload)
+
+    gian_diep = ConnectorGhiLai()
+    chu = await _khach(db_pool, "kh_khong_ro_ri")
+    wid = await _mot_workflow_va_buoc(db_pool, chu)
+
+    await chuan_bi_de_xuat(
+        db_pool,
+        gian_diep,
+        workflow_id=wid,
+        task_id="T1",
+        input_data=dict(YEU_CAU),
+        tuy_chon=TuyChonChonDonVi(ten_don_vi="Đại Tín", max_price=450_000),
+    )
+
+    assert gian_diep.payload, "không gọi đơn vị nào — bài kiểm sẽ xanh vì lý do sai"
+    for payload in gian_diep.payload:
+        assert set(payload) == set(YEU_CAU), f"payload mang thêm: {set(payload) - set(YEU_CAU)}"
+    input_buoc = await db_pool.fetchval(
+        "SELECT input_data FROM workflow_tasks WHERE workflow_id=$1::uuid AND task_id='T1'", uuid.UUID(wid)
+    )
+    import json as _json
+
+    input_buoc = _json.loads(input_buoc) if isinstance(input_buoc, str) else (input_buoc or {})
+    assert "max_price" not in input_buoc and "provider_name_said" not in input_buoc
+
+
+def test_the_move_contract_still_has_exactly_five_inputs():
+    """Schema `schedule_move` KHÔNG được nới để nhận sở thích.
+
+    Nới nó là mở một đường cho Planner ghi sở thích vào bước — và Validator sẽ
+    cho qua, vì lúc ấy chúng là input hợp lệ. Bài kiểm này là khoá cửa: thêm
+    một ô vào hợp đồng thì nó đỏ, và người thêm phải nói ra vì sao.
+    """
+    from src.common.tool_contract import TOOL_CONTRACTS
+
+    o_vao = set(TOOL_CONTRACTS["schedule_move"].inputs)
+    assert o_vao == {
+        "move_date",
+        "move_time",
+        "move_vehicle",
+        "needs_elevator",
+        "needs_loading_support",
+    }, o_vao
+    assert "max_price" not in o_vao and "provider_name_said" not in o_vao
 
 
 @pytest.mark.asyncio

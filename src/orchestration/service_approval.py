@@ -407,7 +407,11 @@ class ServiceApprovalBoundary:
         ghim hàng đợi đơn vị. Lý do đi lên qua `lua_chon` để tầng trên nói ra.
         """
         from src.connectors.resident_services import ResidentServicesConnector
-        from src.orchestration.provider_matching import chuan_bi_de_xuat, payload_cho_nguoi_dung
+        from src.orchestration.provider_matching import (
+            KHONG_CO_TUY_CHON,
+            chuan_bi_de_xuat,
+            payload_cho_nguoi_dung,
+        )
 
         pool = self._repository._pool  # noqa: SLF001 - composition root sở hữu pool
         connector = ResidentServicesConnector(base_url=get_settings().resident_services_service_url)
@@ -419,6 +423,19 @@ class ServiceApprovalBoundary:
                 workflow_id=workflow_id,
                 task_id=task_id,
                 input_data=dict(getattr(task, "input", None) or {}),
+                # KHÔNG có sở thích nào hôm nay, và đó là trạng thái đúng.
+                #
+                # `task.input` chỉ chứa input nghiệp vụ của dịch vụ — năm ô
+                # theo hợp đồng `schedule_move`. Tên đơn vị khách nói và ngân
+                # sách là sở thích CHỌN, không phải input; đọc chúng từ đây
+                # nghĩa là chờ Planner ghi chúng vào bước, và từ đó chúng đi
+                # theo bước tới mọi nơi bước đi — kể cả ra ngoài tới đơn vị.
+                #
+                # Nhánh "khách không nói gì → chọn đơn vị hợp lý nhất" chạy đầy
+                # đủ với `None`. Nhận sở thích bằng ngôn ngữ tự nhiên là một
+                # hợp đồng riêng, cần chỗ lưu riêng và một lượt canary trước
+                # khi nối — xem `TuyChonChonDonVi`.
+                tuy_chon=KHONG_CO_TUY_CHON,
             )
             if ket_qua.de_xuat is not None:
                 return await payload_cho_nguoi_dung(pool, ket_qua.de_xuat)
