@@ -54,7 +54,7 @@ nghĩa. **Một vertical slice hoàn chỉnh mạnh hơn hai luồng cùng làm 
 | Luôn nói ra | Đã chọn ai, theo luật nào, giá bao nhiêu, hạn báo giá |
 | Ngân sách quá thấp | Không gửi provider. Nói giá thấp nhất, hỏi mở |
 | Bị từ chối | Hỏi lại, **không tự chuyển đơn vị** |
-| Trước side effect | `SEARCHED → PROPOSED → USER_CONFIRMED → AWAITING_PROVIDER` |
+| Trước side effect | Đề xuất `PROPOSED` → khách bấm → `CONFIRMED` → hàng đợi đơn vị mở. Ba trạng thái kết thúc: `CONFIRMED` · `EXPIRED` · `SUPERSEDED` (xem mục D) |
 
 ### Ba luật bắt buộc
 
@@ -543,40 +543,167 @@ nhầm của model dừng lại ở resolver thay vì thành một đơn hàng c
 Bảng provider canonical + khoá ngoại cho `service_provider_id` — hoãn sau demo
 theo thống nhất. Trong C, `src/mock/service_providers.py` là nguồn duy nhất.
 
-### D. Xác nhận của người dùng
+### D. Xác nhận của người dùng — **XONG** (27/08)
+
+#### Bảng `service_provider_proposals`
 
 ```
-SEARCHED → PROPOSED → USER_CONFIRMED → AWAITING_PROVIDER
-```
-
-Cần **bảng bền vững** (`service_provider_proposals`):
-
-```
-workflow_id · task_id · quote_id · service_provider_id
-quoted_price · currency
-status: PROPOSED | CONFIRMED | EXPIRED | CANCELLED
+proposal_id · workflow_id · task_id · quote_id · status
 created_at · confirmed_at
 ```
 
-> **`approval_actor` KHÔNG dùng được thay cho việc này.** Đã kiểm: nó không có
-> cột nào trong database — chỉ là trường trong `models/schemas.py`, suy ra lúc
-> chạy để UI biết ai cần hành động. Nó không lưu người dùng xác nhận đơn vị nào,
-> quote nào, giá bao nhiêu, còn hạn không, lúc nào.
->
-> Cũng **không** nhét vào `payment_approvals` — đây là xác nhận lựa chọn nhà
-> cung cấp, chưa phải thanh toán.
+**Bảy cột, hết.** Không `service_provider_id`, không `amount`, không `currency`,
+không `approval_actor` — chúng nằm trên chứng từ báo giá, và đọc qua `quote_id`.
 
-UI hiển thị: tên · giá · đánh giá · **lý do đề xuất** · hạn báo giá · nút xác
-nhận / đổi đơn vị. Xác nhận xong **mới** gửi sang `/review`.
+Chép sang đây là tạo nguồn sự thật thứ hai, và hai nguồn thì lệch — lệch đúng
+vào lúc báo giá bị thay thế hoặc hết hạn, tức đúng lúc con số cũ trông vẫn hợp
+lệ. Có một bài kiểm soi thẳng `information_schema` để một bản vá sau này không
+"tiện tay" thêm cột.
 
-### E. Feature flag
+`approval_actor` cũng không có mặt, và đó là cố ý. Nó được **suy ra** lúc dựng
+câu trả lời — `USER` khi đề xuất còn xác nhận được, `PROVIDER` sau khi hàng đợi
+đơn vị đã mở. Lưu nó nghĩa là có hai chỗ nói "đang chờ ai", và chỗ thứ hai sẽ
+đứng im đúng lúc việc đổi tay. Nó **không** thay thế đề xuất đã persist: nó là
+một trường hiển thị, không phải trạng thái.
 
-```env
-SERVICE_PROVIDER_MATCHING=0      # mặc định TẮT
+#### State machine
+
+```
+PROPOSED ──── khách bấm đồng ý ──────→ CONFIRMED   (không rời khỏi đây)
+         ──── chứng từ hết hạn ───────→ EXPIRED
+         ──── đề xuất mới thay thế ───→ SUPERSEDED
 ```
 
-Chỉ bật trên database demo sau khi acceptance xanh. Cùng luật opt-in với
-`FAST_LANE`: chỉ đúng chuỗi `"1"` mới bật.
+Không có `SEARCHED`, không có `USER_CONFIRMED`, không có `CANCELLED`, không có
+`AWAITING_PROVIDER` — bản kế hoạch đầu liệt kê chúng, và bản triển khai thì
+không. "Đang chờ đơn vị" không phải một trạng thái của đề xuất: nó là hệ quả
+của việc `service_approvals` có một dòng `AWAITING`.
+
+#### Ràng buộc ở database
+
+- `workflow_id`/`task_id` **NOT NULL** + khoá ngoại tổng hợp tới `workflow_tasks`
+- `quote_id` khoá ngoại tới `service_quotes`, **và** khoá ngoại tổng hợp
+  `(quote_id, workflow_id, task_id)` — khoá đơn chỉ nói "chứng từ có thật",
+  không nói "nó thuộc bước này"
+- `UNIQUE (workflow_id, task_id) WHERE status='PROPOSED'` — đúng một đề xuất
+  đang sống mỗi bước
+- `CHECK (status='CONFIRMED') = (confirmed_at IS NOT NULL)`
+
+#### Lượt xác nhận — một transaction
+
+`xac_nhan_de_xuat(pool, proposal_id, owner_user_id)` nhận **hai** tham số.
+`tool`, nhãn dịch vụ, chi tiết, người yêu cầu đều đọc trong transaction — nhận
+chúng làm tham số là mở đường cho người gọi tự khai mình đang đặt dịch vụ gì.
+
+`service_approvals.service_provider_id` lấy từ **chứng từ**. Không từ body,
+không từ task, không từ model.
+
+Từ lệnh ghi đầu tiên trở đi **không còn `return` nào cho nhánh hỏng** — mọi bất
+biến vỡ đều ném để rollback. Ba lượt ghi đều kiểm command tag.
+
+#### Đọc fail-closed
+
+`GET` trả `effective_status` + `can_confirm`, tính từ **cả** đề xuất lẫn chứng
+từ bằng đồng hồ database. Tin `proposal.status` một mình là fail-OPEN: cột vẫn
+ghi `PROPOSED` cho tới khi có ai đó dọn, và đến lúc ấy khách đã bấm ba lần.
+Đường đọc không ghi gì.
+
+#### Vòng đời chứng từ ↔ đề xuất
+
+`don_bao_gia_va_de_xuat()` là đường dọn canonical, một transaction: chứng từ
+đời cũ `SUPERSEDED`, chứng từ quá hạn `EXPIRED`, và đề xuất đang chờ đi theo
+**đúng loại** trạng thái của chứng từ nó trỏ vào.
+
+### E. Feature flag — **XONG** (27/08)
+
+`SERVICE_PROVIDER_MATCHING`, và **chỉ đúng chuỗi `"1"` là bật**. Thiếu biến,
+`""`, `"0"`, `"true"`, `"yes"`, `"01"`, `" 1"` — tất cả **tắt**.
+
+ALLOWLIST chứ không blocklist, vì đây là fail-closed cho một tính năng đụng vào
+tiền: một cấu hình gõ sai phải để hệ thống chạy như **cũ**, chứ không bật một
+đường mới chưa ai xem lại. `"true"` bị từ chối là cố ý — nhận nó nghĩa là phải
+trả lời "thế còn `True`, `TRUE`, `on`, `enabled`?", và mỗi câu trả lời thêm một
+cách để hai môi trường hiểu khác nhau về cùng một dòng trong `.env`.
+
+Không `strip()`, không `lower()`: một khoảng trắng lọt vào `.env` là dấu hiệu
+file ấy được sinh ra bởi một công cụ không ai kiểm soát, chứ không phải một ý
+định.
+
+**MỘT** chỗ đọc (`src/common/feature_flags.py`), đọc lại mỗi lần, không cache.
+Mặc định `0` ở `.env.example`; test khoá cả file mẫu lẫn `docker-compose.yml`.
+
+Khi tắt, đường cũ chạy nguyên vẹn: đơn vị mặc định theo `provider_directory`,
+hàng đợi duyệt mở ngay, không chứng từ, không đề xuất, không một lời gọi báo
+giá nào.
+
+### E1. Nối vào orchestration — **XONG** (27/08)
+
+Điểm nối là `ServiceApprovalBoundary._park` — chỗ **duy nhất** ghim hàng đợi
+duyệt cho một bước cần đơn vị. Chen vào đó nghĩa là mọi đường dẫn tới hàng đợi
+(chạy lần đầu, chạy tiếp sau khi sửa, resume sau khi duyệt) đều đi qua cùng một
+luật; chen ở chỗ khác là để lại ít nhất một đường không đi qua.
+
+**Không nối vào Planner.** Model không sinh `provider_id`, `quote_id`, giá hay
+trạng thái đề xuất. Nó chỉ trích hai mẩu — một đoạn **tên** và một con số
+**ngân sách** — và cả hai đi qua resolver/hàng rào kiểu để mã quyết định. Đường
+này không có lời gọi model nào.
+
+Thứ tự khi cờ bật, với `schedule_move`:
+
+```
+input authoritative của bước (từ kế hoạch đã persist, không từ goal/body)
+  → hỏi giá tất cả đơn vị          (dọn chứng từ + đề xuất đời cũ, một transaction)
+  → chọn bằng resolver canonical    (C)
+  → SELECTED  → ghim ĐÚNG MỘT proposal PROPOSED, bước dừng chờ KHÁCH
+                 /review CHƯA có việc
+  → còn lại   → fail-closed: không proposal, không việc cho đơn vị
+```
+
+`ProviderProposalRequiredError` là mã ngắt riêng, và `approval_actor` là `USER`.
+Dùng lại `SERVICE_APPROVAL_REQUIRED` sẽ dựng câu *"đơn vị đang xác nhận, bạn
+chờ chút nhé"* — nói câu ấy trước khi khách bấm là **sai hai lần**: không ai
+bên kia nhận được việc, và khách đang được bảo là không phải làm gì trong khi
+họ là người duy nhất còn phải làm.
+
+#### Bất biến khi lặp
+
+| tình huống | kết quả |
+|---|---|
+| poll/continue nhiều lần, yêu cầu không đổi | dùng lại đề xuất, **không** hỏi giá thêm lượt nào |
+| poll/continue sau khi khách bấm | **không** dựng đề xuất mới; việc đang ở hàng đợi đơn vị |
+| vân tay đổi | chứng từ + đề xuất cũ `SUPERSEDED` (một transaction), dựng đề xuất mới |
+| chứng từ hết hạn | chứng từ + đề xuất `EXPIRED`, dựng đề xuất mới; cái cũ không bấm được nữa |
+| restart | đọc lại đúng đề xuất đã persist, `can_confirm` không đổi |
+
+Ca thứ hai là một lỗi thật do test tìm ra: `de_xuat_dang_cho` trả `None` sau khi
+đề xuất đã `CONFIRMED`, nên lượt chạy tiếp dựng một đề xuất **thứ hai** mời
+khách chọn lại một việc họ vừa chốt. Phải hỏi thêm "đã ai chốt chưa", không chỉ
+"còn cái nào đang chờ không".
+
+#### Payload trả cho chat/API
+
+`proposal_id` · `provider {id, name}` · `amount` · `currency` · `reason` ·
+`valid_until` · `effective_status` · `can_confirm`.
+
+Ghép lúc **đọc** từ đề xuất + chứng từ + danh mục đơn vị. Không trường nào được
+lưu vào bảng đề xuất — một bản sao là một bản sẽ lệch. `reason` dựng từ dữ kiện
+đã persist, không từ một lượt gọi model: một câu do model viết có thể nói sai
+lý do cho đúng con số, và khách không có cách nào biết.
+
+#### Nghiệm thu
+
+20 test cờ + 13 test đường orchestration + 7 test HTTP end-to-end. **Mười
+mutation, mười cái cắn**: bỏ cờ · cờ mặc định bật · cờ nhận `"true"` · ghim
+hàng đợi trước khi khách bấm · poll dựng đề xuất mới · dùng lại đề xuất sau khi
+vân tay đổi · dùng lại đề xuất hết hạn · sau xác nhận vẫn dựng đề xuất mới ·
+vượt ngân sách vẫn ghim đề xuất · lấy đơn vị từ input thay vì chứng từ.
+
+#### Chưa làm trong E1
+
+UI/browser, và `create_maintenance_request` (chưa có endpoint báo giá ở mock —
+thêm nó vào danh sách trước khi có endpoint sẽ làm mọi yêu cầu bảo trì rơi vào
+nhánh "không đơn vị nào báo giá", tức hỏng một luồng đang chạy để mở một luồng
+chưa chạy).
 
 ### F. Từ chối — mức tối thiểu an toàn
 
