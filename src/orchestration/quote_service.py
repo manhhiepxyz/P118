@@ -29,12 +29,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import asyncpg
 
-from src.db.quote_repository import bao_gia_dang_song, luu_bao_gia, thay_the_bao_gia_cu
+from src.db.quote_repository import (
+    KhongNeoDuocError as _KhongNeoDuocError,
+)
+from src.db.quote_repository import (
+    bao_gia_dang_song,
+    het_han_bao_gia_qua_han,
+    luu_bao_gia,
+    thay_the_bao_gia_cu,
+)
 from src.mock.service_providers import DON_VI_CHUYEN_NHA
 from src.orchestration.quote import (
     BaoGia,
@@ -141,6 +149,14 @@ async def xin_bao_gia_chuyen_nha(
     if da_thay_the:
         logger.info("yêu cầu đã đổi, %d báo giá cũ chuyển SUPERSEDED", da_thay_the)
 
+    # Dọn hạn TRƯỚC khi ghi. Thời gian trôi qua không tự đổi `status`, nên một
+    # dòng quá hạn vẫn mang `ACTIVE` và đụng ràng buộc duy nhất — tức chặn
+    # vĩnh viễn chính lượt hỏi lại này. Không dọn thì một báo giá 30 phút biến
+    # thành một cái khoá 30 phút trở lên.
+    da_het_han = await het_han_bao_gia_qua_han(pool, workflow_id=workflow_id, task_id=task_id)
+    if da_het_han:
+        logger.info("%d báo giá quá hạn chuyển EXPIRED trước khi hỏi lại", da_het_han)
+
     ma_don_vi = [d.provider_id for d in DON_VI_CHUYEN_NHA]
     phan_hoi = await asyncio.gather(
         *(connector.xin_bao_gia_chuyen_nha(ma, dict(payload)) for ma in ma_don_vi),
@@ -168,6 +184,14 @@ async def xin_bao_gia_chuyen_nha(
             logger.warning("đơn vị %s trả báo giá sai hợp đồng", ma)
             tu_choi[ma] = "QUOTE_MALFORMED"
             continue
+        # Báo giá ĐÃ hết hạn ngay lúc tới nơi. Không ghi, và có mã RIÊNG: đó
+        # là một lỗi cấu hình ở phía đơn vị (hạn quá ngắn, đồng hồ lệch), khác
+        # hẳn "trả rác". Ghi nó vào rồi để bước quét chuyển EXPIRED là tạo rác
+        # kèm một khoảng thời gian nó trông như còn sống.
+        if han <= datetime.now(han.tzinfo or UTC):
+            logger.warning("đơn vị %s trả báo giá đã hết hạn (%s)", ma, han.isoformat())
+            tu_choi[ma] = "QUOTE_ALREADY_EXPIRED"
+            continue
         try:
             await luu_bao_gia(
                 pool,
@@ -181,14 +205,27 @@ async def xin_bao_gia_chuyen_nha(
                 workflow_id=workflow_id,
                 task_id=task_id,
             )
-        except asyncpg.UniqueViolationError:
-            # Đơn vị này ĐÃ báo giá cho đúng yêu cầu này. Không phải lỗi: một
-            # lượt hỏi lại (retry sau timeout, hai tab, người dùng bấm lại)
-            # phải dừng ở đây thay vì để lại dòng ACTIVE thứ hai. Ghi một mã
-            # RIÊNG chứ không gộp vào `QUOTE_MALFORMED`: gộp lại thì lúc đọc
-            # log không phân biệt được "provider trả rác" với "ta hỏi hai lần".
-            logger.info("đơn vị %s đã có báo giá ACTIVE cho yêu cầu này", ma)
-            tu_choi[ma] = "QUOTE_ALREADY_ISSUED"
+        except asyncpg.UniqueViolationError as exc:
+            # HAI ràng buộc duy nhất, hai chuyện hoàn toàn khác nhau — nên hai
+            # mã. Gộp chúng thì lúc đọc log không phân biệt được "ta hỏi hai
+            # lần" với "đơn vị phát trùng mã báo giá", và cái thứ hai là một
+            # lỗi ở phía họ mà chỉ P-118 nhìn thấy.
+            if getattr(exc, "constraint_name", "") == "uq_service_quotes_external":
+                logger.warning("đơn vị %s phát lại một mã báo giá đã dùng", ma)
+                tu_choi[ma] = "QUOTE_DUPLICATE_EXTERNAL_ID"
+            else:
+                # Đơn vị này ĐÃ báo giá cho đúng yêu cầu này. Không phải lỗi:
+                # một lượt hỏi lại (retry sau timeout, hai tab, người dùng bấm
+                # lại) phải dừng ở đây thay vì để lại dòng ACTIVE thứ hai.
+                logger.info("đơn vị %s đã có báo giá ACTIVE cho yêu cầu này", ma)
+                tu_choi[ma] = "QUOTE_ALREADY_ISSUED"
+        except _KhongNeoDuocError as exc:
+            # LỖI CỦA TA, không phải của đơn vị: bước không tồn tại, hoặc bước
+            # có `tool` khác. Mã riêng vì hai bên sửa hai chỗ khác nhau —
+            # `QUOTE_MALFORMED` sẽ gửi người đọc log đi gọi cho đối tác về một
+            # lỗi nằm trong chính kế hoạch của P-118.
+            logger.error("neo báo giá sai chỗ (%s): %s", ma, exc)
+            tu_choi[ma] = "QUOTE_ANCHOR_INVALID"
         except (ValueError, KeyError, TypeError, asyncpg.PostgresError) as exc:
             # Sai schema thì KHÔNG persist, và KHÔNG có đề xuất giả. Một dòng
             # bị bỏ ở đây tệ hơn hẳn một dòng sai được ghi: dòng sai sẽ được
@@ -200,6 +237,8 @@ async def xin_bao_gia_chuyen_nha(
     # đem ra chọn phải là thứ đã persist — nếu một dòng không ghi được, nó
     # không được xuất hiện trong đề xuất chỉ vì biến vẫn còn giữ nó.
     tat_ca = await bao_gia_dang_song(pool, workflow_id=workflow_id, task_id=task_id, request_fingerprint=van_tay)
+    # `loc_theo_ngan_sach` lọc CẢ hạn, không chỉ ngân sách: một báo giá hết hạn
+    # giữa lúc đọc và lúc chọn vẫn phải rớt khỏi đề xuất.
     trong_ngan_sach = loc_theo_ngan_sach(tat_ca, max_price)
     return KetQuaBaoGia(
         tat_ca=tat_ca,

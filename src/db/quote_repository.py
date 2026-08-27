@@ -19,6 +19,17 @@ import asyncpg
 
 from src.orchestration.quote import CURRENCY_CHO_PHEP, BaoGia
 
+
+class KhongNeoDuocError(ValueError):
+    """Chứng từ không neo được vào bước tiêu thụ.
+
+    Kiểu RIÊNG chứ không phải `ValueError` chung, vì đây là lỗi CỦA P-118 —
+    kế hoạch trỏ vào một bước không tồn tại, hoặc vào một bước làm việc khác.
+    Gộp nó với "đơn vị trả dữ liệu sai" sẽ gửi người đọc log đi gọi cho đối tác
+    về một lỗi nằm trong chính mã của mình.
+    """
+
+
 _COT = (
     "quote_id, external_quote_id, service_provider_id, service_type, amount, currency, "
     "request_fingerprint, valid_until, status, created_at, confirmed_at, workflow_id, task_id"
@@ -40,7 +51,7 @@ def _to_bao_gia(row: asyncpg.Record | None) -> BaoGia | None:
         status=row["status"],
         created_at=row["created_at"],
         confirmed_at=row["confirmed_at"],
-        workflow_id=str(row["workflow_id"]) if row["workflow_id"] else None,
+        workflow_id=str(row["workflow_id"]),
         task_id=row["task_id"],
     )
 
@@ -55,14 +66,27 @@ async def luu_bao_gia(
     currency: str,
     request_fingerprint: str,
     valid_until: datetime,
-    workflow_id: str | None = None,
-    task_id: str | None = None,
+    workflow_id: str,
+    task_id: str,
 ) -> BaoGia:
-    """Ghim MỘT báo giá. Trả về bản đã persist, không phải bản vừa truyền vào.
+    """Ghim MỘT báo giá vào ĐÚNG bước tiêu thụ. Trả về bản đã persist.
 
     Trả bản đã persist là cố ý: `quote_id` và `created_at` do đây sinh ra, và
     caller dùng bản trả về thì không có đường nào để hai bên hiểu khác nhau về
     cùng một chứng từ.
+
+    `workflow_id`/`task_id` KHÔNG có mặc định. Một tham số tuỳ chọn nghĩa là
+    luật neo chỉ tồn tại với những call site nhớ tới nó — tức không tồn tại.
+
+    Bước được neo phải có `tool` TRÙNG `service_type`. `INSERT ... SELECT` làm
+    việc kiểm ấy nguyên tử với lượt ghi, và nó chặn đúng một ca mà khoá ngoại
+    thôi không chặn được: neo báo giá chuyển nhà vào một bước TRA CỨU nhà cung
+    cấp. Bước tra cứu không tiêu thụ gì, nên một chứng từ neo ở đó sẽ không bao
+    giờ được đối chiếu — và cũng không bao giờ hết hạn theo cách ai đó nhìn thấy.
+
+    Báo giá ĐÃ hết hạn không được ghi. Ghi nó vào chỉ để một bước quét sau đó
+    chuyển sang EXPIRED là tạo rác kèm một khoảng thời gian nó trông như còn
+    sống.
 
     Kiểm `amount`/`currency` ở đây NGOÀI ràng buộc database: `CHECK` cho một
     thông điệp của PostgreSQL, còn cái ném ở đây nói được rằng lỗi đến từ dữ
@@ -73,6 +97,8 @@ async def luu_bao_gia(
         raise ValueError(f"amount phải là số nguyên dương, nhận {amount!r}")
     if currency not in CURRENCY_CHO_PHEP:
         raise ValueError(f"currency ngoài danh sách cho phép: {currency!r}")
+    if not workflow_id or not task_id:
+        raise ValueError("báo giá phải neo vào một workflow và một bước cụ thể")
 
     quote_id = uuid4()
     async with pool.acquire() as conn:
@@ -81,7 +107,10 @@ async def luu_bao_gia(
             INSERT INTO service_quotes
                 (quote_id, external_quote_id, service_provider_id, service_type, amount, currency,
                  request_fingerprint, valid_until, status, workflow_id, task_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', $9, $10)
+            SELECT $1, $2, $3, $4::varchar, $5, $6, $7, $8::timestamptz, 'ACTIVE', t.workflow_id, t.task_id
+              FROM workflow_tasks t
+             WHERE t.workflow_id = $9 AND t.task_id = $10 AND t.tool = $4::varchar
+               AND $8::timestamptz > NOW()
             RETURNING {_COT}
             """,  # noqa: S608 - `_COT` là literal nội bộ, mọi giá trị đều là tham số
             quote_id,
@@ -92,11 +121,18 @@ async def luu_bao_gia(
             currency,
             request_fingerprint,
             valid_until,
-            UUID(workflow_id) if workflow_id else None,
+            UUID(workflow_id),
             task_id,
         )
     bao_gia = _to_bao_gia(row)
-    assert bao_gia is not None  # noqa: S101 - INSERT ... RETURNING luôn trả một dòng
+    if bao_gia is None:
+        # Không dòng nào ghi được. Ba nguyên nhân, và cả ba đều là "chứng từ
+        # này không có chỗ đứng": bước không tồn tại, bước có `tool` khác, hoặc
+        # báo giá đã quá hạn ngay lúc tới nơi.
+        raise KhongNeoDuocError(
+            f"không neo được báo giá: bước {task_id!r} của {workflow_id!r} "
+            f"không tồn tại, không phải {service_type!r}, hoặc báo giá đã hết hạn"
+        )
     return bao_gia
 
 
@@ -129,9 +165,12 @@ async def bao_gia_dang_song(
     Sắp xếp theo giá ngay ở SQL: mọi đường hiển thị và mọi đường chọn đều muốn
     thứ tự ấy, và để mỗi call site tự sắp là để chúng sắp khác nhau.
 
-    KHÔNG lọc hết hạn ở đây. `valid_until` là dữ kiện, `het_han` là luật — và
-    luật sống ở `quote.py`. Lọc ở SQL nghĩa là có hai nơi định nghĩa "còn hiệu
-    lực", và chúng lệch nhau đúng vào lúc đồng hồ database khác đồng hồ ứng dụng.
+    "Đang sống" gồm CẢ hạn, không chỉ trạng thái. Bản đầu cố ý không lọc hạn ở
+    đây với lý do "luật sống ở `quote.py`" — nhưng rồi không tầng nào lọc, và
+    một báo giá quá hạn vẫn đi thẳng vào đề xuất. Lý do ấy còn sai ở chỗ khác:
+    ĐỒNG HỒ CỦA DATABASE là đồng hồ mà bước quét hết hạn và lệnh xác nhận đều
+    dùng. Lọc ở đây bằng chính đồng hồ ấy làm ba chỗ nhất quán, chứ không phải
+    tạo ra một định nghĩa thứ hai.
     """
     dieu_kien = ""
     tham_so: list[object] = [UUID(workflow_id), task_id]
@@ -142,7 +181,8 @@ async def bao_gia_dang_song(
         rows = await conn.fetch(
             f"""
             SELECT {_COT} FROM service_quotes
-             WHERE workflow_id = $1 AND task_id = $2 AND status = 'ACTIVE'{dieu_kien}
+             WHERE workflow_id = $1 AND task_id = $2 AND status = 'ACTIVE'
+               AND valid_until > NOW(){dieu_kien}
              ORDER BY amount ASC, service_provider_id ASC
             """,  # noqa: S608
             *tham_so,
@@ -151,19 +191,42 @@ async def bao_gia_dang_song(
     return [q for q in ket_qua if q is not None]
 
 
-async def xac_nhan_bao_gia(pool: asyncpg.Pool, quote_id: str) -> BaoGia | None:
-    """ACTIVE → CONFIRMED, và chỉ một lượt thắng.
+async def xac_nhan_bao_gia(
+    pool: asyncpg.Pool,
+    quote_id: str,
+    *,
+    service_type: str,
+    service_provider_id: str,
+    request_fingerprint: str,
+    amount: int,
+    currency: str,
+    workflow_id: str,
+    task_id: str,
+) -> BaoGia | None:
+    """ACTIVE + còn hạn + khớp ĐỦ chín điều kiện → CONFIRMED. Một lượt thắng.
 
-    `WHERE status = 'ACTIVE'` làm việc chuyển trạng thái trở thành một phép
-    so-sánh-rồi-đổi nguyên tử ở database. Đọc-rồi-ghi ở tầng ứng dụng thì hai
-    lượt bấm đồng thời đều đọc thấy ACTIVE và đều ghi CONFIRMED — hai lần xác
-    nhận cho một chứng từ, và bên cung cấp nhận hai đơn.
+    MỘT lệnh, không phải "kiểm rồi ghi". Bản đầu chỉ có
+    `WHERE quote_id = $1 AND status = 'ACTIVE'` và để `kiem_bao_gia()` canh
+    phần còn lại ở tầng ứng dụng. Hai vấn đề, và cái thứ hai không sửa được
+    bằng cách gọi cẩn thận hơn:
+
+      1. Báo giá HẾT HẠN vẫn chuyển được sang CONFIRMED — hạn không có mặt
+         trong mệnh đề nào.
+      2. Giữa lúc `kiem_bao_gia()` nói "được" và lúc `UPDATE` chạy, báo giá có
+         thể vừa hết hạn hoặc vừa bị một lượt sửa làm SUPERSEDED. Cửa sổ ấy
+         nhỏ, nhưng nó mở đúng vào lúc hệ thống bận nhất.
+
+    Nên mọi điều kiện đi vào cùng một mệnh đề `WHERE`, nơi PostgreSQL giữ khoá
+    dòng. `kiem_bao_gia()` vẫn còn giá trị của nó: nó nói VÌ SAO không được, và
+    nói trước khi ai đó nhìn thấy một lựa chọn không có thật. Nhưng nó không
+    còn là thứ duy nhất đứng giữa một chứng từ hỏng và một cam kết.
 
     Trả `None` khi không đổi được: caller phân biệt được "đã xác nhận rồi" với
     "vừa xác nhận xong", và đó là khác biệt giữa 409 và 200.
     """
     try:
         khoa = UUID(quote_id)
+        wid = UUID(workflow_id)
     except (ValueError, AttributeError, TypeError):
         return None
     async with pool.acquire() as conn:
@@ -171,12 +234,54 @@ async def xac_nhan_bao_gia(pool: asyncpg.Pool, quote_id: str) -> BaoGia | None:
             f"""
             UPDATE service_quotes
                SET status = 'CONFIRMED', confirmed_at = NOW()
-             WHERE quote_id = $1 AND status = 'ACTIVE'
+             WHERE quote_id = $1
+               AND status = 'ACTIVE'
+               AND valid_until > NOW()
+               AND service_type = $2
+               AND service_provider_id = $3
+               AND request_fingerprint = $4
+               AND amount = $5
+               AND currency = $6
+               AND workflow_id = $7
+               AND task_id = $8
             RETURNING {_COT}
             """,  # noqa: S608
             khoa,
+            service_type,
+            service_provider_id,
+            request_fingerprint,
+            amount,
+            currency,
+            wid,
+            task_id,
         )
     return _to_bao_gia(row)
+
+
+async def het_han_bao_gia_qua_han(pool: asyncpg.Pool, *, workflow_id: str, task_id: str) -> int:
+    """ACTIVE + quá hạn → EXPIRED, nguyên tử. Chạy TRƯỚC mỗi lượt xin báo giá.
+
+    Đây là nghĩa vụ đi kèm ràng buộc `UNIQUE ... WHERE status = 'ACTIVE'`. Thời
+    gian trôi qua KHÔNG tự đổi `status`, nên một dòng quá hạn vẫn mang `ACTIVE`
+    — và nó chặn vĩnh viễn mọi lượt hỏi lại của cùng đơn vị cho cùng yêu cầu.
+    Ràng buộc dựng lên để ngăn báo giá trùng lại trở thành thứ khoá cứng người
+    dùng ra khỏi việc xin giá mới.
+
+    Không có bộ đếm giờ nền: quét ĐÚNG bước sắp được ghi, ngay trước khi ghi.
+    Một job định kỳ sẽ đúng "phần lớn thời gian", và phần còn lại là đúng lúc
+    người dùng đang chờ.
+    """
+    async with pool.acquire() as conn:
+        ket_qua = await conn.execute(
+            """
+            UPDATE service_quotes SET status = 'EXPIRED'
+             WHERE workflow_id = $1 AND task_id = $2
+               AND status = 'ACTIVE' AND valid_until <= NOW()
+            """,
+            UUID(workflow_id),
+            task_id,
+        )
+    return int(str(ket_qua).rsplit(" ", 1)[-1])
 
 
 async def thay_the_bao_gia_cu(pool: asyncpg.Pool, *, workflow_id: str, task_id: str, van_tay_moi: str) -> int:

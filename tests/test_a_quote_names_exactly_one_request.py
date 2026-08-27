@@ -17,12 +17,14 @@ Ba luật thuần, kiểm được không cần database:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from src.orchestration.quote import (
     FIELD_CHUYEN_NHA,
+    BaoGia,
+    loc_theo_ngan_sach,
     payload_gui_provider,
     van_tay_yeu_cau,
 )
@@ -110,3 +112,48 @@ def test_the_budget_never_leaves_p118():
     payload = payload_gui_provider({**YEU_CAU, "max_price": 500_000, "ngan_sach": 500_000})
     assert "max_price" not in payload
     assert set(payload) == set(FIELD_CHUYEN_NHA), f"payload mang thêm: {set(payload) - set(FIELD_CHUYEN_NHA)}"
+
+
+# ---------------------------------------------------------------- lọc, thuần
+def _bao_gia(gia: int, *, con_lai_phut: int) -> BaoGia:
+    return BaoGia(
+        quote_id="q",
+        external_quote_id="Q-1",
+        service_provider_id="MOV-01",
+        service_type="schedule_move",
+        amount=gia,
+        currency="VND",
+        request_fingerprint=van_tay_yeu_cau(dict(YEU_CAU)),
+        valid_until=datetime.now(UTC) + timedelta(minutes=con_lai_phut),
+        status="ACTIVE",
+        workflow_id="w",
+        task_id="T1",
+    )
+
+
+def test_an_expired_quote_is_filtered_even_when_it_fits_the_budget():
+    """Hàng rào THỨ HAI cho hạn, ở tầng thuần — độc lập với mệnh đề SQL.
+
+    Đường đọc đã lọc `valid_until > NOW()` ở database. Vế này bắt khoảng giữa:
+    một báo giá hết hạn SAU lúc đọc và TRƯỚC lúc chọn. Khoảng ấy nhỏ, nhưng nó
+    mở đúng lúc hệ thống bận — và nếu bỏ, thứ hiện lên màn hình là một lựa chọn
+    không còn tồn tại.
+
+    Kiểm ở đây chứ không qua database là cố ý: nếu bài kiểm đi qua đường đọc
+    thì mệnh đề SQL sẽ trả lời hộ, và vế thuần này có bị xoá cũng không ai biết.
+    """
+    con_han = _bao_gia(470_000, con_lai_phut=30)
+    het_han = _bao_gia(100_000, con_lai_phut=-1)
+
+    assert loc_theo_ngan_sach([het_han, con_han], None) == [con_han]
+    # Rẻ hơn hẳn ngân sách, nhưng đã chết — không được lọt vào chỉ vì rẻ.
+    assert loc_theo_ngan_sach([het_han, con_han], 500_000) == [con_han]
+    assert loc_theo_ngan_sach([het_han], 500_000) == []
+
+
+def test_the_budget_filter_still_filters_by_budget():
+    """Vế ngân sách vẫn nguyên — thêm luật hạn không được nuốt luật cũ."""
+    re = _bao_gia(420_000, con_lai_phut=30)
+    dat = _bao_gia(470_000, con_lai_phut=30)
+    assert loc_theo_ngan_sach([re, dat], 425_000) == [re]
+    assert loc_theo_ngan_sach([re, dat], None) == [re, dat]

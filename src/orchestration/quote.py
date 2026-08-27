@@ -148,14 +148,16 @@ class BaoGia:
     request_fingerprint: str
     valid_until: datetime
     status: str
+    # NEO BẮT BUỘC, không có mặc định. Vân tay tính từ input, nên hai workflow
+    # khác nhau xin cùng một việc có CÙNG vân tay; không neo thì báo giá của
+    # người này dùng được cho yêu cầu của người kia.
+    #
+    # Không mặc định `None` là cố ý: một tham số tuỳ chọn nghĩa là luật chỉ
+    # tồn tại với những call site nhớ tới nó — tức không tồn tại.
+    workflow_id: str
+    task_id: str
     created_at: datetime | None = None
     confirmed_at: datetime | None = None
-    # NGOÀI contract tối thiểu, và bắt buộc: vân tay tính từ input, nên hai
-    # workflow khác nhau xin cùng một việc sẽ có CÙNG vân tay. Không neo vào
-    # workflow/task thì báo giá của người này dùng được cho yêu cầu của người
-    # kia — đúng nghĩa IDOR, chỉ là trên chứng từ thay vì trên hàng đợi.
-    workflow_id: str | None = None
-    task_id: str | None = None
 
     @property
     def het_han(self) -> bool:
@@ -182,8 +184,8 @@ def kiem_bao_gia(
     request_fingerprint: str,
     amount: int,
     currency: str,
-    workflow_id: str | None = None,
-    task_id: str | None = None,
+    workflow_id: str,
+    task_id: str,
 ) -> BaoGia:
     """Bảy điều kiện, phải đúng ĐỒNG THỜI. Sai một cái là ném.
 
@@ -214,22 +216,30 @@ def kiem_bao_gia(
         raise QuoteInvalidError("QUOTE_STALE_REQUEST", "Yêu cầu đã đổi so với lúc báo giá.")
     if bao_gia.amount != amount or bao_gia.currency != currency:
         raise QuoteInvalidError("QUOTE_AMOUNT_MISMATCH", "Số tiền không khớp báo giá đã lưu.")
-    # Neo workflow/task chỉ kiểm khi caller nói mình là ai. Đường tính toán
-    # thuần (xếp hạng, hiển thị) không cần; đường TIÊU THỤ thì luôn truyền.
-    if workflow_id is not None and bao_gia.workflow_id != workflow_id:
+    # Neo LUÔN được kiểm, không phụ thuộc caller có truyền hay không. Bản đầu
+    # để hai điều kiện này là tuỳ chọn (`x is not None and ...`) — nghĩa là một
+    # call site quên truyền sẽ đi qua cổng mà không có gì đỏ lên.
+    if bao_gia.workflow_id != workflow_id:
         raise QuoteInvalidError("QUOTE_WRONG_WORKFLOW", "Báo giá thuộc một yêu cầu khác.")
-    if task_id is not None and bao_gia.task_id != task_id:
+    if bao_gia.task_id != task_id:
         raise QuoteInvalidError("QUOTE_WRONG_TASK", "Báo giá thuộc một bước khác.")
     return bao_gia
 
 
 def loc_theo_ngan_sach(danh_sach: list[BaoGia], max_price: int | None) -> list[BaoGia]:
-    """Lọc theo ngân sách — Ở PHÍA P-118, sau khi đã có giá thật.
+    """Lọc theo ngân sách VÀ theo hạn — Ở PHÍA P-118, sau khi đã có giá thật.
+
+    Hạn được lọc ở đây chứ không chỉ ở SQL, vì một báo giá hết hạn GIỮA lúc đọc
+    và lúc chọn vẫn phải rớt. Bản đầu bỏ hẳn vế này với lý do "hạn là dữ kiện,
+    luật sống ở tầng trên" — nhưng rồi không tầng nào lọc, và một báo giá quá
+    hạn vẫn thành đề xuất. Nó chỉ bị chặn tận lúc tiêu thụ, tức sau khi đã hiện
+    lên màn hình như một lựa chọn có thật.
 
     Không ai vừa túi thì trả RỖNG. Không nới ngân sách hộ, không chọn "gần
     nhất": tầng trên có nhiệm vụ nói ra giá thật rẻ nhất và để khách quyết
     định, chứ không phải lặng lẽ đặt một đơn vị vượt ngân sách.
     """
+    con_han = [q for q in danh_sach if not q.het_han]
     if max_price is None:
-        return list(danh_sach)
-    return [q for q in danh_sach if q.amount <= max_price]
+        return con_han
+    return [q for q in con_han if q.amount <= max_price]

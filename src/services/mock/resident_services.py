@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from threading import RLock
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +33,18 @@ _move_requests: dict[str, dict] = {}
 _lock = RLock()
 _new_maintenance_id = make_generator("MAINT")
 _new_move_id = make_generator("MOVE")
-_new_quote_id = make_generator("QMOV")
+# Mã báo giá phải DUY NHẤT theo đơn vị, sống qua cả restart tiến trình.
+#
+# `make_generator` đếm từ 1 mỗi lần khởi động, nên sau một lượt deploy nó phát
+# lại đúng `QMOV-001` — và P-118 (nơi có ràng buộc `UNIQUE (provider,
+# external_quote_id)`) sẽ từ chối một báo giá hoàn toàn hợp lệ. Ngoài đời không
+# nhà cung cấp nào đánh số lại từ đầu sau khi khởi động lại máy chủ.
+_dem_bao_gia = make_generator("QMOV")
+
+
+def _new_quote_id() -> str:
+    return f"{_dem_bao_gia()}-{uuid4().hex[:8]}"
+
 
 # Báo giá sống bao lâu. Ngắn là CỐ Ý: một báo giá còn hiệu lực nghĩa là đơn vị
 # còn giữ chỗ cho ngày ấy, và không ai giữ chỗ vô hạn. Nó cũng làm nhánh hết

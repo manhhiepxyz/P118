@@ -202,19 +202,56 @@ danh tính kiểm chứng được. Bảng provider canonical vẫn là việc c
 `quote_id` (nội bộ) · `external_quote_id` (do đơn vị đặt) · `service_provider_id`
 · `service_type` · `amount` (`BIGINT`, `CHECK > 0`) · `currency` (`CHECK IN
 ('VND')`) · `request_fingerprint` · `valid_until` · `status` · `created_at` ·
-`confirmed_at`, cộng `workflow_id` / `task_id`.
+`confirmed_at` · `workflow_id` · `task_id`.
 
-Hai ràng buộc ở tầng database, không ở tầng ứng dụng:
+Bốn ràng buộc ở tầng database, không ở tầng ứng dụng:
 
-- `CHECK ((status='CONFIRMED') = (confirmed_at IS NOT NULL))` — một đường ghi
-  mới quên đặt mốc thời gian thì vỡ ngay, chứ không để lại chứng từ nói "đã xác
-  nhận" mà không nói lúc nào.
+- `workflow_id` / `task_id` **NOT NULL**, kèm khoá ngoại **tổng hợp**
+  `(workflow_id, task_id) → workflow_tasks`, cùng khuôn với `approval_decisions`
+  và `execution_logs`. Bản đầu để hai cột nullable và cổng chỉ kiểm *nếu* caller
+  chịu truyền — nghĩa là luật chỉ tồn tại với những call site nhớ tới nó, tức
+  không tồn tại. Trỏ vào `workflows` thôi cũng chưa đủ: nó cho phép neo vào một
+  `task_id` không có thật.
+- `CHECK ((status='CONFIRMED') = (confirmed_at IS NOT NULL))`.
 - `UNIQUE (workflow_id, task_id, service_provider_id, request_fingerprint)
-  WHERE status='ACTIVE'` — một lượt hỏi giá chạy hai lần (retry sau timeout,
-  hai tab) không được để lại hai dòng ACTIVE cùng đơn vị khác giá; luật chọn sẽ
-  lấy dòng rẻ hơn, tức hệ thống tự thưởng cho mình mỗi lần mạng chập chờn.
+  WHERE status='ACTIVE'` — một lượt hỏi giá chạy hai lần không được để lại hai
+  dòng ACTIVE cùng đơn vị khác giá; luật chọn sẽ lấy dòng rẻ hơn, tức hệ thống
+  tự thưởng cho mình mỗi lần mạng chập chờn.
+- `UNIQUE (service_provider_id, external_quote_id)` — **theo đơn vị**, không
+  toàn cục. Hai đơn vị khác nhau hoàn toàn có thể cùng đánh số `Q-001`; ép
+  chúng khác nhau là áp luật của P-118 lên hệ thống đánh mã nội bộ của người
+  khác. Nhưng trong một đơn vị, mã phải là danh tính — trùng mã nghĩa là câu
+  "chúng tôi đã xác nhận Q-001" trỏ tới hai con số và không ai phân xử được.
+
+`luu_bao_gia()` ghi bằng `INSERT ... SELECT FROM workflow_tasks`, nên **bước
+được neo phải có `tool` trùng `service_type`**. Đó là ca mà khoá ngoại thôi
+không chặn được: neo báo giá chuyển nhà vào một bước *tra cứu*. Bước tra cứu
+không tiêu thụ gì, nên chứng từ neo ở đó không bao giờ được đối chiếu — nó nằm
+im, hợp lệ về hình thức, và vô dụng. Lỗi này có mã riêng
+`QUOTE_ANCHOR_INVALID`: nó là lỗi của P-118, không phải của đối tác, và gộp vào
+`QUOTE_MALFORMED` sẽ gửi người đọc log đi gọi nhầm người.
 
 Không lưu `goal`, prompt hay văn bản hội thoại. Báo giá là chứng từ thương mại.
+
+#### Hạn hiệu lực — thực thi ở đồng hồ của database
+
+Ba chỗ, cùng một đồng hồ:
+
+| | |
+|---|---|
+| **Không ghi** | `luu_bao_gia` có `AND $valid_until > NOW()` trong `WHERE`. Ghi một báo giá đã chết rồi chờ bước quét dọn là tạo rác kèm một khoảng nó trông như còn sống — và trong khoảng ấy nó là một lựa chọn hợp lệ trên màn hình. Mã riêng: `QUOTE_ALREADY_EXPIRED` |
+| **Không đề xuất** | `bao_gia_dang_song` lọc `valid_until > NOW()` ở SQL; `loc_theo_ngan_sach` lọc lại ở tầng thuần để bắt khoảng giữa "đọc xong" và "chọn xong" |
+| **Không xác nhận** | `xac_nhan_bao_gia` kiểm **chín** điều kiện trong MỘT lệnh `UPDATE` |
+
+Bước quét `het_han_bao_gia_qua_han()` — `ACTIVE + valid_until <= NOW() →
+EXPIRED` — chạy **trước mỗi lượt xin báo giá**. Đây là nghĩa vụ đi kèm ràng
+buộc `UNIQUE ... WHERE ACTIVE`: thời gian trôi qua **không** tự đổi `status`,
+nên không có bước quét thì một báo giá 30 phút biến thành một cái khoá 30 phút
+*trở lên* — cùng đơn vị, cùng yêu cầu, không bao giờ xin lại được nữa. Ràng
+buộc dựng lên để chống trùng lại thành ngõ cụt.
+
+Quét đúng bước sắp ghi, ngay trước khi ghi — không có job nền. Một job định kỳ
+đúng "phần lớn thời gian", và phần còn lại là đúng lúc người dùng đang chờ.
 
 #### `request_fingerprint`
 
@@ -244,18 +281,28 @@ allowlist, nên field mới mặc định là *không gửi*. Phía nhận: mock
 `extra="forbid"` và trả **422** cho `max_price`. Allowlist nằm cùng phía với
 đoạn mã sẽ vi phạm nó; hàng rào ở phía không do P-118 kiểm soát thì không.
 
-#### Bảy điều kiện tiêu thụ
+#### Chín điều kiện tiêu thụ
 
-`kiem_bao_gia()` là cổng DUY NHẤT, kiểm từ thô tới tinh: tồn tại → ACTIVE →
-chưa hết hạn → đúng service → đúng provider → vân tay khớp → amount/currency
-khớp bản persist. Cộng hai điều kiện neo (`workflow_id`, `task_id`) — ngoài
-contract tối thiểu và bắt buộc: vân tay tính từ input, nên hai người xin cùng
-một việc có cùng vân tay, và không neo thì báo giá của người này dùng được cho
-yêu cầu của người kia.
+`kiem_bao_gia()` kiểm từ thô tới tinh: tồn tại → ACTIVE → chưa hết hạn → đúng
+service → đúng provider → vân tay khớp → amount/currency khớp → **đúng
+workflow** → **đúng task**. Hai vế cuối **luôn** được kiểm; chữ ký hàm không
+cho phép bỏ qua chúng nữa (thiếu là `TypeError` ngay lúc gọi).
 
-`amount` được **đối chiếu**, không phải **đọc ra**: caller đưa vào thứ họ định
-dùng. Nếu chỉ đọc ra thì một con số bị sửa ở task sẽ lặng lẽ bị thay thế và
-không ai biết đã có một lần thử.
+`amount` được **đối chiếu**, không **đọc ra**: caller đưa vào thứ họ định dùng.
+Chỉ đọc ra thì một con số bị sửa ở task sẽ lặng lẽ bị thay thế và không ai biết
+đã có một lần thử.
+
+`xac_nhan_bao_gia()` kiểm **lại toàn bộ** trong cùng lệnh ghi. Không phải thừa:
+
+1. Bản đầu chỉ có `WHERE quote_id = $1 AND status = 'ACTIVE'`, nên một báo giá
+   **hết hạn vẫn chuyển được sang CONFIRMED**.
+2. Giữa lúc cổng nói "được" và lúc `UPDATE` chạy, chứng từ có thể vừa hết hạn
+   hoặc vừa bị một lượt sửa làm SUPERSEDED. Cửa sổ nhỏ, nhưng nó mở đúng vào
+   lúc hệ thống bận nhất.
+
+Cổng vẫn giữ vai trò của nó: nó nói **vì sao** không được, và nói *trước* khi
+ai đó nhìn thấy một lựa chọn không có thật. Nhưng nó không còn là thứ duy nhất
+đứng giữa một chứng từ hỏng và một cam kết.
 
 Đổi ngày/xe/thang máy/bốc xếp → báo giá đời cũ thành `SUPERSEDED` (không phải
 `EXPIRED` — hết hạn là thời gian trôi, bị thay thế là khách đổi ý). Đã
@@ -263,8 +310,9 @@ không ai biết đã có một lần thử.
 
 #### Nghiệm thu
 
-**94 test mới**, tất cả xanh; toàn bộ suite 3898 xanh (3 lỗi baseline theo
-lịch). Mười hai mutation, mười hai cái cắn:
+**105 test mới**, tất cả xanh; toàn bộ suite **3923 xanh** (3 lỗi baseline theo
+lịch). **Hai mươi chín mutation, hai mươi chín cái cắn** — 12 ở vòng đầu, 17 sau
+khi vá bốn lỗ hổng:
 
 | mutation | test bắt |
 |---|---|
@@ -279,27 +327,48 @@ lịch). Mười hai mutation, mười hai cái cắn:
 | không dọn báo giá đời cũ | `test_changing_the_request_starts_a_clean_round` |
 | connector không ép kiểu `amount` | `test_a_numeric_string_amount...` |
 | bỏ kiểm đơn vị mạo danh | `test_a_provider_cannot_quote_on_behalf_of_another` |
-| bỏ ràng buộc `UNIQUE ... WHERE ACTIVE` | 2 test |
+| bỏ `UNIQUE ... WHERE ACTIVE` | 2 test |
+| **neo lại thành tuỳ chọn ở domain** | `test_the_ownership_check_is_not_optional` |
+| **cổng bỏ kiểm neo (bản cũ)** | `test_a_quote_from_another_workflow...` |
+| **`luu_bao_gia` không kiểm `tool` của bước** | `test_a_quote_cannot_be_anchored_to_a_lookup_step` |
+| **`luu_bao_gia` nhận báo giá đã hết hạn** | `test_a_provider_quote_that_is_already_expired...` |
+| **đường đọc không lọc hạn (SQL)** | `test_an_expired_quote_never_reaches_the_recommendation` |
+| **`loc_theo_ngan_sach` không lọc hạn** | `test_an_expired_quote_is_filtered_even_when_it_fits...` |
+| **bỏ bước quét hết hạn** | `test_a_quote_that_expires_can_be_asked_for_again` |
+| **quét hết hạn đụng cả dòng còn hạn** | 2 test |
+| **bỏ `UNIQUE (provider, external_quote_id)`** | 2 test |
+| **gộp lỗi neo vào `QUOTE_MALFORMED`** | `test_anchoring_to_the_wrong_step_is_named_as_our_bug...` |
+| **8 vế của lệnh xác nhận, từng vế một** | 8 test, mỗi vế một test riêng |
+
+Vế cuối đáng nói: kiểm chúng một lượt cùng nhau thì một điều kiện bị xoá vẫn
+xanh nhờ các điều kiện còn lại, và mutation "bỏ một vế" sống sót. Mỗi ca phá
+đúng **một** vế, nên mỗi vế có một bài kiểm nói tên nó.
 
 **Canary trên `p118_db`** — connector thật → mock provider thật qua HTTP →
 PostgreSQL thật (dữ liệu gieo đã dọn):
 
 ```
-1. MOV-03 420.000 · MOV-01 430.000 · MOV-02 470.000 (mã QMOV-*, hạn 30 phút)
-   ngân sách 440.000 → [MOV-03, MOV-01] → đề xuất MOV-03
-2. đọc lại bằng CHỈ quote_id → khớp, vân tay khớp
+1. MOV-03 420k · MOV-01 430k · MOV-02 470k    → ngân sách 440k → đề xuất MOV-03
+2. neo vào bước tra cứu T0      → ghi 0, QUOTE_ANCHOR_INVALID
+   neo vào bước T99 không có    → ghi 0, QUOTE_ANCHOR_INVALID
+   gọi cổng thiếu neo           → TypeError (không gọi được)
 3. sai đơn vị→WRONG_PROVIDER · sai giá→AMOUNT_MISMATCH
-   đổi yêu cầu→STALE_REQUEST · workflow khác→WRONG_WORKFLOW
-4. hai lượt xác nhận đồng thời → 1/2 thắng, status=CONFIRMED
-5. đổi sang xe tải → ACTIVE=3, SUPERSEDED=2, CONFIRMED=1 (không bị viết đè)
-   đề xuất đổi sang MOV-02 @ 560.000 — đơn vị rẻ nhất ĐỔI theo yêu cầu
-6. ngân sách 100.000 → không đề xuất, rẻ nhất thật 420.000,
-   hàng đợi duyệt=0, chứng từ đã chốt=0
+   đổi yêu cầu→STALE_REQUEST · workflow khác→WRONG_WORKFLOW · bước khác→WRONG_TASK
+4. sai giá, VÒNG QUA cổng, gọi thẳng lệnh xác nhận → CHẶN, vẫn ACTIVE
+   hai lượt xác nhận đồng thời                    → 1/2 thắng
+5. xác nhận báo giá quá hạn     → CHẶN
+   hỏi lại sau khi hết hạn      → ghi 3, không lượt nào bị chặn
+   database: ACTIVE=3, EXPIRED=3, đề xuất dùng chứng từ MỚI
+6. cặp (đơn vị, mã báo giá) bị trùng: 0
 ```
 
-Điểm 5 là bằng chứng cho thiết kế hệ số đan chéo: xe van thì MOV-03 rẻ nhất,
-xe tải thì MOV-02. Nếu xếp hạng không đổi theo tham số thì việc tính giá theo
-tham số chỉ là trang trí.
+Điểm 4 là điểm quan trọng nhất của vòng vá: canary gọi **thẳng** lệnh xác nhận,
+bỏ qua cổng, để kiểm mệnh đề `WHERE` chứ không kiểm kỷ luật của call site.
+
+Ngoài lề: mock provider trước đây sinh mã bằng bộ đếm reset mỗi lần khởi động,
+nên sau một lượt deploy nó phát lại `QMOV-001` và ràng buộc mới sẽ từ chối một
+báo giá hợp lệ. Đã đổi sang mã có hậu tố ngẫu nhiên — ngoài đời không nhà cung
+cấp nào đánh số lại từ đầu sau khi khởi động lại máy chủ.
 
 #### Chưa làm trong B (đúng phạm vi)
 

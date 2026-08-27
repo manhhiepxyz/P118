@@ -1311,12 +1311,16 @@ CREATE TABLE IF NOT EXISTS service_quotes (
                         CHECK (status IN ('ACTIVE', 'CONFIRMED', 'EXPIRED', 'SUPERSEDED')),
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     confirmed_at        TIMESTAMPTZ,
-    -- NGOÀI contract tối thiểu, và bắt buộc. Vân tay tính từ input, nên hai
-    -- workflow khác nhau xin cùng một việc có CÙNG vân tay. Không neo vào
-    -- workflow/task thì báo giá của người này dùng được cho yêu cầu của người
-    -- kia — đúng nghĩa IDOR, chỉ là trên chứng từ thay vì trên hàng đợi.
-    workflow_id         UUID,
-    task_id             VARCHAR(64),
+    -- NEO BẮT BUỘC, không phải tuỳ chọn. Vân tay tính từ input, nên hai
+    -- workflow khác nhau xin cùng một việc có CÙNG vân tay. Không neo thì báo
+    -- giá của người này dùng được cho yêu cầu của người kia — đúng nghĩa IDOR,
+    -- chỉ là trên chứng từ thay vì trên hàng đợi.
+    --
+    -- Bản đầu để hai cột NULLABLE và `kiem_bao_gia()` chỉ kiểm khi caller chịu
+    -- truyền. Nghĩa là luật chỉ tồn tại với những call site nhớ tới nó — tức
+    -- không tồn tại. NOT NULL đẩy nó xuống chỗ không ai quên được.
+    workflow_id         UUID         NOT NULL,
+    task_id             VARCHAR(20)  NOT NULL,
     -- CONFIRMED thì phải có mốc thời gian, và chưa CONFIRMED thì không được
     -- có. Ràng buộc ở database chứ không ở tầng ứng dụng: một đường ghi mới
     -- quên đặt `confirmed_at` sẽ vỡ ngay, chứ không để lại một chứng từ nói
@@ -1324,6 +1328,44 @@ CREATE TABLE IF NOT EXISTS service_quotes (
     CONSTRAINT chk_service_quotes_confirmed_at
         CHECK ((status = 'CONFIRMED') = (confirmed_at IS NOT NULL))
 );
+
+-- Khoá ngoại TỔNG HỢP tới đúng BƯỚC, cùng khuôn với `approval_decisions` và
+-- `execution_logs`. Trỏ vào `workflows` thôi là chưa đủ: nó cho phép neo vào
+-- một `task_id` không tồn tại, và một chứng từ neo vào hư vô thì không khác gì
+-- chứng từ không neo.
+--
+-- Tách khỏi `CREATE TABLE` và bọc điều kiện vì file này còn chạy trên database
+-- LEGACY chỉ có vài bảng (xem `test_schema_migrations_upgrades_legacy_table`),
+-- nơi `workflow_tasks` chưa có ràng buộc duy nhất `(workflow_id, task_id)` —
+-- và `REFERENCES` ở đó nổ ngay, kéo theo mọi migration phía sau. Cùng khuôn
+-- với khối `service_provider_accounts` bên trên.
+--
+-- Khối này cũng nâng cấp bảng đã tồn tại với hai cột nullable (bản đầu của
+-- bước B). XOÁ dòng chưa neo thay vì cố vá: một chứng từ không biết mình thuộc
+-- yêu cầu nào thì không tiêu thụ được — `kiem_bao_gia()` chặn nó ở mọi đường —
+-- nên nó không phải dữ liệu, nó là rác. Bảng này trẻ hơn chính ràng buộc đang
+-- thêm, nên không có dòng nào như vậy ngoài môi trường dev của tuần này.
+DO $$
+BEGIN
+    IF to_regclass('service_quotes') IS NULL THEN
+        RETURN;
+    END IF;
+
+    DELETE FROM service_quotes WHERE workflow_id IS NULL OR task_id IS NULL;
+    ALTER TABLE service_quotes ALTER COLUMN workflow_id SET NOT NULL;
+    ALTER TABLE service_quotes ALTER COLUMN task_id SET NOT NULL;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_service_quotes_task')
+       AND EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'uq_workflow_tasks_wf_task' AND contype IN ('u', 'p')
+       )
+    THEN
+        ALTER TABLE service_quotes
+            ADD CONSTRAINT fk_service_quotes_task
+            FOREIGN KEY (workflow_id, task_id) REFERENCES workflow_tasks (workflow_id, task_id);
+    END IF;
+END $$;
 
 -- Tra theo BƯỚC: "báo giá nào đang sống cho bước này". Đây là truy vấn nóng —
 -- mọi lượt hiển thị và mọi lượt tiêu thụ đều đi qua nó.
@@ -1342,6 +1384,23 @@ CREATE INDEX IF NOT EXISTS idx_service_quotes_fingerprint
 -- và luật chọn sẽ lấy dòng rẻ hơn — tức hệ thống tự thưởng cho mình mỗi lần
 -- mạng chập chờn. `WHERE status = 'ACTIVE'` để lịch sử vẫn giữ được các báo
 -- giá đã hết hạn hay bị thay thế.
+--
+-- Kèm theo nó là một NGHĨA VỤ: dòng hết hạn phải được chuyển sang EXPIRED
+-- trước khi xin báo giá mới. Nếu không, một dòng quá hạn vẫn mang `ACTIVE` và
+-- chặn vĩnh viễn mọi lượt hỏi lại của cùng đơn vị cho cùng yêu cầu — ràng buộc
+-- an toàn biến thành ngõ cụt. Xem `het_han_bao_gia_qua_han()`.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_active
     ON service_quotes (workflow_id, task_id, service_provider_id, request_fingerprint)
  WHERE status = 'ACTIVE';
+
+-- Cùng một đơn vị không được dùng MỘT mã báo giá cho hai chứng từ khác nhau.
+--
+-- Không unique toàn cục: hai đơn vị khác nhau hoàn toàn có thể cùng đánh số
+-- `Q-001`, và ép chúng phải khác nhau là áp một luật của P-118 lên hệ thống
+-- đánh mã nội bộ của người khác.
+--
+-- Nhưng TRONG một đơn vị thì mã phải là danh tính. Trùng mã nghĩa là lúc tranh
+-- chấp, câu "chúng tôi đã xác nhận Q-001" trỏ tới hai con số khác nhau và
+-- không ai phân xử được.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_external
+    ON service_quotes (service_provider_id, external_quote_id);

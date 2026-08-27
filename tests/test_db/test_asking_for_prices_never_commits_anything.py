@@ -58,7 +58,9 @@ class ConnectorGianDiep:
             return StandardResult.fail("NO_AVAILABILITY", "bận ngày đó")
         return StandardResult.ok(
             data={
-                "external_quote_id": f"QMOV-{service_provider_id}",
+                # Mã DUY NHẤT mỗi lượt phát: `(provider, external_quote_id)` là
+                # unique, và ngoài đời không đơn vị nào phát lại một mã cũ.
+                "external_quote_id": f"QMOV-{service_provider_id}-{uuid.uuid4().hex[:8]}",
                 "service_provider_id": service_provider_id,
                 "amount": so_tien,
                 "currency": "VND",
@@ -67,11 +69,24 @@ class ConnectorGianDiep:
         )
 
 
-async def _workflow(pool) -> str:
+async def _workflow(pool, *, tasks=("T1",)) -> str:
+    """Workflow VÀ các bước `schedule_move` thật.
+
+    Chứng từ có khoá ngoại tổng hợp tới `workflow_tasks` và chỉ neo được vào
+    bước có `tool` trùng `service_type`, nên fixture phải dựng cả bước — không
+    còn đường nào ghi một báo giá lơ lửng.
+    """
     wid = str(uuid.uuid4())
     await pool.execute(
         "INSERT INTO workflows (workflow_id, goal, status) VALUES ($1::uuid, 'chuyển nhà', 'PENDING')", wid
     )
+    for task in tasks:
+        await pool.execute(
+            "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, depends_on) "
+            "VALUES ($1::uuid, $2, 'schedule_move', 'PENDING', '[]'::jsonb)",
+            wid,
+            task,
+        )
     return wid
 
 
@@ -268,6 +283,147 @@ async def test_every_provider_failing_leaves_no_recommendation(db_pool):
     assert await _dem_quotes(db_pool, wid) == 0
 
 
+@pytest.mark.asyncio
+async def test_a_provider_that_reuses_one_quote_id_is_named_for_it(db_pool):
+    """Đơn vị phát lại một mã báo giá đã dùng → rớt, với mã lý do RIÊNG.
+
+    Hai ràng buộc duy nhất, hai chuyện khác hẳn nhau. `QUOTE_ALREADY_ISSUED`
+    nghĩa là *ta* hỏi hai lần; `QUOTE_DUPLICATE_EXTERNAL_ID` nghĩa là *họ* đánh
+    trùng mã. Gộp lại thì lúc đọc log không phân biệt được lỗi của mình với lỗi
+    của đối tác — và cái thứ hai chỉ P-118 nhìn thấy.
+    """
+
+    class ConnectorTrungMa(ConnectorGianDiep):
+        async def xin_bao_gia_chuyen_nha(self, service_provider_id, payload):
+            ket_qua = await super().xin_bao_gia_chuyen_nha(service_provider_id, payload)
+            if ket_qua.success:
+                ket_qua.data["external_quote_id"] = "QMOV-DUNG-LAI"
+            return ket_qua
+
+    wid = await _workflow(db_pool)
+    ket_qua = await xin_bao_gia_chuyen_nha(
+        db_pool, ConnectorTrungMa(), workflow_id=wid, task_id="T1", input_data=YEU_CAU
+    )
+
+    # Ba đơn vị cùng phát `QMOV-DUNG-LAI`, nhưng ràng buộc theo TỪNG đơn vị nên
+    # cả ba vẫn ghi được — mã trùng giữa hai đơn vị khác nhau là hợp lệ.
+    assert await _dem_quotes(db_pool, wid) == 3
+    assert ket_qua.tu_choi == {}
+
+    # Hỏi lại lần nữa: cùng đơn vị, cùng mã → đây mới là điều bị chặn. Đổi vân
+    # tay để nó không dừng ở ràng buộc "một đơn vị một báo giá cho một yêu cầu".
+    lan_hai = await xin_bao_gia_chuyen_nha(
+        db_pool,
+        ConnectorTrungMa(),
+        workflow_id=wid,
+        task_id="T1",
+        input_data={**YEU_CAU, "move_vehicle": "truck"},
+    )
+    assert set(lan_hai.tu_choi.values()) == {"QUOTE_DUPLICATE_EXTERNAL_ID"}, lan_hai.tu_choi
+    assert lan_hai.de_xuat is None
+
+
+@pytest.mark.asyncio
+async def test_anchoring_to_the_wrong_step_is_named_as_our_bug_not_theirs(db_pool):
+    """Neo sai chỗ → `QUOTE_ANCHOR_INVALID`, không phải `QUOTE_MALFORMED`.
+
+    Hai mã, hai người phải sửa. `QUOTE_MALFORMED` nghĩa là đơn vị trả dữ liệu
+    sai — người đọc log sẽ đi gọi cho đối tác. Neo sai bước là lỗi trong chính
+    kế hoạch của P-118, và gọi cho đối tác về nó là lãng phí hai bên.
+    """
+    wid = await _workflow(db_pool)
+    await db_pool.execute(
+        "INSERT INTO workflow_tasks (workflow_id, task_id, tool, status, depends_on) "
+        "VALUES ($1::uuid, 'T0', 'search_properties', 'PENDING', '[]'::jsonb)",
+        wid,
+    )
+
+    vao_buoc_tra_cuu = await xin_bao_gia_chuyen_nha(
+        db_pool, ConnectorGianDiep(), workflow_id=wid, task_id="T0", input_data=YEU_CAU
+    )
+    vao_buoc_khong_co = await xin_bao_gia_chuyen_nha(
+        db_pool, ConnectorGianDiep(), workflow_id=wid, task_id="T99", input_data=YEU_CAU
+    )
+
+    for ket_qua, ten in ((vao_buoc_tra_cuu, "bước tra cứu"), (vao_buoc_khong_co, "bước không tồn tại")):
+        assert set(ket_qua.tu_choi.values()) == {"QUOTE_ANCHOR_INVALID"}, f"{ten}: {ket_qua.tu_choi}"
+        assert ket_qua.tat_ca == [] and ket_qua.de_xuat is None
+    assert await _dem_quotes(db_pool, wid) == 0
+
+
+# ------------------------------------------------------------------ hết hạn
+@pytest.mark.asyncio
+async def test_a_provider_quote_that_arrives_expired_never_becomes_a_recommendation(db_pool):
+    """Đơn vị trả một báo giá đã quá hạn → rớt, và có mã RIÊNG.
+
+    Đây là lỗi cấu hình ở phía đơn vị (hạn quá ngắn, đồng hồ lệch), khác hẳn
+    "trả rác" — nên `QUOTE_ALREADY_EXPIRED` chứ không phải `QUOTE_MALFORMED`.
+    Gộp hai mã thì không ai biết phải gọi cho đơn vị nào để sửa đồng hồ.
+
+    Và nó KHÔNG được ghi. Ghi vào rồi chờ bước quét chuyển EXPIRED là tạo rác
+    kèm một khoảng thời gian nó trông như còn sống — trong khoảng ấy nó là một
+    lựa chọn hợp lệ trên màn hình.
+    """
+
+    class ConnectorHetHan(ConnectorGianDiep):
+        async def xin_bao_gia_chuyen_nha(self, service_provider_id, payload):
+            if service_provider_id == "MOV-03":
+                return await ConnectorGianDiep(self.gia, han_phut=-1).xin_bao_gia_chuyen_nha(
+                    service_provider_id, payload
+                )
+            return await super().xin_bao_gia_chuyen_nha(service_provider_id, payload)
+
+    wid = await _workflow(db_pool)
+    ket_qua = await xin_bao_gia_chuyen_nha(
+        db_pool, ConnectorHetHan(), workflow_id=wid, task_id="T1", input_data=YEU_CAU
+    )
+
+    assert ket_qua.tu_choi["MOV-03"] == "QUOTE_ALREADY_EXPIRED"
+    assert await _dem_quotes(db_pool, wid) == 2, "báo giá hết hạn vẫn được ghim"
+    # MOV-03 rẻ nhất (420.000) — nếu nó lọt vào thì đề xuất sẽ là nó.
+    assert ket_qua.de_xuat.service_provider_id == "MOV-01"
+
+
+@pytest.mark.asyncio
+async def test_a_quote_that_expires_can_be_asked_for_again(db_pool):
+    """Hết hạn rồi hỏi lại ĐÚNG yêu cầu cũ: dòng cũ EXPIRED, dòng mới ACTIVE.
+
+    Ràng buộc `UNIQUE ... WHERE status = 'ACTIVE'` chỉ nhìn `status`, và thời
+    gian trôi qua không tự đổi `status`. Không có bước quét thì một báo giá 30
+    phút biến thành một cái khoá 30 phút TRỞ LÊN: cùng đơn vị, cùng yêu cầu,
+    không bao giờ xin lại được nữa.
+    """
+    wid = await _workflow(db_pool)
+    lan_dau = await xin_bao_gia_chuyen_nha(
+        db_pool, ConnectorGianDiep(), workflow_id=wid, task_id="T1", input_data=YEU_CAU
+    )
+    ma_cu = {q.quote_id for q in lan_dau.tat_ca}
+    await db_pool.execute(
+        "UPDATE service_quotes SET valid_until = NOW() - INTERVAL '1 minute' WHERE workflow_id = $1::uuid",
+        wid,
+    )
+
+    lan_hai = await xin_bao_gia_chuyen_nha(
+        db_pool,
+        ConnectorGianDiep(gia={"MOV-01": 520_000, "MOV-02": 470_000, "MOV-03": 610_000}),
+        workflow_id=wid,
+        task_id="T1",
+        input_data=YEU_CAU,
+    )
+
+    assert lan_hai.tu_choi == {}, f"lượt hỏi lại bị chặn: {lan_hai.tu_choi}"
+    assert len(lan_hai.tat_ca) == 3
+    assert {q.quote_id for q in lan_hai.tat_ca}.isdisjoint(ma_cu), "vẫn đang đọc chứng từ đời cũ"
+    cu = await db_pool.fetch(
+        "SELECT status FROM service_quotes WHERE workflow_id = $1::uuid AND quote_id = ANY($2::uuid[])",
+        wid,
+        [uuid.UUID(m) for m in ma_cu],
+    )
+    assert {r["status"] for r in cu} == {"EXPIRED"}
+    # Đề xuất dùng chứng từ MỚI: giá đời hai khác hẳn đời một.
+    assert (lan_hai.de_xuat.service_provider_id, lan_hai.de_xuat.amount) == ("MOV-02", 470_000)
+
+
 # ------------------------------------------------------------------ lượt sửa
 @pytest.mark.asyncio
 async def test_changing_the_request_starts_a_clean_round(db_pool):
@@ -317,7 +473,7 @@ async def test_asking_twice_for_the_same_request_does_not_double_the_quotes(db_p
 @pytest.mark.asyncio
 async def test_quotes_of_one_step_never_leak_into_another(db_pool):
     """Hai bước trong cùng một yêu cầu giữ hai bộ chứng từ riêng."""
-    wid = await _workflow(db_pool)
+    wid = await _workflow(db_pool, tasks=("T1", "T5"))
     await xin_bao_gia_chuyen_nha(db_pool, ConnectorGianDiep(), workflow_id=wid, task_id="T1", input_data=YEU_CAU)
     t5 = await xin_bao_gia_chuyen_nha(db_pool, ConnectorGianDiep(), workflow_id=wid, task_id="T5", input_data=YEU_CAU)
 
