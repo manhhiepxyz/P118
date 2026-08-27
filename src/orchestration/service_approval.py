@@ -177,6 +177,38 @@ def approval_details(task: Any) -> dict[str, Any]:
     return out
 
 
+# Field KHÔNG BAO GIỜ đi tới đơn vị cung cấp.
+#
+# `_HIDDEN_FIELDS` là định danh nội bộ. Đây là một luật khác: `max_price` là
+# NGÂN SÁCH CỦA KHÁCH. Đơn vị biết nó thì họ định giá theo túi tiền người hỏi
+# thay vì theo công việc — đúng điều bước B dựng hai hàng rào để chặn ở đường
+# xin báo giá. Chặn ở đó rồi để nó rò qua đường ghim hàng đợi là chặn một nửa.
+_FIELD_KHONG_GUI_DON_VI = frozenset({"max_price", "ngan_sach", "budget"})
+
+
+def chi_tiet_cho_don_vi(input_data: Any) -> dict[str, Any]:
+    """Dữ kiện đơn vị được nhìn, đọc từ JSONB của bước.
+
+    Cùng luật với `approval_details` nhưng nhận `dict`/chuỗi JSONB thay vì một
+    `Task`, vì đường xác nhận đề xuất đọc thẳng từ database. Hai hàm, một luật
+    — và luật ấy là ALLOWLIST theo kiểu dữ liệu cộng blocklist theo tên.
+    """
+    if isinstance(input_data, str):
+        try:
+            input_data = json.loads(input_data)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(input_data, dict):
+        return {}
+    return {
+        key: value
+        for key, value in input_data.items()
+        if key not in _HIDDEN_FIELDS
+        and key not in _FIELD_KHONG_GUI_DON_VI
+        and (isinstance(value, str | int | float | bool) or value is None)
+    }
+
+
 class ServiceApprovalBoundary:
     """Chặn mọi dịch vụ hướng-đơn-vị cho tới khi có người bên kia đồng ý."""
 
@@ -555,9 +587,7 @@ async def don_vi_cua_tai_khoan(pool: asyncpg.Pool, user_id: str) -> list[str]:
     return [r["service_provider_id"] for r in rows]
 
 
-async def so_huu_boi(
-    pool: asyncpg.Pool, workflow_id: str, task_id: str, don_vi: list[str]
-) -> bool:
+async def so_huu_boi(pool: asyncpg.Pool, workflow_id: str, task_id: str, don_vi: list[str]) -> bool:
     """Dòng chờ duyệt này có thuộc một trong các đơn vị ấy không.
 
     Kiểm ĐỘC LẬP với đường đọc danh sách. Không được suy "nó không hiện trong
@@ -571,8 +601,7 @@ async def so_huu_boi(
         return False
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT service_provider_id FROM service_approvals "
-            "WHERE workflow_id = $1 AND task_id = $2",
+            "SELECT service_provider_id FROM service_approvals WHERE workflow_id = $1 AND task_id = $2",
             _uuid(workflow_id),
             task_id,
         )

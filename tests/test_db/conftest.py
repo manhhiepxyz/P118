@@ -68,6 +68,10 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
         await conn.execute(
             """
             TRUNCATE TABLE
+                -- Đề xuất đơn vị. Dọn TRƯỚC `service_quotes` vì nó tham chiếu
+                -- sang đó; `CASCADE` lo được, nhưng liệt kê rõ giữ đúng thứ tự
+                -- phụ thuộc mà phần còn lại của khối này đang theo.
+                service_provider_proposals,
                 -- Chứng từ báo giá. Sót lại thì `bao_gia_dang_song` của test
                 -- sau đọc phải báo giá của test trước — và vì vân tay tính từ
                 -- input, hai test dùng cùng một yêu cầu mẫu sẽ trùng vân tay.

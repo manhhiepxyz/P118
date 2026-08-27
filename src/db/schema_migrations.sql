@@ -1404,3 +1404,76 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_active
 -- không ai phân xử được.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_external
     ON service_quotes (service_provider_id, external_quote_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Bước D — ĐỀ XUẤT ĐƠN VỊ, và lượt xác nhận của người dùng
+-- ---------------------------------------------------------------------------
+-- Bước C chọn được một đơn vị nhưng không ghi gì: nó chỉ ĐỌC. Giữa lúc P-118
+-- nói "mình đề xuất Đại Tín, 470.000" và lúc khách bấm đồng ý có một khoảng
+-- thời gian thật — họ đọc, họ hỏi người nhà, họ đóng tab rồi mở lại. Khoảng ấy
+-- phải sống qua restart, qua worker thứ hai, qua một lượt deploy.
+--
+-- Nên đề xuất là một BẢN GHI, không phải một biến trong bộ nhớ.
+--
+-- KHÔNG chép provider/amount/currency vào đây
+-- ------------------------------------------
+-- Chúng đã nằm trên chứng từ báo giá. Chép sang là tạo nguồn sự thật thứ hai,
+-- và hai nguồn thì lệch — lệch đúng vào lúc báo giá bị thay thế hoặc hết hạn,
+-- tức đúng lúc con số cũ trông vẫn hợp lệ. `quote_id` là khoá ngoại; muốn biết
+-- giá thì đọc chứng từ.
+--
+-- `approval_actor` KHÔNG có mặt ở đây, và đó là cố ý. Nó là thứ SUY RA lúc
+-- dựng câu trả lời (`USER` trước xác nhận, `PROVIDER` sau), không phải một
+-- trạng thái được lưu. Lưu nó nghĩa là có hai chỗ nói "đang chờ ai", và chỗ
+-- thứ hai sẽ đứng im khi việc đổi tay.
+CREATE TABLE IF NOT EXISTS service_provider_proposals (
+    proposal_id UUID        PRIMARY KEY,
+    workflow_id UUID        NOT NULL,
+    task_id     VARCHAR(20) NOT NULL,
+    -- Chứng từ được đề xuất. Nguồn DUY NHẤT cho đơn vị, giá và tiền tệ.
+    quote_id    UUID        NOT NULL REFERENCES service_quotes (quote_id),
+    status      VARCHAR(16) NOT NULL DEFAULT 'PROPOSED'
+                CHECK (status IN ('PROPOSED', 'CONFIRMED', 'EXPIRED', 'SUPERSEDED')),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,
+    -- Cùng khuôn với `service_quotes`: đã xác nhận thì phải có mốc thời gian,
+    -- chưa xác nhận thì không được có.
+    CONSTRAINT chk_proposals_confirmed_at
+        CHECK ((status = 'CONFIRMED') = (confirmed_at IS NOT NULL))
+);
+
+-- Khoá ngoại tổng hợp tới đúng BƯỚC, và điều kiện `uq_workflow_tasks_wf_task`
+-- vì file này còn chạy trên database legacy chỉ có vài bảng.
+DO $$
+BEGIN
+    IF to_regclass('service_provider_proposals') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_proposals_task')
+       AND EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'uq_workflow_tasks_wf_task' AND contype IN ('u', 'p')
+       )
+    THEN
+        ALTER TABLE service_provider_proposals
+            ADD CONSTRAINT fk_proposals_task
+            FOREIGN KEY (workflow_id, task_id) REFERENCES workflow_tasks (workflow_id, task_id);
+    END IF;
+END $$;
+
+-- ĐÚNG MỘT đề xuất đang sống trên mỗi bước.
+--
+-- Không có ràng buộc này thì hai lượt đề xuất đồng thời (khách bấm hỏi lại,
+-- hai tab, một lượt retry) để lại hai dòng PROPOSED — và khách xác nhận một
+-- cái trong khi màn hình đang hiển thị cái kia. Đề xuất mới phải làm cái cũ
+-- SUPERSEDED trước, chứ không nằm cạnh nó.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_proposals_live
+    ON service_provider_proposals (workflow_id, task_id)
+ WHERE status = 'PROPOSED';
+
+-- Tra theo bước, gồm cả lịch sử — dùng cho màn giám sát và cho lượt đọc lại.
+CREATE INDEX IF NOT EXISTS idx_proposals_task
+    ON service_provider_proposals (workflow_id, task_id, status, created_at);
+
+-- Tra ngược từ chứng từ: "báo giá này đã được đề xuất chưa".
+CREATE INDEX IF NOT EXISTS idx_proposals_quote
+    ON service_provider_proposals (quote_id);
