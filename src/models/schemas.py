@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 
 
 class DemoContactProfile(BaseModel):
@@ -178,6 +178,59 @@ class DemoViewingApproval(BaseModel):
     viewing_time: str
     passenger_count: int | None = None
     wants_shuttle: bool = False
+
+
+class ServiceProposalProviderView(BaseModel):
+    """Đơn vị cung cấp, ở dạng người đọc được.
+
+    `id` đi kèm `name` vì hai thứ phục vụ hai việc: mã để đối chiếu log và hỗ
+    trợ, tên để hiển thị. Giao diện chỉ vẽ `name` — vẽ cả mã là bắt khách đọc
+    một định danh nội bộ không có nghĩa với họ.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
+class ServiceProposalActionView(BaseModel):
+    """MỘT việc khách còn phải quyết: đồng ý với đơn vị này cho bước này.
+
+    `extra="forbid"` không phải để bắt lỗi chính tả. Trước đó đây là
+    `dict[str, Any]`, và một dict thì chấp nhận mọi thứ — thiếu `valid_until`
+    thì giao diện vẽ một thẻ không có hạn, thừa `quote_id` thì một định danh
+    nội bộ đi thẳng ra màn hình, và cả hai đều im lặng cho tới khi ai đó nhìn
+    thấy. Model có kiểu biến hai lỗi ấy thành lỗi lúc dựng response.
+
+    KHÔNG mang `quote_id` hay `request_fingerprint`: chúng là chứng cứ nội bộ,
+    và khách không có gì để làm với chúng. Cái duy nhất khách cần gửi lại là
+    `proposal_id`.
+
+    `can_confirm` là thứ giao diện đọc để dựng nút, KHÔNG phải `effective_status`.
+    Hai trường vì hai câu hỏi khác nhau: "còn bấm được không" và "vì sao không".
+    Suy cái thứ nhất từ cái thứ hai nghĩa là mỗi lần thêm một trạng thái là một
+    lần phải sửa giao diện.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str = Field(min_length=1)
+    # BƯỚC mà đề xuất này thuộc về. Bắt buộc: một response mang hai đề xuất mà
+    # không nói cái nào cho việc nào thì giao diện chỉ còn cách đoán theo thứ tự.
+    task_id: str = Field(min_length=1)
+    provider: ServiceProposalProviderView
+    # STRICT: `"420000"` là vi phạm hợp đồng, không phải một con số cần ép kiểu.
+    # Pydantic mặc định sẽ nhận nó và ép sang `int` — im lặng, và che mất việc
+    # một tầng nào đó đang trả tiền dưới dạng chuỗi.
+    amount: StrictInt = Field(gt=0)
+    currency: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    valid_until: str = Field(min_length=1)
+    effective_status: Literal["PROPOSED", "CONFIRMED", "EXPIRED", "SUPERSEDED"]
+    # STRICT vì cùng lý do: `"false"` ép thành `True` là cách một cái nút bấm
+    # không được lại hiện ra.
+    can_confirm: StrictBool
 
 
 class DemoWorkflowEvent(BaseModel):
@@ -442,7 +495,7 @@ class DemoWorkflowResponse(BaseModel):
     # Giao diện dựng nút "đồng ý" từ `can_confirm` bên trong, KHÔNG từ
     # `status`: chứng từ có thể vừa hết hạn trong khi lượt dọn chưa chạy tới,
     # và lúc ấy cột vẫn ghi `PROPOSED`.
-    provider_proposal: dict[str, Any] | None = None
+    provider_proposal: ServiceProposalActionView | None = None
     # MỌI đề xuất khách còn phải quyết, thứ tự theo bước.
     #
     # Danh sách chứ không phải một cái: một kế hoạch được phép có hai bước
@@ -453,7 +506,7 @@ class DemoWorkflowResponse(BaseModel):
     # `provider_proposal` ở trên là ALIAS, và chỉ có giá trị khi danh sách có
     # ĐÚNG một phần tử. Nhiều hơn một thì nó là `None` — không âm thầm chọn cái
     # đầu, vì "cái đầu" là một quyết định giao diện không ai chủ ý đưa ra.
-    service_proposals: list[dict[str, Any]] = Field(default_factory=list)
+    service_proposals: list[ServiceProposalActionView] = Field(default_factory=list)
     # Mã lỗi ỔN ĐỊNH khi workflow hỏng: `LLM_CONFIGURATION_ERROR`,
     # `PROVIDER_UNAVAILABLE`, … Dùng để đối chiếu log server và cho admin đọc.
     # KHÔNG phải tên class exception — tên class là chi tiết cài đặt, đổi theo

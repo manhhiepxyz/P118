@@ -68,6 +68,7 @@ from src.models.schemas import (
     DemoWorkflowListResponse,
     DemoWorkflowRequest,
     DemoWorkflowResponse,
+    ServiceProposalActionView,
 )
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.compensation import release_on_failure
@@ -2041,12 +2042,12 @@ async def _facts_for(
         facts["dang_cho_ban_chon_don_vi"] = {
             "cac_de_xuat": [
                 {
-                    "buoc": d.get("task_id"),
-                    "don_vi": (d.get("provider") or {}).get("name"),
-                    "gia": d.get("amount"),
-                    "tien_te": d.get("currency"),
-                    "ly_do": d.get("reason"),
-                    "han_bao_gia": d.get("valid_until"),
+                    "buoc": d.task_id,
+                    "don_vi": d.provider.name,
+                    "gia": d.amount,
+                    "tien_te": d.currency,
+                    "ly_do": d.reason,
+                    "han_bao_gia": d.valid_until,
                 }
                 for d in response.service_proposals
             ],
@@ -5007,14 +5008,24 @@ def cau_de_xuat_don_vi(danh_sach: list[dict[str, Any]]) -> str:
 def _khoi_de_xuat(danh_sach: list[dict[str, Any]]) -> dict[str, Any]:
     """Hai trường response cho đề xuất, dựng cùng nhau ở MỘT chỗ.
 
+    MỘT mapper duy nhất: alias và phần tử trong danh sách là CÙNG một object,
+    không phải hai lần dựng từ cùng dữ liệu. Hai mapper nghĩa là hai chỗ để
+    lệch nhau, và chúng sẽ lệch đúng ở trường ai đó thêm sau này.
+
     `provider_proposal` là ALIAS, và chỉ có giá trị khi danh sách có ĐÚNG một
     phần tử. Nhiều hơn một thì nó là `None`: chọn cái đầu là một quyết định
     giao diện không ai chủ ý đưa ra, và nó biến "khách còn hai việc" thành
     "khách còn một việc" mà không có gì báo.
+
+    Dựng thành `ServiceProposalActionView` NGAY tại đây, không để dict đi tiếp.
+    Pydantic bắt thiếu trường và thừa trường ở chỗ này — muộn hơn thì một thẻ
+    không có hạn hoặc một `quote_id` lọt ra màn hình sẽ im lặng cho tới khi có
+    người nhìn thấy.
     """
+    items = [ServiceProposalActionView.model_validate(row) for row in danh_sach]
     return {
-        "service_proposals": list(danh_sach),
-        "provider_proposal": danh_sach[0] if len(danh_sach) == 1 else None,
+        "service_proposals": items,
+        "provider_proposal": items[0] if len(items) == 1 else None,
     }
 
 
