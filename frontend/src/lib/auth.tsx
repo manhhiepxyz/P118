@@ -46,7 +46,8 @@ interface AuthContextValue {
   register: (
     username: string,
     password: string,
-    email?: string,
+    email: string,
+    otpCode: string,
     profile?: RegisterProfileInput,
   ) => Promise<void>
   /** Đọc lại user qua /auth/me — dùng sau PATCH /users/me để UI cập nhật ngay. */
@@ -92,11 +93,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (
       username: string,
       password: string,
-      email?: string,
+      email: string,
+      otpCode: string,
       profile?: RegisterProfileInput,
     ) => {
       // Register trả user (không token) — tự login sau để có phiên.
-      await apiRegister(username, password, email, profile)
+      await apiRegister(username, password, email, otpCode, profile)
       await login(username, password)
     },
     [login],

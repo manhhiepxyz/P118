@@ -21,19 +21,24 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+import secrets
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, BackgroundTasks
 
 from src.api.auth import create_access_token, hash_password, verify_password
 from src.api.deps import get_current_user, get_user_repository
 from src.api.schemas import (
     LoginRequest,
     RegisterRequest,
+    SendOtpRequest,
     TokenResponse,
     UserResponse,
 )
 from src.config import get_settings
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.user_repository import UserAlreadyExistsError
+from src.db.otp_repository import OtpRepository
+from src.services.email_service import send_otp_email
 from src.orchestration.runtime_provider import acquire_repository
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -68,6 +73,41 @@ def _to_user_response(user: dict) -> UserResponse:
     )
 
 
+@router.post("/send-registration-otp", status_code=200)
+async def send_registration_otp(
+    req: SendOtpRequest,
+    background_tasks: BackgroundTasks,
+    users: Any = Depends(get_user_repository),
+) -> dict:
+    """Gửi OTP xác nhận email trước khi đăng ký."""
+    username = req.username.strip().lower()
+    user_by_username = await users.get_user_by_username(username)
+    if user_by_username is not None:
+        raise HTTPException(status_code=409, detail="Tên đăng nhập đã tồn tại.")
+
+    email = req.email.strip().lower()
+    user_by_email = await users.get_user_by_email(email)
+    if user_by_email is not None:
+        raise HTTPException(status_code=409, detail="Email này đã được sử dụng.")
+
+    otp_code = str(secrets.choice(range(100000, 999999)))
+    
+    repository = await acquire_repository()
+    pool = repository._pool
+    try:
+        from src.db.otp_repository import CooldownError
+        otp_repo = OtpRepository(pool)
+        await otp_repo.save_otp(email, otp_code)
+    except CooldownError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    finally:
+        await pool.close()
+
+    # Gửi email qua background để không block request
+    background_tasks.add_task(send_otp_email, email, otp_code)
+    return {"message": "OTP đã được gửi đến email của bạn."}
+
+
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(
     req: RegisterRequest,
@@ -75,17 +115,25 @@ async def register(
 ) -> UserResponse:
     """Đăng ký tài khoản mới — luôn tạo role='customer'. Không trả token.
 
-    KHÔNG tạo liên kết cư dân. Role cũ tên 'resident' khiến đăng ký xong trông
-    như đã là cư dân, và mọi chỗ kiểm "role == resident" để mở dịch vụ cư dân
-    đều mở cho tài khoản vừa tạo xong.
-
-    Trả 409 nếu username đã tồn tại (đồng bộ với nút trùng trong DB).
+    Yêu cầu mã OTP hợp lệ được gửi tới email.
     """
     username = req.username.strip().lower()
     password_hash = hash_password(req.password)
-    email = req.email.strip().lower() if req.email and req.email.strip() else None
+    email = req.email.strip().lower()
+
+    # Kiểm tra OTP trước
+    repository = await acquire_repository()
+    pool = repository._pool
+    try:
+        otp_repo = OtpRepository(pool)
+        is_valid = await otp_repo.verify_otp(email, req.otp_code)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail="Mã OTP không hợp lệ hoặc đã hết hạn.")
+    finally:
+        await pool.close()
 
     try:
+        from src.db.user_repository import EmailAlreadyExistsError
         user = await users.create_user(
             username=username,
             password_hash=password_hash,
@@ -100,6 +148,8 @@ async def register(
         )
     except UserAlreadyExistsError:
         raise HTTPException(status_code=409, detail="Tên đăng nhập đã tồn tại.") from None
+    except EmailAlreadyExistsError:
+        raise HTTPException(status_code=409, detail="Email này đã được sử dụng.") from None
 
     return _to_user_response(user)
 

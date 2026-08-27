@@ -289,7 +289,7 @@ def test_an_account_without_a_verified_resident_is_not_onboarded_by_the_planner(
 def test_the_tool_contract_docstring_states_the_real_count():
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[1] / "src" / "common" / "tool_contract.py").read_text()
+    text = (Path(__file__).resolve().parents[1] / "src" / "common" / "tool_contract.py").read_text(encoding="utf-8")
     assert "9 tool" not in text
 
 

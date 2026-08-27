@@ -84,19 +84,12 @@ UserRole = Literal["customer", "admin", "provider"]
 ResidentLinkStatus = Literal["NOT_LINKED", "PENDING", "VERIFIED", "REJECTED"]
 
 
-class RegisterRequest(BaseModel):
-    """Body cho POST /auth/register — user mới luôn là 'customer'.
-
-    Profile fields là THÔNG TIN TỰ KHAI, tất cả optional. `cccd_last4` chỉ nhận
-    đúng 4 chữ số cuối (mặt nạ) — không có toàn bộ giấy tờ đi qua wire này.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
+class RegistrationData(BaseModel):
+    """Các trường thông tin đăng ký cơ bản, dùng chung cho cả lúc gửi OTP và lúc đăng ký."""
     username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=8, max_length=128)
-    # Email là str thường (EmailStr cần email-validator chưa cài); chấp nhận None.
-    email: str | None = Field(default=None, max_length=255)
+    
+    email: str = Field(..., max_length=255, pattern=r"^[^@]+@[^@]+\.[^@]+$")
 
     full_name: str | None = Field(default=None, min_length=1, max_length=200)
     phone: str | None = Field(default=None, min_length=8, max_length=20)
@@ -110,6 +103,21 @@ class RegisterRequest(BaseModel):
         pattern=r"^[0-9]{4}$",
         description="4 chữ số cuối của CCCD — MẶT NẠ, không bao giờ gửi nguyên giấy tờ",
     )
+
+
+class SendOtpRequest(RegistrationData):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RegisterRequest(RegistrationData):
+    """Body cho POST /auth/register — user mới luôn là 'customer'.
+
+    Profile fields là THÔNG TIN TỰ KHAI, tất cả optional. `cccd_last4` chỉ nhận
+    đúng 4 chữ số cuối (mặt nạ) — không có toàn bộ giấy tờ đi qua wire này.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="Mã OTP 6 số")
 
 
 class LoginRequest(BaseModel):

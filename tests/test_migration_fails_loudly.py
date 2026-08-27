@@ -19,7 +19,7 @@ _SQL = Path(__file__).resolve().parents[1] / "src" / "db"
 
 
 def test_the_migration_has_no_catch_all_around_the_not_null_step():
-    text = (_SQL / "schema_migrations.sql").read_text()
+    text = (_SQL / "schema_migrations.sql").read_text(encoding="utf-8")
     assert "EXCEPTION WHEN others THEN" not in text
     assert "SET NOT NULL" in text
 
@@ -34,7 +34,7 @@ def test_the_migration_never_carries_a_connection_string_or_a_literal_secret():
     import re
 
     for name in ("schema.sql", "schema_migrations.sql"):
-        text = (_SQL / name).read_text()
+        text = (_SQL / name).read_text(encoding="utf-8")
         assert "postgresql://" not in text
         assert not re.search(r"(?i)password\s*=\s*['\"]", text)
         assert not re.search(r"sk-[A-Za-z0-9]{16,}", text)

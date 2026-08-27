@@ -24,6 +24,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+from unittest.mock import patch
 
 from src.api.routes import _extract_follow_up_answers
 
@@ -40,16 +41,18 @@ from src.api.routes import _extract_follow_up_answers
     ],
 )
 def test_a_bare_day_borrows_the_month_from_the_question(cau: str, mong_doi: str):
-    answers, unresolved = _extract_follow_up_answers(
-        cau, ["viewing_date"], anchor="2026-08-24", today=date(2026, 8, 23)
-    )
+    with patch("src.common.field_parsers._is_allowed_schedule_date", return_value=True):
+        answers, unresolved = _extract_follow_up_answers(
+            cau, ["viewing_date"], anchor="2026-08-24", today=date(2026, 8, 23)
+        )
 
     assert answers.get("viewing_date") == mong_doi, f"{cau!r} → {answers} / chưa đọc được: {unresolved}"
 
 
 def test_without_an_anchor_nothing_changes():
     """Không có giá trị cũ thì giữ nguyên hành vi cũ — không đoán bừa."""
-    answers, unresolved = _extract_follow_up_answers("2026-09-03", ["viewing_date"])
+    with patch("src.common.field_parsers._is_allowed_schedule_date", return_value=True):
+        answers, unresolved = _extract_follow_up_answers("2026-09-03", ["viewing_date"])
 
     assert answers.get("viewing_date") == "2026-09-03"
     assert unresolved == []
@@ -57,9 +60,10 @@ def test_without_an_anchor_nothing_changes():
 
 def test_the_anchor_never_invents_a_date_from_nothing():
     """Câu không có ngày nào thì vẫn là "chưa đọc được", không phải ngày neo."""
-    answers, unresolved = _extract_follow_up_answers(
-        "tôi chưa quyết định", ["viewing_date"], anchor="2026-08-24", today=date(2026, 8, 23)
-    )
+    with patch("src.common.field_parsers._is_allowed_schedule_date", return_value=True):
+        answers, unresolved = _extract_follow_up_answers(
+            "tôi chưa quyết định", ["viewing_date"], anchor="2026-08-24", today=date(2026, 8, 23)
+        )
 
     assert answers == {}
     assert unresolved == ["viewing_date"]
@@ -67,9 +71,10 @@ def test_the_anchor_never_invents_a_date_from_nothing():
 
 def test_a_date_far_ahead_keeps_its_own_month():
     """Lịch đặt tháng 12 mà nói "ngày 5" thì là 05/12, không phải 05 tháng này."""
-    answers, _unresolved = _extract_follow_up_answers(
-        "ngày 5", ["viewing_date"], anchor="2026-12-20", today=date(2026, 8, 23)
-    )
+    with patch("src.common.field_parsers._is_allowed_schedule_date", return_value=True):
+        answers, _unresolved = _extract_follow_up_answers(
+            "ngày 5", ["viewing_date"], anchor="2026-12-20", today=date(2026, 8, 23)
+        )
 
     assert answers.get("viewing_date") == "2026-12-05", answers
 

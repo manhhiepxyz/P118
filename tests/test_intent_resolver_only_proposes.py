@@ -198,7 +198,7 @@ def test_confidence_is_never_a_gate_anywhere():
     """
     from pathlib import Path
 
-    source = (Path(__file__).resolve().parents[1] / "src" / "orchestration" / "patch.py").read_text()
+    source = (Path(__file__).resolve().parents[1] / "src" / "orchestration" / "patch.py").read_text(encoding="utf-8")
     assert "confidence" not in source
 
 
@@ -209,7 +209,7 @@ def test_the_resolver_reaches_no_repository_executor_or_provider():
 
     path = Path(__file__).resolve().parents[1] / "src" / "agents" / "intent_resolver.py"
     used: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Name):
             used.add(node.id)
         elif isinstance(node, ast.Attribute):

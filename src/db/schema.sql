@@ -605,6 +605,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email
     ON users(email) WHERE email IS NOT NULL;
 
 
+CREATE TABLE IF NOT EXISTS registration_otps (
+    email VARCHAR(255) PRIMARY KEY,
+    otp_code VARCHAR(10) NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
 -- =============================================================
 -- Yêu cầu liên kết căn hộ do CHÍNH CHỦ TÀI KHOẢN gửi
 -- =============================================================

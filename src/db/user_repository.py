@@ -39,11 +39,19 @@ def _as_date(value: object) -> object:
 
 
 class UserAlreadyExistsError(ValueError):
-    """Username (hoặc email) đã tồn tại — map từ UniqueViolationError."""
+    """Username đã tồn tại — map từ UniqueViolationError."""
 
     def __init__(self, username: str) -> None:
         self.username = username
         super().__init__(f"Username {username} already exists")
+
+
+class EmailAlreadyExistsError(ValueError):
+    """Email đã tồn tại — map từ UniqueViolationError."""
+
+    def __init__(self, email: str) -> None:
+        self.email = email
+        super().__init__(f"Email {email} already exists")
 
 
 class UserRepository:
@@ -85,7 +93,8 @@ class UserRepository:
 
         `profile` nhận thêm full_name/phone/address/date_of_birth/gender/cccd_last4
         — tất cả nullable, tự khai. Raises:
-            UserAlreadyExistsError: username hoặc email đã tồn tại.
+            UserAlreadyExistsError: username đã tồn tại.
+            EmailAlreadyExistsError: email đã tồn tại.
         """
         columns = ["username", "email", "password_hash", "role"]
         values: list[object] = [username, email, password_hash, role]
@@ -105,6 +114,8 @@ class UserRepository:
                     *values,
                 )
         except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "users_email_key":
+                raise EmailAlreadyExistsError(email) from exc
             raise UserAlreadyExistsError(username) from exc
 
         return dict(row)
@@ -116,6 +127,16 @@ class UserRepository:
                 f"SELECT {', '.join(self._PUBLIC_COLUMNS)}, password_hash FROM users "
                 "WHERE username = $1 AND archived_at IS NULL",
                 username,
+            )
+            return dict(row) if row is not None else None
+
+    async def get_user_by_email(self, email: str) -> dict | None:
+        """Tìm user theo email (lowercase ở tầng gọi). Bao gồm password_hash."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {', '.join(self._PUBLIC_COLUMNS)}, password_hash FROM users "
+                "WHERE email = $1 AND archived_at IS NULL",
+                email,
             )
             return dict(row) if row is not None else None
 
