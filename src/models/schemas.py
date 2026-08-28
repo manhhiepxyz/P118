@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 
@@ -215,6 +215,20 @@ class ServiceProposalActionView(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Mã định danh CANONICAL của loại hành động. Giao diện chuyển theo mã này,
+    # không suy từ `status`, không suy từ tên tool, không suy từ câu chữ.
+    #
+    # Nằm ngay trong view đã có thay vì một schema bọc ngoài: đây vẫn là cùng
+    # một object mà `service_proposals` đang trả. Bọc thêm một lớp nghĩa là hai
+    # hình dạng cho cùng một việc, và giao diện sẽ phải biết cả hai.
+    kind: Literal["PROVIDER_PROPOSAL"] = "PROVIDER_PROPOSAL"
+    # Tiêu đề card, do BACKEND soạn.
+    #
+    # `min_length=1` không phải phép lịch sự: giao diện từng dùng `"—"` làm giá
+    # trị dự phòng khi không đọc được gì, và một card CÓ NÚT mang tiêu đề `"—"`
+    # là một card mời người ta bấm vào thứ họ không đọc được. Thiếu tiêu đề
+    # phải vỡ ở đây, không phải hiện ra một dấu gạch.
+    title: str = Field(min_length=1)
     proposal_id: str = Field(min_length=1)
     # BƯỚC mà đề xuất này thuộc về. Bắt buộc: một response mang hai đề xuất mà
     # không nói cái nào cho việc nào thì giao diện chỉ còn cách đoán theo thứ tự.
@@ -419,6 +433,119 @@ class DemoSessionListResponse(BaseModel):
     workflows: list[DemoWorkflowListItem] = Field(default_factory=list)
 
 
+class PaymentApprovalAction(BaseModel):
+    """Khách còn phải xác nhận MỘT khoản tiền.
+
+    `body` do BACKEND soạn. Trước đây giao diện tự viết câu "Chỗ đỗ xe đã được
+    giữ…" và dùng nó cho MỌI trạng thái `WAITING_APPROVAL` — nên một yêu cầu
+    chuyển nhà đang chờ chọn đơn vị cũng đọc được câu ấy, kèm một số tiền không
+    tồn tại. Câu chữ phải đi cùng dữ liệu sinh ra nó.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["PAYMENT_APPROVAL"] = "PAYMENT_APPROVAL"
+    task_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    body: str = Field(min_length=1)
+    # `StrictInt`: tiền không đi qua float. `gt=0` vì một khoản 0 đồng không
+    # cần ai xác nhận — nếu nó xuất hiện thì đó là dữ liệu hỏng, không phải một
+    # khoản miễn phí.
+    amount: StrictInt = Field(gt=0)
+    currency: str = Field(min_length=1)
+    can_act: StrictBool
+
+
+class ClarificationAction(BaseModel):
+    """Khách còn phải bổ sung thông tin.
+
+    Loại thứ ba, và là loại từng bị nuốt hoàn toàn: giao diện chỉ biết hai
+    nhánh — tham quan và "còn lại", nên câu hỏi bổ sung cũng được vẽ thành một
+    khoản thanh toán.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["CLARIFICATION"] = "CLARIFICATION"
+    task_id: str | None = None
+    title: str = Field(min_length=1)
+    # Một trong hai phải có nội dung — xem validator bên dưới. Câu hỏi tự do và
+    # danh sách ô đang thiếu là hai cách nói cùng một việc, tuỳ đường nào dựng.
+    question: str | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    can_act: StrictBool
+
+    @model_validator(mode="after")
+    def _phai_noi_duoc_dang_thieu_gi(self) -> "ClarificationAction":
+        """Một câu hỏi không nêu được hỏi gì thì không phải một việc làm được."""
+        if not (self.question or self.missing_fields):
+            raise ValueError("Câu hỏi bổ sung phải nêu được ô đang thiếu hoặc một câu hỏi.")
+        return self
+
+
+# VIỆC khách còn phải làm — MỘT trường, ba hình dạng, phân biệt bằng `kind`.
+#
+# Vì sao cần dù đã có `approval_actor`: `approval_actor` trả lời "AI phải làm"
+# (USER / PROVIDER / ADMIN). Nó KHÔNG trả lời "làm VIỆC GÌ", và thanh toán với
+# chọn đơn vị đều là `USER`. Giao diện đã lấp chỗ trống ấy bằng một phép suy:
+#
+#     waitingPayment = status === 'WAITING_APPROVAL' && !viewing_approval
+#
+# `WAITING_APPROVAL` dùng chung cho mọi kiểu chờ, nên phép suy ấy đúng một lần
+# trên bốn. Đo được: một yêu cầu chuyển nhà đang chờ chọn đơn vị hiện ra tiêu
+# đề "—", câu "Chỗ đỗ xe đã được giữ…", và một nút chung.
+#
+# `discriminator="kind"` để Pydantic chọn đúng nhánh khi đọc, và để OpenAPI mô
+# tả được ba hình dạng thay vì một `dict[str, Any]`.
+CustomerAction = Annotated[
+    PaymentApprovalAction | ServiceProposalActionView | ClarificationAction,
+    Field(discriminator="kind"),
+]
+
+
+# Nhãn của TỪNG LOẠI việc khách còn phải làm. Hằng số, không do model soạn —
+# đây là tên một loại hành động, không phải một câu tường thuật, và nó phải
+# giống hệt nhau qua mọi lượt đọc để người dùng nhận ra cùng một thứ.
+_TIEU_DE_THANH_TOAN = "Xác nhận thanh toán"
+_TIEU_DE_BO_SUNG = "Bổ sung thông tin"
+
+
+def _hanh_dong_thanh_toan(bao_gia: dict[str, Any], tasks: list[DemoTaskResult]) -> PaymentApprovalAction | None:
+    """Khoản tiền chờ khách duyệt, hoặc `None` khi không dựng nổi một card thật.
+
+    Trả `None` chứ không dựng một card thiếu dữ liệu: một thẻ CÓ NÚT mà không
+    nói được số tiền hay thuộc bước nào còn tệ hơn không có thẻ nào.
+
+    `body` nói về CHỖ ĐỖ XE chỉ khi báo giá thật sự đến từ một lượt giữ chỗ
+    (`booking_id`). Trước đây câu ấy được giao diện viết cứng và dùng cho mọi
+    trạng thái chờ, nên một yêu cầu chuyển nhà cũng đọc được nó.
+    """
+    so_tien = bao_gia.get("amount")
+    tien_te = bao_gia.get("currency")
+    if not isinstance(so_tien, int) or isinstance(so_tien, bool) or so_tien <= 0 or not tien_te:
+        return None
+
+    buoc = next((t.task_id for t in tasks if t.tool == "pay_fee"), None) or next(
+        (t.task_id for t in tasks if t.status == "WAITING_APPROVAL"), None
+    )
+    if not buoc:
+        return None
+
+    cho_do_xe = bool(bao_gia.get("booking_id"))
+    return PaymentApprovalAction(
+        task_id=buoc,
+        title=_TIEU_DE_THANH_TOAN,
+        body=(
+            "Chỗ đỗ xe đã được giữ. Khoản này chưa được thanh toán — chỉ thu sau khi bạn đồng ý."
+            if cho_do_xe
+            else "Khoản này chưa được thanh toán — chỉ thu sau khi bạn đồng ý."
+        ),
+        amount=so_tien,
+        currency=str(tien_te),
+        can_act=True,
+    )
+
+
 class DemoWorkflowResponse(BaseModel):
     status: Literal[
         "PENDING",
@@ -520,6 +647,13 @@ class DemoWorkflowResponse(BaseModel):
     # `viewing_approval` khác null — một suy diễn sẽ sai ngay khi có loại chờ
     # thứ ba.
     approval_actor: Literal["USER", "PROVIDER", "ADMIN"] | None = None
+    # VIỆC khách còn phải làm, và LOẠI của nó. Xem `CustomerAction`.
+    #
+    # `None` nghĩa là khách không phải làm gì — đang chờ đơn vị, đang chạy, hoặc
+    # đã xong. Giao diện KHÔNG được dựng card hành động khi trường này `None`,
+    # kể cả khi `status == "WAITING_APPROVAL"`: chờ đơn vị cũng là
+    # `WAITING_APPROVAL`, và đó chính là chỗ card sai mọc lên.
+    customer_action: CustomerAction | None = None
     # Đề xuất đơn vị đang chờ CHÍNH KHÁCH bấm đồng ý.
     #
     # Có mặt khi và chỉ khi `approval_actor == "USER"` vì lý do chọn đơn vị.
@@ -583,3 +717,53 @@ class DemoWorkflowResponse(BaseModel):
     events: list[DemoWorkflowEvent] = Field(default_factory=list)
     session_id: str | None = None
     parent_workflow_id: str | None = None
+
+    @model_validator(mode="after")
+    def _noi_ro_viec_khach_con_phai_lam(self) -> "DemoWorkflowResponse":
+        """Suy `customer_action` từ các trường đã có — MỘT chỗ, mọi đường dựng.
+
+        Vì sao suy ở đây thay vì đặt tay ở từng route: response này được dựng ở
+        hơn mười chỗ (đường chạy mới, đường đọc lại từ database, đường sau khi
+        đơn vị quyết định, đường sửa lỗi…). Đặt tay nghĩa là mười chỗ phải nhớ,
+        và chỗ quên sẽ rơi về đúng hành vi cũ — giao diện đoán, và đoán ra thẻ
+        thanh toán. Suy ở đây thì một route MỚI cũng tự đúng.
+
+        Thứ tự KHÔNG đảo được:
+
+          1. đề xuất đơn vị còn bấm được — cụ thể nhất, và nó mang sẵn `kind`;
+          2. còn khoản tiền chờ CHÍNH KHÁCH duyệt;
+          3. còn ô đang hỏi khách.
+
+        Không rơi vào nhánh nào thì `None`: khách không phải làm gì. `None` ở
+        đây quan trọng ngang ba nhánh kia — `WAITING_APPROVAL` cũng là trạng
+        thái lúc đang chờ ĐƠN VỊ, và đó chính là chỗ card sai mọc lên.
+
+        Giá trị người gọi tự đặt được TÔN TRỌNG: một route biết rõ hơn vẫn đặt
+        được, và bộ suy này chỉ điền vào chỗ trống.
+        """
+        if self.customer_action is not None:
+            return self
+
+        con_bam = next((p for p in self.service_proposals if p.can_confirm), None)
+        if con_bam is not None:
+            self.customer_action = con_bam
+            return self
+
+        # `approval_actor == "USER"` là điều kiện BẮT BUỘC cho khoản tiền: cùng
+        # một `payment_quote` vẫn còn đó sau khi khách đã duyệt, và lúc ấy
+        # người đang được chờ là đơn vị chứ không phải khách.
+        if self.payment_quote and self.approval_actor == "USER" and self.status == "WAITING_APPROVAL":
+            hanh_dong = _hanh_dong_thanh_toan(self.payment_quote, self.tasks)
+            if hanh_dong is not None:
+                self.customer_action = hanh_dong
+            return self
+
+        if self.status == "NEEDS_INFORMATION" and (self.question or self.missing_fields):
+            self.customer_action = ClarificationAction(
+                task_id=next((t.task_id for t in self.tasks if t.status == "WAITING_APPROVAL"), None),
+                title=_TIEU_DE_BO_SUNG,
+                question=self.question,
+                missing_fields=list(self.missing_fields),
+                can_act=True,
+            )
+        return self

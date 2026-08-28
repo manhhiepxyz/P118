@@ -5061,6 +5061,14 @@ def cau_de_xuat_don_vi(danh_sach: list[dict[str, Any]]) -> str:
     )
 
 
+# Nhãn của TỪNG LOẠI việc khách còn phải làm. Hằng số, không do model soạn —
+# đây là tên một loại hành động, không phải một câu tường thuật, và nó phải
+# giống hệt nhau qua mọi lượt đọc để người dùng nhận ra cùng một thứ.
+TIEU_DE_THANH_TOAN = "Xác nhận thanh toán"
+TIEU_DE_CHON_DON_VI = "Xác nhận đơn vị cung cấp"
+TIEU_DE_BO_SUNG = "Bổ sung thông tin"
+
+
 def _khoi_de_xuat(danh_sach: list[dict[str, Any]]) -> dict[str, Any]:
     """Hai trường response cho đề xuất, dựng cùng nhau ở MỘT chỗ.
 
@@ -5078,7 +5086,15 @@ def _khoi_de_xuat(danh_sach: list[dict[str, Any]]) -> dict[str, Any]:
     không có hạn hoặc một `quote_id` lọt ra màn hình sẽ im lặng cho tới khi có
     người nhìn thấy.
     """
-    items = [ServiceProposalActionView.model_validate(row) for row in danh_sach]
+    # Tiêu đề soạn ở BACKEND, ngay tại mapper duy nhất này.
+    #
+    # Không để giao diện tự đặt: nó đã từng làm vậy và đặt nhầm — mọi trạng
+    # thái `WAITING_APPROVAL` không phải tham quan đều nhận tiêu đề của thẻ
+    # thanh toán, kể cả một yêu cầu chuyển nhà không có khoản tiền nào.
+    #
+    # Hằng số, không do model soạn: đây là nhãn của một loại việc, không phải
+    # một câu tường thuật.
+    items = [ServiceProposalActionView.model_validate({"title": TIEU_DE_CHON_DON_VI, **row}) for row in danh_sach]
     return {
         "service_proposals": items,
         "provider_proposal": items[0] if len(items) == 1 else None,
