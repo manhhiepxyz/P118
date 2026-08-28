@@ -10,7 +10,12 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from src.common.move_locations import MOVE_LOCATIONS, distance_band, resolve_move_location_id
+from src.common.move_locations import (
+    MOVE_LOCATIONS,
+    distance_band,
+    find_move_location_id,
+    resolve_move_location_id,
+)
 from src.common.tool_contract import TOOL_CONTRACTS
 from src.services.mock.resident_services import resident_services_app
 
@@ -37,6 +42,10 @@ def test_the_location_catalog_is_canonical_and_resolves_vietnamese_names() -> No
     assert resolve_move_location_id("toa a1 riverside") == "MOVE-Q7-A1"
     assert resolve_move_location_id("Hà Nội") is None
     assert distance_band("MOVE-Q7-A1", "MOVE-Q7-B1") == "SAME_DISTRICT"
+
+
+def test_a_sentence_with_two_locations_is_ambiguous_instead_of_picking_one() -> None:
+    assert find_move_location_id("Chuyển từ Tòa A1 Riverside sang Tòa B1 Green View") is None
 
 
 @pytest.mark.asyncio

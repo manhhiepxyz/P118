@@ -451,5 +451,26 @@ export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction |
     }
   }
 
+  // WAITING_APPROVAL + approval_actor=USER + customer_action (không có payment_quote)
+  // → đang chờ khách chọn đơn vị chuyển nhà.
+  //
+  // Trả về pending để câu hỏi tiếp theo đi qua `respondTo`, không đi qua nhánh
+  // tạo workflow mới (nhánh ấy xoá `said.current` trước khi gửi request, tạo
+  // cửa sổ polling thấy câu cũ và nói lại lần nữa).
+  if (res.status === 'WAITING_APPROVAL' && res.approval_actor === 'USER' && res.customer_action && !res.payment_quote) {
+    return {
+      actionId: `proposal:${workflowId}`,
+      workflowId,
+      taskId: res.tasks.find((t) => t.status === 'WAITING_APPROVAL')?.task_id ?? '',
+      kind: 'provider_proposal',
+      status: 'WAITING_APPROVAL',
+      title: 'Chọn đơn vị',
+      message: res.answer || '',
+      details: [],
+      fingerprint: `proposal:${workflowId}`,
+      explain: res.answer || '',
+    }
+  }
+
   return null
 }

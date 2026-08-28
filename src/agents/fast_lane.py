@@ -106,7 +106,10 @@ class _DuDoan(BaseModel):
     consent: bool | None = None
     move_date: str | None = None
     move_time: str | None = None
-    move_vehicle: Literal["van", "truck"] | None = None
+    move_origin_id: str | None = None
+    move_destination_id: str | None = None
+    move_size: Literal["small", "medium", "large"] | None = None
+    move_vehicle: Literal["none", "van", "truck"] | None = None
     needs_elevator: bool | None = None
     needs_loading_support: bool | None = None
     tour_date: str | None = None
@@ -141,13 +144,17 @@ Trả về ĐÚNG khung JSON này, đủ mọi khoá:
  "issue_type": null, "description": null, "location": null,
  "preferred_date": null, "preferred_time": null,
  "interest_type": null, "preferred_contact_time": null, "consent": null,
- "move_date": null, "move_time": null, "move_vehicle": null,
- "needs_elevator": null, "needs_loading_support": null,
+ "move_date": null, "move_time": null,
+ "move_origin_id": null, "move_destination_id": null, "move_size": null,
+ "move_vehicle": null, "needs_elevator": null, "needs_loading_support": null,
  "tour_date": null, "passenger_count": null
 }
 vehicle_type: "car" | "motorcycle".  parking_zone: "ZONE_A" | "ZONE_B" ("Khu A"->ZONE_A).
 issue_type: "air_conditioning" | "plumbing" | "electrical" | "other".
-interest_type: "rent" ("Thuê") | "buy" ("Mua").  move_vehicle: "van" | "truck"."""
+interest_type: "rent" ("Thuê") | "buy" ("Mua").
+move_origin_id / move_destination_id: tên hoặc mã tòa nhà ("Tòa B2 Green View", "MOVE-Q7-B2", …).
+move_size: "small" (ít đồ/phòng nhỏ) | "medium" (vừa) | "large" (nhiều đồ/nhà lớn).
+move_vehicle: "none" (tự lo/không cần xe) | "van" | "truck"."""
 
 # Ô lấy từ TÀI KHOẢN, không từ câu người dùng gõ. Model không được bịa ra chúng
 # — `resident_id` là danh tính cư dân, và một chuỗi model tự nghĩ ra sẽ đăng ký

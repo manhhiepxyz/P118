@@ -6557,13 +6557,22 @@ async def _tra_loi_ve_de_xuat(
             "Bạn mở lại yêu cầu để xem tình trạng mới nhất nhé."
         )
 
-    await _persist_chat_turn(
+    # Cập nhật câu trả lời trong DB trên CHÍNH workflow đề xuất.
+    #
+    # `_persist_chat_turn` với `workflow_id` của đề xuất → `create_workflow` gây
+    # conflict (ID đã tồn tại) → bắt exception im lặng → DB không được cập nhật.
+    # Polling đọc câu cũ ("Mình tìm được…"), `said.current` đã bị frontend xoá
+    # trước khi gửi request → bong bóng cũ hiện lại trước bong bóng mới.
+    #
+    # Dùng `_save_answer_safely` thay: nó UPDATE trực tiếp `assistant_answer`,
+    # không cần tạo mới. Polling nhịp tiếp theo đọc đúng câu trả lời hỏi thêm,
+    # `sayOnce` dedupe thành công.
+    await _save_answer_safely(
         workflow_id,
-        goal=goal,
-        reply=ket_qua.cau,
-        owner_user_id=user["id"],
-        session_id=session_id,
-        parent_workflow_id=None,
+        answer=ket_qua.cau,
+        suggestions=[],
+        state="READY",
+        for_status="CHAT",
     )
     # Trả về TRẠNG THÁI HIỆN TẠI của chính workflow ấy, đọc lại từ database.
     #

@@ -843,7 +843,10 @@ export function JourneyWorkspacePage() {
      * gì". Chỉ `missing_info` mới cần chuyển tiếp, vì ở đó người dùng đang đối
      * thoại với Planner chứ không đứng trước một nút bấm.
      */
-    const forwardAside = intent === 'QUESTION' && action?.kind === 'missing_info'
+    // `provider_proposal`: mọi câu đều chuyển tiếp, không có ý định nào được xử
+    // lý tại chỗ. Backend (`_tra_loi_ve_de_xuat`) sẽ trả lời bằng chứng từ.
+    const forwardAside =
+      (intent === 'QUESTION' && action?.kind === 'missing_info') || action?.kind === 'provider_proposal'
 
     if (!action || (!outcome.ok && !forwardAside)) {
       say('agent', outcome.reply)
@@ -905,6 +908,18 @@ export function JourneyWorkspacePage() {
                 // chỗ vừa hết. Đo được: `book_parking` chạy lại với ZONE_A.
                 await continueWorkflow(action.workflowId, { fields: { [key]: matched } })
               : await continueWorkflow(action.workflowId, { message: value })
+      } else if (action.kind === 'provider_proposal') {
+        // Câu hỏi thêm về đề xuất đơn vị — backend bắt ở `_tra_loi_ve_de_xuat`.
+        //
+        // KHÔNG gọi `startWorkflow` từ nhánh chính: nhánh ấy xoá `said.current`
+        // trước khi gửi, mở cửa sổ để polling nói lại câu cũ. Ở đây `said.current`
+        // còn nguyên, `sayOnce` sẽ dedupe đúng khi polling trả về.
+        res = await startWorkflow(value ?? '', undefined, sessionRef.current)
+        // Câu trả lời thật đến thẳng từ HTTP response — poll đọc lại câu tóm
+        // tắt cũ từ _waiting_proposal_view (hardcode, không đọc assistant_answer),
+        // nên nếu absorbIfCurrent dưới bị thua seq poll thì answer bị mất.
+        // Gọi sayOnce ngay ở đây để answer luôn hiện, seq-race hay không.
+        sayOnce(res.answer)
       } else {
         // `decision` — đơn vị quyết, người dùng không bấm được gì.
         res = await getWorkflow(action.workflowId)
