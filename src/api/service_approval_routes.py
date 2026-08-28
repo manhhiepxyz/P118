@@ -341,6 +341,6 @@ async def decide_service_approval(
             outcome.get("assistant_message")
             or f"Yêu cầu **{target.get('service_label', 'dịch vụ')}** của bạn đã được xử lý. Vui lòng truy cập hệ thống để xem chi tiết."
         )
-        background_tasks.add_task(send_workflow_batch_email, user_email, ai_message)
+        background_tasks.add_task(send_workflow_batch_email, user_email, ai_message, workflow_id, task_id)
 
     return {"workflow_id": workflow_id, "task_id": task_id, "decision": body.decision, **outcome}

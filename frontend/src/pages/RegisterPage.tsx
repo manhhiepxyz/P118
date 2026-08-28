@@ -1,10 +1,24 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Eye, EyeOff, UserPlus, Mail } from 'lucide-react'
 
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { sendOtp } from '../lib/agentApi'
+
+const OTP_LIFETIME_SECONDS = 5 * 60
+const OTP_RESEND_COOLDOWN_SECONDS = 60
+
+function remainingSeconds(deadline: number | null): number {
+  if (deadline === null) return 0
+  return Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+}
+
+function formatCountdown(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+}
 
 /** Register — tạo tài khoản cư dân có OTP. */
 export function RegisterPage() {
@@ -25,7 +39,12 @@ export function RegisterPage() {
   const [step, setStep] = useState<1 | 2>(1)
   const [show, setShow] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [resending, setResending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [otpExpiresAt, setOtpExpiresAt] = useState<number | null>(null)
+  const [resendAvailableAt, setResendAvailableAt] = useState<number | null>(null)
+  const [otpSecondsLeft, setOtpSecondsLeft] = useState(0)
+  const [resendSecondsLeft, setResendSecondsLeft] = useState(0)
 
   // Hồ sơ tự khai — optional
   const [fullName, setFullName] = useState('')
@@ -34,6 +53,43 @@ export function RegisterPage() {
   const [dob, setDob] = useState('')
   const [gender, setGender] = useState('')
   const [cccdLast4, setCccdLast4] = useState('')
+
+  useEffect(() => {
+    if (step !== 2) return
+
+    const updateCountdowns = () => {
+      setOtpSecondsLeft(remainingSeconds(otpExpiresAt))
+      setResendSecondsLeft(remainingSeconds(resendAvailableAt))
+    }
+
+    updateCountdowns()
+    const timer = window.setInterval(updateCountdowns, 1000)
+    return () => window.clearInterval(timer)
+  }, [otpExpiresAt, resendAvailableAt, step])
+
+  function registrationPayload() {
+    return {
+      username: username.trim(),
+      password,
+      email: email.trim(),
+      full_name: fullName.trim() || undefined,
+      phone: phone.trim() || undefined,
+      address: address.trim() || undefined,
+      date_of_birth: dob || undefined,
+      gender: gender || undefined,
+      cccd_last4: cccdLast4.replace(/\D/g, '').slice(0, 4) || undefined,
+    }
+  }
+
+  function startOtpCountdowns() {
+    const now = Date.now()
+    const expiresAt = now + OTP_LIFETIME_SECONDS * 1000
+    const resendAt = now + OTP_RESEND_COOLDOWN_SECONDS * 1000
+    setOtpExpiresAt(expiresAt)
+    setResendAvailableAt(resendAt)
+    setOtpSecondsLeft(OTP_LIFETIME_SECONDS)
+    setResendSecondsLeft(OTP_RESEND_COOLDOWN_SECONDS)
+  }
 
   async function handleSendOtp(e: FormEvent) {
     e.preventDefault()
@@ -60,19 +116,9 @@ export function RegisterPage() {
 
     setSubmitting(true)
     try {
-      const payload = {
-        username: username.trim(),
-        password,
-        email: email.trim(),
-        full_name: fullName.trim() || undefined,
-        phone: phone.trim() || undefined,
-        address: address.trim() || undefined,
-        date_of_birth: dob || undefined,
-        gender: gender || undefined,
-        cccd_last4: cccdLast4.replace(/\D/g, '').slice(0, 4) || undefined,
-      }
-      await sendOtp(payload)
+      await sendOtp(registrationPayload())
       toast.push('success', 'Mã OTP đã được gửi đến email của bạn!')
+      startOtpCountdowns()
       setStep(2)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Không thể gửi OTP.'
@@ -90,6 +136,10 @@ export function RegisterPage() {
 
     if (otpCode.trim().length !== 6) {
       setError('Mã OTP phải bao gồm 6 chữ số.')
+      return
+    }
+    if (remainingSeconds(otpExpiresAt) === 0) {
+      setError('Mã OTP đã hết hạn. Vui lòng gửi mã mới để tiếp tục.')
       return
     }
 
@@ -110,6 +160,25 @@ export function RegisterPage() {
       setError(msg)
       toast.push('error', msg)
       setSubmitting(false)
+    }
+  }
+
+  async function handleResendOtp() {
+    if (submitting || resending || remainingSeconds(resendAvailableAt) > 0) return
+
+    setResending(true)
+    setError(null)
+    try {
+      await sendOtp(registrationPayload())
+      setOtpCode('')
+      startOtpCountdowns()
+      toast.push('success', 'Mã OTP mới đã được gửi đến email của bạn!')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Không thể gửi lại OTP.'
+      setError(msg)
+      toast.push('error', msg)
+    } finally {
+      setResending(false)
     }
   }
 
@@ -332,6 +401,26 @@ export function RegisterPage() {
                 Mã xác nhận 6 số đã được gửi tới <strong>{email}</strong>. Vui lòng kiểm tra hộp thư (kể cả mục Spam).
               </div>
 
+              <div
+                className={`rounded-xl border px-4 py-3 text-center ${
+                  otpSecondsLeft > 0
+                    ? 'border-teal-200 bg-teal-50/60 text-teal-800'
+                    : 'border-amber-200 bg-amber-50 text-amber-800'
+                }`}
+                aria-live="polite"
+              >
+                {otpSecondsLeft > 0 ? (
+                  <>
+                    <p className="text-xs font-medium uppercase tracking-wider">Mã còn hiệu lực</p>
+                    <p className="mt-1 font-mono text-2xl font-bold tabular-nums">
+                      {formatCountdown(otpSecondsLeft)}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-sm font-medium">Mã đã hết hạn. Hãy gửi mã mới để tiếp tục.</p>
+                )}
+              </div>
+
               <div>
                 <label htmlFor="reg-otp" className="mb-1 block text-sm font-medium text-gray-700">
                   Mã OTP <span className="font-medium text-red-500">*</span>
@@ -358,7 +447,7 @@ export function RegisterPage() {
               <div className="flex gap-3">
                 <button
                   type="button"
-                  disabled={submitting}
+                  disabled={submitting || resending}
                   onClick={() => {
                     setStep(1)
                     setError(null)
@@ -369,7 +458,7 @@ export function RegisterPage() {
                 </button>
                 <button
                   type="submit"
-                  disabled={otpCode.length !== 6 || submitting}
+                  disabled={otpCode.length !== 6 || otpSecondsLeft === 0 || submitting || resending}
                   className="inline-flex w-2/3 items-center justify-center gap-2 rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {submitting ? (
@@ -378,6 +467,22 @@ export function RegisterPage() {
                     <UserPlus className="h-4 w-4" aria-hidden />
                   )}
                   {submitting ? 'Đang tạo…' : 'Tạo tài khoản'}
+                </button>
+              </div>
+
+              <div className="text-center text-sm text-gray-500">
+                Chưa nhận được mã?{' '}
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  disabled={submitting || resending || resendSecondsLeft > 0}
+                  className="font-medium text-teal-700 hover:underline disabled:cursor-not-allowed disabled:text-gray-400 disabled:no-underline"
+                >
+                  {resending
+                    ? 'Đang gửi mã mới…'
+                    : resendSecondsLeft > 0
+                    ? `Gửi lại sau ${formatCountdown(resendSecondsLeft)}`
+                    : 'Gửi lại mã'}
                 </button>
               </div>
             </form>

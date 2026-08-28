@@ -205,6 +205,12 @@ class Settings(BaseSettings):
     smtp_port: int = Field(default=587, description="SMTP server port")
     smtp_username: str | None = Field(default=None, description="SMTP account username/email")
     smtp_password: str | None = Field(default=None, description="SMTP account password (or App Password)")
+    # Tài khoản xác thực SMTP không nhất thiết là địa chỉ người gửi. Resend,
+    # chẳng hạn, dùng username cố định `resend` nhưng yêu cầu From thuộc domain
+    # đã xác minh. Tách hai khái niệm để không phát thư với From="resend".
+    smtp_from_email: str | None = Field(default=None, description="Verified From address")
+    smtp_from_name: str = Field(default="P-118", description="Friendly sender name")
+    smtp_reply_to: str | None = Field(default=None, description="Optional Reply-To address")
 
 
 @lru_cache

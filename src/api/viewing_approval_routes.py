@@ -277,7 +277,12 @@ async def decide_viewing_approval(
                                 "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. "
                                 "Vui lòng truy cập hệ thống để xem chi tiết."
                             )
-                            background_tasks.add_task(send_workflow_batch_email, user_info["email"], ai_msg)
+                            background_tasks.add_task(
+                                send_workflow_batch_email,
+                                user_info["email"],
+                                ai_msg,
+                                workflow_id,
+                            )
             finally:
                 await pool.close()
         except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
@@ -380,7 +385,12 @@ async def decide_viewing_approval(
                             "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. "
                             "Vui lòng truy cập hệ thống để xem chi tiết."
                         )
-                        background_tasks.add_task(send_workflow_batch_email, user_info["email"], ai_msg)
+                        background_tasks.add_task(
+                            send_workflow_batch_email,
+                            user_info["email"],
+                            ai_msg,
+                            workflow_id,
+                        )
         finally:
             await pool.close()
     except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi

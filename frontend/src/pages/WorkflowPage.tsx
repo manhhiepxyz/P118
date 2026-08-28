@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, ChevronDown, Clock3, Info } from 'lucide-react'
 
 import { InspectorPanel } from '../components/workspace/InspectorPanel'
@@ -76,6 +76,8 @@ const TERMINAL_STATUSES = new Set(['SUCCESS', 'FAILED', 'CANCELLED'])
 
 export function WorkflowPage() {
   const { workflowId = '' } = useParams()
+  const [searchParams] = useSearchParams()
+  const requestedTaskId = searchParams.get('task')
   /** Diễn biến kỹ thuật: gập mặc định sau khi việc đã xong. */
   const [showTrace, setShowTrace] = useState(false)
 
@@ -111,6 +113,11 @@ export function WorkflowPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const journey = useMemo(() => (data ? journeyFromWorkflow(data) : null), [data])
   const selectedStep = journey?.steps.find((step) => step.id === selectedId) ?? null
+
+  useEffect(() => {
+    if (!requestedTaskId || !journey?.steps.some((step) => step.id === requestedTaskId)) return
+    setSelectedId(requestedTaskId)
+  }, [journey, requestedTaskId])
 
   /*
    * Cuộc hội thoại KHÔNG nằm trên một workflow.
