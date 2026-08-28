@@ -28,6 +28,7 @@ from src.api.small_talk import (
 from src.common.enums import ErrorCode, WorkflowStatus
 from src.common.failure_messages import ZONE_LABELS, repair_question, task_failure_message
 from src.common.failures import classify_failure, failure_for_code
+from src.common.feature_flags import chon_don_vi_theo_bao_gia_bat
 from src.common.field_parsers import (
     BOOLEAN_FIELDS,
     DATE_FIELDS,
@@ -48,6 +49,7 @@ from src.common.task_plan import InputRef, TaskPlan
 from src.common.tool_contract import TOOL_CONTRACTS
 from src.config import get_settings
 from src.db.capacity_repository import CapacityRepository
+from src.db.proposal_repository import de_xuat_dang_cho
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.session_repository import create_session, get_session
 from src.models.schemas import (
@@ -92,6 +94,7 @@ from src.orchestration.demo_service import (
     run_demo_workflow,
 )
 from src.orchestration.payment_approval import quote_from_results
+from src.orchestration.proposal_followup import tra_loi_hoi_them
 from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import (
@@ -3916,6 +3919,21 @@ async def start_demo_workflow(
         user_id=str(user["id"]),
     )
 
+    # Làn HỎI THÊM VỀ ĐỀ XUẤT — đứng TRƯỚC mọi làn khác.
+    #
+    # Vì sao trước cả small talk: một tiếng "ok" giữa lúc đang được đề xuất một
+    # đơn vị và một khoản tiền KHÔNG phải tiếng đệm. Small talk trả lời nó bằng
+    # một lời đáp lễ, và khách tưởng mình đã đồng ý trong khi không có gì được
+    # ghim. Cổng ở đây hẹp — chỉ mở khi phiên này thật sự có một đề xuất
+    # `schedule_move` đang chờ chính người đang gõ — nên nó không đụng tới bất
+    # kỳ cuộc trò chuyện nào khác.
+    #
+    # Đọc từ PostgreSQL, KHÔNG từ `_DEMO_JOBS`: sau restart câu hỏi tiếp vẫn
+    # phải được trả lời bằng chứng từ, không rơi về làn lập kế hoạch.
+    hoi_them = await _tra_loi_ve_de_xuat(request.goal, session_id=session_id, user=user)
+    if hoi_them is not None:
+        return hoi_them
+
     # Speech lane: greeting/acknowledgement/capability → trả CHAT ngay, 0 LLM.
     small_talk = classify(request.goal)
     if isinstance(small_talk, SmallTalk):
@@ -6426,6 +6444,124 @@ async def _changes_from_intent(
     label = MISSING_FIELD_LABELS.get(resolved.field, resolved.field)
     shown = ZONE_LABELS.get(str(resolved.value), str(resolved.value))
     return {resolved.field: resolved.value}, [(label, shown)]
+
+
+async def _de_xuat_dang_cho_trong_phien(session_id: str, *, owner_user_id: str) -> str | None:
+    """Workflow trong phiên này đang chờ CHÍNH KHÁCH chọn đơn vị. `None` nếu không có.
+
+    Bó trong một phiên và trong một chủ sở hữu, cùng lý do với `_amend_target`:
+    "còn bên nào rẻ hơn không" nói về việc vừa nói tới, không phải một việc từ
+    tuần trước — và chắc chắn không phải việc của người khác.
+
+    Đọc từ PostgreSQL mỗi lượt. Không cache, không `_DEMO_JOBS`: sau restart câu
+    hỏi tiếp vẫn phải tìm được đúng đề xuất, nếu không nó rơi xuống làn lập kế
+    hoạch và sinh ra một yêu cầu thứ hai.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await repository.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+        # MỚI NHẤT trước: đề xuất khách đang nhìn là đề xuất vừa được dựng.
+        for row in reversed(rows):
+            wid = str(row["workflow_id"])
+            if await de_xuat_dang_cho(pool, workflow_id=wid, task_id=None) is not None:
+                return wid
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("lan hoi them: khong doc duoc phien (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+    return None
+
+
+async def _tra_loi_ve_de_xuat(
+    goal: str,
+    *,
+    session_id: str,
+    user: dict[str, Any],
+) -> DemoWorkflowResponse | None:
+    """Trả lời một câu hỏi tiếp về đề xuất đơn vị. `None` = không phải việc này.
+
+    `None` ở MỌI nhánh không chắc chắn, và người gọi đi tiếp vào các làn cũ —
+    cùng hướng an toàn với làn sửa yêu cầu. Nhưng KHI đã có một đề xuất đang
+    chờ, làn này trả lời MỌI câu, kể cả câu nó không hiểu: để một câu hỏi về
+    báo giá rơi xuống làn lập kế hoạch chính là cách sinh ra workflow thứ hai.
+
+    Một lượt gọi model để PHÂN LOẠI, không hơn. Câu trả lời ghép từ dữ kiện đã
+    persist — xem `proposal_followup`.
+    """
+    if not chon_don_vi_theo_bao_gia_bat():
+        return None
+
+    workflow_id = await _de_xuat_dang_cho_trong_phien(session_id, owner_user_id=str(user["id"]))
+    if workflow_id is None:
+        return None
+
+    y_dinh = None
+    try:
+        from src.agents.proposal_followup_intent import BoPhanLoaiHoiThem
+        from src.services.llm import get_llm, structured_output_method
+
+        y_dinh = await BoPhanLoaiHoiThem(get_llm(), structured_output_method=structured_output_method()).doc(goal)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        # Không có mô hình thì vẫn KHÔNG rơi xuống Planner: `y_dinh=None` được
+        # đọc như `UNKNOWN`, và khách nhận một câu hỏi lại thay vì một kế hoạch
+        # họ không xin.
+        logger.warning("lan hoi them: khong phan loai duoc (%s)", type(exc).__name__)
+
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        ket_qua = await tra_loi_hoi_them(
+            pool,
+            workflow_id=workflow_id,
+            y_dinh=y_dinh,
+            owner_user_id=str(user["id"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("lan hoi them: khong tra loi duoc (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+    if ket_qua is None:
+        return None
+
+    await _persist_chat_turn(
+        workflow_id,
+        goal=goal,
+        reply=ket_qua.cau,
+        owner_user_id=user["id"],
+        session_id=session_id,
+        parent_workflow_id=None,
+    )
+    # Trả về TRẠNG THÁI HIỆN TẠI của chính workflow ấy, đọc lại từ database.
+    #
+    # Không dựng một response rời: giao diện đọc `customer_action` để vẽ thẻ, và
+    # sau một lượt đổi đơn vị thẻ ấy phải đổi theo. Dựng rời nghĩa là câu trả
+    # lời nói một đằng còn thẻ vẽ một nẻo.
+    hien_tai = await _public_view_from_db(workflow_id)
+    if hien_tai is None:
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="CHAT",
+            stage="CHAT",
+            message=ket_qua.cau,
+            answer=ket_qua.cau,
+            session_id=session_id,
+        )
+    return hien_tai.model_copy(
+        update={
+            "message": ket_qua.cau,
+            "answer": ket_qua.cau,
+            "response_state": "READY",
+            "session_id": session_id,
+        }
+    )
 
 
 async def _amend_target(session_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
