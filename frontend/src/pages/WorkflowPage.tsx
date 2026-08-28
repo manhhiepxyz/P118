@@ -228,12 +228,26 @@ export function WorkflowPage() {
   const headline = finished && resultTask ? `${resultTask.title} thành công` : (data.summary || data.message || 'Yêu cầu của bạn')
   /** Bước hỏng ĐẦU TIÊN — cái sau thường chỉ là hệ quả của cái này. */
   const failedStep = data.tasks.find((task) => task.status === 'FAILED')
-  const quote = data.payment_quote ?? {}
   // Cùng status WAITING_APPROVAL nhưng KHÁC loại chờ: lịch tham quan chờ đơn vị
   // duyệt, khách chỉ xem. Phân biệt bằng `viewing_approval`, không dùng status
   // riêng — đây là tiền lệ đã có trong codebase.
   const waitingViewing = data.status === 'WAITING_APPROVAL' && Boolean(data.viewing_approval)
-  const waitingPayment = data.status === 'WAITING_APPROVAL' && !waitingViewing
+
+  // VIỆC khách còn phải làm, do BACKEND nói ra.
+  //
+  // Dòng trước đây ở đây là:
+  //
+  //     const waitingPayment = data.status === 'WAITING_APPROVAL' && !waitingViewing
+  //
+  // `WAITING_APPROVAL` dùng chung cho MỌI kiểu chờ — chờ khách trả tiền, chờ
+  // khách chọn đơn vị, chờ khách bổ sung thông tin, chờ đơn vị nhận việc. Suy
+  // một trong bốn thứ ấy từ "không phải tham quan" là đoán, và cái đoán ấy sai
+  // ba lần trên bốn. Đo được: một yêu cầu chuyển nhà đang chờ chọn đơn vị hiện
+  // ra tiêu đề "—", câu "Chỗ đỗ xe đã được giữ…", và một nút chung.
+  //
+  // `customer_action` là mã CANONICAL. Không suy từ status, không suy từ tên
+  // tool, không suy từ câu chữ.
+  const action = data.customer_action ?? null
 
   return (
     <WorkspaceShell>
@@ -445,9 +459,11 @@ export function WorkflowPage() {
             </section>
           )}
 
-          {/* ── Chờ BẠN: có nút, và nút chính là phần tử mạnh nhất ──── */}
-          {waitingPayment && (
+          {/* ── Chờ BẠN: MỘT card, đúng loại việc backend nói ────────── */}
+          {action && (
             <section
+              data-testid="customer-action"
+              data-action-kind={action.kind}
               className="rise mt-9 rounded-[var(--r-sm)] p-5"
               style={{
                 color: 'var(--waiting-user)',
@@ -457,27 +473,57 @@ export function WorkflowPage() {
             >
               <p className="flex items-center gap-2.5 text-[13px] font-bold uppercase tracking-[0.1em]">
                 <Info className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-                Cần bạn xác nhận
-              </p>
-              {/* `data-quote-amount`: neo cho kiểm thử. Harness từng bám vào
-                  `p.text-2xl` — một BẬC TYPOGRAPHY. Cỡ chữ đổi là phép kiểm
-                  "báo giá khớp booking" báo đỏ, dù số tiền vẫn đúng và vẫn
-                  hiện ngay đó. */}
-              <p
-                data-quote-amount
-                className="mt-3 font-mono text-[30px] font-semibold tabular-nums text-[var(--text-primary)]"
-              >
-                {formatVnd(quote.amount as number | undefined, quote.currency as string | undefined)}
-              </p>
-              <p className="mt-2 text-[15px] leading-[1.6] text-[var(--text-secondary)]">
-                Chỗ đỗ xe đã được giữ. Khoản này chưa được thanh toán — chỉ thu sau khi bạn đồng ý.
+                {/* Tiêu đề do backend soạn. KHÔNG có `?? '—'` ở đây: một card
+                    có nút mà tiêu đề là một dấu gạch là card mời người ta bấm
+                    vào thứ họ không đọc được. Backend đã chặn tiêu đề rỗng
+                    bằng `min_length=1`, nên chỗ này không cần bản dự phòng. */}
+                {action.title}
               </p>
 
-              {/* Nút "Xác nhận thanh toán" / "Từ chối" ĐÃ GỠ.
-                  Tiền là quyết định nặng nhất trong cả luồng, và nó phải có
-                  đúng MỘT chỗ để bấm. Hai chỗ nghĩa là hai đường có thể lệch
-                  nhau, và chỗ lệch ấy nằm ngay trên một khoản tiền thật.
-                  Báo giá vẫn hiện ở đây — đọc được, không bấm được. */}
+              {action.kind === 'PAYMENT_APPROVAL' && (
+                <>
+                  {/* `data-quote-amount`: neo cho kiểm thử. Harness từng bám vào
+                      `p.text-2xl` — một BẬC TYPOGRAPHY. Cỡ chữ đổi là phép kiểm
+                      "báo giá khớp booking" báo đỏ, dù số tiền vẫn đúng. */}
+                  <p
+                    data-quote-amount
+                    className="mt-3 font-mono text-[30px] font-semibold tabular-nums text-[var(--text-primary)]"
+                  >
+                    {formatVnd(action.amount, action.currency)}
+                  </p>
+                  {/* Câu này đến từ backend cùng với con số sinh ra nó. Trước
+                      đây nó là chuỗi cứng ở giao diện và nói về chỗ đỗ xe cho
+                      MỌI loại chờ. */}
+                  <p className="mt-2 text-[15px] leading-[1.6] text-[var(--text-secondary)]">{action.body}</p>
+                </>
+              )}
+
+              {action.kind === 'PROVIDER_PROPOSAL' && (
+                <>
+                  <p className="mt-3 text-[17px] font-semibold text-[var(--text-primary)]">
+                    {action.provider.name}
+                  </p>
+                  <p
+                    data-quote-amount
+                    className="mt-1 font-mono text-[30px] font-semibold tabular-nums text-[var(--text-primary)]"
+                  >
+                    {formatVnd(action.amount, action.currency)}
+                  </p>
+                  <p className="mt-2 text-[15px] leading-[1.6] text-[var(--text-secondary)]">{action.reason}</p>
+                </>
+              )}
+
+              {action.kind === 'CLARIFICATION' && (
+                <p className="mt-3 text-[15px] leading-[1.6] text-[var(--text-secondary)]">
+                  {action.question ??
+                    `Mình cần thêm: ${action.missing_fields.join(', ')}.`}
+                </p>
+              )}
+
+              {/* Nút quyết định thật nằm ở workspace — MỘT chỗ để bấm.
+                  Tiền và việc chọn đơn vị là hai quyết định nặng, và hai chỗ
+                  bấm nghĩa là hai đường có thể lệch nhau. Trang này đọc được,
+                  không bấm được. */}
               <Link
                 to={`/workspace?w=${encodeURIComponent(workflowId)}`}
                 className="press mt-5 inline-flex min-h-12 items-center gap-2 rounded-[var(--r-sm)] px-6 text-[15px] font-semibold"

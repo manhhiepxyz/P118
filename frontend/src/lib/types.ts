@@ -204,7 +204,42 @@ export interface AgentServiceProposalProvider {
  * duy nhất cần gửi lại là `proposal_id`. Backend chặn chúng bằng
  * `extra="forbid"`, nên nếu chúng xuất hiện ở đây thì response đã sai từ server.
  */
+/** Khách còn phải xác nhận một khoản tiền. */
+export interface AgentPaymentApprovalAction {
+  kind: 'PAYMENT_APPROVAL'
+  task_id: string
+  title: string
+  /** Câu mô tả do BACKEND soạn — giao diện không tự viết. */
+  body: string
+  amount: number
+  currency: string
+  can_act: boolean
+}
+
+/** Khách còn phải bổ sung thông tin. */
+export interface AgentClarificationAction {
+  kind: 'CLARIFICATION'
+  task_id: string | null
+  title: string
+  question: string | null
+  missing_fields: string[]
+  can_act: boolean
+}
+
+/**
+ * Union phân biệt bằng `kind` — TypeScript thu hẹp được, nên quên một nhánh là
+ * lỗi biên dịch chứ không phải một thẻ vẽ sai lúc chạy.
+ */
+export type AgentCustomerAction =
+  | AgentPaymentApprovalAction
+  | AgentServiceProposal
+  | AgentClarificationAction
+
 export interface AgentServiceProposal {
+  /** Mã định danh loại hành động. Giao diện chuyển theo trường NÀY. */
+  kind: 'PROVIDER_PROPOSAL'
+  /** Tiêu đề card, do backend soạn. Không bao giờ rỗng — Pydantic chặn. */
+  title: string
   proposal_id: string
   /** BƯỚC mà đề xuất này thuộc về — thứ phân biệt hai thẻ với nhau. */
   task_id: string
@@ -295,6 +330,24 @@ export interface AgentWorkflowResponse {
    * Mock không bao giờ đặt field này — hai chế độ phân biệt bằng null.
    */
   payment_redirect_url: string | null
+  /**
+   * VIỆC khách còn phải làm, và LOẠI của nó.
+   *
+   * `null` nghĩa là khách KHÔNG phải làm gì — đang chờ đơn vị, đang chạy, hoặc
+   * đã xong. Đừng dựng card hành động khi trường này `null`, kể cả lúc
+   * `status === 'WAITING_APPROVAL'`: chờ đơn vị cũng mang status ấy.
+   *
+   * Trước khi có trường này, trang chi tiết suy loại việc bằng
+   * `status === 'WAITING_APPROVAL' && !viewing_approval` rồi vẽ thẻ thanh toán
+   * — nên một yêu cầu chuyển nhà đang chờ chọn đơn vị hiện ra tiêu đề "—", câu
+   * "Chỗ đỗ xe đã được giữ…" và một nút chung. Chuyển theo `kind`, không suy.
+   *
+   * KHÔNG thay `payment_redirect_url` ở trên: hai trường trả lời hai câu khác
+   * nhau. `customer_action` nói KHÁCH PHẢI LÀM GÌ; `payment_redirect_url` nói
+   * TRÌNH DUYỆT PHẢI ĐI ĐÂU khi việc ấy là trả tiền qua cổng. Gộp chúng lại là
+   * mất một trong hai — và lượt gộp nhánh này đã suýt làm đúng thế.
+   */
+  customer_action: AgentCustomerAction | null
   /**
    * Cùng status WAITING_APPROVAL với thanh toán nhưng KHÁC loại chờ: lịch tham
    * quan đang chờ provider duyệt trong /review. Khác null → hiển thị màn chờ

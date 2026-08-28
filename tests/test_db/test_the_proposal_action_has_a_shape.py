@@ -41,6 +41,10 @@ YEU_CAU = {
 }
 
 DAY_DU = {
+    # `title` là phần của "đầy đủ" từ khi response mang mã loại hành động:
+    # giao diện dựng tiêu đề card từ đây, không tự đặt. Thiếu nó thì thẻ rơi về
+    # một chuỗi dự phòng — và chuỗi dự phòng chính là thứ đã hiện sai.
+    "title": "Xác nhận đơn vị cung cấp",
     "proposal_id": "p-1",
     "task_id": "T1",
     "provider": {"id": "MOV-03", "name": "Dịch vụ An Khang"},

@@ -20,15 +20,56 @@ const CO = process.argv[2]
 if (CO !== '0' && CO !== '1') { console.log('DỪNG: truyền 0 hoặc 1'); process.exit(2) }
 const API = process.env.P118_API ?? 'http://127.0.0.1:8000'
 const PW = 'Passw0rd!123'
-const psql = (q) => execFileSync('docker', ['exec', 'p118_postgres', 'psql', '-U', 'p118', '-d', 'p118_db', '-tAc', q], { encoding: 'utf8' }).trim()
+// Kho mà probe ĐẾM. Phải là chính kho backend đang phục vụ — xem `chotCungKho`.
+//
+// `p118_db` nằm trong container, `p118_e2e_db` nằm ở PostgreSQL local, và hai
+// máy chủ cùng cổng 5432. Bản đầu của file này gắn cứng kho trong container,
+// nên khi trỏ `P118_API` sang backend e2e nó vẫn đếm kho demo — và báo "0 báo
+// giá" cho một workflow có ba. Một probe đọc nhầm kho không đỏ vì sản phẩm sai;
+// nó đỏ vì chính nó sai, và đó là kiểu đỏ tốn thời gian nhất.
+const DB = process.env.P118_DB ?? 'p118_db'
+const psql = (cau) =>
+  DB === 'p118_db'
+    ? execFileSync('docker', ['exec', 'p118_postgres', 'psql', '-U', 'p118', '-d', DB, '-tAc', cau], { encoding: 'utf8' }).trim()
+    : execFileSync('psql', ['-d', DB, '-tAc', cau], { encoding: 'utf8' }).trim()
 const q = (s) => `'${String(s).replace(/'/g, "''")}'`
 
-const thay = docker_env()
-function docker_env() {
-  try { return execFileSync('docker', ['exec', 'p118_backend', 'printenv', 'SERVICE_PROVIDER_MATCHING'], { encoding: 'utf8' }).trim() }
-  catch { return '(chưa đặt)' }
+/** Backend đang phục vụ kho nào — hỏi chính nó, rồi so với kho probe đếm. */
+async function chotCungKho() {
+  const r = await fetch(`${API}/ready`)
+  const j = await r.json().catch(() => ({}))
+  const chi_tiet = (j.checks ?? []).find((c) => c.name === 'database')?.detail ?? ''
+  const cua_backend = chi_tiet.split('database=')[1]?.trim()
+  if (cua_backend !== DB) {
+    console.log(`DỪNG: backend phục vụ ${cua_backend}, probe đếm ${DB}. Đặt P118_DB cho khớp.`)
+    process.exit(2)
+  }
 }
-if (thay !== CO) { console.log(`DỪNG: container đang thấy cờ = ${thay}, không phải ${CO}. Chạy 'docker compose up -d backend' sau khi sửa .env.`); process.exit(2) }
+
+/** Cờ mà TIẾN TRÌNH ĐANG PHỤC VỤ thật sự thấy.
+ *
+ * Chỉ đọc được khi backend chạy trong container. Với một backend local (dùng
+ * cho `p118_e2e_db`) thì không có đường nào hỏi biến môi trường của nó, nên
+ * giá trị lấy từ argv — và bài in ra điều đó thay vì im lặng giả vờ đã kiểm.
+ *
+ * Bản đầu gọi `docker exec` vô điều kiện, nên trỏ API sang backend local là
+ * DỪNG với một câu nói về container không liên quan. Cùng một kiểu lệch với
+ * chuyện đếm nhầm kho ngay bên trên. */
+function coCuaTienTrinh() {
+  if (DB !== 'p118_db') return null
+  try {
+    return execFileSync('docker', ['exec', 'p118_backend', 'printenv', 'SERVICE_PROVIDER_MATCHING'], { encoding: 'utf8' }).trim()
+  } catch {
+    return '(chưa đặt)'
+  }
+}
+const thay = coCuaTienTrinh()
+if (thay === null) {
+  console.log(`cờ = ${CO} (nhận từ đối số — backend local không hỏi được biến môi trường)`)
+} else if (thay !== CO) {
+  console.log(`DỪNG: container đang thấy cờ = ${thay}, không phải ${CO}. Chạy 'docker compose up -d backend' sau khi sửa .env.`)
+  process.exit(2)
+}
 
 const loi = []
 const check = (t, ok, ct = '') => { console.log(`  ${ok ? '✓' : '✗'} ${t}${ct ? ` — ${ct}` : ''}`); if (!ok) loi.push(t) }
