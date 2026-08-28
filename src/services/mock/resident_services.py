@@ -9,6 +9,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.common.move_locations import distance_band
 from src.mock import schemas
 from src.mock.errors import install_error_handler, not_found
 from src.mock.ids import make_generator
@@ -76,6 +77,12 @@ def create_maintenance_request(payload: schemas.CreateMaintenanceRequest) -> sch
     summary="Đặt lịch chuyển nhà",
 )
 def schedule_move(payload: schemas.ScheduleMoveRequest) -> schemas.ApiEnvelope:
+    if distance_band(payload.move_origin_id, payload.move_destination_id) is None:
+        return schemas.ApiEnvelope(
+            success=False,
+            error_code="OUT_OF_SERVICE_AREA",
+            message="Tuyến chuyển nhà này chưa được hỗ trợ hoặc chưa có đơn vị vận chuyển phù hợp.",
+        )
     move_request_id = _new_move_id()
     result = {
         "move_request_id": move_request_id,
@@ -118,11 +125,20 @@ def quote_move(service_provider_id: str, payload: schemas.QuoteMoveRequest) -> s
             error_code="NO_AVAILABILITY",
             message=f"{don_vi.ten} không nhận việc ngày {payload.move_date.isoformat()}",
         )
+    pham_vi = distance_band(payload.move_origin_id, payload.move_destination_id)
+    if pham_vi is None:
+        return schemas.ApiEnvelope(
+            success=False,
+            error_code="OUT_OF_SERVICE_AREA",
+            message="Tuyến chuyển nhà này chưa được hỗ trợ hoặc chưa có đơn vị vận chuyển phù hợp.",
+        )
     gia = gia_chuyen_nha(
         don_vi,
         move_vehicle=payload.move_vehicle,
         needs_elevator=payload.needs_elevator,
         needs_loading_support=payload.needs_loading_support,
+        distance_band=pham_vi,
+        move_size=payload.move_size,
     )
     return schemas.ApiEnvelope(
         success=True,

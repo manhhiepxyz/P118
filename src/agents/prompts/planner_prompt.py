@@ -26,7 +26,7 @@ mục tiêu đó. Bạn CHỈ lập kế hoạch; bạn không thực thi bất 
 | schedule_property_viewing | project_id, viewing_date, viewing_time | viewing_id, project_id, project_name, viewing_date, viewing_time, viewing_status, contact_name, contact_phone, receptionist_name, receptionist_phone, reception_area, reception_time |
 | register_property_interest | project_id, interest_type, preferred_contact_time, consent | interest_id, project_id, project_name, interest_status, contact_channel |
 | create_maintenance_request | issue_type, description, location, preferred_date, preferred_time | maintenance_id, maintenance_status, appointment_date, appointment_time |
-| schedule_move | move_date, move_time, needs_elevator, needs_loading_support, move_vehicle | move_request_id, move_status, move_date, move_time, elevator_slot |
+| schedule_move | move_date, move_time, move_origin_id, move_destination_id, move_size, needs_elevator, needs_loading_support, move_vehicle | move_request_id, move_status, move_date, move_time, elevator_slot |
 | register_vehicle | resident_id, plate_number, vehicle_type | vehicle_id |
 | book_parking | vehicle_id, booking_date, parking_zone | booking_id, parking_zone, booking_date, amount, currency |
 | pay_fee | booking_id, amount, currency | payment_id, payment_status |
@@ -220,9 +220,17 @@ Vẫn giữ nguyên: không được lùi về quá khứ, và cách nói còn m
 - `create_maintenance_request` và `schedule_move` độc lập với nhau và độc lập
   với parking. Nếu user yêu cầu cùng lúc, để `depends_on=[]` cho cả hai để
   Executor có thể chạy song song.
+- `schedule_move` chỉ hỗ trợ các điểm nội khu sau: Tòa A1 Riverside,
+  Tòa A2 Riverside, Tòa B1 Green View, Tòa B2 Green View, Tòa C1 Sunrise,
+  Tòa C2 Sunrise. Ghi tên người dùng nói vào `move_origin_id` /
+  `move_destination_id`; Validator đổi sang mã canonical. Ngoài danh mục thì
+  trả NEEDS_INFORMATION cho đúng field, không tự rút gọn địa chỉ hay đoán quận.
+- `move_size` là `small` (ít đồ/phòng nhỏ), `medium` (căn 1–2 phòng) hoặc
+  `large` (căn 3 phòng trở lên). Không đủ căn cứ thì hỏi lại.
 - Không tự thêm `pay_fee`: mock bảo trì/chuyển nhà MVP chỉ tiếp nhận và xếp
   lịch, chưa phát sinh khoản thanh toán.
-- Không tự đoán ngày, giờ, nhu cầu thang máy, hỗ trợ bốc dỡ hoặc loại xe.
+- Không tự đoán ngày, giờ, điểm đi/đến, quy mô đồ, nhu cầu thang máy, hỗ trợ
+  bốc dỡ hoặc loại xe.
 
 ## Quy tắc đặt lịch xem nhà
 
@@ -425,7 +433,8 @@ khác soạn câu chữ. Đừng viết gì thêm vào output.
 project_id, viewing_date, viewing_time, tour_date, passenger_count,
 interest_type, preferred_contact_time, consent,
 issue_type, description, location, preferred_date, preferred_time,
-move_date, move_time, needs_elevator, needs_loading_support, move_vehicle,
+move_date, move_time, move_origin_id, move_destination_id, move_size,
+needs_elevator, needs_loading_support, move_vehicle,
 plate_number, vehicle_type, booking_date, parking_zone,
 supported_goal, payment_quote
 

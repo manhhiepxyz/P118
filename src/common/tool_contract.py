@@ -314,6 +314,9 @@ TOOL_CONTRACTS: Mapping[str, ToolContract] = MappingProxyType(
             inputs={
                 "move_date": _DATE,
                 "move_time": _TIME,
+                "move_origin_id": _STRING,
+                "move_destination_id": _STRING,
+                "move_size": FieldSpec(kind="enum", enum=frozenset({"small", "medium", "large"})),
                 "needs_elevator": FieldSpec(kind="boolean"),
                 "needs_loading_support": FieldSpec(kind="boolean"),
                 "move_vehicle": FieldSpec(kind="enum", enum=frozenset({"none", "van", "truck"})),

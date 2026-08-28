@@ -93,7 +93,18 @@ PATCHABLE_FIELDS_BY_TOOL: dict[str, frozenset[str]] = {
     "create_maintenance_request": frozenset(
         {"issue_type", "description", "location", "preferred_date", "preferred_time"}
     ),
-    "schedule_move": frozenset({"move_date", "move_time", "needs_elevator", "needs_loading_support", "move_vehicle"}),
+    "schedule_move": frozenset(
+        {
+            "move_date",
+            "move_time",
+            "move_origin_id",
+            "move_destination_id",
+            "move_size",
+            "needs_elevator",
+            "needs_loading_support",
+            "move_vehicle",
+        }
+    ),
     "register_property_interest": frozenset({"project_id", "interest_type", "preferred_contact_time"}),
     "pay_fee": frozenset(),
 }

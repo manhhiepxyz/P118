@@ -244,6 +244,42 @@ async def test_one_user_turn_produces_exactly_one_assistant_reply(client, db_poo
     assert sau - truoc <= 0, f"một lượt hỏi sinh {sau - truoc} bản ghi hội thoại mới"
 
 
+@pytest.mark.asyncio
+async def test_asking_for_another_option_stays_in_the_same_workflow(client, db_pool, _ep_y_dinh):
+    """Cách nói thật của khách phải đọc bảng giá, không rơi sang bất động sản."""
+    _ep_y_dinh("COMPARE_OPTIONS")
+    phien = await _phien_dang_cho_de_xuat(client, db_pool, "kh_cho_khac")
+
+    body = (await _hoi(client, phien, "còn chỗ nào khác không")).json()
+
+    assert body["workflow_id"] == phien["workflow_id"]
+    for ten in ("An Khang", "Minh Phát", "Đại Tín"):
+        assert ten in body["answer"], body["answer"]
+    assert "Vinhomes" not in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_a_followup_failure_does_not_fall_through_to_the_planner(client, db_pool, monkeypatch):
+    """Có đề xuất thật + tầng đọc lỗi vẫn phải giữ workflow cũ, không lập cái mới."""
+    phien = await _phien_dang_cho_de_xuat(client, db_pool, "kh_loi_doc_bao_gia")
+
+    async def _hong(*_args, **_kwargs):
+        raise RuntimeError("khong-duoc-lo-ra")
+
+    import src.api.routes as mod
+
+    monkeypatch.setattr(mod, "tra_loi_hoi_them", _hong)
+    before = int(await db_pool.fetchval("SELECT count(*) FROM workflows WHERE session_id=$1", phien["session_id"]))
+
+    body = (await _hoi(client, phien, "còn chỗ nào khác không")).json()
+
+    after = int(await db_pool.fetchval("SELECT count(*) FROM workflows WHERE session_id=$1", phien["session_id"]))
+    assert body["workflow_id"] == phien["workflow_id"]
+    assert after == before
+    assert "thử lại" in body["answer"].lower()
+    assert "Vinhomes" not in body["answer"]
+
+
 # ==================================================== ma trận, với ý định GIẢ
 #
 # Model chỉ chọn NHÃN. Ghim nhãn trong bài kiểm là cách duy nhất để đo phần còn
@@ -722,3 +758,46 @@ async def test_the_session_lookup_itself_is_scoped_to_the_owner(client, db_pool)
 
     assert thay_chu == chu["workflow_id"]
     assert thay_ke_la is None, "phép tra phiên trả về đề xuất của người khác"
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_confirmed_mid_question_still_answers_in_place(client, db_pool, _ep_y_dinh):
+    """Đề xuất biến mất GIỮA hai lần đọc vẫn không được rơi xuống Planner.
+
+    `_de_xuat_dang_cho_trong_phien` xác nhận có đề xuất, rồi `tra_loi_hoi_them`
+    ĐỌC LẠI. Giữa hai lần đọc ấy có một khe: khách bấm xác nhận ở tab khác, hoặc
+    một lượt đề xuất mới thay chỗ. Lần đọc thứ hai trả `None`, và bản trước để
+    `None` rơi xuống làn lập kế hoạch — đúng cái sinh ra workflow thứ hai và câu
+    trả lời thứ hai.
+
+    Khe hẹp, nhưng nó là CÙNG một lỗi với nhánh `except` đã bịt: một khi đã biết
+    phiên đang chờ đề xuất thì mọi câu đều phải được trả lời tại chỗ.
+    """
+    _ep_y_dinh("COMPARE_OPTIONS")
+    phien = await _phien_dang_cho_de_xuat(client, db_pool, "kh_chot_giua_chung")
+    truoc = await _dem_workflow(db_pool, phien["session_id"])
+
+    # Mô phỏng đúng cái khe: lần đọc THỨ HAI không còn thấy đề xuất nào.
+    import src.orchestration.proposal_followup as mod
+
+    that = mod.de_xuat_dang_cho
+    da_goi: list[int] = []
+
+    async def _bien_mat(*a, **kw):
+        da_goi.append(1)
+        return None
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mod, "de_xuat_dang_cho", _bien_mat)
+        body = (await _hoi(client, phien, "còn chỗ nào khác không")).json()
+
+    assert da_goi, "bài kiểm không chạm được vào khe — đọc lại cách dựng cảnh"
+    assert await _dem_workflow(db_pool, phien["session_id"]) == truoc, "sinh workflow thứ hai"
+    assert body.get("workflow_id") == phien["workflow_id"], body.get("workflow_id")
+    cau = f"{body.get('answer') or ''} {body.get('message') or ''}"
+    assert cau.strip(), "không trả lời gì"
+    for cam in ("Vinhomes", "dự án", "căn hộ"):
+        assert cam.lower() not in cau.lower(), f"rơi sang bất động sản: {cau}"
+    assert that is not None  # giữ tham chiếu để lint không cắt

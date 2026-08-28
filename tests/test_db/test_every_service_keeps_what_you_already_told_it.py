@@ -83,6 +83,17 @@ MAU_RIENG = {
     "description": "Điều hoà hư",
     "location": "P-101",
     "move_vehicle": "van",
+    # TÊN như người dùng nói, không phải mã: Validator đổi sang `MOVE-Q7-*`.
+    # Cùng khuôn với `project_id` ngay trên — bài này mô phỏng người gõ từng ô.
+    # Hai toà KHÁC nhau để `distance_band` ra `SAME_WARD`, không phải
+    # `SAME_BUILDING` — một cặp trùng nhau vẫn hợp lệ nhưng nó che mất nhánh
+    # tính quãng đường.
+    "move_origin_id": "Tòa A1 Riverside",
+    "move_destination_id": "Tòa A2 Riverside",
+    # Enum đóng trong `tool_contract`; Validator chặn giá trị ngoài tập qua
+    # `contract.inputs[...].check`. Khai ở đây vì `gia_tri_mau` chỉ tra
+    # `ENUM_INPUTS` — một bảng phụ chỉ còn hai dòng — chứ không tra contract.
+    "move_size": "medium",
     "interest_type": "thuê",
     "consent": "tôi đồng ý",
 }

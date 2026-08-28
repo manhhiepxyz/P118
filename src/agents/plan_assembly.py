@@ -91,6 +91,9 @@ O_NGUOI_DUNG: dict[str, tuple[str, ...]] = {
     "schedule_move": (
         "move_date",
         "move_time",
+        "move_origin_id",
+        "move_destination_id",
+        "move_size",
         "needs_elevator",
         "needs_loading_support",
         "move_vehicle",

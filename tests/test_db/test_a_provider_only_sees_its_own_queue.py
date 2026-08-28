@@ -91,6 +91,12 @@ async def _yeu_cau(db_pool, owner_user_id: str, service_provider_id: str | None)
                 "input": {
                     "move_date": "2026-09-30",
                     "move_time": "08:00",
+                    # Ba ô BẮT BUỘC từ khi giá tính theo quãng đường và khối
+                    # lượng. Thiếu chúng thì Validator từ chối cả kế hoạch, và
+                    # bài kiểm đỏ ở một chỗ không liên quan tới quyền sở hữu.
+                    "move_origin_id": "MOVE-Q7-A1",
+                    "move_destination_id": "MOVE-Q7-B1",
+                    "move_size": "medium",
                     "move_vehicle": "van",
                     "needs_elevator": False,
                     "needs_loading_support": False,

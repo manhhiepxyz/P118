@@ -68,9 +68,16 @@ _CA = {
     "schedule_move": {
         "provider": "resident_services",
         "path": "/api/resident-services/moves",
+        # `body` gửi thẳng cho mock provider, `input` đi qua Validator. Cả hai
+        # đều cần ba ô điểm đi / điểm đến / quy mô: provider trả 422 nếu thiếu,
+        # Validator từ chối cả kế hoạch nếu thiếu. Hai toà cùng phường nên
+        # `distance_band` ra `SAME_WARD` — trong vùng phục vụ.
         "body": {
             "move_date": NGAY,
             "move_time": "08:00",
+            "move_origin_id": "MOVE-Q7-A1",
+            "move_destination_id": "MOVE-Q7-A2",
+            "move_size": "medium",
             "needs_elevator": True,
             "needs_loading_support": False,
             "move_vehicle": "van",
@@ -78,6 +85,9 @@ _CA = {
         "input": {
             "move_date": NGAY,
             "move_time": "08:00",
+            "move_origin_id": "MOVE-Q7-A1",
+            "move_destination_id": "MOVE-Q7-A2",
+            "move_size": "medium",
             "needs_elevator": True,
             "needs_loading_support": False,
             "move_vehicle": "van",

@@ -87,7 +87,7 @@ hay không. Bạn phân loại câu họ vừa nói.
 `y_dinh` chọn ĐÚNG một trong:
 
   ASK_CHEAPER                hỏi có lựa chọn rẻ hơn không
-  COMPARE_OPTIONS            muốn xem/so sánh các lựa chọn
+  COMPARE_OPTIONS            muốn xem/so sánh lựa chọn, kể cả hỏi "còn chỗ/bên nào khác không"
   ASK_REPUTATION             hỏi về uy tín, đánh giá, chất lượng của đơn vị
   ASK_RECOMMENDATION_REASON  hỏi vì sao đơn vị này được đề xuất
   SELECT_PROVIDER            muốn đổi sang một đơn vị họ GỌI TÊN

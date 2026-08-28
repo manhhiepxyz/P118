@@ -54,6 +54,9 @@ from typing import Any
 FIELD_CHUYEN_NHA: tuple[str, ...] = (
     "move_date",
     "move_time",
+    "move_origin_id",
+    "move_destination_id",
+    "move_size",
     "move_vehicle",
     "needs_elevator",
     "needs_loading_support",

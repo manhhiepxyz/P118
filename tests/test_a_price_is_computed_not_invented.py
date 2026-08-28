@@ -47,10 +47,19 @@ def test_provider_ids_are_unique():
 
 
 # ---------------------------------------------------------------- giá
+MOVE_SCOPE = {"distance_band": "SAME_DISTRICT", "move_size": "medium"}
+
+
 def test_the_same_request_always_costs_the_same():
     for don_vi in DON_VI_CHUYEN_NHA:
         gia = [
-            gia_chuyen_nha(don_vi, move_vehicle="truck", needs_elevator=True, needs_loading_support=True)
+            gia_chuyen_nha(
+                don_vi,
+                move_vehicle="truck",
+                needs_elevator=True,
+                needs_loading_support=True,
+                **MOVE_SCOPE,
+            )
             for _ in range(5)
         ]
         assert len(set(gia)) == 1, f"{don_vi.provider_id} cho 5 giá khác nhau: {gia}"
@@ -59,11 +68,21 @@ def test_the_same_request_always_costs_the_same():
 def test_asking_for_more_never_costs_less():
     """Đơn điệu: thêm thang máy, thêm bốc xếp, đổi xe to hơn — giá không giảm."""
     for don_vi in DON_VI_CHUYEN_NHA:
-        tran = gia_chuyen_nha(don_vi, move_vehicle="none", needs_elevator=False, needs_loading_support=False)
-        them_thang_may = gia_chuyen_nha(don_vi, move_vehicle="none", needs_elevator=True, needs_loading_support=False)
-        them_boc_xep = gia_chuyen_nha(don_vi, move_vehicle="none", needs_elevator=False, needs_loading_support=True)
-        xe_van = gia_chuyen_nha(don_vi, move_vehicle="van", needs_elevator=False, needs_loading_support=False)
-        xe_tai = gia_chuyen_nha(don_vi, move_vehicle="truck", needs_elevator=False, needs_loading_support=False)
+        tran = gia_chuyen_nha(
+            don_vi, move_vehicle="none", needs_elevator=False, needs_loading_support=False, **MOVE_SCOPE
+        )
+        them_thang_may = gia_chuyen_nha(
+            don_vi, move_vehicle="none", needs_elevator=True, needs_loading_support=False, **MOVE_SCOPE
+        )
+        them_boc_xep = gia_chuyen_nha(
+            don_vi, move_vehicle="none", needs_elevator=False, needs_loading_support=True, **MOVE_SCOPE
+        )
+        xe_van = gia_chuyen_nha(
+            don_vi, move_vehicle="van", needs_elevator=False, needs_loading_support=False, **MOVE_SCOPE
+        )
+        xe_tai = gia_chuyen_nha(
+            don_vi, move_vehicle="truck", needs_elevator=False, needs_loading_support=False, **MOVE_SCOPE
+        )
 
         # LỚN HƠN HẲN, không phải `>=`: mọi đơn vị trong danh mục đều khai phụ
         # phí dương, nên `>=` vẫn xanh khi phụ phí bị bỏ quên — đo được, mutation
@@ -88,7 +107,7 @@ def test_maintenance_price_depends_on_the_kind_of_problem():
 # ---------------------------------------------------------------- luật chọn
 def test_the_cheapest_available_provider_wins():
     ket_qua = tim_don_vi_chuyen_nha(
-        ngay=NGAY, move_vehicle="van", needs_elevator=False, needs_loading_support=False
+        ngay=NGAY, move_vehicle="van", needs_elevator=False, needs_loading_support=False, **MOVE_SCOPE
     )
     assert ket_qua, "không đơn vị nào rảnh — dữ liệu mẫu không dùng được để demo"
     chon = chon_don_vi(ket_qua)
@@ -121,7 +140,7 @@ def test_a_tie_is_broken_the_same_way_every_time():
 
 def test_a_budget_filters_but_never_invents_a_cheaper_provider():
     tat_ca = tim_don_vi_chuyen_nha(
-        ngay=NGAY, move_vehicle="truck", needs_elevator=True, needs_loading_support=True
+        ngay=NGAY, move_vehicle="truck", needs_elevator=True, needs_loading_support=True, **MOVE_SCOPE
     )
     assert tat_ca
     re_nhat = min(x.gia for x in tat_ca)
@@ -133,6 +152,7 @@ def test_a_budget_filters_but_never_invents_a_cheaper_provider():
         move_vehicle="truck",
         needs_elevator=True,
         needs_loading_support=True,
+        **MOVE_SCOPE,
         max_price=re_nhat - 1,
     )
     assert khong_ai == [], f"ngân sách dưới giá sàn mà vẫn trả về {khong_ai}"
@@ -142,6 +162,7 @@ def test_a_budget_filters_but_never_invents_a_cheaper_provider():
         move_vehicle="truck",
         needs_elevator=True,
         needs_loading_support=True,
+        **MOVE_SCOPE,
         max_price=re_nhat,
     )
     assert len(vua_du) >= 1
@@ -162,7 +183,11 @@ def test_the_date_is_a_hard_constraint():
         tra_ve = {
             x.provider_id
             for x in tim_don_vi_chuyen_nha(
-                ngay=ngay, move_vehicle="van", needs_elevator=False, needs_loading_support=False
+                ngay=ngay,
+                move_vehicle="van",
+                needs_elevator=False,
+                needs_loading_support=False,
+                **MOVE_SCOPE,
             )
         }
         for d in DON_VI_CHUYEN_NHA:

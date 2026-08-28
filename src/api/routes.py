@@ -95,7 +95,7 @@ from src.orchestration.demo_service import (
     run_demo_workflow,
 )
 from src.orchestration.payment_approval import quote_from_results
-from src.orchestration.proposal_followup import tra_loi_hoi_them
+from src.orchestration.proposal_followup import CauTraLoi, tra_loi_hoi_them
 from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
 from src.orchestration.runtime_provider import acquire_repository
 from src.orchestration.service_approval import (
@@ -1146,6 +1146,9 @@ def _task_presentation(
             _detail("Thời gian", " ".join(value for value in (move_date, move_time) if value)),
             _detail("Khung thang máy", data.get("elevator_slot")),
             _detail("Phương tiện", inputs.get("move_vehicle")),
+            _detail("Điểm chuyển đi", inputs.get("move_origin_id")),
+            _detail("Điểm chuyển đến", inputs.get("move_destination_id")),
+            _detail("Quy mô đồ", inputs.get("move_size")),
             _detail("Trạng thái", data.get("move_status")),
         ]
     elif task.tool == "book_shuttle":
@@ -6524,13 +6527,35 @@ async def _tra_loi_ve_de_xuat(
         )
     except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
         logger.warning("lan hoi them: khong tra loi duoc (%s)", type(exc).__name__)
-        return None
+        # Đã xác định chắc phiên đang chờ đề xuất thì KHÔNG được thả câu xuống
+        # Planner. Một lỗi đọc chứng từ tạm thời mà sinh workflow mới là vừa
+        # lặp hội thoại, vừa trả lời sang dịch vụ khác.
+        ket_qua = CauTraLoi(
+            "Mình chưa đọc lại được các lựa chọn vận chuyển lúc này. "
+            "Yêu cầu cũ vẫn được giữ nguyên; bạn thử lại sau một chút nhé."
+        )
     finally:
         if pool is not None:
             await pool.close()
 
     if ket_qua is None:
-        return None
+        # Tới đây nghĩa là `_de_xuat_dang_cho_trong_phien` ĐÃ thấy một đề xuất
+        # đang chờ, rồi `tra_loi_hoi_them` đọc lại và không thấy nữa. Giữa hai
+        # lần đọc có một khe: khách bấm xác nhận ở tab khác, hoặc một lượt đề
+        # xuất mới vừa thay chỗ.
+        #
+        # KHÔNG trả `None`. Trả `None` là thả câu hỏi xuống làn lập kế hoạch —
+        # nó lập một yêu cầu mới và trả lời sang chuyện khác, nên một lượt hỏi
+        # thành hai câu trả lời. Đó là chính lỗi mà làn này sinh ra để chặn, và
+        # nó không hết chỉ vì cửa vào hẹp hơn.
+        #
+        # Cùng cách xử lý với nhánh `except` ngay trên: nói ra rằng trạng thái
+        # vừa đổi, giữ nguyên workflow cũ, và mời khách đọc lại.
+        logger.info("lan hoi them: de xuat doi giua hai lan doc workflow=%s", workflow_id[:8])
+        ket_qua = CauTraLoi(
+            "Trạng thái yêu cầu vừa thay đổi nên mình chưa đọc lại được các lựa chọn. "
+            "Bạn mở lại yêu cầu để xem tình trạng mới nhất nhé."
+        )
 
     await _persist_chat_turn(
         workflow_id,

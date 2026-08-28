@@ -5,6 +5,7 @@ from collections import deque
 from datetime import date, time, timedelta
 
 from src.common.field_parsers import extract_plate_number
+from src.common.move_locations import move_location_name, resolve_move_location_id
 from src.common.projects import project_name, resolve_project_id
 from src.common.schedule_policy import MAX_HORIZON_DAYS as _MAX_HORIZON_DAYS
 from src.common.schedule_policy import TIME_INPUTS as _TIME_INPUTS
@@ -78,7 +79,16 @@ class TaskPlanValidator:
             {"issue_type", "description", "location", "preferred_date", "preferred_time"}
         ),
         "schedule_move": frozenset(
-            {"move_date", "move_time", "needs_elevator", "needs_loading_support", "move_vehicle"}
+            {
+                "move_date",
+                "move_time",
+                "move_origin_id",
+                "move_destination_id",
+                "move_size",
+                "needs_elevator",
+                "needs_loading_support",
+                "move_vehicle",
+            }
         ),
         "register_resident": frozenset({"full_name", "apartment_code", "residential_area"}),
         "register_vehicle": frozenset({"resident_id", "plate_number", "vehicle_type"}),
@@ -300,6 +310,22 @@ class TaskPlanValidator:
             resolved = resolve_project_id(candidate)
             if resolved:
                 task.input["project_id"] = resolved
+
+        # Điểm chuyển nhà cũng là khóa danh mục. Chỉ chuẩn hóa tên khớp chính
+        # xác; địa chỉ ngoài danh mục quay lại hỏi thay vì đi xuống provider và
+        # nhận một con số không có căn cứ.
+        for task in plan.tasks:
+            if task.tool != "schedule_move":
+                continue
+            for field in ("move_origin_id", "move_destination_id"):
+                candidate = task.input.get(field)
+                if not isinstance(candidate, str) or move_location_name(candidate):
+                    continue
+                resolved = resolve_move_location_id(candidate)
+                if resolved is None:
+                    task.input.pop(field, None)
+                    raise MissingRequiredInputError((field,), reason="UNSUPPORTED_MOVE_LOCATION")
+                task.input[field] = resolved
 
         # 6. Kiểm tra các giá trị ĐÃ CÓ và InputRef trước. Nhờ vậy một plan vừa
         # thiếu field vừa có reference/enum/ngày sai vẫn bị từ chối đúng lỗi cấu

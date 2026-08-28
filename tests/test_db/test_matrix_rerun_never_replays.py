@@ -193,6 +193,10 @@ async def test_only_the_broken_branch_runs_again(client, db_pool, spy_connectors
             "T2": {
                 "move_date": "2030-05-10",
                 "move_time": "08:00",
+                # Bắt buộc từ khi giá tính theo quãng đường và khối lượng.
+                "move_origin_id": "MOVE-Q7-A1",
+                "move_destination_id": "MOVE-Q7-B1",
+                "move_size": "medium",
                 "needs_elevator": True,
                 "needs_loading_support": False,
                 "move_vehicle": "truck",

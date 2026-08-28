@@ -26,7 +26,7 @@ import pytest
 
 from src.common.results import StandardResult
 from src.mock.service_providers import DON_VI_CHUYEN_NHA
-from src.orchestration.quote import van_tay_yeu_cau
+from src.orchestration.quote import FIELD_CHUYEN_NHA, van_tay_yeu_cau
 from src.orchestration.quote_service import xin_bao_gia_chuyen_nha
 
 YEU_CAU = {
@@ -117,13 +117,17 @@ async def test_the_budget_never_appears_in_any_provider_request(db_pool):
     assert len(gian_diep.da_goi) == len(DON_VI_CHUYEN_NHA), "không hỏi hết các đơn vị"
     for don_vi, payload in gian_diep.da_goi:
         assert "max_price" not in payload, f"{don_vi} nhận được ngân sách của khách"
-        assert set(payload) == {
-            "move_date",
-            "move_time",
-            "move_vehicle",
-            "needs_elevator",
-            "needs_loading_support",
-        }, f"{don_vi} nhận thêm field ngoài allowlist: {sorted(payload)}"
+        # Đối chiếu với NGUỒN, không gõ lại danh sách.
+        #
+        # Bản trước liệt kê năm tên bằng tay, nên khi hợp đồng thêm điểm đi,
+        # điểm đến và quy mô đồ thì bài này đỏ — không phải vì có gì rò ra, mà
+        # vì bản sao thứ hai của một danh sách đã lệch. Đó đúng là thứ
+        # `payload_gui_provider` sinh ra để tránh.
+        #
+        # Điều đáng khoá vẫn nguyên: payload bằng ĐÚNG allowlist, không hơn.
+        assert set(payload) == set(FIELD_CHUYEN_NHA), (
+            f"{don_vi} nhận thêm field ngoài allowlist: {sorted(set(payload) - set(FIELD_CHUYEN_NHA))}"
+        )
 
 
 @pytest.mark.asyncio

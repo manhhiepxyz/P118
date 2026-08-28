@@ -221,6 +221,17 @@ _USER_PROVIDED_FIELDS: frozenset[str] = frozenset(
         "preferred_time",
         "move_date",
         "move_time",
+        # Ba ô này BẮT BUỘC từ khi giá chuyển nhà tính theo quãng đường và khối
+        # lượng. Bắt buộc mà không hỏi lại được là một ngõ cụt: Validator từ
+        # chối kế hoạch, tầng này không có gì để hỏi, và người dùng nhận "Mình
+        # chưa đủ cơ sở để hỏi thêm" cho một thứ họ hoàn toàn trả lời được.
+        #
+        # Đo được trước khi thêm: `WARNING không hỏi lại được: 'move_size'
+        # không nằm trong danh sách hỏi được` — yêu cầu dừng, không câu hỏi nào
+        # tới khách.
+        "move_origin_id",
+        "move_destination_id",
+        "move_size",
         "needs_elevator",
         "needs_loading_support",
         "move_vehicle",
@@ -369,6 +380,10 @@ _LY_DO_HOI_LAI: dict[str, str] = {
     ),
     "BEYOND_HORIZON": (
         "Ngày bạn chọn xa quá nên hệ thống chưa nhận đặt trước. Bạn chọn giúp mình một ngày gần hơn nhé."
+    ),
+    "UNSUPPORTED_MOVE_LOCATION": (
+        "Điểm chuyển đi hoặc điểm chuyển đến chưa nằm trong khu vực được hỗ trợ. "
+        "Bạn chọn một địa điểm trong danh mục nội khu; nếu không có, hiện chưa có đơn vị vận chuyển phù hợp."
     ),
 }
 

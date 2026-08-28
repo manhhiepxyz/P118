@@ -63,8 +63,9 @@ class TuyChonChonDonVi:
 
     Đây là ranh giới quan trọng nhất của file này, và nó dễ bị xoá nhầm.
 
-    `schedule_move` có đúng năm input theo hợp đồng: ngày, giờ, xe, thang máy,
-    bốc xếp. Đó là những gì ĐƠN VỊ cần để làm việc. "Cho tôi bên Đại Tín" và
+    `schedule_move` có tám input theo hợp đồng: ngày, giờ, điểm đi, điểm đến,
+    quy mô đồ, xe, thang máy và bốc xếp. Đó là những gì ĐƠN VỊ cần để làm việc.
+    "Cho tôi bên Đại Tín" và
     "trong khoảng 450 nghìn" thì không — chúng là cách P-118 chọn giúp khách,
     và đơn vị không bao giờ được nhìn thấy chúng:
 

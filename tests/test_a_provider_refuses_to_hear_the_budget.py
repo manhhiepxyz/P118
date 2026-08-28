@@ -27,6 +27,9 @@ NGAY = date.today() + timedelta(days=30)
 YEU_CAU = {
     "move_date": NGAY.isoformat(),
     "move_time": "08:00",
+    "move_origin_id": "MOVE-Q7-A1",
+    "move_destination_id": "MOVE-Q7-B1",
+    "move_size": "medium",
     "move_vehicle": "van",
     "needs_elevator": False,
     "needs_loading_support": False,
@@ -82,7 +85,14 @@ def test_the_price_matches_the_catalogue_for_the_exact_request(client):
         json={**YEU_CAU, "move_vehicle": "truck", "needs_elevator": True, "needs_loading_support": True},
     ).json()["data"]["amount"]
 
-    assert re == gia_chuyen_nha(don_vi, move_vehicle="van", needs_elevator=False, needs_loading_support=False)
+    assert re == gia_chuyen_nha(
+        don_vi,
+        move_vehicle="van",
+        needs_elevator=False,
+        needs_loading_support=False,
+        distance_band="SAME_DISTRICT",
+        move_size="medium",
+    )
     assert dat > re, "yêu cầu nhiều hơn mà giá không tăng"
 
 

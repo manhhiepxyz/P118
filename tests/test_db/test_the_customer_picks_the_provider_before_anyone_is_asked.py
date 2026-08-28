@@ -37,9 +37,20 @@ from src.orchestration.service_approval import (
     ServiceApprovalRequiredError,
 )
 
+# Một yêu cầu chuyển nhà ĐẦY ĐỦ theo hợp đồng hiện tại.
+#
+# Ba ô `move_origin_id` / `move_destination_id` / `move_size` là BẮT BUỘC từ khi
+# giá được tính theo quãng đường và khối lượng. Thiếu chúng thì Validator từ
+# chối cả kế hoạch, và bài kiểm đỏ ở một chỗ không liên quan gì tới thứ nó nói.
+#
+# Hai địa điểm lấy từ `move_locations.MOVE_LOCATIONS` — cùng quận, khác phường,
+# nên `distance_band` trả `SAME_DISTRICT` và mock provider báo giá được.
 YEU_CAU = {
     "move_date": "2026-09-30",
     "move_time": "08:00",
+    "move_origin_id": "MOVE-Q7-A1",
+    "move_destination_id": "MOVE-Q7-B1",
+    "move_size": "medium",
     "move_vehicle": "van",
     "needs_elevator": False,
     "needs_loading_support": False,
@@ -515,7 +526,7 @@ async def test_preferences_never_reach_the_provider_or_the_step(db_pool, monkeyp
     assert "max_price" not in input_buoc and "provider_name_said" not in input_buoc
 
 
-def test_the_move_contract_still_has_exactly_five_inputs():
+def test_the_move_contract_has_only_job_facts_not_provider_preferences():
     """Schema `schedule_move` KHÔNG được nới để nhận sở thích.
 
     Nới nó là mở một đường cho Planner ghi sở thích vào bước — và Validator sẽ
@@ -528,6 +539,9 @@ def test_the_move_contract_still_has_exactly_five_inputs():
     assert o_vao == {
         "move_date",
         "move_time",
+        "move_origin_id",
+        "move_destination_id",
+        "move_size",
         "move_vehicle",
         "needs_elevator",
         "needs_loading_support",

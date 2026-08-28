@@ -32,6 +32,9 @@ from src.orchestration.quote import (
 YEU_CAU = {
     "move_date": "2026-09-30",
     "move_time": "08:00",
+    "move_origin_id": "MOVE-Q7-A1",
+    "move_destination_id": "MOVE-Q7-B1",
+    "move_size": "medium",
     "move_vehicle": "van",
     "needs_elevator": False,
     "needs_loading_support": False,
@@ -58,6 +61,9 @@ def test_a_date_object_and_its_iso_string_are_the_same_request():
     [
         ("move_date", "2026-10-01"),
         ("move_time", "14:00"),
+        ("move_origin_id", "MOVE-Q7-A2"),
+        ("move_destination_id", "MOVE-Q7-C1"),
+        ("move_size", "large"),
         ("move_vehicle", "truck"),
         ("needs_elevator", True),
         ("needs_loading_support", True),
@@ -75,7 +81,16 @@ def test_every_pricing_field_is_covered():
     Thêm một field định giá vào `FIELD_CHUYEN_NHA` mà quên thêm một ca kiểm thì
     field ấy không được canh — và đó chính xác là cách một field lọt lưới.
     """
-    da_kiem = {"move_date", "move_time", "move_vehicle", "needs_elevator", "needs_loading_support"}
+    da_kiem = {
+        "move_date",
+        "move_time",
+        "move_origin_id",
+        "move_destination_id",
+        "move_size",
+        "move_vehicle",
+        "needs_elevator",
+        "needs_loading_support",
+    }
     assert set(FIELD_CHUYEN_NHA) == da_kiem, "FIELD_CHUYEN_NHA đổi mà bài kiểm chưa theo"
 
 

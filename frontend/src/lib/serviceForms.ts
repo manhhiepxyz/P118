@@ -382,7 +382,8 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
     },
   ],
 
-  // schedule_move(move_date, move_time, needs_elevator, needs_loading_support, move_vehicle)
+  // schedule_move(move_date, move_time, move_origin_id, move_destination_id,
+  //               move_size, needs_elevator, needs_loading_support, move_vehicle)
   'Đặt lịch chuyển nhà': [
     { key: 'move_date', label: 'Ngày chuyển', kind: 'date', phrase: 'ngày {v}' },
     {
@@ -392,6 +393,48 @@ export const SERVICE_FIELDS: Record<string, FieldSpec[]> = {
       tool: 'schedule_move',
       phrase: 'lúc {v}',
       options: slots(7, 16),
+    },
+    {
+      key: 'move_origin_id',
+      label: 'Điểm chuyển đi',
+      kind: 'select',
+      tool: 'schedule_move',
+      phrase: 'chuyển từ {v}',
+      options: [
+        { value: 'MOVE-Q7-A1', label: 'Tòa A1 Riverside' },
+        { value: 'MOVE-Q7-A2', label: 'Tòa A2 Riverside' },
+        { value: 'MOVE-Q7-B1', label: 'Tòa B1 Green View' },
+        { value: 'MOVE-Q7-B2', label: 'Tòa B2 Green View' },
+        { value: 'MOVE-Q7-C1', label: 'Tòa C1 Sunrise' },
+        { value: 'MOVE-Q7-C2', label: 'Tòa C2 Sunrise' },
+      ],
+    },
+    {
+      key: 'move_destination_id',
+      label: 'Điểm chuyển đến',
+      kind: 'select',
+      tool: 'schedule_move',
+      phrase: 'đến {v}',
+      options: [
+        { value: 'MOVE-Q7-A1', label: 'Tòa A1 Riverside' },
+        { value: 'MOVE-Q7-A2', label: 'Tòa A2 Riverside' },
+        { value: 'MOVE-Q7-B1', label: 'Tòa B1 Green View' },
+        { value: 'MOVE-Q7-B2', label: 'Tòa B2 Green View' },
+        { value: 'MOVE-Q7-C1', label: 'Tòa C1 Sunrise' },
+        { value: 'MOVE-Q7-C2', label: 'Tòa C2 Sunrise' },
+      ],
+    },
+    {
+      key: 'move_size',
+      label: 'Quy mô đồ',
+      kind: 'select',
+      tool: 'schedule_move',
+      phrase: 'quy mô đồ {v}',
+      options: [
+        { value: 'small', label: 'Ít đồ — phòng nhỏ' },
+        { value: 'medium', label: 'Vừa — căn 1–2 phòng' },
+        { value: 'large', label: 'Nhiều — căn 3 phòng trở lên' },
+      ],
     },
     {
       key: 'move_vehicle',

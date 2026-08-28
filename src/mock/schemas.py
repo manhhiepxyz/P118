@@ -199,6 +199,9 @@ class CreateMaintenanceRequest(BaseModel):
 class ScheduleMoveRequest(BaseModel):
     move_date: date
     move_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    move_origin_id: str = Field(..., min_length=1)
+    move_destination_id: str = Field(..., min_length=1)
+    move_size: Literal["small", "medium", "large"]
     needs_elevator: bool
     needs_loading_support: bool
     move_vehicle: Literal["none", "van", "truck"]
@@ -231,6 +234,9 @@ class QuoteMoveRequest(BaseModel):
 
     move_date: date
     move_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    move_origin_id: str = Field(..., min_length=1)
+    move_destination_id: str = Field(..., min_length=1)
+    move_size: Literal["small", "medium", "large"]
     needs_elevator: bool
     needs_loading_support: bool
     move_vehicle: Literal["none", "van", "truck"]

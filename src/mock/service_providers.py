@@ -50,6 +50,7 @@ from datetime import date
 from typing import Literal
 
 PhuongTien = Literal["none", "van", "truck"]
+QuyMoDo = Literal["small", "medium", "large"]
 HangMuc = Literal["air_conditioning", "electrical", "plumbing", "other"]
 
 
@@ -178,6 +179,8 @@ def gia_chuyen_nha(
     move_vehicle: PhuongTien,
     needs_elevator: bool,
     needs_loading_support: bool,
+    distance_band: Literal["SAME_BUILDING", "SAME_WARD", "SAME_DISTRICT"],
+    move_size: QuyMoDo,
 ) -> int:
     """Giá cho ĐÚNG yêu cầu này. Thuần, không đọc đồng hồ, không đọc trạng thái."""
     gia = don_vi.gia_goc + don_vi.phu_phi_xe.get(move_vehicle, 0)
@@ -185,6 +188,8 @@ def gia_chuyen_nha(
         gia += don_vi.phu_phi_thang_may
     if needs_loading_support:
         gia += don_vi.phu_phi_boc_xep
+    gia += {"SAME_BUILDING": 0, "SAME_WARD": 100_000, "SAME_DISTRICT": 220_000}[distance_band]
+    gia += {"small": 0, "medium": 180_000, "large": 400_000}[move_size]
     return gia
 
 
@@ -221,6 +226,8 @@ def tim_don_vi_chuyen_nha(
     move_vehicle: PhuongTien,
     needs_elevator: bool,
     needs_loading_support: bool,
+    distance_band: Literal["SAME_BUILDING", "SAME_WARD", "SAME_DISTRICT"],
+    move_size: QuyMoDo,
     max_price: int | None = None,
 ) -> list[DonViDuocChon]:
     ket_qua = [
@@ -232,6 +239,8 @@ def tim_don_vi_chuyen_nha(
                 move_vehicle=move_vehicle,
                 needs_elevator=needs_elevator,
                 needs_loading_support=needs_loading_support,
+                distance_band=distance_band,
+                move_size=move_size,
             ),
             danh_gia=d.danh_gia,
         )

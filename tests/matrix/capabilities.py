@@ -122,6 +122,9 @@ MOVING = Capability(
             literal={
                 "move_date": future(25),
                 "move_time": "08:00",
+                "move_origin_id": "MOVE-Q7-A1",
+                "move_destination_id": "MOVE-Q7-B1",
+                "move_size": "medium",
                 "needs_elevator": True,
                 "needs_loading_support": False,
                 "move_vehicle": "truck",

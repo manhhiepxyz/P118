@@ -50,6 +50,7 @@ from datetime import date, time, timedelta
 from typing import Any
 
 from src.common.agent_tool_policy import AGENT_REACHABLE_TOOLS
+from src.common.move_locations import find_move_location_id, resolve_move_location_id
 from src.common.projects import find_project_id, project_name, resolve_project_id
 from src.common.schedule_policy import MAX_HORIZON_DAYS, TIME_WINDOWS
 from src.common.tool_contract import TOOL_CONTRACTS
@@ -403,6 +404,14 @@ ENUM_SYNONYMS: dict[str, list[tuple[str, str]]] = {
         ("khong", "none"),
         ("tu chuyen", "none"),
     ],
+    "move_size": [
+        ("it do", "small"),
+        ("nho", "small"),
+        ("trung binh", "medium"),
+        ("vua", "medium"),
+        ("nhieu do", "large"),
+        ("lon", "large"),
+    ],
     "vehicle_type": [("xe may", "motorcycle"), ("mo to", "motorcycle"), ("o to", "car"), ("xe hoi", "car")],
 }
 
@@ -451,6 +460,10 @@ def _parse_project_id(text: str) -> str | None:
     """Câu trả lời thường gộp tên dự án + ngày + giờ. `resolve` chỉ nhận đúng
     toàn bộ tên; `find` tìm tên đóng nằm bên trong câu tự nhiên."""
     return find_project_id(text) or resolve_project_id(text)
+
+
+def _parse_move_location_id(text: str) -> str | None:
+    return find_move_location_id(text) or resolve_move_location_id(text)
 
 
 def _parse_project_name(text: str) -> str | None:
@@ -621,6 +634,8 @@ def _build_registry() -> dict[str, Callable[[str], Any]]:
         "vehicle_type": _extract_vehicle_type,
         "passenger_count": _extract_passenger_count,
         "project_id": _parse_project_id,
+        "move_origin_id": _parse_move_location_id,
+        "move_destination_id": _parse_move_location_id,
         # Không phải ô của contract — đây là tên CÔNG KHAI mà biên API dùng.
         "project_name": _parse_project_name,
     }
