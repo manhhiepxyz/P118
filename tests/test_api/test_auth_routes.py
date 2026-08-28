@@ -11,9 +11,10 @@ che mất 401 (dependency-order gotcha).
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from fastapi import Depends
-from unittest.mock import patch
 
 from src.api.deps import get_current_user, get_planner, get_runtime, get_user_repository
 from src.main import app
@@ -26,7 +27,7 @@ def auth_env():
     """Override get_user_repository bằng fake; trả FakeUserRepository."""
     users = FakeUserRepository()
     app.dependency_overrides[get_user_repository] = lambda: users
-    with patch('src.api.auth_routes.OtpRepository.verify_otp', return_value=True):
+    with patch("src.api.auth_routes.OtpRepository.verify_otp", return_value=True):
         yield users
     app.dependency_overrides.clear()
 
@@ -52,12 +53,7 @@ async def _register(client, username="nguyen.van.a", password="matkhau123", emai
         email = f"{username.strip().replace(' ', '')}@example.com".lower()
     return await client.post(
         "/api/v1/auth/register",
-        json={
-            "username": username,
-            "password": password,
-            "email": email,
-            "otp_code": "123456"
-        },
+        json={"username": username, "password": password, "email": email, "otp_code": "123456"},
     )
 
 
@@ -106,12 +102,20 @@ async def test_register_invalid_payload_422(client, auth_env):
     res = await client.post("/api/v1/auth/register", json={"username": "abc", "password": "short"})
     assert res.status_code == 422
     # Thiếu username.
-    res = await client.post("/api/v1/auth/register", json={"password": "matkhau123", "email": "abc@abc.com", "otp_code": "123456"})
+    res = await client.post(
+        "/api/v1/auth/register", json={"password": "matkhau123", "email": "abc@abc.com", "otp_code": "123456"}
+    )
     assert res.status_code == 422
     # Extra field (extra="forbid").
     res = await client.post(
         "/api/v1/auth/register",
-        json={"username": "abc", "password": "matkhau123", "email": "abc@abc.com", "otp_code": "123456", "role": "admin"},
+        json={
+            "username": "abc",
+            "password": "matkhau123",
+            "email": "abc@abc.com",
+            "otp_code": "123456",
+            "role": "admin",
+        },
     )
     assert res.status_code == 422
 

@@ -46,6 +46,7 @@ from src.orchestration.runtime_provider import (
 )
 from src.services.mock.apartment_ownership import apartment_ownership_app
 from src.services.mock.transport import transport_app
+from tests._otp_registration import dang_ky_qua_duong_that
 
 # Chủ sở hữu thật trong `apartment_owners` — provider trả ownership_match=True.
 OWNER_CLAIM = {
@@ -108,18 +109,16 @@ def _headers(user: dict) -> dict:
 
 
 async def _register_customer(client) -> dict:
-    username = _unique("customer")
-    res = await client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "matkhau123"},
-    )
-    assert res.status_code == 201, res.text
-    data = res.json()
-    return {
-        "id": data["id"],
-        "username": data["username"],
-        "role": data["role"],
-    }
+    """Khách mới, tạo qua ĐÚNG đường sản phẩm — gồm cả bước OTP.
+
+    Phần cơ học nằm ở `tests/_otp_registration`: cùng một việc cũng cần cho
+    `tests/test_db`, và hai bản sao của một luồng đăng ký là hai chỗ để lệch
+    nhau khi hợp đồng đổi. Lần này nó đã đổi thật — bước OTP được thêm — và
+    đó là lý do file này từng đỏ 9 bài.
+    """
+    data = await dang_ky_qua_duong_that(client, _unique("customer"), password="matkhau123")
+    assert data is not None, "tên đăng ký bị trùng — `_unique` không còn duy nhất"
+    return {"id": data["id"], "username": data["username"], "role": data["role"]}
 
 
 async def _make_provider(repo) -> dict:

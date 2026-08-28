@@ -28,6 +28,7 @@ không ai đi thử.
 from __future__ import annotations
 
 import pytest
+from fastapi import BackgroundTasks
 
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
@@ -78,6 +79,7 @@ async def test_the_reviewer_is_told_the_real_reason(monkeypatch, ma, phai_co):
         await mod.decide_viewing_approval(
             "11111111-1111-1111-1111-111111111111",
             mod._DecideBody(decision="approve"),
+            BackgroundTasks(),
             reviewer={"username": "don_vi_tour"},
         )
     assert phai_co in loi.value.detail, f"{ma} mà người duyệt nghe: {loi.value.detail!r}"
@@ -108,6 +110,7 @@ async def test_the_resident_gets_a_fresh_answer_before_the_route_gives_up():
             await mod.decide_viewing_approval(
                 "22222222-2222-2222-2222-222222222222",
                 mod._DecideBody(decision="approve"),
+                BackgroundTasks(),
                 reviewer={"username": "don_vi_tour"},
             )
 
@@ -137,6 +140,7 @@ async def test_a_successful_confirmation_is_untouched(monkeypatch):
     ket = await mod.decide_viewing_approval(
         "33333333-3333-3333-3333-333333333333",
         mod._DecideBody(decision="approve"),
+        BackgroundTasks(),
         reviewer={"username": "don_vi_tour"},
     )
     assert ket["status"] == "APPROVED"

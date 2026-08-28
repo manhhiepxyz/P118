@@ -47,6 +47,7 @@ from src.orchestration.runtime_provider import (
     clear_repository_provider,
     set_repository_provider,
 )
+from tests._otp_registration import dang_ky_qua_duong_that
 
 # Ngày trong tương lai — provider từ chối ngày quá khứ, và ngày cứng sẽ biến
 # test thành quả bom hẹn giờ.
@@ -204,13 +205,15 @@ def _headers(user: dict) -> dict:
 
 
 async def _register_customer(client) -> dict:
-    username = _unique("customer")
-    res = await client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "matkhau123"},
-    )
-    assert res.status_code == 201, res.text
-    data = res.json()
+    """Khách mới, tạo qua ĐÚNG đường sản phẩm — gồm cả bước OTP.
+
+    Phần cơ học nằm ở `tests/_otp_registration`: cùng một việc cũng cần cho
+    `tests/test_db`, và hai bản sao của một luồng đăng ký là hai chỗ để lệch
+    nhau khi hợp đồng đổi. Lần này nó đã đổi thật — bước OTP được thêm — và
+    đó là lý do file này từng đỏ 9 bài.
+    """
+    data = await dang_ky_qua_duong_that(client, _unique("customer"), password="matkhau123")
+    assert data is not None, "tên đăng ký bị trùng — `_unique` không còn duy nhất"
     return {"id": data["id"], "username": data["username"], "role": data["role"]}
 
 
@@ -302,8 +305,7 @@ async def _seed_awaiting_workflow(harness, *, owner_user_id: str) -> str:
         # không phải một lỗi ở đây; nhưng nó có nghĩa là bài kiểm phải nói ra ai
         # sở hữu, y như đường ghi thật (`save_pending_viewing_approval`) đang làm.
         await conn.execute(
-            "UPDATE service_approvals SET service_provider_id = $2 "
-            "WHERE workflow_id = $1 AND task_id = 'T1'",
+            "UPDATE service_approvals SET service_provider_id = $2 WHERE workflow_id = $1 AND task_id = 'T1'",
             workflow_id,
             don_vi_mac_dinh("schedule_property_viewing"),
         )

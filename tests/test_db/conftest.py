@@ -21,6 +21,7 @@ import pytest_asyncio
 
 from src.db.migrations import create_test_db
 from tests._dbcheck import require_test_database_url
+from tests._otp_registration import MAT_KHAU, dang_ky_qua_duong_that
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -80,6 +81,16 @@ async def clean_tables(db_pool: asyncpg.Pool) -> None:
                 -- CASCADE: một mapping sót lại cho phép tài khoản của test sau
                 -- thấy hàng đợi của test trước, và test ấy xanh vì lý do sai.
                 service_provider_accounts,
+                -- Mã OTP đăng ký. Bảng này KHÔNG khoá ngoại tới `users` (mã tồn
+                -- tại TRƯỚC khi có tài khoản), nên `CASCADE` không dọn hộ.
+                --
+                -- Sót lại thì luật chống spam 60 giây/email rớt sang lượt chạy
+                -- SAU: lượt xin mã đầu tiên của một test nhận 429 vì một test
+                -- của lượt trước đã xin cho cùng email chưa đầy một phút. Đo
+                -- được: ba bài đỏ khi chạy lại cùng file trong vòng một phút,
+                -- và xanh trở lại nếu chờ đủ lâu — đúng dạng "flaky theo đồng
+                -- hồ" khó lần nhất.
+                registration_otps,
                 -- Hàng đợi duyệt của MỌI dịch vụ. Sau khi gộp hai hàng đợi,
                 -- `viewing_approvals` chỉ còn là khung nhìn trên bảng này —
                 -- dọn khung nhìn thì không dọn được gì, và test sau đọc phải
@@ -169,13 +180,19 @@ async def client(db_pool, monkeypatch):
 
 
 async def _register_and_login(client: AsyncClient, username: str) -> str:
-    await client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "MatKhauRatDai123!"},
-    )
+    """Bảo đảm tài khoản này tồn tại, rồi trả token đăng nhập.
+
+    Hợp đồng KHÔNG đổi: vẫn `(client, username) -> token`, nên 260 lời gọi
+    không phải sửa. Thứ đổi là bên trong — đăng ký nay đi qua đủ bước OTP như
+    người dùng thật: xin mã, đọc mã ở hộp thư test, rồi mới đăng ký.
+
+    Gọi hai lần cho cùng một tên là đường BÌNH THƯỜNG (lấy token mới sau khi
+    đổi vai): lượt thứ hai nhận 409 ở bước xin mã và đi thẳng tới đăng nhập.
+    """
+    await dang_ky_qua_duong_that(client, username, password=MAT_KHAU)
     response = await client.post(
         "/api/v1/auth/login",
-        json={"username": username, "password": "MatKhauRatDai123!"},
+        json={"username": username, "password": MAT_KHAU},
     )
     assert response.status_code == 200, response.text
     return response.json()["access_token"]
