@@ -90,7 +90,25 @@ class RegistrationData(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=8, max_length=128)
 
-    email: str = Field(..., max_length=255, pattern=r"^[^@]+@[^@]+\.[^@]+$")
+    # `[^\s@]`, KHÔNG phải `[^@]`.
+    #
+    # Mẫu cũ khớp cả dấu cách, tab và xuống dòng, nên `"a b@c.vn"` đi qua đây,
+    # được ghi vào `registration_otps` làm KHOÁ, một thư được gửi tới địa chỉ
+    # không tồn tại, rồi lượt đăng ký hỏng ở bước kiểm mã — trả 400 và nói về
+    # MÃ trong khi thứ sai là ĐỊA CHỈ.
+    #
+    # Chặn ở đây chứ không `strip()` rồi nhận: cắt khoảng trắng hộ là tự sửa
+    # thứ người dùng gõ, và hợp đồng chưa nói gì về việc ấy. Một địa chỉ có
+    # khoảng trắng là một địa chỉ sai, không phải một địa chỉ cần dọn.
+    #
+    # Khai ở `RegistrationData` nên CẢ HAI endpoint — xin mã và đăng ký — dùng
+    # chung. Sửa một chỗ rồi quên chỗ kia là để nguyên đúng một nửa lỗ, và nửa
+    # còn lại là nửa ghi vào database.
+    #
+    # Giống hệt mẫu frontend đang dùng (`RegisterPage.tsx`). Hai tầng lệch nhau
+    # thì hoặc client khác đi qua được cửa trình duyệt đã đóng, hoặc người dùng
+    # gõ đúng ở form rồi nhận 422 không hiểu vì sao.
+    email: str = Field(..., max_length=255, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
     full_name: str | None = Field(default=None, min_length=1, max_length=200)
     phone: str | None = Field(default=None, min_length=8, max_length=20)

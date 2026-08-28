@@ -34,3 +34,15 @@ Tài liệu này cung cấp các kịch bản khắc phục sự cố (troublesh
 1. Tìm các workflow_id qua Admin Dashboard.
 2. Kiểm tra lịch sử log để hiểu nguyên nhân tại sao quá trình thực thi treo (thường do database deadlock hoặc API thứ 3 không phản hồi).
 3. Đánh dấu thủ công luồng thành `FAILED` thông qua kịch bản hỗ trợ.
+
+## NỢ — trải nghiệm gửi lại mã OTP
+
+Chưa làm, và cố ý không làm trong lượt tích hợp (đó là redesign trang đăng ký):
+
+- nút **gửi lại mã**;
+- bộ đếm ngược tới lúc gửi lại được (giới hạn hiện tại: 60 giây/email);
+- trạng thái riêng cho **429** thay vì để nó rơi vào ô lỗi chung.
+
+Hôm nay câu 429 của backend vẫn tới người dùng qua đường lỗi (`setError` +
+toast), nên họ đọc được lý do — chỉ là không có nút để bấm lại và không biết
+phải chờ bao lâu.
