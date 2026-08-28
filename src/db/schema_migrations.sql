@@ -1526,4 +1526,47 @@ BEGIN
             FOREIGN KEY (quote_id, workflow_id, task_id)
             REFERENCES service_quotes (quote_id, workflow_id, task_id);
     END IF;
+-- 2026-08 — VNPay gateway trên `payments`
+--
+-- `PAYMENT_PROVIDER=vnpay` biến một dòng payments thành MỘT PHIÊN thanh toán:
+-- sinh ra ở trạng thái PENDING với số tiền ĐÓNG BĂNG lúc mở phiên (IPN đối
+-- chiếu với số trong dòng này, KHÔNG bao giờ đọc lại giá live từ booking —
+-- đơn vị có thể đổi khu giữa chừng user đang đứng ở trang VNPay).
+--
+--   provider          'mock' | 'vnpay' — mock giữ nguyên hành vi đồng bộ cũ.
+--   provider_txn_ref  vnp_TxnRef/vnp_TransactionNo phía gateway, để đối chiếu
+--                     khiếu nại và để IPN tìm đúng giao dịch nội bộ.
+--   workflow_id       phiên thuộc workflow nào — IPN cần đường này để resume,
+--                     bảng payments vốn chỉ biết booking_id.
+--
+-- NULL được phép cho cả hai cột mới để row mock/legacy không phải đụng tới;
+-- index thường (không UNIQUE) vì cùng một txn_ref có thể xuất hiện ở nhiều
+-- môi trường sandbox khác nhau nhưng tra cứu luôn trả ít hơn một trang kết quả.
+DO $$
+BEGIN
+    IF to_regclass('payments') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider VARCHAR(20) NOT NULL DEFAULT 'mock';
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_txn_ref VARCHAR(100);
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_payments_provider') THEN
+        ALTER TABLE payments ADD CONSTRAINT ck_payments_provider
+            CHECK (provider IN ('mock', 'vnpay')) NOT VALID;
+    END IF;
+
+    CREATE INDEX IF NOT EXISTS idx_payments_provider_txn ON payments(provider_txn_ref);
+END $$;
+
+-- workflow_id tách riêng vì FK cần bảng workflows tồn tại (legacy test DB có
+-- thể chỉ có vài bảng — xem guard payment_approvals phía trên).
+DO $$
+BEGIN
+    IF to_regclass('payments') IS NULL OR to_regclass('workflows') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS workflow_id UUID REFERENCES workflows(workflow_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_workflow ON payments(workflow_id);
 END $$;

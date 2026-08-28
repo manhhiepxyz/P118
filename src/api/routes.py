@@ -82,6 +82,7 @@ from src.orchestration.demo_service import (
     RetryNotAllowed,
     amend_and_rerun,
     expire_pending_viewing_approval,
+    open_vnpay_payment_session,
     persist_pending_approval,
     persist_pending_viewing_approval,
     read_demo_workflow,
@@ -6959,6 +6960,11 @@ async def retry_demo_workflow(
 async def decide_demo_payment(
     workflow_id: str,
     request: DemoPaymentDecisionRequest,
+    # Annotation PHẢI là `Request` đúng nguyên dạng: `Request | None` khiến
+    # FastAPI dựng Pydantic field từ nó và vỡ lúc import. Default None chỉ để
+    # test gọi trực tiếp không cần dựng HTTP request; runtime luôn được
+    # FastAPI tiêm object thật.
+    http_request: Request = None,  # type: ignore[assignment]
     user: dict = Depends(get_current_user),
 ) -> DemoWorkflowResponse:
     """Duyệt hoặc từ chối thanh toán cho một workflow đang chờ.
@@ -6993,6 +6999,43 @@ async def decide_demo_payment(
             if job is not None:
                 _append_job_event(job, "FINISHED")
                 job["message"] = response.summary
+            return response
+
+        # PAYMENT_PROVIDER=vnpay: duyệt KHÔNG thu tiền ngay — chốt APPROVED,
+        # mở phiên PENDING với số tiền đóng băng, trả URL VNPay đã ký để giao
+        # diện chuyển hướng. Tiền được xác nhận bởi callback IPN; workflow vẫn
+        # WAITING_APPROVAL tới lúc đó.
+        settings = get_settings()
+        if settings.payment_provider == "vnpay":
+            session = await open_vnpay_payment_session(
+                workflow_id,
+                client_ip=http_request.client.host if http_request.client else "",
+            )
+            view = await _public_view_from_db(workflow_id)
+            summary = (
+                "Mình đã mở phiên thanh toán VNPay cho bạn. Đang chuyển tới trang "
+                "thanh toán — sau khi hoàn tất, chỗ đỗ sẽ được xác nhận tự động."
+            )
+            response = (
+                view.model_copy(
+                    update={
+                        "status": "WAITING_APPROVAL",
+                        "summary": summary,
+                        "payment_redirect_url": session["payment_redirect_url"],
+                    }
+                )
+                if view is not None
+                else DemoWorkflowResponse(
+                    workflow_id=workflow_id,
+                    status="WAITING_APPROVAL",
+                    summary=summary,
+                    payment_redirect_url=session["payment_redirect_url"],
+                )
+            )
+            if job is not None:
+                _append_job_event(job, "WAITING_PAYMENT_GATEWAY")
+                job["message"] = summary
+                job["response"] = None
             return response
 
         outcome = await resume_payment_after_approval(

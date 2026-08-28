@@ -215,6 +215,68 @@ async def _cancel_workflow_and_tasks(workflow_id: str, *, from_expiry: bool) -> 
         await pool.close()
 
 
+async def _expire_stale_vnpay_sessions(pool: Any, ttl_minutes: int | None = None) -> list[str]:
+    """Phiên gateway PENDING quá hạn → payment FAILED + workflow CANCELLED.
+
+    User bấm duyệt rồi bỏ ở trang VNPay là đường BÌNH THƯỜNG: URL đã chết theo
+    `vnp_ExpireDate`, tiền không bao giờ về. Việc duy nhất cần làm là ghi nhận
+    thất bại, huỷ task/workflow (mirror đường expire approval) và NHẢ KHÓA đổi
+    khu — booking vẫn giữ nguyên như chính sách reject.
+    """
+    from src.db.parking_payment_repository import expire_stale_vnpay_sessions
+
+    if ttl_minutes is None:
+        ttl_minutes = get_settings().vnpay_session_ttl_minutes
+    expired = await expire_stale_vnpay_sessions(pool, ttl_minutes)
+    workflow_ids: list[str] = []
+    for row in expired:
+        workflow_id = row.get("workflow_id") or ""
+        if not workflow_id:
+            continue
+        await _cancel_workflow_and_tasks(workflow_id, from_expiry=True)
+        await release_on_failure(workflow_id)
+        workflow_ids.append(workflow_id)
+    return workflow_ids
+
+
+async def _finalize_paid_vnpay_workflows(pool: Any) -> list[str]:
+    """Hàn workflow đã PAID qua gateway nhưng chưa chốt (process chết giữa IPN).
+
+    Tiền THẬT đã về thì không được phép mất: nếu backend sập giữa lượt IPN
+    (confirm xong, resume chưa kịp), dòng payments đứng ở PAID trong khi
+    `pay_fee` chưa terminal. Rule này chạy nốt đúng đường resume chính thống
+    (`resume_vnpay_after_gateway`) nên mọi bất biến giữ nguyên. Idempotent:
+    resume thành công thì pay_fee SUCCESS, lần quét sau chọn 0 row.
+    """
+    from src.orchestration.demo_service import ResumeError, resume_vnpay_after_gateway
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT p.workflow_id
+            FROM payments p
+            JOIN workflow_tasks t
+              ON t.workflow_id = p.workflow_id AND t.tool = 'pay_fee'
+            WHERE p.provider = 'vnpay'
+              AND p.payment_status = 'PAID'
+              AND p.workflow_id IS NOT NULL
+              AND t.status NOT IN ('SUCCESS', 'FAILED', 'CANCELLED', 'SKIPPED')
+            LIMIT 20
+            """
+        )
+    healed: list[str] = []
+    for row in rows:
+        workflow_id = str(row["workflow_id"])
+        try:
+            await resume_vnpay_after_gateway(workflow_id)
+            healed.append(workflow_id)
+        except ResumeError as exc:
+            logger.warning("heal paid vnpay workflow %s bị từ chối (%s)", workflow_id, exc.code)
+        except Exception:  # noqa: BLE001 - sweep không được làm vỡ poll
+            logger.exception("heal paid vnpay workflow %s lỗi", workflow_id)
+    return healed
+
+
 async def sweep_zombie_workflows(live_ids: set[str] | None = None) -> dict[str, Any]:
     """Sweep toàn bộ zombie. Trả về tóm tắt; KHÔNG raise.
 
@@ -223,28 +285,53 @@ async def sweep_zombie_workflows(live_ids: set[str] | None = None) -> dict[str, 
     """
     settings = get_settings()
     if not settings.zombie_sweep_enabled:
-        return {"expired_approvals": [], "archived_parents": [], "swept_workflows": [], "disabled": True}
+        return {
+            "expired_approvals": [],
+            "expired_sessions": [],
+            "archived_parents": [],
+            "swept_workflows": [],
+            "released_abandoned": [],
+            "healed_paid_workflows": [],
+            "disabled": True,
+        }
 
     live = live_ids or set()
     summary: dict[str, Any] = {
         "expired_approvals": [],
+        "expired_sessions": [],
         "archived_parents": [],
         "swept_workflows": [],
         "released_abandoned": [],
+        "healed_paid_workflows": [],
         "disabled": False,
     }
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001
     try:
         summary["expired_approvals"] = await _expire_stale_payment_approvals(pool, settings.payment_approval_ttl_hours)
+        # Phiên gateway quá hạn đóng TRƯỚC heal: một phiên vừa bị đánh FAILED
+        # không bao giờ được resume (resume đòi payment PAID). Tính năng tùy
+        # chọn — cài đặt giả trong unit test không có field này thì bỏ qua.
+        session_ttl = getattr(settings, "vnpay_session_ttl_minutes", None)
+        if session_ttl:
+            summary["expired_sessions"] = await _expire_stale_vnpay_sessions(pool, session_ttl)
         # Đóng cha đã bàn giao TRƯỚC, để sweeper không đánh chúng là thất bại.
         summary["archived_parents"] = await _archive_superseded_parents(pool)
         summary["swept_workflows"] = await _sweep_zombie_workflows(pool, settings.zombie_running_ttl_hours, live)
+        # Hàn workflow đã PAID nhưng chưa chốt — đặt SAU expire để không hàn nhầm
+        # phiên vừa bị đóng, và SAU zombie sweep để không cướp việc của đường thường.
+        summary["healed_paid_workflows"] = await _finalize_paid_vnpay_workflows(pool)
         summary["released_abandoned"] = await _release_abandoned_repairs(pool, settings.abandoned_repair_ttl_hours)
     except Exception:  # noqa: BLE001 - sweep không được làm vỡ poll
         logger.warning("zombie sweep failed", exc_info=True)
     finally:
         await pool.close()
-    if summary["expired_approvals"] or summary["swept_workflows"] or summary["released_abandoned"]:
+    if (
+        summary["expired_approvals"]
+        or summary["expired_sessions"]
+        or summary["swept_workflows"]
+        or summary["released_abandoned"]
+        or summary["healed_paid_workflows"]
+    ):
         logger.info("zombie sweep: %s", summary)
     return summary

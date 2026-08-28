@@ -78,13 +78,44 @@ def build_connectors(
         # lượt gọi lặp — sau timeout, sau restart, sau bất kỳ đường resume nào —
         # sẽ báo "Booking has already been paid" thay vì trả lại đúng giao dịch
         # cũ. Đo được: tiền đã trừ thật mà task ghi FAILED.
-        PaymentConnector(base_url=payment_url, workflow_id=workflow_id),
+        build_payment_connector(payment_url=payment_url, workflow_id=workflow_id),
         PropertyConnector(base_url=property_url, contact_profile=contact_profile),
         TourConnector(base_url=tour_url),
         ResidentServicesConnector(base_url=resident_services_url),
         ConsultationConnector(base_url=consultation_url),
         ShuttleConnector(base_url=shuttle_url),
     ]
+
+
+def build_payment_connector(
+    *,
+    payment_url: str = "http://localhost:8003",
+    workflow_id: str | None = None,
+    client: Any | None = None,
+) -> Any:
+    """Chọn connector `pay_fee` theo `PAYMENT_PROVIDER` — MỘT điểm quyết định duy nhất.
+
+    Cả hai connector cùng giao diện (`tool_names=["pay_fee"]`, cùng công thức
+    idempotency key), nên Executor/boundary không cần biết provider là ai:
+
+      * mock  → PaymentConnector: POST đồng bộ tới mock service (cổng 8003).
+      * vnpay → VnPayPaymentConnector: đọc phiên PENDING→PAID do IPN ghi; mở
+        phiên nằm ở đường `/payment-decision`, không phải ở đây.
+
+    Fail-fast khi bật vnpay mà thiếu cấu hình merchant: một phiên mở nhầm là
+    một chỗ đỗ bị treo — im lặng rơi về mock là giấu đúng lỗi đó.
+    """
+    settings = get_settings()
+    if settings.payment_provider == "vnpay":
+        from src.connectors.vnpay import VnPayPaymentConnector
+
+        if not settings.vnpay_tmn_code or not settings.vnpay_hash_secret:
+            raise RuntimeError(
+                "PAYMENT_PROVIDER=vnpay nhưng thiếu VNPAY_TMN_CODE/VNPAY_HASH_SECRET — "
+                "điền .env hoặc đặt PAYMENT_PROVIDER=mock"
+            )
+        return VnPayPaymentConnector(workflow_id=workflow_id)
+    return PaymentConnector(base_url=payment_url, workflow_id=workflow_id, client=client)
 
 
 async def build_repository(*, migrate: bool = True) -> PostgreSQLWorkflowStateRepository:

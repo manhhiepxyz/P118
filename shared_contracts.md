@@ -633,6 +633,24 @@ book_parking internal input
 
 > **Endpoint của mock service không phải là contract bất biến của hệ thống. Contract bất biến tương đối là internal tool contract, TaskPlan và StandardResult.**
 
+### 11b. Cổng thanh toán gateway thật (VNPay sandbox) — tùy chọn
+
+`PAYMENT_PROVIDER=mock|vnpay` chọn đường chạy của `pay_fee` **mà không đổi contract**: tool name, input/output, StandardResult và error codes giữ nguyên.
+
+| | `mock` (mặc định) | `vnpay` |
+| --- | --- | --- |
+| Duyệt thanh toán | Thu tiền đồng bộ — xong ngay | Chỉ **MỞ PHIÊN**: row `payments` PENDING với số tiền **ĐÓNG BĂNG**, trả `payment_redirect_url` cho UI chuyển hướng |
+| Nguồn sự thật về tiền | Mock service | Callback **IPN** máy-nhân-máy (`GET /api/v1/webhooks/vnpay/ipn`, xác minh HMAC-SHA512, không JWT) |
+| Trạng thái | `PAID` tức thì | `PENDING` → `PAID` khi IPN xác nhận; hết hạn TTL → `FAILED`. **Không thêm trạng thái mới** |
+
+Quy tắc bổ sung:
+
+- Return URL (trình duyệt quay về) **chỉ hiển thị** — không bao giờ dùng để ghi dữ liệu tài chính.
+- `payment_approvals.status='APPROVED'` nghĩa là *người dùng đồng ý*, KHÔNG phải *đã thu tiền*. Tiền chỉ được coi là PAID sau IPN hợp lệ.
+- Khi một booking còn phiên PENDING, yêu cầu đổi khu bị từ chối ở tầng domain (`PAYMENT_SESSION_ACTIVE`) — số tiền user thấy khi trả phải là số được tất toán.
+- Sweeper đóng phiên quá hạn (khớp `vnp_ExpireDate` phía gateway) và hàn workflow đã PAID nhưng chưa chốt (process chết giữa lượt IPN).
+- Secret (`VNPAY_HASH_SECRET`) chỉ nằm trong `.env`; mọi tham số `vnp_*`, nhân-100 số tiền, ký HMAC nằm trong `src/connectors/vnpay.py` — Executor/orchestration không nhìn thấy đặc tả gateway.
+
 ---
 
 ## 12. Mock API Endpoints

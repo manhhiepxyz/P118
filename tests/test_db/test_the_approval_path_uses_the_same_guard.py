@@ -258,7 +258,7 @@ def test_no_orchestration_module_calls_a_connector_directly():
     for path in list((src / "orchestration").glob("*.py")) + list((src / "api").glob("*.py")):
         if path.name in allowed:
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue

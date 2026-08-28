@@ -18,6 +18,7 @@ import { ProviderReviewPage } from './pages/ProviderReviewPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { VehicleRegistrationPage } from './pages/VehicleRegistrationPage'
 import { WorkflowPage } from './pages/WorkflowPage'
+import { PaymentResultPage } from './pages/PaymentResultPage'
 import { JourneyWorkspacePage } from './pages/JourneyWorkspacePage'
 import { WorkflowsPage } from './pages/WorkflowsPage'
 
@@ -141,6 +142,18 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <WorkflowPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Trang user quay về sau cổng thanh toán gateway (VNPay redirect).
+              TOÀN MÀN HÌNH, ngoài AppLayout: đây là điểm cuối một luồng tài
+              chính, chỉ poll và báo kết quả — không phải nơi điều hướng. */}
+          <Route
+            path="/payment/result"
+            element={
+              <ProtectedRoute>
+                <PaymentResultPage />
               </ProtectedRoute>
             }
           />
