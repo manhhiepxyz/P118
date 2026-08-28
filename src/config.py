@@ -174,6 +174,12 @@ class Settings(BaseSettings):
     daily_workflow_quota: int = 200
     daily_quota_window_hours: int = 24
 
+    # Email / SMTP
+    smtp_host: str | None = Field(default=None, description="SMTP server host, e.g. smtp.gmail.com")
+    smtp_port: int = Field(default=587, description="SMTP server port")
+    smtp_username: str | None = Field(default=None, description="SMTP account username/email")
+    smtp_password: str | None = Field(default=None, description="SMTP account password (or App Password)")
+
 
 @lru_cache
 def get_settings() -> Settings:

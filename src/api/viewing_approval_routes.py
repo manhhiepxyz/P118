@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.api.deps import require_roles
@@ -62,6 +62,7 @@ from src.orchestration.viewing_approval import (
     get_pending_viewing_approval,
     list_viewing_approvals,
 )
+from src.services.email_service import send_workflow_batch_email
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,7 @@ async def _bat_buoc_so_huu(workflow_id: str, reviewer: dict) -> list[str]:
 async def decide_viewing_approval(
     workflow_id: str,
     body: _DecideBody,
+    background_tasks: BackgroundTasks,
     reviewer: dict = Depends(require_roles("provider")),
 ) -> dict:
     """ĐƠN VỊ TOUR quyết định lịch tham quan. Admin không có quyền này.
@@ -248,6 +250,26 @@ async def decide_viewing_approval(
         # viết lại nó là thay lời chứng bằng một bản diễn giải.
         if not (outcome or {}).get("repair_pending"):
             request_fresh_answer(workflow_id, job=job)
+            
+        # Kiểm tra xem workflow còn pending approval nào không
+        repository = await acquire_repository()
+        pool = repository._pool
+        try:
+            # Lịch tham quan chỉ có một bước duyệt, nên duyệt xong là xong
+            is_workflow_done = True
+            if is_workflow_done:
+                from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+                if isinstance(repository, PostgreSQLWorkflowStateRepository):
+                    owner_id = await repository.get_workflow_owner(workflow_id)
+                    if owner_id:
+                        from src.db.user_repository import UserRepository
+                        user_info = await UserRepository(pool).get_user_by_id(owner_id)
+                        if user_info and user_info.get("email"):
+                            ai_msg = outcome.get("assistant_message") or "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. Vui lòng truy cập hệ thống để xem chi tiết."
+                            background_tasks.add_task(send_workflow_batch_email, user_info["email"], ai_msg)
+        finally:
+            await pool.close()
+            
         return {
             "workflow_id": workflow_id,
             "decision": "reject",
@@ -318,6 +340,26 @@ async def decide_viewing_approval(
     # Tình huống vừa đổi: lịch đã được duyệt. Câu cũ nói "đơn vị tour đang xác
     # nhận" và nó hết đúng ngay tại đây.
     request_fresh_answer(workflow_id, job=job)
+    
+    # Kiểm tra xem workflow còn pending approval nào không
+    repository = await acquire_repository()
+    pool = repository._pool
+    try:
+        # Lịch tham quan chỉ có một bước duyệt, nên duyệt xong là xong
+        is_workflow_done = True
+        if is_workflow_done:
+            from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+            if isinstance(repository, PostgreSQLWorkflowStateRepository):
+                owner_id = await repository.get_workflow_owner(workflow_id)
+                if owner_id:
+                    from src.db.user_repository import UserRepository
+                    user_info = await UserRepository(pool).get_user_by_id(owner_id)
+                    if user_info and user_info.get("email"):
+                        ai_msg = outcome.get("assistant_message") or "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. Vui lòng truy cập hệ thống để xem chi tiết."
+                        background_tasks.add_task(send_workflow_batch_email, user_info["email"], ai_msg)
+    finally:
+        await pool.close()
+    
     return {
         "workflow_id": workflow_id,
         "decision": "approve",

@@ -71,7 +71,7 @@ def test_a_common_module_never_imports_a_higher_layer(module):
     # trước, và gỡ nó là một thay đổi ngoài phạm vi. Ghi ra đây thay vì mở rộng
     # danh sách rồi im lặng — nó là nợ đã biết, không phải nợ được tha.
     higher = {"agents", "api", "orchestration"}
-    tree = ast.parse(module.read_text())
+    tree = ast.parse(module.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("src."):
             layer = (node.module or "").split(".")[1]
@@ -92,7 +92,7 @@ def test_nobody_keeps_a_second_copy_of_the_allowlist():
     names = {"PROVIDER_TOOLS", "AGENT_FORBIDDEN_TOOLS", "AGENT_REACHABLE_TOOLS"}
     owners = set()
     for path in _SRC.rglob("*.py"):
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in tree.body:
             targets = []
             if isinstance(node, ast.Assign):

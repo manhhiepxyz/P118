@@ -6,12 +6,13 @@ import {
   type AdminUser,
 } from "../lib/agentApi";
 import { useToast } from "../lib/toast";
-import { Lock, Unlock, Search, Loader2 } from "lucide-react";
+import { Lock, Unlock, Search, Loader2, Info, X } from "lucide-react";
 
 export function AdminUsersPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
+  const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
   const toast = useToast();
 
   const fetchUsers = async () => {
@@ -188,7 +189,15 @@ export function AdminUsersPage() {
                       {user.archived_at ? "ĐÃ KHÓA" : "HOẠT ĐỘNG"}
                     </span>
                   </td>
-                  <td className="py-4 px-6 text-right">
+                  <td className="py-4 px-6 text-right space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedUser(user)}
+                      title="Xem chi tiết"
+                      className="press inline-flex items-center justify-center w-8 h-8 rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-raised)] transition-all"
+                    >
+                      <Info className="w-4 h-4" />
+                    </button>
                     <button
                       type="button"
                       onClick={() =>
@@ -232,6 +241,82 @@ export function AdminUsersPage() {
           </table>
         </div>
       </div>
+      {/* Details Modal */}
+      {selectedUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-[var(--surface-base)] w-full max-w-lg rounded-[var(--r-md)] border border-[var(--border-strong)] shadow-2xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-subtle)] bg-[var(--surface-raised)]">
+              <h3 className="text-[16px] font-semibold text-[var(--text-primary)]">
+                Chi tiết người dùng
+              </h3>
+              <button
+                type="button"
+                onClick={() => setSelectedUser(null)}
+                className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto max-h-[70vh]">
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-16 h-16 rounded-full bg-[var(--surface-raised)] border border-[var(--border-subtle)] overflow-hidden flex items-center justify-center shrink-0">
+                  {selectedUser.avatar_url ? (
+                    <img src={selectedUser.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-[20px] font-medium text-[var(--text-muted)]">
+                      {selectedUser.username.charAt(0).toUpperCase()}
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[18px] font-semibold text-[var(--text-primary)]">
+                    {selectedUser.full_name || selectedUser.username}
+                  </div>
+                  <div className="text-[14px] text-[var(--text-secondary)] mt-0.5">
+                    ID: {selectedUser.id}
+                  </div>
+                  <div className="text-[14px] text-[var(--text-secondary)] mt-0.5">
+                    Tham gia: {new Date(selectedUser.created_at).toLocaleDateString("vi-VN")}
+                  </div>
+                </div>
+              </div>
+
+              <dl className="grid gap-y-4 gap-x-6 sm:grid-cols-2">
+                {[
+                  { label: "Username", value: selectedUser.username },
+                  { label: "Họ và tên", value: selectedUser.full_name },
+                  { label: "Email", value: selectedUser.email },
+                  { label: "Số điện thoại", value: selectedUser.phone },
+                  { label: "Giới tính", value: selectedUser.gender },
+                  { label: "Ngày sinh", value: selectedUser.date_of_birth },
+                  { label: "Địa chỉ", value: selectedUser.address, full: true },
+                  { label: "CCCD (4 số cuối)", value: selectedUser.cccd_last4 },
+                ].map((field) => (
+                  <div key={field.label} className={field.full ? "sm:col-span-2" : ""}>
+                    <dt className="text-[12px] font-semibold uppercase tracking-[0.05em] text-[var(--text-muted)]">
+                      {field.label}
+                    </dt>
+                    <dd className={`mt-1 text-[14.5px] ${field.value ? "text-[var(--text-primary)] font-medium" : "text-[var(--text-muted)] italic"}`}>
+                      {field.value || "Chưa có"}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+            
+            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-[var(--surface-raised)] flex justify-end">
+              <button
+                type="button"
+                onClick={() => setSelectedUser(null)}
+                className="press min-h-10 px-5 rounded-[var(--r-sm)] font-medium text-[14px] bg-[var(--surface-overlay)] border border-[var(--border-strong)] text-[var(--text-primary)] hover:bg-[var(--surface-base)]"
+              >
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

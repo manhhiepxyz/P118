@@ -398,19 +398,27 @@ export interface RegisterProfileInput {
 export async function register(
   username: string,
   password: string,
-  email?: string,
+  email: string,
+  otpCode: string,
   profile: RegisterProfileInput = {},
 ): Promise<AuthUser> {
   // Backend luôn tạo role `customer`. Browser không chọn được role, và cũng
   // không tạo được liên kết cư dân — việc đó thuộc đường admin/provider.
-  const body: Record<string, unknown> = { username, password };
-  if (email) body.email = email;
+  const body: Record<string, unknown> = { username, password, email, otp_code: otpCode };
   for (const [key, value] of Object.entries(profile)) {
     if (value) body[key] = value;
   }
   return request<AuthUser>("/auth/register", {
     method: "POST",
     body,
+    anonymous: true,
+  });
+}
+
+export async function sendOtp(data: any): Promise<{ message: string }> {
+  return request<{ message: string }>("/auth/send-registration-otp", {
+    method: "POST",
+    body: data,
     anonymous: true,
   });
 }
@@ -922,6 +930,11 @@ export interface AdminUser {
   archived_at: string | null;
   full_name: string | null;
   phone: string | null;
+  address: string | null;
+  date_of_birth: string | null;
+  gender: string | null;
+  cccd_last4: string | null;
+  avatar_url: string | null;
 }
 
 export async function adminListUsers(): Promise<{ items: AdminUser[] }> {
