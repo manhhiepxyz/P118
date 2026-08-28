@@ -139,3 +139,29 @@ def require_roles(*roles: str | list[str] | tuple[str, ...]):
         return user
 
     return _checker
+
+
+# ---------------------------------------------------------------------------
+# Người gửi email OTP — MỘT chỗ để thay.
+#
+# Vì sao cần một dependency cho một hàm
+# -------------------------------------
+# `auth_routes` gọi thẳng `send_otp_email` qua import ở đầu file. Với một import
+# module-level, không có đường nào để bài kiểm chen vào mà không vá thuộc tính
+# của module — và một phép vá như vậy rò sang bài kế tiếp khi ai đó quên gỡ.
+#
+# Bài kiểm cần đọc được mã OTP, và nó phải đọc ở ĐÚNG CHỖ mã ấy rời hệ thống:
+# email. Đọc từ database là đọc một chi tiết cài đặt — ngày ai đó đổi cách lưu
+# (băm mã, đổi bảng, đưa sang Redis) thì mọi bài kiểm đỏ trong khi hành vi
+# người dùng thấy không đổi một chút nào.
+#
+# Vì sao KHÔNG có cờ môi trường
+# -----------------------------
+# Không có `if TESTING:` ở đây. Thay thế chỉ xảy ra qua
+# `app.dependency_overrides`, thứ chỉ tồn tại trong tiến trình test. Production
+# không có đường nào bật nó — kể cả khi một biến môi trường bị đặt nhầm.
+def get_otp_email_sender() -> Any:
+    """Hàm gửi email OTP. Production luôn nhận bản thật."""
+    from src.services.email_service import send_otp_email
+
+    return send_otp_email

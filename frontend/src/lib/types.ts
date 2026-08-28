@@ -286,6 +286,7 @@ export interface AgentWorkflowResponse {
    * có hai việc trong khi thật ra chỉ có một.
    */
   provider_rejection: AgentProviderRejection | null
+  /**
    * URL thanh toán gateway (VNPay) trả về NGAY khi user bấm duyệt.
    *
    * Khác null → giao diện chuyển hướng CẢ CỬA SỔ sang đây thay vì coi duyệt là

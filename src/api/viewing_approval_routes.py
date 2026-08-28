@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.api.deps import require_roles
@@ -250,26 +250,39 @@ async def decide_viewing_approval(
         # viết lại nó là thay lời chứng bằng một bản diễn giải.
         if not (outcome or {}).get("repair_pending"):
             request_fresh_answer(workflow_id, job=job)
-            
-        # Kiểm tra xem workflow còn pending approval nào không
-        repository = await acquire_repository()
-        pool = repository._pool
+
+        # Báo cho khách bằng email — VIỆC PHỤ, và nó không được làm hỏng việc chính.
+        #
+        # Quyết định đã được ghi và chuỗi đã chạy xong TRƯỚC dòng này. Khâu báo tin
+        # hỏng — chưa cấu hình repository, đọc user lỗi, SMTP chết — thì hệ quả đúng
+        # là "khách không nhận được email", KHÔNG phải "lượt duyệt trả 500".
+        #
+        # Bản đầu để lỗi lan ra ngoài, nên một lượt duyệt THÀNH CÔNG vẫn ném
+        # `RepositoryNotConfiguredError` và người duyệt đọc một lỗi hệ thống cho một
+        # việc đã xong. Chỉ giữ TÊN loại lỗi: message có thể mang email của khách.
         try:
-            # Lịch tham quan chỉ có một bước duyệt, nên duyệt xong là xong
-            is_workflow_done = True
-            if is_workflow_done:
+            repository = await acquire_repository()
+            pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+            try:
                 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+
                 if isinstance(repository, PostgreSQLWorkflowStateRepository):
                     owner_id = await repository.get_workflow_owner(workflow_id)
                     if owner_id:
                         from src.db.user_repository import UserRepository
+
                         user_info = await UserRepository(pool).get_user_by_id(owner_id)
                         if user_info and user_info.get("email"):
-                            ai_msg = outcome.get("assistant_message") or "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. Vui lòng truy cập hệ thống để xem chi tiết."
+                            ai_msg = outcome.get("assistant_message") or (
+                                "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. "
+                                "Vui lòng truy cập hệ thống để xem chi tiết."
+                            )
                             background_tasks.add_task(send_workflow_batch_email, user_info["email"], ai_msg)
-        finally:
-            await pool.close()
-            
+            finally:
+                await pool.close()
+        except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+            logger.warning("khong bao duoc email ket qua tham quan (%s)", type(exc).__name__)
+
         return {
             "workflow_id": workflow_id,
             "decision": "reject",
@@ -340,26 +353,39 @@ async def decide_viewing_approval(
     # Tình huống vừa đổi: lịch đã được duyệt. Câu cũ nói "đơn vị tour đang xác
     # nhận" và nó hết đúng ngay tại đây.
     request_fresh_answer(workflow_id, job=job)
-    
-    # Kiểm tra xem workflow còn pending approval nào không
-    repository = await acquire_repository()
-    pool = repository._pool
+
+    # Báo cho khách bằng email — VIỆC PHỤ, và nó không được làm hỏng việc chính.
+    #
+    # Quyết định đã được ghi và chuỗi đã chạy xong TRƯỚC dòng này. Khâu báo tin
+    # hỏng — chưa cấu hình repository, đọc user lỗi, SMTP chết — thì hệ quả đúng
+    # là "khách không nhận được email", KHÔNG phải "lượt duyệt trả 500".
+    #
+    # Bản đầu để lỗi lan ra ngoài, nên một lượt duyệt THÀNH CÔNG vẫn ném
+    # `RepositoryNotConfiguredError` và người duyệt đọc một lỗi hệ thống cho một
+    # việc đã xong. Chỉ giữ TÊN loại lỗi: message có thể mang email của khách.
     try:
-        # Lịch tham quan chỉ có một bước duyệt, nên duyệt xong là xong
-        is_workflow_done = True
-        if is_workflow_done:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
             from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+
             if isinstance(repository, PostgreSQLWorkflowStateRepository):
                 owner_id = await repository.get_workflow_owner(workflow_id)
                 if owner_id:
                     from src.db.user_repository import UserRepository
+
                     user_info = await UserRepository(pool).get_user_by_id(owner_id)
                     if user_info and user_info.get("email"):
-                        ai_msg = outcome.get("assistant_message") or "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. Vui lòng truy cập hệ thống để xem chi tiết."
+                        ai_msg = outcome.get("assistant_message") or (
+                            "Yêu cầu **tham quan bất động sản** của bạn đã được xử lý. "
+                            "Vui lòng truy cập hệ thống để xem chi tiết."
+                        )
                         background_tasks.add_task(send_workflow_batch_email, user_info["email"], ai_msg)
-    finally:
-        await pool.close()
-    
+        finally:
+            await pool.close()
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("khong bao duoc email ket qua tham quan (%s)", type(exc).__name__)
+
     return {
         "workflow_id": workflow_id,
         "decision": "approve",

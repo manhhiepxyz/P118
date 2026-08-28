@@ -17,16 +17,15 @@ Test: override `get_user_repository` bằng FakeUserRepository qua
 
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import secrets
-
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 
 from src.api.auth import create_access_token, hash_password, verify_password
-from src.api.deps import get_current_user, get_user_repository
+from src.api.deps import get_current_user, get_otp_email_sender, get_user_repository
 from src.api.schemas import (
     LoginRequest,
     RegisterRequest,
@@ -35,10 +34,9 @@ from src.api.schemas import (
     UserResponse,
 )
 from src.config import get_settings
+from src.db.otp_repository import OtpRepository
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.user_repository import UserAlreadyExistsError
-from src.db.otp_repository import OtpRepository
-from src.services.email_service import send_otp_email
 from src.orchestration.runtime_provider import acquire_repository
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -78,8 +76,13 @@ async def send_registration_otp(
     req: SendOtpRequest,
     background_tasks: BackgroundTasks,
     users: Any = Depends(get_user_repository),
+    gui_email_otp: Any = Depends(get_otp_email_sender),
 ) -> dict:
-    """Gửi OTP xác nhận email trước khi đăng ký."""
+    """Gửi OTP xác nhận email trước khi đăng ký.
+
+    Người gửi email đến từ `get_otp_email_sender`, không phải từ import trực
+    tiếp: bài kiểm cần đọc mã OTP ở ĐÚNG chỗ nó rời hệ thống, và đó là email.
+    """
     username = req.username.strip().lower()
     user_by_username = await users.get_user_by_username(username)
     if user_by_username is not None:
@@ -91,11 +94,12 @@ async def send_registration_otp(
         raise HTTPException(status_code=409, detail="Email này đã được sử dụng.")
 
     otp_code = str(secrets.choice(range(100000, 999999)))
-    
+
     repository = await acquire_repository()
     pool = repository._pool
     try:
         from src.db.otp_repository import CooldownError
+
         otp_repo = OtpRepository(pool)
         await otp_repo.save_otp(email, otp_code)
     except CooldownError as e:
@@ -104,7 +108,7 @@ async def send_registration_otp(
         await pool.close()
 
     # Gửi email qua background để không block request
-    background_tasks.add_task(send_otp_email, email, otp_code)
+    background_tasks.add_task(gui_email_otp, email, otp_code)
     return {"message": "OTP đã được gửi đến email của bạn."}
 
 
@@ -134,6 +138,7 @@ async def register(
 
     try:
         from src.db.user_repository import EmailAlreadyExistsError
+
         user = await users.create_user(
             username=username,
             password_hash=password_hash,

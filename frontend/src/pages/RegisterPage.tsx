@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Eye, EyeOff, UserPlus, Mail, ArrowRight } from 'lucide-react'
+import { Eye, EyeOff, UserPlus, Mail } from 'lucide-react'
 
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'

@@ -86,9 +86,10 @@ ResidentLinkStatus = Literal["NOT_LINKED", "PENDING", "VERIFIED", "REJECTED"]
 
 class RegistrationData(BaseModel):
     """Các trường thông tin đăng ký cơ bản, dùng chung cho cả lúc gửi OTP và lúc đăng ký."""
+
     username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=8, max_length=128)
-    
+
     email: str = Field(..., max_length=255, pattern=r"^[^@]+@[^@]+\.[^@]+$")
 
     full_name: str | None = Field(default=None, min_length=1, max_length=200)

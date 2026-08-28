@@ -2,18 +2,21 @@
 src/services/email_service.py
 P-118 — Dịch vụ Gửi Email qua SMTP (Gmail)
 """
+
 import logging
-from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
 import aiosmtplib
 
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+
 async def _send_email_async(to_email: str, subject: str, content: str) -> None:
     settings = get_settings()
-    
+
     if not settings.smtp_username or not settings.smtp_password or not settings.smtp_host:
         logger.warning(
             f"SMTP chưa cấu hình. Fallback in ra console:\n"
@@ -28,7 +31,7 @@ async def _send_email_async(to_email: str, subject: str, content: str) -> None:
     msg["From"] = settings.smtp_username
     msg["To"] = to_email
     msg["Subject"] = subject
-    
+
     msg.attach(MIMEText(content, "html", "utf-8"))
 
     try:
@@ -68,10 +71,10 @@ async def send_otp_email(to_email: str, otp_code: str) -> None:
 async def send_workflow_batch_email(to_email: str, assistant_message: str) -> None:
     """Gửi email thông báo kết quả duyệt tiến trình."""
     subject = "Cập nhật yêu cầu dịch vụ của bạn (AI20K Agent)"
-    
+
     # Chuyển đổi message của AI thành HTML cho dễ đọc (đơn giản hoá việc đổi \n thành <br>)
     html_message = assistant_message.replace("\n", "<br>")
-    
+
     content = f"""
     <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
@@ -81,13 +84,13 @@ async def send_workflow_batch_email(to_email: str, assistant_message: str) -> No
                 </h3>
                 <p>Chào bạn,</p>
                 <p>Hệ thống vừa có cập nhật mới về tiến trình yêu cầu dịch vụ của bạn. Trợ lý AI có lời nhắn dành cho bạn như sau:</p>
-                
+
                 <div style="background-color: #f9f9f9; border-left: 4px solid #3498db; padding: 15px; margin: 20px 0; font-size: 15px;">
                     {html_message}
                 </div>
-                
+
                 <p style="font-size: 14px; color: #555;">(Nếu có yêu cầu thanh toán, vui lòng làm theo hướng dẫn ở trên để hoàn tất thủ tục).</p>
-                
+
                 <br>
                 <p>Trân trọng,</p>
                 <p><b>Ban quản lý & Trợ lý AI20K</b></p>
