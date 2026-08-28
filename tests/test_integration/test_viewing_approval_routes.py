@@ -41,6 +41,7 @@ from src.common.task_plan import InputRef
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.main import app
 from src.orchestration import demo_service
+from src.orchestration.provider_directory import don_vi_mac_dinh
 from src.orchestration.runtime_provider import (
     SharedPool,
     clear_repository_provider,
@@ -213,8 +214,26 @@ async def _register_customer(client) -> dict:
     return {"id": data["id"], "username": data["username"], "role": data["role"]}
 
 
-async def _make_provider(repo) -> dict:
+async def _make_provider(repo, *, don_vi: str | None = None) -> dict:
+    """Tài khoản đơn vị — có role VÀ, mặc định, được gắn đơn vị giữ lịch tham quan.
+
+    Gắn đơn vị không phải chi tiết dựng cảnh. Từ khi cổng tham quan lọc theo
+    quyền sở hữu, một tài khoản `provider` chưa gắn đơn vị nào không đọc và
+    không quyết định được gì — đó là hành vi ĐÚNG, và mọi bài ở file này nói về
+    chuyện khác.
+
+    Mã lấy từ `don_vi_mac_dinh` chứ không gõ tay: bảng ánh xạ tool → đơn vị chỉ
+    nên có một bản. Truyền `don_vi` khác để dựng một đơn vị KHÔNG sở hữu.
+    """
     user = await repo.users.create_user(_unique("provider"), hash_password("matkhau123"), role="provider")
+    ma = don_vi if don_vi is not None else don_vi_mac_dinh("schedule_property_viewing")
+    async with repo._pool.acquire() as conn:  # noqa: SLF001 - test dựng state
+        await conn.execute(
+            "INSERT INTO service_provider_accounts (user_id, service_provider_id) "
+            "VALUES ($1::uuid, $2) ON CONFLICT DO NOTHING",
+            str(user["id"]),
+            ma,
+        )
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
@@ -275,6 +294,18 @@ async def _seed_awaiting_workflow(harness, *, owner_user_id: str) -> str:
             workflow_id,
             _date.fromisoformat(FUTURE),
             owner_user_id,
+        )
+        # Gán ĐƠN VỊ giữ hồ sơ. Trigger `INSTEAD OF INSERT` của view
+        # `viewing_approvals` KHÔNG đặt `service_provider_id`, nên mọi dòng ghi
+        # qua view là dòng VÔ CHỦ — và từ khi cổng tham quan lọc theo quyền sở
+        # hữu, dòng vô chủ không đơn vị nào thấy. Đó là fail-closed đúng ý, chứ
+        # không phải một lỗi ở đây; nhưng nó có nghĩa là bài kiểm phải nói ra ai
+        # sở hữu, y như đường ghi thật (`save_pending_viewing_approval`) đang làm.
+        await conn.execute(
+            "UPDATE service_approvals SET service_provider_id = $2 "
+            "WHERE workflow_id = $1 AND task_id = 'T1'",
+            workflow_id,
+            don_vi_mac_dinh("schedule_property_viewing"),
         )
     return workflow_id
 

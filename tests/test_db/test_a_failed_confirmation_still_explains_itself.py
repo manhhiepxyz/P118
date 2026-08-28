@@ -33,6 +33,15 @@ from src.common.enums import ErrorCode
 from src.common.results import StandardResult
 
 
+async def _cong_mo(_workflow_id, _reviewer):
+    """Cổng quyền sở hữu ở trạng thái ĐÃ QUA — dùng cho bài không nói về quyền.
+
+    Quyền sở hữu có bộ kiểm riêng ở `test_a_viewing_belongs_to_one_unit_too.py`,
+    nơi nó được đo bằng tài khoản và ánh xạ thật.
+    """
+    return ["BQL-SALES"]
+
+
 def _ket_qua_hong(ma: ErrorCode) -> dict:
     return {
         "viewing_result": StandardResult(success=False, error_code=ma, message=""),
@@ -59,6 +68,11 @@ async def test_the_reviewer_is_told_the_real_reason(monkeypatch, ma, phai_co):
 
     monkeypatch.setattr(mod, "resume_viewing_after_approval", _hong)
     monkeypatch.setattr(mod, "request_fresh_answer", lambda *_a, **_kw: None)
+    # Bài này nói về CÂU người duyệt nghe khi materialize hỏng, không nói về
+    # quyền sở hữu. Cổng `_bat_buoc_so_huu` cần một tài khoản có ánh xạ đơn vị
+    # thật trong database; dựng nó ở đây là kéo một mối bận tâm khác vào, và
+    # khi cổng ấy đổi thì bài này đỏ vì lý do không liên quan.
+    monkeypatch.setattr(mod, "_bat_buoc_so_huu", _cong_mo)
 
     with pytest.raises(HTTPException) as loi:
         await mod.decide_viewing_approval(
@@ -87,6 +101,9 @@ async def test_the_resident_gets_a_fresh_answer_before_the_route_gives_up():
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(mod, "resume_viewing_after_approval", _hong)
         mp.setattr(mod, "request_fresh_answer", lambda wid, **_kw: da_xin.append(wid))
+        # Xem ghi chú ở `_cong_mo`: bài này nói về việc xin câu mới, không nói
+        # về quyền sở hữu.
+        mp.setattr(mod, "_bat_buoc_so_huu", _cong_mo)
         with pytest.raises(HTTPException):
             await mod.decide_viewing_approval(
                 "22222222-2222-2222-2222-222222222222",
@@ -112,6 +129,11 @@ async def test_a_successful_confirmation_is_untouched(monkeypatch):
 
     monkeypatch.setattr(mod, "resume_viewing_after_approval", _xong)
     monkeypatch.setattr(mod, "request_fresh_answer", lambda *_a, **_kw: None)
+    # Bài này nói về CÂU người duyệt nghe khi materialize hỏng, không nói về
+    # quyền sở hữu. Cổng `_bat_buoc_so_huu` cần một tài khoản có ánh xạ đơn vị
+    # thật trong database; dựng nó ở đây là kéo một mối bận tâm khác vào, và
+    # khi cổng ấy đổi thì bài này đỏ vì lý do không liên quan.
+    monkeypatch.setattr(mod, "_bat_buoc_so_huu", _cong_mo)
     ket = await mod.decide_viewing_approval(
         "33333333-3333-3333-3333-333333333333",
         mod._DecideBody(decision="approve"),

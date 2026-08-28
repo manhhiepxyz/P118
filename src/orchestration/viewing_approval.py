@@ -306,27 +306,63 @@ async def list_viewing_approvals(
     pool: asyncpg.Pool,
     status: str | None = None,
     limit: int = 100,
+    *,
+    don_vi: list[str] | None = None,
 ) -> list[PendingViewingApproval]:
     """Danh sách yêu cầu tham quan cho cổng /review — mới nhất trước.
 
     `status` lọc theo vòng đời QUYẾT ĐỊNH (AWAITING/APPROVED/REJECTED); bỏ qua
     khi None. Giới hạn mặc định 100 để cổng review không tải cả lịch sử.
+
+    `don_vi` là các đơn vị mà người gọi được nhân danh, và bộ lọc chạy TRONG
+    SQL chứ không sau khi dữ liệu đã rời database:
+
+      * lọc ở Python nghĩa là hàng của đơn vị khác — kèm tên và số điện thoại
+        người yêu cầu — đã đi qua mạng và nằm trong bộ nhớ tiến trình. Một
+        `LIMIT` đặt trước bộ lọc còn tệ hơn: nó cắt mất hàng CỦA CHÍNH người
+        gọi để lấy chỗ cho hàng của người khác;
+      * `viewing_approvals` là VIEW trên `service_approvals` và không phơi cột
+        `service_provider_id`, nên câu này JOIN ngược về bảng gốc. KHÔNG thêm
+        cột vào view: chủ sở hữu là thuộc tính của DÒNG CHỜ DUYỆT, và view này
+        tồn tại để mô tả một lịch tham quan.
+
+    `don_vi=None` nghĩa là KHÔNG lọc — chỉ dành cho công cụ nội bộ chạy ngoài
+    tầng request (sweeper, kiểm kê). KHÔNG route HTTP nào được truyền `None`;
+    đường của provider luôn truyền danh sách, kể cả rỗng.
+
+    Danh sách RỖNG khớp 0 dòng (`= ANY('{}')`), và `service_provider_id IS NULL`
+    không bao giờ khớp `= ANY(...)` — cả hai đều fail-closed mà không cần một
+    mệnh đề riêng để ai đó quên.
     """
+    loc = "" if don_vi is None else " AND s.service_provider_id = ANY($3::varchar[])"
     if status is not None:
+        tham_so: list[object] = [status, limit]
+        if don_vi is not None:
+            tham_so.append(list(don_vi))
         rows = await pool.fetch(
-            """
-            SELECT * FROM viewing_approvals
-            WHERE status = $1
-            ORDER BY created_at DESC
+            f"""
+            SELECT v.* FROM viewing_approvals v
+              JOIN service_approvals s USING (workflow_id, task_id)
+            WHERE v.status = $1{loc}
+            ORDER BY v.created_at DESC
             LIMIT $2
-            """,
-            status,
-            limit,
+            """,  # noqa: S608 - mệnh đề lọc là literal nội bộ, giá trị luôn là tham số
+            *tham_so,
         )
     else:
+        loc_khong_status = "" if don_vi is None else " WHERE s.service_provider_id = ANY($2::varchar[])"
+        tham_so = [limit]
+        if don_vi is not None:
+            tham_so.append(list(don_vi))
         rows = await pool.fetch(
-            "SELECT * FROM viewing_approvals ORDER BY created_at DESC LIMIT $1",
-            limit,
+            f"""
+            SELECT v.* FROM viewing_approvals v
+              JOIN service_approvals s USING (workflow_id, task_id)
+            {loc_khong_status}
+            ORDER BY v.created_at DESC
+            LIMIT $1
+            """,  # noqa: S608 - như trên
+            *tham_so,
         )
     return [_row_to_pending(row) for row in rows]
 
@@ -380,17 +416,40 @@ async def record_viewing_decision(
     workflow_id: str,
     decision: str,
     decided_by: str | None = None,
+    *,
+    don_vi: list[str] | None = None,
 ) -> bool:
-    """Ghi quyết định. Trả False nếu workflow không còn ở trạng thái chờ.
+    """Ghi quyết định. Trả False nếu dòng không còn chờ HOẶC không thuộc `don_vi`.
 
-    `WHERE status = 'AWAITING'` là khoá chống hai lệnh duyệt đồng thời: chỉ một
-    lệnh đổi được trạng thái, lệnh còn lại thấy 0 row và biết mình đến sau.
+    Ba điều kiện nằm trong MỘT câu lệnh, và đó là điểm chính của hàm này:
+
+        status = 'AWAITING'          không ai quyết định trước
+        tool   = tham quan           không đụng phần của đơn vị khác trong cùng
+                                     yêu cầu
+        service_provider_id ∈ don_vi người bấm đang nhân danh đúng đơn vị
+
+    Gộp chúng vào một `UPDATE ... WHERE` là cách duy nhất KHÔNG có khe TOCTOU.
+    Kiểm quyền sở hữu bằng một câu `SELECT` rồi mới `UPDATE` để lại một khoảng
+    giữa hai lệnh, và trong khoảng ấy quyền sở hữu có thể đổi — dòng bị ghim lại
+    cho đơn vị khác, hoặc ánh xạ tài khoản bị gỡ. PostgreSQL đánh giá `WHERE`
+    tại thời điểm ghi, nên ở đây không có khoảng nào.
+
+    Hệ quả phụ đáng giữ: hai lượt bấm đồng thời vẫn chỉ một lượt thắng, vì
+    `status = 'AWAITING'` vẫn là điều kiện chống đua như trước — thêm một mệnh
+    đề không làm yếu nó.
+
+    `don_vi=None` = không lọc, chỉ cho công cụ nội bộ (sweeper tự duyệt lúc
+    demo, kiểm kê). Không route HTTP nào được truyền `None`.
 
     `decided_by` lấy từ JWT của người duyệt (main app đặt, không nhận từ body).
     """
+    loc = "" if don_vi is None else " AND service_provider_id = ANY($4::varchar[])"
+    tham_so: list[object] = [_uuid(workflow_id), decision, decided_by]
+    if don_vi is not None:
+        tham_so.append(list(don_vi))
     async with pool.acquire() as conn:
         result = await conn.execute(
-            """
+            f"""
             -- GIỚI HẠN theo tool. Bảng cũ khoá theo `workflow_id` nên mệnh
             -- đề này đủ; bảng gộp khoá theo `(workflow_id, task_id)`, và một
             -- yêu cầu có thể chứa cả lịch tham quan lẫn chỗ đỗ xe của hai đơn
@@ -399,11 +458,9 @@ async def record_viewing_decision(
             UPDATE service_approvals
                SET status = $2, decided_at = NOW(), decided_by = COALESCE($3, decided_by)
              WHERE workflow_id = $1 AND status = 'AWAITING'
-               AND tool = 'schedule_property_viewing'
-            """,
-            _uuid(workflow_id),
-            decision,
-            decided_by,
+               AND tool = 'schedule_property_viewing'{loc}
+            """,  # noqa: S608 - mệnh đề lọc là literal nội bộ, giá trị luôn là tham số
+            *tham_so,
         )
     return result.endswith(" 1")
 

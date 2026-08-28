@@ -1487,12 +1487,23 @@ async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[s
         await pool.close()
 
 
-async def record_viewing_decision_or_fail(workflow_id: str, decision: str, decided_by: str | None = None) -> bool:
-    """Chốt quyết định duyệt lịch tham quan. Chỉ MỘT lệnh đổi AWAITING."""
+async def record_viewing_decision_or_fail(
+    workflow_id: str,
+    decision: str,
+    decided_by: str | None = None,
+    *,
+    don_vi: list[str] | None = None,
+) -> bool:
+    """Chốt quyết định duyệt lịch tham quan. Chỉ MỘT lệnh đổi AWAITING.
+
+    `don_vi` đi thẳng xuống mệnh đề `WHERE` của câu UPDATE — quyền sở hữu được
+    kiểm ở CÙNG lệnh ghi, không phải ở một câu SELECT trước đó. Xem
+    `viewing_approval.record_viewing_decision`.
+    """
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
-        return await record_viewing_decision(pool, workflow_id, decision, decided_by)
+        return await record_viewing_decision(pool, workflow_id, decision, decided_by, don_vi=don_vi)
     finally:
         await pool.close()
 
@@ -2136,6 +2147,7 @@ async def resume_viewing_after_approval(
     resident_services_url: str = "http://localhost:8006",
     consultation_url: str = "http://localhost:8007",
     decided_by: str | None = None,
+    don_vi: list[str] | None = None,
 ) -> dict[str, Any]:
     """Provider duyệt lịch tham quan: materialize tour rồi chạy nốt task còn lại.
 
@@ -2168,7 +2180,10 @@ async def resume_viewing_after_approval(
     finally:
         await pool.close()
 
-    if not await record_viewing_decision_or_fail(workflow_id, VIEWING_APPROVED, decided_by):
+    # Quyền sở hữu nằm TRONG câu UPDATE này, và nó chạy TRƯỚC mọi tác dụng phụ:
+    # materialize lịch bên Tour provider và đặt xe đưa đón đều nằm dưới. Một đơn
+    # vị không sở hữu không đổi được dòng, nên không có gì được đặt.
+    if not await record_viewing_decision_or_fail(workflow_id, VIEWING_APPROVED, decided_by, don_vi=don_vi):
         raise ResumeError("ALREADY_DECIDED", "Yêu cầu tham quan này đã được xử lý.")
 
     return await _materialize_and_run_remaining(
@@ -2509,6 +2524,7 @@ async def reject_viewing(
     decided_by: str | None = None,
     *,
     reject_code: str | None = None,
+    don_vi: list[str] | None = None,
 ) -> dict[str, Any]:
     """Từ chối lịch tham quan. TUYỆT ĐỐI không gọi Tour provider.
 
@@ -2528,7 +2544,7 @@ async def reject_viewing(
     viết "khung giờ 10:00 đã kín lịch, bạn chọn giờ khác giúp mình" — đúng thứ
     khách cần — và yêu cầu dừng hẳn, không ô nào để đổi giờ.
     """
-    if not await record_viewing_decision_or_fail(workflow_id, VIEWING_REJECTED, decided_by):
+    if not await record_viewing_decision_or_fail(workflow_id, VIEWING_REJECTED, decided_by, don_vi=don_vi):
         raise ResumeError("ALREADY_DECIDED", "Yêu cầu tham quan này đã được xử lý.")
 
     repository = await acquire_repository()

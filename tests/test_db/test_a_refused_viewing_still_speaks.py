@@ -25,6 +25,7 @@ import uuid
 import pytest
 
 from src.common.enums import TaskStatus
+from src.orchestration.provider_directory import don_vi_mac_dinh
 from src.orchestration.viewing_approval import save_pending_viewing_approval
 from tests.test_db.conftest import _register_and_login
 
@@ -83,8 +84,21 @@ def _auth(t):
 
 
 async def _tour_provider(client, db_pool, name):
+    """Tài khoản đơn vị tham quan — có role VÀ được gắn đúng đơn vị.
+
+    Gắn đơn vị không phải chi tiết dựng cảnh: từ khi cổng tham quan lọc theo
+    quyền sở hữu, một tài khoản `provider` chưa gắn đơn vị nào KHÔNG duyệt được
+    gì cả, và đó là hành vi đúng. Lấy mã từ `don_vi_mac_dinh` chứ không gõ
+    `"BQL-SALES"`: bảng ánh xạ tool → đơn vị chỉ nên có một bản.
+    """
     await _register_and_login(client, name)
     await db_pool.execute("UPDATE users SET role='provider' WHERE username=$1", name)
+    await db_pool.execute(
+        "INSERT INTO service_provider_accounts (user_id, service_provider_id) "
+        "SELECT id, $2 FROM users WHERE username = $1 ON CONFLICT DO NOTHING",
+        name,
+        don_vi_mac_dinh("schedule_property_viewing"),
+    )
     return await _register_and_login(client, name)
 
 

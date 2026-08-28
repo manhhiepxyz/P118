@@ -52,7 +52,16 @@ from src.orchestration.demo_service import (
     resume_viewing_after_approval,
 )
 from src.orchestration.runtime_provider import acquire_repository
-from src.orchestration.viewing_approval import expire_stale_viewing_approvals, list_viewing_approvals
+
+# Nguồn quyền sở hữu CANONICAL — cùng hai hàm hàng đợi dịch vụ đang dùng.
+# Một bảng ánh xạ thứ hai, hay một helper "gần giống", là một nguồn sự thật thứ
+# hai; và hai nguồn sự thật về quyền thì sớm muộn nói khác nhau.
+from src.orchestration.service_approval import don_vi_cua_tai_khoan, so_huu_boi
+from src.orchestration.viewing_approval import (
+    expire_stale_viewing_approvals,
+    get_pending_viewing_approval,
+    list_viewing_approvals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +130,7 @@ def _pending_to_dict(pending) -> dict:
 @router.get("", summary="Danh sách yêu cầu lịch tham quan (cho người duyệt)")
 async def list_viewing_approval_records(
     status: str | None = None,
-    _reviewer: dict = Depends(require_roles("provider")),
+    reviewer: dict = Depends(require_roles("provider")),
 ) -> dict:
     """Danh sách yêu cầu tham quan cho cổng /review — mới nhất trước.
 
@@ -142,10 +151,58 @@ async def list_viewing_approval_records(
         # đang đứng trước màn hình. Lọc ở đây thì thứ không duyệt được không
         # bao giờ xuất hiện như thể duyệt được.
         await expire_stale_viewing_approvals(pool)
-        items = await list_viewing_approvals(pool, status)
+        # Đơn vị đến từ TÀI KHOẢN, không bao giờ từ query string — nhận nó từ
+        # request là để người gọi tự khai mình nhân danh ai.
+        #
+        # LUÔN là một danh sách, kể cả rỗng. `None` (không lọc) chỉ dành cho
+        # công cụ nội bộ; không vai nào ở tầng HTTP được miễn lọc, kể cả admin —
+        # admin không có mặt bằng và không tiếp khách, nên không có gì để duyệt.
+        don_vi = await don_vi_cua_tai_khoan(pool, str(reviewer["id"]))
+        items = await list_viewing_approvals(pool, status, don_vi=don_vi)
     finally:
         await pool.close()
+    # Response KHÔNG có `total`. Cố ý: một con số đếm bằng câu truy vấn thứ hai
+    # là chỗ để mệnh đề lọc bị quên ở đúng một trong hai câu — đã xảy ra một lần
+    # ở hàng đợi dịch vụ, nơi `total` đếm cả bảng trong khi danh sách đã lọc.
+    # Thêm nó thì phải thêm cùng `WHERE`, không phải `count(*)` trần.
     return {"items": [_pending_to_dict(item) for item in items]}
+
+
+async def _bat_buoc_so_huu(workflow_id: str, reviewer: dict) -> list[str]:
+    """Chặn 404 nếu người duyệt không nhân danh đơn vị giữ lịch này.
+
+    Trả về danh sách đơn vị của tài khoản để người gọi truyền tiếp xuống câu
+    ghi — cùng một danh sách, đọc một lần.
+
+    Vì sao cần cổng này dù `record_viewing_decision` đã mang mệnh đề quyền sở
+    hữu trong câu UPDATE: hai lời từ chối đều KHÔNG ghi gì, nhưng chúng nói hai
+    câu khác nhau. Không có cổng, một đơn vị lạ nhận `409 ALREADY_DECIDED` cho
+    một dòng có thật và `404` cho một `workflow_id` bịa ra — và sự khác nhau ấy
+    chính là câu trả lời cho "dòng này có tồn tại không".
+
+    Câu UPDATE vẫn giữ mệnh đề của nó. Hai hàng rào cho hai việc: hàm này quyết
+    ĐỊNH DẠNG CÂU TRẢ LỜI, câu UPDATE bảo đảm KHÔNG GHI. Bỏ cái nào cũng để lại
+    một nửa lỗ — và mỗi nửa đã được đo bằng một đột biến riêng.
+
+    Là hàm riêng ở tầng module để bài kiểm nào không nói về quyền sở hữu có thể
+    thay đúng một thứ, thay vì dựng cả một tài khoản có ánh xạ chỉ để đi qua nó.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+    try:
+        don_vi = await don_vi_cua_tai_khoan(pool, str(reviewer["id"]))
+        pending = await get_pending_viewing_approval(pool, workflow_id)
+        # `so_huu_boi` là hàm đã dùng cho hàng đợi dịch vụ — cùng bảng, cùng
+        # luật fail-closed cho `service_provider_id IS NULL`.
+        duoc_phep = pending is not None and await so_huu_boi(pool, workflow_id, pending.task_id, don_vi)
+    finally:
+        await pool.close()
+    if not duoc_phep:
+        # MỘT câu duy nhất cho cả "không có" lẫn "không phải của bạn". Hai câu
+        # khác nhau là một kênh dò: gọi thử từng id và đọc mã trạng thái.
+        logger.info("chan quyet dinh tham quan ngoai quyen so huu user=%s", reviewer.get("username"))
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu tham quan này.")
+    return don_vi
 
 
 @router.post("/{workflow_id}/decide", summary="Duyệt hoặc từ chối một lịch tham quan")
@@ -165,6 +222,9 @@ async def decide_viewing_approval(
     """
     settings = get_settings()
 
+    # Quyền sở hữu TRƯỚC mọi thứ khác, kể cả trước khi đụng cache.
+    don_vi = await _bat_buoc_so_huu(workflow_id, reviewer)
+
     # Response đang cache trong `_DEMO_JOBS` được dựng lúc workflow còn chờ
     # duyệt. Sau quyết định, nó là ảnh cũ: nếu không bỏ đi, mọi lần poll tiếp
     # theo vẫn trả "chờ đơn vị xác nhận" dù database đã ghi SUCCESS/FAILED, và
@@ -180,6 +240,7 @@ async def decide_viewing_approval(
                 body.reject_reason,
                 decided_by=reviewer["username"],
                 reject_code=body.reject_code,
+                don_vi=don_vi,
             )
         except Exception as exc:  # noqa: BLE001 - lỗi map ra HTTP bên dưới
             raise _to_http(exc) from exc
@@ -206,6 +267,7 @@ async def decide_viewing_approval(
             resident_services_url=settings.resident_services_service_url,
             consultation_url=settings.consultation_service_url,
             decided_by=reviewer["username"],
+            don_vi=don_vi,
         )
     except Exception as exc:  # noqa: BLE001 - lỗi map ra HTTP bên dưới
         raise _to_http(exc) from exc
