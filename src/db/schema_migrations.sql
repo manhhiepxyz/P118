@@ -1526,6 +1526,11 @@ BEGIN
             FOREIGN KEY (quote_id, workflow_id, task_id)
             REFERENCES service_quotes (quote_id, workflow_id, task_id);
     END IF;
+END $$;
+
+
+
+
 -- 2026-08 — VNPay gateway trên `payments`
 --
 -- `PAYMENT_PROVIDER=vnpay` biến một dòng payments thành MỘT PHIÊN thanh toán:
