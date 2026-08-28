@@ -47,6 +47,63 @@ def test_a_bare_day_borrows_the_month_from_the_question(cau: str, mong_doi: str)
     assert answers.get("viewing_date") == mong_doi, f"{cau!r} → {answers} / chưa đọc được: {unresolved}"
 
 
+@pytest.mark.parametrize("hom_nay", [date(2020, 1, 1), date(2026, 8, 23), date(2031, 6, 15)])
+def test_the_injected_clock_governs_the_whole_read(hom_nay: date):
+    """`today` phải chi phối CẢ phép kiểm "ngày này đã qua chưa".
+
+    Hợp đồng: người gọi đưa `today` nào thì lượt đọc ấy sống trong ngày ấy —
+    không đọc đồng hồ tường ở bất kỳ bước nào.
+
+    Trước bản vá, `today` chỉ tới được bộ viết lại ngày nói tắt; phép kiểm quá
+    khứ bên trong `parse_field` vẫn gọi `date.today()`. Hậu quả đo được: ba bài
+    ngay trên đỏ vào đúng ngày 28/08/2026 và xanh trở lại vào tháng sau — một bộ
+    kiểm nói về hôm nay chứ không nói về mã.
+    """
+    # Ngày 28 nằm SAU cả ba mốc `hom_nay`, nên bộ neo không phải đẩy sang kỳ kế
+    # tiếp — bài này đo ĐỒNG HỒ, không đo luật "đừng nhận ngày đã qua".
+    neo = hom_nay.replace(day=10).isoformat()
+    mong_doi = hom_nay.replace(day=28).isoformat()
+
+    answers, unresolved = _extract_follow_up_answers("ngày 28", ["viewing_date"], anchor=neo, today=hom_nay)
+
+    assert answers.get("viewing_date") == mong_doi, f"{hom_nay} → {answers} / {unresolved}"
+
+
+def test_a_date_already_past_for_the_injected_clock_is_refused():
+    """Nửa còn lại: đồng hồ đưa vào cũng phải LOẠI được, không chỉ nhận.
+
+    Không có bài này thì một bản vá "bỏ hẳn phép kiểm quá khứ" cũng làm mọi bài
+    trên xanh — và hệ thống nhận lịch cho ngày hôm qua.
+
+    Dùng ngày ĐẦY ĐỦ chứ không phải ngày nói tắt: với ngày nói tắt, bộ neo cố ý
+    đẩy sang kỳ kế tiếp thay vì loại ("ngày 5" gõ hôm 21/8 nghĩa là 5/9). Chỉ
+    một ngày viết đủ mới đi thẳng tới phép kiểm quá khứ.
+    """
+    answers, unresolved = _extract_follow_up_answers(
+        "2026-08-12", ["viewing_date"], anchor="2026-08-10", today=date(2026, 8, 20)
+    )
+
+    assert answers.get("viewing_date") is None, answers
+    assert unresolved == ["viewing_date"], unresolved
+
+
+def test_the_clock_is_put_back_after_the_read():
+    """Đồng hồ đặt cho MỘT lượt đọc, không rò sang lượt sau.
+
+    `dat_ngay_hom_nay` đặt rồi phải trả lại. Không trả lại thì lượt đọc kế tiếp
+    — một request khác, của một người khác — sống trong ngày của lượt trước, và
+    nó nhận hoặc loại lịch theo một hôm nay không có thật.
+
+    Đo bằng chính `hom_nay()` chứ không bằng một ngày cứng: bài này phải đúng ở
+    mọi ngày chạy.
+    """
+    from src.common import field_parsers
+
+    _extract_follow_up_answers("ngày 28", ["viewing_date"], anchor="2020-01-10", today=date(2020, 1, 1))
+
+    assert field_parsers.hom_nay() == date.today(), "đồng hồ của lượt trước còn nằm lại"
+
+
 def test_without_an_anchor_nothing_changes():
     """Không có giá trị cũ thì giữ nguyên hành vi cũ — không đoán bừa."""
     answers, unresolved = _extract_follow_up_answers("2026-09-03", ["viewing_date"])

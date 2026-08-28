@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, time, timedelta
 from typing import Any
 
@@ -301,9 +303,52 @@ def _extract_passenger_count(text: str) -> int | None:
 MAX_SCHEDULE_HORIZON_DAYS = MAX_HORIZON_DAYS
 
 
+# "Hôm nay" mà bộ đọc ngày dùng để loại ngày quá khứ.
+#
+# Vì sao là `ContextVar` chứ không phải một tham số
+# -------------------------------------------------
+# Các bộ đọc nằm trong `FIELD_PARSERS` dưới dạng closure `(text) -> value`, và
+# giao thức ấy được dùng ở nhiều đường. Thêm một tham số `today` vào nó nghĩa là
+# sửa mọi bộ đọc, kể cả những bộ không liên quan gì tới ngày.
+#
+# Vì sao KHÔNG để mặc `date.today()`
+# ----------------------------------
+# `_extract_follow_up_answers` nhận một tham số `today` và truyền nó cho bộ viết
+# lại ngày — nhưng phép kiểm "ngày này đã qua chưa" ngay sau đó lại đọc đồng hồ
+# THẬT. Nên `today` chỉ chi phối được nửa đường, và một bài kiểm dựng cảnh ngày
+# 23/08 vẫn đỏ khi máy chạy ngày 28/08: câu "ngày 25" được viết lại đúng thành
+# `2026-08-25` rồi bị chính hệ thống ấy loại vì "đã qua".
+#
+# Một tham số chỉ có tác dụng một nửa còn tệ hơn không có tham số: người gọi tin
+# rằng mình đã kiểm soát được thời gian.
+_DONG_HO: ContextVar[date | None] = ContextVar("_DONG_HO", default=None)
+
+
+def hom_nay() -> date:
+    """Ngày hiện tại theo bộ đọc — đồng hồ đã đặt, hoặc đồng hồ thật."""
+    return _DONG_HO.get() or date.today()
+
+
+@contextmanager
+def dat_ngay_hom_nay(ngay: date | None) -> Iterator[None]:
+    """Trong khối này, bộ đọc ngày coi `ngay` là hôm nay. `None` = không đổi gì.
+
+    `ContextVar` chứ không phải biến module: mỗi task asyncio có bản riêng, nên
+    hai request đồng thời không giẫm lên đồng hồ của nhau.
+    """
+    if ngay is None:
+        yield
+        return
+    token = _DONG_HO.set(ngay)
+    try:
+        yield
+    finally:
+        _DONG_HO.reset(token)
+
+
 def _is_allowed_schedule_date(value: str) -> bool:
     parsed = date.fromisoformat(value)
-    today = date.today()
+    today = hom_nay()
     return today <= parsed <= today + timedelta(days=MAX_SCHEDULE_HORIZON_DAYS)
 
 

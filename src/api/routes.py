@@ -38,6 +38,7 @@ from src.common.field_parsers import (
     _extract_vehicle_type,
     _unknown_zone,
     _unknown_zone_message,
+    dat_ngay_hom_nay,
     extract_all_dates,
     is_bare_yes_no,
     parse_field,
@@ -229,6 +230,30 @@ _CONTROL_FIELDS = frozenset({"supported_goal", "payment_quote"})
 
 
 def _extract_follow_up_answers(
+    message: str,
+    missing_fields: list[str],
+    *,
+    anchor: str | None = None,
+    today: date | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Đọc câu trả lời, với `today` chi phối TOÀN BỘ lượt đọc.
+
+    Vỏ mỏng quanh `_doc_cau_tra_loi`. Nó tồn tại vì `today` phải tới được cả hai
+    chỗ quyết định về thời gian:
+
+      1. bộ viết lại ngày nói tắt (`rewrite_relative_dates`) — đã nhận từ trước;
+      2. phép kiểm "ngày này đã qua chưa" bên trong `parse_field` — trước đây
+         đọc thẳng `date.today()`.
+
+    Thiếu chỗ thứ hai, `today` chỉ đúng một nửa: "ngày 25" được viết lại thành
+    `2026-08-25` rồi bị chính hệ thống ấy loại vì đồng hồ thật đã sang 28/08.
+    Người gọi tin rằng mình đã cố định thời gian, mà chưa.
+    """
+    with dat_ngay_hom_nay(today):
+        return _doc_cau_tra_loi(message, missing_fields, anchor=anchor, today=today)
+
+
+def _doc_cau_tra_loi(
     message: str,
     missing_fields: list[str],
     *,
