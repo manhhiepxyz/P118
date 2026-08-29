@@ -10,29 +10,33 @@ export function GoogleRegisterPage() {
   const toast = useToast()
   const navigate = useNavigate()
   const location = useLocation()
-  
-  const state = location.state as { credential?: string; data?: { email: string, name: string, picture: string } } | null
-  
-  if (!state?.credential || !state?.data) {
-    return <Navigate to="/login" replace />
-  }
 
-  // Khởi tạo username từ phần trước của email
-  const defaultUsername = state.data.email.split('@')[0].replace(/[^a-zA-Z0-9]/g, '')
-  
+  const state = location.state as {
+    credential?: string
+    data?: { email: string; name: string | null; picture: string | null }
+  } | null
+  const defaultUsername = (state?.data?.email ?? '').split('@')[0].replace(/[^a-zA-Z0-9]/g, '')
+
+  // Hook phải chạy cùng thứ tự ở mọi render; redirect chỉ được quyết định sau
+  // khi toàn bộ hook đã được khai báo.
   const [username, setUsername] = useState(defaultUsername)
   const [phone, setPhone] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  if (!state?.credential || !state.data) {
+    return <Navigate to="/login" replace />
+  }
+  const credential = state.credential
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     if (!username.trim() || submitting) return
     setSubmitting(true)
     setError(null)
-    
+
     try {
-      await googleRegister(state!.credential!, username.trim(), phone.trim() || undefined)
+      await googleRegister(credential, username.trim(), phone.trim() || undefined)
       toast.push('success', `Chào mừng, ${username.trim()}!`)
       navigate('/', { replace: true })
     } catch (err) {

@@ -162,6 +162,50 @@ async def test_login_missing_fields_422(client, auth_env):
 
 
 # ---------------------------------------------------------------------------
+# Google OAuth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verified_google_email_logs_into_the_existing_account(client, auth_env):
+    await _register(client, email="google.user@example.com")
+
+    with patch(
+        "src.api.auth_routes._verify_google_token",
+        return_value={"email": "google.user@example.com", "email_verified": True},
+    ):
+        res = await client.post("/api/v1/auth/google/verify", json={"credential": "google-id-token"})
+
+    assert res.status_code == 200
+    assert res.json()["access_token"]
+    assert res.json()["user"]["username"] == "nguyen.van.a"
+
+
+@pytest.mark.asyncio
+async def test_new_verified_google_email_requires_customer_registration(client, auth_env):
+    with patch(
+        "src.api.auth_routes._verify_google_token",
+        return_value={
+            "email": "new.google@example.com",
+            "email_verified": True,
+            "name": "Google User",
+            "picture": "https://images.example/avatar.png",
+        },
+    ):
+        verify = await client.post("/api/v1/auth/google/verify", json={"credential": "google-id-token"})
+        register = await client.post(
+            "/api/v1/auth/google/register",
+            json={"credential": "google-id-token", "username": "google.user"},
+        )
+
+    assert verify.status_code == 202
+    assert verify.json()["email"] == "new.google@example.com"
+    assert register.status_code == 200
+    assert register.json()["user"]["role"] == "customer"
+    assert await auth_env.get_user_by_email("new.google@example.com") is not None
+
+
+# ---------------------------------------------------------------------------
 # GET /auth/me
 # ---------------------------------------------------------------------------
 

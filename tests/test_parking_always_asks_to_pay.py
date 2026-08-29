@@ -17,9 +17,26 @@ thì không phải cơ chế bảo vệ.
 
 from __future__ import annotations
 
+import datetime
+
+import pytest
+
 from src.agents.graph import _ensure_payment_is_offered
 from src.agents.validator import TaskPlanValidator
 from src.common.task_plan import InputRef, Task, TaskPlan
+
+
+class _FrozenDate(datetime.date):
+    """date subclass that freezes today() so test dates never expire."""
+
+    @classmethod
+    def today(cls) -> datetime.date:
+        return datetime.date(2025, 1, 1)
+
+
+@pytest.fixture(autouse=True)
+def freeze_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.agents.validator.date", _FrozenDate)
 
 
 def _booking_plan(*extra: Task) -> TaskPlan:

@@ -1131,6 +1131,49 @@ BEGIN
     END IF;
 END $$;
 
+-- OTP đăng ký và OTP đặt lại mật khẩu là hai chứng từ khác nhau. Database cũ
+-- chỉ có khoá `email`; mọi dòng legacy là OTP đăng ký.
+DO $$
+DECLARE
+    old_primary_key TEXT;
+BEGIN
+    IF to_regclass('registration_otps') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE registration_otps
+        ADD COLUMN IF NOT EXISTS purpose VARCHAR(32) NOT NULL DEFAULT 'registration';
+
+    SELECT conname INTO old_primary_key
+      FROM pg_constraint
+     WHERE conrelid = 'registration_otps'::regclass
+       AND contype = 'p'
+       AND pg_get_constraintdef(oid) = 'PRIMARY KEY (email)';
+
+    IF old_primary_key IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE registration_otps DROP CONSTRAINT %I', old_primary_key);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'registration_otps'::regclass
+           AND contype = 'p'
+           AND pg_get_constraintdef(oid) = 'PRIMARY KEY (email, purpose)'
+    ) THEN
+        ALTER TABLE registration_otps
+            ADD CONSTRAINT registration_otps_pkey PRIMARY KEY (email, purpose);
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_registration_otps_purpose') THEN
+        ALTER TABLE registration_otps
+            ADD CONSTRAINT ck_registration_otps_purpose
+            CHECK (purpose IN ('registration', 'password_reset'));
+    END IF;
+
+    -- Default chỉ phục vụ backfill legacy. Đường ghi mới phải nói rõ mục đích.
+    ALTER TABLE registration_otps ALTER COLUMN purpose DROP DEFAULT;
+END $$;
+
 -- 2026-08 — LÝ DO TỪ CHỐI phải có MÃ, không chỉ có câu chữ.
 --
 -- Đo được trên yêu cầu thật: đơn vị từ chối `book_parking` với câu "Khu B đã

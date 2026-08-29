@@ -10,7 +10,7 @@ import {
 import { Navigate, useLocation } from 'react-router-dom'
 
 import * as api from './agentApi'
-import type { RegisterProfileInput } from './agentApi'
+import type { GoogleVerifyResult, RegisterProfileInput } from './agentApi'
 import type { AuthUser } from './types'
 
 /* ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ interface AuthContextValue {
     otpCode: string,
     profile?: RegisterProfileInput,
   ) => Promise<void>
-  googleLogin: (credential: string) => Promise<any>
+  googleLogin: (credential: string) => Promise<GoogleVerifyResult>
   googleRegister: (credential: string, username: string, phone?: string) => Promise<void>
   /** Đọc lại user qua /auth/me — dùng sau PATCH /users/me để UI cập nhật ngay. */
   refreshUser: () => Promise<void>
@@ -70,7 +70,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then((u) => setUser(u))
       .catch(() => {
         // Token cũ/hết hạn — `agentApi` đã xoá nó khi gặp 401.
-        apiLogout()
+        api.logout()
         setToken(null)
         setUser(null)
       })

@@ -12,6 +12,14 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _masked_email(value: str) -> str:
+    """Không đưa địa chỉ người nhận đầy đủ vào log."""
+    local, separator, domain = value.partition("@")
+    if not separator:
+        return "***"
+    return f"{local[:1]}***@{domain}"
+
+
 @dataclass(frozen=True)
 class EmailContent:
     subject: str
@@ -272,26 +280,37 @@ def _workflow_update_email(assistant_message: str, workflow_url: str) -> EmailCo
     return EmailContent(subject=subject, text=text, html=html_body)
 
 
+async def _post_resend_email(*, api_key: str, payload: dict[str, object]) -> str:
+    """I/O boundary duy nhất của Resend; tách ra để test không gọi mạng."""
+    import httpx
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers=headers,
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        return str(response.json().get("id", ""))
+
+
 async def _send_email_async(to_email: str, content: EmailContent) -> bool:
     settings = get_settings()
+    masked_recipient = _masked_email(to_email)
 
     if not settings.resend_api_key:
         if settings.app_env == "development":
-            logger.warning(
-                "Resend chưa cấu hình. MOCK EMAIL TO %s | Subject: %s | Body: %s",
-                to_email,
-                content.subject,
-                content.text,
-            )
+            logger.warning("Resend chưa cấu hình. Không gửi email tới %s", masked_recipient)
         else:
             logger.error("Resend chưa cấu hình; email giao dịch không được gửi")
         return False
 
-    headers = {
-        "Authorization": f"Bearer {settings.resend_api_key}",
-        "Content-Type": "application/json",
-    }
-    
+    if not settings.resend_from_email or "@" not in settings.resend_from_email:
+        logger.error("RESEND_FROM_EMAIL thiếu hoặc không hợp lệ")
+        return False
+
     payload = {
         "from": f"{settings.resend_from_name} <{settings.resend_from_email}>",
         "to": [to_email],
@@ -299,16 +318,15 @@ async def _send_email_async(to_email: str, content: EmailContent) -> bool:
         "text": content.text,
         "html": content.html,
     }
+    if settings.resend_reply_to:
+        payload["reply_to"] = settings.resend_reply_to
 
     try:
-        import httpx
-        async with httpx.AsyncClient() as client:
-            resp = await client.post("https://api.resend.com/emails", json=payload, headers=headers, timeout=10.0)
-            resp.raise_for_status()
-            logger.info("Đã gửi email thành công tới %s (ID: %s)", to_email, resp.json().get("id"))
-            return True
+        email_id = await _post_resend_email(api_key=settings.resend_api_key, payload=payload)
+        logger.info("Đã gửi email thành công tới %s (ID: %s)", masked_recipient, email_id)
+        return True
     except Exception as e:
-        logger.error("Lỗi gửi email tới %s: %s", to_email, type(e).__name__)
+        logger.error("Lỗi gửi email tới %s: %s", masked_recipient, type(e).__name__)
         # Không raise để không làm crash API hoặc Workflow nếu chạy background
         return False
 

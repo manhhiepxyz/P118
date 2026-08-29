@@ -170,6 +170,7 @@ class FakeUserRepository:
     def __init__(self) -> None:
         self._users: dict[str, dict] = {}
         self._by_username: dict[str, dict] = {}
+        self._by_email: dict[str, dict] = {}
 
     async def create_user(
         self,
@@ -200,6 +201,8 @@ class FakeUserRepository:
         }
         self._users[user["id"]] = user
         self._by_username[username] = user
+        if email is not None:
+            self._by_email[email] = user
         return {k: v for k, v in user.items() if k != "password_hash"}
 
     async def update_profile(
@@ -237,9 +240,20 @@ class FakeUserRepository:
     async def get_user_by_username(self, username: str) -> dict | None:
         return dict(self._by_username.get(username)) if username in self._by_username else None
 
+    async def get_user_by_email(self, email: str) -> dict | None:
+        return dict(self._by_email.get(email)) if email in self._by_email else None
+
+    async def update_password(self, email: str, new_password_hash: str) -> bool:
+        user = self._by_email.get(email)
+        if user is None:
+            return False
+        user["password_hash"] = new_password_hash
+        return True
+
     async def get_user_by_id(self, user_id: str) -> dict | None:
         return dict(self._users.get(user_id)) if user_id in self._users else None
 
     def clear(self) -> None:
         self._users.clear()
         self._by_username.clear()
+        self._by_email.clear()

@@ -231,7 +231,7 @@ class UserRepository:
 
     async def update_password(self, email: str, new_password_hash: str) -> bool:
         """Cập nhật mật khẩu cho user (phục vụ quên mật khẩu).
-        
+
         Sử dụng `email` thay vì `user_id` để tương thích trực tiếp với luồng quên mật khẩu.
         """
         async with self._pool.acquire() as conn:
@@ -241,4 +241,3 @@ class UserRepository:
                 email,
             )
             return result == "UPDATE 1"
-

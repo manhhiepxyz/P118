@@ -444,7 +444,17 @@ export async function resetPassword(email: string, otpCode: string, newPassword:
  * Nếu status là 202, ném ApiError (hoặc xử lý riêng ở nơi gọi) để lấy thông tin email, name.
  * Nếu thành công (200), trả về LoginResponse chứa token.
  */
-export async function googleVerify(credential: string): Promise<LoginResponse | any> {
+export interface GoogleRegistrationDraft {
+  email: string;
+  name: string | null;
+  picture: string | null;
+}
+
+export type GoogleVerifyResult =
+  | { status: 200; data: LoginResponse }
+  | { status: 202; data: GoogleRegistrationDraft };
+
+export async function googleVerify(credential: string): Promise<GoogleVerifyResult> {
   const response = await fetch(`${BASE}/auth/google/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -207,7 +207,10 @@ export function ForgotPasswordPage() {
               <form onSubmit={handleVerifyOtp} className="mt-6" noValidate>
                 <div className="rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-4 text-[13.5px] leading-relaxed text-[var(--text-secondary)]">
                   Mã xác nhận gồm 6 chữ số đã được gửi tới <strong>{email.trim()}</strong>. Mã
-                  có hiệu lực trong 5 phút. Vui lòng kiểm tra hộp thư.
+                  {otpSecondsLeft > 0
+                    ? ` còn hiệu lực ${formatCountdown(otpSecondsLeft)}.`
+                    : ' đã hết hiệu lực.'}{' '}
+                  Vui lòng kiểm tra hộp thư.
                 </div>
 
                 <div className="mt-6">

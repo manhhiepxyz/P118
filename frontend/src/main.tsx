@@ -8,13 +8,14 @@ import App from './App'
 import { ToastProvider } from './lib/toast'
 
 const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
+const app = (
+  <ToastProvider>
+    <App />
+  </ToastProvider>
+)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <GoogleOAuthProvider clientId={clientId}>
-      <ToastProvider>
-        <App />
-      </ToastProvider>
-    </GoogleOAuthProvider>
+    {clientId ? <GoogleOAuthProvider clientId={clientId}>{app}</GoogleOAuthProvider> : app}
   </StrictMode>,
 )

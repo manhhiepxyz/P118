@@ -24,24 +24,24 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
-from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
 
 from src.api.auth import create_access_token, hash_password, verify_password
 from src.api.deps import get_current_user, get_otp_email_sender, get_reset_password_email_sender, get_user_repository
 from src.api.schemas import (
     ForgotPasswordRequest,
+    GoogleRegisterRequest,
+    GoogleVerifyRequest,
     LoginRequest,
     RegisterRequest,
     ResetPasswordRequest,
     SendOtpRequest,
     TokenResponse,
     UserResponse,
-    GoogleVerifyRequest,
-    GoogleRegisterRequest,
 )
 from src.config import get_settings
-from src.db.otp_repository import OtpRepository
+from src.db.otp_repository import OtpPurpose, OtpRepository
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.user_repository import UserAlreadyExistsError
 from src.orchestration.runtime_provider import acquire_repository
@@ -108,7 +108,7 @@ async def send_registration_otp(
         from src.db.otp_repository import CooldownError
 
         otp_repo = OtpRepository(pool)
-        await otp_repo.save_otp(email, otp_code)
+        await otp_repo.save_otp(email, otp_code, purpose=OtpPurpose.REGISTRATION)
     except CooldownError as e:
         raise HTTPException(status_code=429, detail=str(e))
     finally:
@@ -137,7 +137,7 @@ async def register(
     pool = repository._pool
     try:
         otp_repo = OtpRepository(pool)
-        is_valid = await otp_repo.verify_otp(email, req.otp_code)
+        is_valid = await otp_repo.verify_otp(email, req.otp_code, purpose=OtpPurpose.REGISTRATION)
         if not is_valid:
             raise HTTPException(status_code=400, detail="Mã OTP không hợp lệ hoặc đã hết hạn.")
     finally:
@@ -174,12 +174,12 @@ async def login(
     """Đăng nhập → access token (24h). Message 401 giống nhau cho sai username
     lẫn sai password — tránh lộ username hợp lệ."""
     username_or_email = req.username.strip().lower()
-    
+
     if "@" in username_or_email:
         user = await users.get_user_by_email(username_or_email)
     else:
         user = await users.get_user_by_username(username_or_email)
-        
+
     if user is None or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail=_USERNAME_OR_PASSWORD)
 
@@ -197,9 +197,9 @@ def _verify_google_token(token: str) -> dict:
     if not settings.google_client_id:
         raise HTTPException(status_code=500, detail="Google Client ID chưa được cấu hình.")
     try:
-        idinfo = id_token.verify_oauth2_token(
-            token, google_requests.Request(), settings.google_client_id
-        )
+        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), settings.google_client_id)
+        if idinfo.get("email_verified") is not True:
+            raise HTTPException(status_code=401, detail="Email Google chưa được xác minh.")
         return idinfo
     except ValueError:
         raise HTTPException(status_code=401, detail="Token Google không hợp lệ hoặc đã hết hạn.")
@@ -217,10 +217,10 @@ async def google_verify(
     email = idinfo.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Không lấy được email từ tài khoản Google.")
-    
+
     email = email.strip().lower()
     user = await users.get_user_by_email(email)
-    
+
     if user is not None:
         settings = get_settings()
         return TokenResponse(
@@ -229,7 +229,7 @@ async def google_verify(
             expires_in=settings.jwt_expire_minutes * 60,
             user=_to_user_response(user),
         )
-    
+
     # User chưa tồn tại, yêu cầu thông tin bổ sung
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -237,8 +237,8 @@ async def google_verify(
             "message": "Cần bổ sung thông tin đăng ký.",
             "email": email,
             "name": idinfo.get("name"),
-            "picture": idinfo.get("picture")
-        }
+            "picture": idinfo.get("picture"),
+        },
     )
 
 
@@ -252,21 +252,21 @@ async def google_register(
     email = idinfo.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Không lấy được email từ tài khoản Google.")
-    
+
     email = email.strip().lower()
-    
+
     # Kiểm tra email trùng lần nữa để đảm bảo
     existing = await users.get_user_by_email(email)
     if existing is not None:
         raise HTTPException(status_code=409, detail="Email này đã được sử dụng.")
-    
+
     username = req.username.strip().lower()
     # Dummy hash để không thể dùng form login thường
     dummy_password_hash = hash_password(f"!GOOGLE_AUTH!{secrets.token_hex(16)}")
-    
+
     try:
         from src.db.user_repository import EmailAlreadyExistsError
-        
+
         user = await users.create_user(
             username=username,
             password_hash=dummy_password_hash,
@@ -298,11 +298,12 @@ async def forgot_password(
     gui_email_otp: Any = Depends(get_reset_password_email_sender),
 ) -> dict:
     """Yêu cầu mã OTP để lấy lại mật khẩu."""
+    generic_response = {"message": "Nếu email tồn tại trong hệ thống, OTP đã được gửi."}
     email = req.email.strip().lower()
     user_by_email = await users.get_user_by_email(email)
     if user_by_email is None:
         # Không tiết lộ việc email có tồn tại hay không vì lý do bảo mật
-        return {"message": "Nếu email tồn tại trong hệ thống, OTP đã được gửi."}
+        return generic_response
 
     otp_code = str(secrets.choice(range(100000, 999999)))
 
@@ -312,15 +313,17 @@ async def forgot_password(
         from src.db.otp_repository import CooldownError
 
         otp_repo = OtpRepository(pool)
-        await otp_repo.save_otp(email, otp_code)
-    except CooldownError as e:
-        raise HTTPException(status_code=429, detail=str(e))
+        await otp_repo.save_otp(email, otp_code, purpose=OtpPurpose.PASSWORD_RESET)
+    except CooldownError:
+        # 429 chỉ xảy ra với email tồn tại và vì thế trở thành oracle dò tài
+        # khoản. Trả cùng response chung; không gửi thêm thư trong cooldown.
+        return generic_response
     finally:
         await pool.close()
 
     # Gửi email qua background để không block request
     background_tasks.add_task(gui_email_otp, email, otp_code)
-    return {"message": "Nếu email tồn tại trong hệ thống, OTP đã được gửi."}
+    return generic_response
 
 
 @router.post("/reset-password", status_code=200)
@@ -336,7 +339,7 @@ async def reset_password(
     pool = repository._pool
     try:
         otp_repo = OtpRepository(pool)
-        is_valid = await otp_repo.verify_otp(email, req.otp_code)
+        is_valid = await otp_repo.verify_otp(email, req.otp_code, purpose=OtpPurpose.PASSWORD_RESET)
         if not is_valid:
             raise HTTPException(status_code=400, detail="Mã OTP không hợp lệ hoặc đã hết hạn.")
     finally:

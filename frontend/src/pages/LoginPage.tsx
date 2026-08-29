@@ -25,6 +25,7 @@ export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string } | null)?.from ?? '/'
+  const googleEnabled = Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim())
 
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -205,14 +206,16 @@ export function LoginPage() {
                   )}
                 </button>
                 
-                <div className="mt-6 flex items-center justify-between">
-                  <span className="w-1/5 border-b border-[var(--border-subtle)] lg:w-1/4"></span>
-                  <span className="text-xs text-[var(--text-muted)] uppercase">Hoặc</span>
-                  <span className="w-1/5 border-b border-[var(--border-subtle)] lg:w-1/4"></span>
-                </div>
+                {googleEnabled && (
+                  <>
+                    <div className="mt-6 flex items-center justify-between">
+                      <span className="w-1/5 border-b border-[var(--border-subtle)] lg:w-1/4"></span>
+                      <span className="text-xs text-[var(--text-muted)] uppercase">Hoặc</span>
+                      <span className="w-1/5 border-b border-[var(--border-subtle)] lg:w-1/4"></span>
+                    </div>
 
-                <div className="mt-6 flex justify-center">
-                  <GoogleLogin
+                    <div className="mt-6 flex justify-center">
+                      <GoogleLogin
                     onSuccess={async (credentialResponse) => {
                       if (!credentialResponse.credential) return;
                       try {
@@ -237,8 +240,10 @@ export function LoginPage() {
                       toast.push('error', 'Đăng nhập Google thất bại.');
                     }}
                     useOneTap
-                  />
-                </div>
+                      />
+                    </div>
+                  </>
+                )}
 
               </form>
             </div>

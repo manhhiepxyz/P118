@@ -205,8 +205,9 @@ class Settings(BaseSettings):
 
     # Email / Resend API
     resend_api_key: str = ""
-    resend_from_email: str = "no-reply@c3-app-118.io.vn"
+    resend_from_email: str = "no-reply@account.c3-app-118.io.vn"
     resend_from_name: str = "P-118"
+    resend_reply_to: str | None = None
 
 
 @lru_cache
