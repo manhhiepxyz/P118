@@ -226,6 +226,21 @@ export interface AgentClarificationAction {
   can_act: boolean
 }
 
+export interface ConflictTaskInfo {
+  workflow_id: string
+  task_id: string
+  service: string
+  service_label: string
+  datetime_display: string
+}
+
+export interface AgentScheduleConflictAction {
+  kind: 'SCHEDULE_CONFLICT'
+  task_a: ConflictTaskInfo
+  task_b: ConflictTaskInfo
+  can_act: boolean
+}
+
 /**
  * Union phân biệt bằng `kind` — TypeScript thu hẹp được, nên quên một nhánh là
  * lỗi biên dịch chứ không phải một thẻ vẽ sai lúc chạy.
@@ -234,6 +249,7 @@ export type AgentCustomerAction =
   | AgentPaymentApprovalAction
   | AgentServiceProposal
   | AgentClarificationAction
+  | AgentScheduleConflictAction
 
 export interface AgentServiceProposal {
   /** Mã định danh loại hành động. Giao diện chuyển theo trường NÀY. */

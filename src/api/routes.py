@@ -55,6 +55,8 @@ from src.db.session_repository import create_session, get_session
 from src.models.schemas import (
     ChatRequest,
     ChatResponse,
+    ConflictRespondRequest,
+    ConflictTaskInfo,
     DemoCapabilityItem,
     DemoCapabilityListResponse,
     DemoDetailItem,
@@ -72,6 +74,7 @@ from src.models.schemas import (
     DemoWorkflowRequest,
     DemoWorkflowResponse,
     ProviderRejectionView,
+    ScheduleConflictAction,
     ServiceProposalActionView,
 )
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
@@ -89,7 +92,9 @@ from src.orchestration.demo_service import (
     persist_pending_viewing_approval,
     read_demo_workflow,
     reject_payment,
+    repair_conflict_task,
     rerun_with_answers,
+    resume_after_conflict_ack,
     resume_payment_after_approval,
     retry_failed_tasks,
     run_demo_workflow,
@@ -98,6 +103,11 @@ from src.orchestration.payment_approval import quote_from_results
 from src.orchestration.proposal_followup import CauTraLoi, tra_loi_hoi_them
 from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
 from src.orchestration.runtime_provider import acquire_repository
+from src.orchestration.schedule_conflict import (
+    claim_conflict_ack,
+    clear_conflict_check,
+    load_conflict_check,
+)
 from src.orchestration.service_approval import (
     SERVICE_LABELS,
     gated_tasks,
@@ -811,6 +821,7 @@ _STAGE_MESSAGES = {
     # KHÔNG có chữ "đang chờ": ở trạng thái này không ai đang chờ ai. Đơn vị đã
     # trả lời, việc đã dừng, và khách là người duy nhất còn phải quyết định.
     "WAITING_PROVIDER_RESELECTION": "Đơn vị đã từ chối. Bạn chọn giúp mình bước tiếp theo nhé.",
+    "WAITING_SCHEDULE_CONFLICT_CHECK": "Mình thấy lịch có khả năng bị trùng.",
     "EXECUTING": "Đang thực hiện yêu cầu.",
     "TASK_RUNNING": "Đang thực hiện một bước trong yêu cầu.",
     "TASK_SUCCESS": "Đã hoàn thành một bước trong yêu cầu.",
@@ -1544,6 +1555,7 @@ async def _run_demo_job(
             session_id=session_id,
             parent_workflow_id=parent_workflow_id,
             on_failure=repair_manager,
+            owner_user_id=job.get("owner_user_id"),
         )
         # Chờ duyệt thanh toán: ghi ngữ cảnh xuống PostgreSQL TRƯỚC khi trả
         # response. Từ đây trở đi resume không còn phụ thuộc `_DEMO_JOBS`.
@@ -2619,6 +2631,58 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     # khoản tiền vẫn đọc được và vẫn trả được. Đây là thứ tự HIỂN THỊ, không
     # phải cổng duyệt — `pay_fee` vẫn nằm `WAITING_APPROVAL` và khoản duyệt vẫn
     # `AWAITING` cho tới khi có một hành động không thể hiểu nhầm.
+    # Xung đột lịch → hiển thị trước thanh toán và đề xuất (đứng đầu).
+    # Đọc từ schedule_conflict_checks như đường polling.
+    if status == "WAITING_APPROVAL":
+        try:
+            _sc_repo = await acquire_repository()
+            _sc_pool = _sc_repo._pool  # noqa: SLF001
+            try:
+                _conflict = await load_conflict_check(_sc_pool, workflow_id)
+            finally:
+                await _sc_pool.close()
+            if _conflict is not None:
+                _svc_labels_cold = {
+                    "schedule_move": "Đăng ký chuyển nhà",
+                    "create_maintenance_request": "Yêu cầu bảo trì",
+                    "schedule_property_viewing": "Đặt lịch tham quan",
+                }
+                _svc_a = _conflict.get("service_a", "")
+                _svc_b = _conflict.get("service_b", "")
+                _task_a = ConflictTaskInfo(
+                    workflow_id=str(_conflict.get("workflow_id") or workflow_id),
+                    task_id=str(_conflict.get("task_id") or ""),
+                    service=_svc_a,
+                    service_label=_svc_labels_cold.get(_svc_a, _svc_a),
+                    datetime_display=f"{_conflict.get('date_a', '')} {_conflict.get('time_a', '')}".strip(),
+                )
+                _task_b = ConflictTaskInfo(
+                    workflow_id=str(_conflict.get("workflow_id_b") or workflow_id),
+                    task_id=str(_conflict.get("task_id_b") or ""),
+                    service=_svc_b,
+                    service_label=_svc_labels_cold.get(_svc_b, _svc_b),
+                    datetime_display=f"{_conflict.get('date_b', '')} {_conflict.get('time_b', '')}".strip(),
+                )
+                _conflict_action = ScheduleConflictAction(task_a=_task_a, task_b=_task_b, can_act=True)
+                return DemoWorkflowResponse(
+                    workflow_id=workflow_id,
+                    status="WAITING_APPROVAL",
+                    stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+                    message=_STAGE_MESSAGES.get("WAITING_SCHEDULE_CONFLICT_CHECK"),
+                    summary=(
+                        f"Lịch {_task_a.service_label} ({_task_a.datetime_display}) "
+                        f"và {_task_b.service_label} ({_task_b.datetime_display}) "
+                        "có thể bị trùng giờ."
+                    ),
+                    customer_action=_conflict_action,
+                    plan=_plan_view(plan),
+                    tasks=_polling_task_views(plan, record),
+                    events=events,
+                    persisted=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("_public_view_from_db: khong doc duoc conflict (%s)", type(exc).__name__)
+
     pending_payment = None if _has_open_repair(record) else await _load_pending_payment(workflow_id)
     if pending_payment is not None:
         return _waiting_approval_view(workflow_id, plan=plan, record=record, pending=pending_payment, events=events)
@@ -3723,6 +3787,48 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             approval_actor="USER",
             plan=plan_view,
         )
+    if policy_error == "SCHEDULE_CONFLICT_REQUIRED":
+        ctx = state.get("policy_context") or {}
+        svc_labels = {
+            "schedule_move": "Đăng ký chuyển nhà",
+            "create_maintenance_request": "Yêu cầu bảo trì",
+            "schedule_property_viewing": "Đặt lịch tham quan",
+        }
+        svc_a = ctx.get("conflict_service_a", "")
+        svc_b = ctx.get("conflict_service_b", "")
+        date_a, time_a = ctx.get("conflict_date_a", ""), ctx.get("conflict_time_a", "")
+        date_b, time_b = ctx.get("conflict_date_b", ""), ctx.get("conflict_time_b", "")
+        task_a = ConflictTaskInfo(
+            workflow_id=state.get("workflow_id") or "",
+            task_id=ctx.get("conflict_task_id", ""),
+            service=svc_a,
+            service_label=svc_labels.get(svc_a, svc_a),
+            datetime_display=f"{date_a} {time_a}".strip(),
+        )
+        task_b = ConflictTaskInfo(
+            workflow_id=ctx.get("conflict_workflow_b", ""),
+            task_id=ctx.get("conflict_task_b", ""),
+            service=svc_b,
+            service_label=svc_labels.get(svc_b, svc_b),
+            datetime_display=f"{date_b} {time_b}".strip(),
+        )
+        conflict_action = ScheduleConflictAction(task_a=task_a, task_b=task_b, can_act=True)
+        dt_display = f"{date_a} {time_a}".strip()
+        summary = (
+            f"Mình thấy bạn đang có 2 lịch cùng lúc: "
+            f"{task_a.service_label} lúc {dt_display} và {task_b.service_label} lúc {dt_display}. "
+            "Bạn đã kiểm tra kỹ thời gian này chưa? "
+            "Nếu cần, mình có thể giúp bạn đổi một trong hai lịch; "
+            "còn nếu đây đúng là điều bạn muốn, mình sẽ giữ nguyên và tiếp tục gửi yêu cầu."
+        )
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+            workflow_id=state.get("workflow_id"),
+            summary=summary,
+            customer_action=conflict_action,
+            plan=plan_view,
+        )
     if policy_error == "SERVICE_APPROVAL_REQUIRED":
         # Chờ ĐƠN VỊ nhận việc — không phải lỗi, và không có khoản tiền nào để
         # khách bấm xác nhận. Không có nhánh này thì mọi yêu cầu dịch vụ rơi
@@ -3937,6 +4043,16 @@ async def start_demo_workflow(
     hoi_them = await _tra_loi_ve_de_xuat(request.goal, session_id=session_id, user=user)
     if hoi_them is not None:
         return hoi_them
+
+    # Làn XUNG ĐỘT LỊCH — đứng TRƯỚC small talk và Planner.
+    #
+    # Khi người dùng có một conflict đang chờ trong phiên này, mọi câu đều được
+    # phân loại bằng LLM nhỏ (KEEP_BOTH/CHANGE_A/CHANGE_B/UNKNOWN). UNKNOWN →
+    # hỏi lại chứ không tạo workflow mới. Không bao giờ rơi xuống Planner khi
+    # conflict đang chờ.
+    conflict_reply = await _xu_ly_conflict_ngon_ngu_tu_nhien(request.goal, session_id, user)
+    if conflict_reply is not None:
+        return conflict_reply
 
     # Speech lane: greeting/acknowledgement/capability → trả CHAT ngay, 0 LLM.
     small_talk = classify(request.goal)
@@ -5762,6 +5878,61 @@ async def _demo_workflow_status(
             workflow_id,
         )
 
+    # Xung đột lịch survive restart: _DEMO_JOBS trống nhưng DB có conflict row
+    # chưa được ack → phải trả card trước thanh toán (cùng thứ tự _public_view_from_db).
+    if record is not None and record.get("workflow", {}).get("status") == "WAITING_APPROVAL":
+        _conflict_row = None
+        try:
+            _sc_repo2 = await acquire_repository()
+            _sc_pool2 = _sc_repo2._pool  # noqa: SLF001
+            try:
+                _conflict_row = await load_conflict_check(_sc_pool2, workflow_id)
+            finally:
+                await _sc_pool2.close()
+        except Exception as _exc2:  # noqa: BLE001
+            logger.warning("_demo_workflow_status: khong doc duoc conflict (%s)", type(_exc2).__name__)
+        if _conflict_row is not None:
+            _svc_labels2 = {
+                "schedule_move": "Đăng ký chuyển nhà",
+                "create_maintenance_request": "Yêu cầu bảo trì",
+                "schedule_property_viewing": "Đặt lịch tham quan",
+            }
+            _svc_a2 = _conflict_row.get("service_a", "")
+            _svc_b2 = _conflict_row.get("service_b", "")
+            _task_a2 = ConflictTaskInfo(
+                workflow_id=str(_conflict_row.get("workflow_id") or workflow_id),
+                task_id=str(_conflict_row.get("task_id") or ""),
+                service=_svc_a2,
+                service_label=_svc_labels2.get(_svc_a2, _svc_a2),
+                datetime_display=f"{_conflict_row.get('date_a', '')} {_conflict_row.get('time_a', '')}".strip(),
+            )
+            _task_b2 = ConflictTaskInfo(
+                workflow_id=str(_conflict_row.get("workflow_id_b") or workflow_id),
+                task_id=str(_conflict_row.get("task_id_b") or ""),
+                service=_svc_b2,
+                service_label=_svc_labels2.get(_svc_b2, _svc_b2),
+                datetime_display=f"{_conflict_row.get('date_b', '')} {_conflict_row.get('time_b', '')}".strip(),
+            )
+            return await _with_stored_answer(
+                DemoWorkflowResponse(
+                    workflow_id=workflow_id,
+                    status="WAITING_APPROVAL",
+                    stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+                    message=_STAGE_MESSAGES.get("WAITING_SCHEDULE_CONFLICT_CHECK"),
+                    summary=(
+                        f"Lịch {_task_a2.service_label} ({_task_a2.datetime_display}) "
+                        f"và {_task_b2.service_label} ({_task_b2.datetime_display}) "
+                        "có thể bị trùng giờ."
+                    ),
+                    customer_action=ScheduleConflictAction(task_a=_task_a2, task_b=_task_b2, can_act=True),
+                    plan=_plan_view(_plan_from_job_or_record(job, record)),
+                    tasks=_polling_task_views(_plan_from_job_or_record(job, record), record),
+                    events=_public_events(job) or await _read_events(workflow_id),
+                    persisted=True,
+                ),
+                workflow_id,
+            )
+
     # Khoản thanh toán đang chờ duyệt quyết định view, bất kể job còn trong RAM
     # hay đã mất sau restart. `workflows.status` vẫn là RUNNING trong lúc chờ,
     # nên đọc cột đó sẽ báo "đang chạy" cho một workflow thực ra đang đợi người
@@ -6478,6 +6649,167 @@ async def _de_xuat_dang_cho_trong_phien(session_id: str, *, owner_user_id: str) 
         if pool is not None:
             await pool.close()
     return None
+
+
+async def _conflict_dang_cho_trong_phien(session_id: str, *, owner_user_id: str) -> tuple[str, dict] | None:
+    """Tìm workflow đang chờ xác nhận xung đột lịch trong phiên.
+
+    Trả (workflow_id, conflict_row) hoặc None.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001
+        rows = await repository.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+        for row in reversed(rows):
+            wid = str(row["workflow_id"])
+            conflict = await load_conflict_check(pool, wid)
+            if conflict is not None:
+                return wid, conflict
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lan xung dot: khong doc duoc phien (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+    return None
+
+
+async def _xu_ly_conflict_ngon_ngu_tu_nhien(
+    goal: str,
+    session_id: str,
+    user: dict[str, Any],
+) -> DemoWorkflowResponse | None:
+    """Chặn câu của người dùng khi có xung đột lịch đang chờ xác nhận.
+
+    Phân loại bằng LLM nhỏ (KEEP_BOTH/CHANGE_A/CHANGE_B/UNKNOWN). UNKNOWN →
+    hỏi lại, KHÔNG tạo workflow mới, KHÔNG gọi Planner.
+    """
+    pending = await _conflict_dang_cho_trong_phien(session_id, owner_user_id=str(user["id"]))
+    if pending is None:
+        return None
+
+    workflow_id, conflict = pending
+
+    # Nhãn tiếng Việt theo tool thực tế từ conflict row
+    _svc_vi = {
+        "schedule_move": "Đăng ký chuyển nhà",
+        "create_maintenance_request": "Yêu cầu bảo trì",
+        "schedule_property_viewing": "Đặt lịch tham quan",
+    }
+    label_a = _svc_vi.get(str(conflict.get("service_a") or ""), str(conflict.get("service_a") or "Dịch vụ A"))
+    label_b = _svc_vi.get(str(conflict.get("service_b") or ""), str(conflict.get("service_b") or "Dịch vụ B"))
+
+    y_dinh = None
+    try:
+        from src.agents.conflict_intent import BoPhanLoaiXungDot
+        from src.services.llm import get_llm
+        from src.services.llm import structured_output_method as _som
+
+        phan_loai = BoPhanLoaiXungDot(get_llm(), structured_output_method=_som())
+        ket_qua = await phan_loai.doc(goal, label_a=label_a, label_b=label_b)
+        if ket_qua is not None:
+            y_dinh = ket_qua.y_dinh
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lan xung dot: khong phan loai duoc (%s)", type(exc).__name__)
+
+    # UNKNOWN hoặc lỗi LLM → hỏi lại. Không bao giờ rơi xuống Planner.
+    if y_dinh is None or y_dinh == "UNKNOWN":
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="WAITING_APPROVAL",
+            stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+            summary=(
+                "Mình chưa hiểu rõ bạn muốn làm gì. "
+                "Bạn có thể cho mình biết: giữ nguyên cả hai lịch, "
+                "hay muốn đổi một trong hai?"
+            ),
+        )
+
+    # Xử lý theo ý định đã phân loại
+    settings = get_settings()
+    urls = {
+        "resident_url": settings.resident_service_url,
+        "transport_url": settings.transport_service_url,
+        "payment_url": settings.payment_service_url,
+        "property_url": settings.property_service_url,
+        "resident_services_url": settings.resident_services_service_url,
+        "shuttle_url": settings.shuttle_service_url,
+    }
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001
+    won = False
+    owner_id = ""
+    conflict_task_id = ""
+    try:
+        if y_dinh == "KEEP_BOTH":
+            won = await claim_conflict_ack(pool, conflict["fingerprint"])
+            owner_id = str(user.get("id") or "")
+            conflict_task_id = conflict.get("task_id", "")
+        elif y_dinh in ("CHANGE_A", "CHANGE_B"):
+            await clear_conflict_check(pool, workflow_id)
+            if y_dinh == "CHANGE_A":
+                target_wf = workflow_id
+                target_task = str(conflict.get("task_id") or "")
+            else:
+                target_wf = str(conflict.get("workflow_id_b") or "")
+                target_task = str(conflict.get("task_id_b") or "")
+                if target_wf:
+                    async with pool.acquire() as _conn:
+                        _wf_row = await _conn.fetchrow(
+                            "SELECT owner_user_id FROM workflows WHERE workflow_id=$1::uuid",
+                            target_wf,
+                        )
+                    if _wf_row is None or str(_wf_row["owner_user_id"]) != str(user.get("id") or ""):
+                        return DemoWorkflowResponse(
+                            workflow_id=workflow_id,
+                            status="EXECUTION_ERROR",
+                            summary="Không có quyền chỉnh sửa lịch kia.",
+                        )
+            await pool.close()
+            outcome = await repair_conflict_task(target_wf, target_task)
+            view = await _public_view_from_db(target_wf)
+            if view is not None:
+                return view
+            return DemoWorkflowResponse(
+                workflow_id=target_wf,
+                status=outcome.get("status", "FAILED"),
+            )
+    finally:
+        try:
+            await pool.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # keep_both: chỉ request nhận được RETURNING fingerprint (won=True) được resume.
+    if not won:
+        view = await _public_view_from_db(workflow_id)
+        if view is not None:
+            return view
+        return DemoWorkflowResponse(workflow_id=workflow_id, status="WAITING_APPROVAL")
+
+    try:
+        outcome = await resume_after_conflict_ack(
+            workflow_id,
+            owner_user_id=owner_id,
+            conflict_task_id=conflict_task_id,
+            **urls,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lan xung dot: resume that bai (%s)", type(exc).__name__)
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="EXECUTION_ERROR",
+            summary="Mình chưa tiếp tục được yêu cầu lúc này. Bạn thử lại sau nhé.",
+        )
+
+    view = await _public_view_from_db(workflow_id)
+    if view is not None:
+        return view
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status=outcome.get("status", "FAILED"),
+    )
 
 
 async def _tra_loi_ve_de_xuat(
@@ -7386,6 +7718,116 @@ def _assistant_fields(row: Any) -> dict[str, Any]:
         "suggestions": json.loads(raw) if isinstance(raw, str) else list(raw or []),
         "response_state": row.get("assistant_response_state"),
     }
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/conflict-respond",
+    response_model=DemoWorkflowResponse,
+)
+async def respond_to_conflict(
+    workflow_id: str,
+    request: ConflictRespondRequest,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Người dùng quyết định "giữ nguyên" hay "đổi lịch" khi phát hiện xung đột.
+
+    - `keep_both`: xác nhận xung đột, tiếp tục workflow.
+    - `change_a`: huỷ conflict check, trả thông báo để người dùng đặt lịch mới cho workflow hiện tại.
+    - `change_b`: huỷ conflict check, trả thông báo để người dùng đặt lịch mới cho workflow kia.
+    """
+    await _require_workflow_owner(workflow_id, user)
+
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+
+    settings = get_settings()
+    urls = {
+        "resident_url": settings.resident_service_url,
+        "transport_url": settings.transport_service_url,
+        "payment_url": settings.payment_service_url,
+        "property_url": settings.property_service_url,
+        "resident_services_url": settings.resident_services_service_url,
+        "shuttle_url": settings.shuttle_service_url,
+    }
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001
+    won = False
+    owner_id = ""
+    conflict_task_id = ""
+    try:
+        conflict = await load_conflict_check(pool, workflow_id)
+        if conflict is None:
+            return await _public_view_from_db(workflow_id) or DemoWorkflowResponse(
+                status="EXECUTION_ERROR",
+                summary="Không tìm thấy thông tin xung đột lịch.",
+            )
+
+        if request.choice == "keep_both":
+            won = await claim_conflict_ack(pool, conflict["fingerprint"])
+            owner_id = str(user.get("id") or "")
+            conflict_task_id = conflict.get("task_id", "")
+        elif request.choice in ("change_a", "change_b"):
+            await clear_conflict_check(pool, workflow_id)
+            if request.choice == "change_a":
+                target_wf = workflow_id
+                target_task = conflict.get("task_id", "")
+            else:
+                target_wf = str(conflict.get("workflow_id_b") or "")
+                target_task = str(conflict.get("task_id_b") or "")
+                # Kiểm sở hữu workflow_b trước khi sửa
+                if target_wf:
+                    async with pool.acquire() as _conn:
+                        _wf_row = await _conn.fetchrow(
+                            "SELECT owner_user_id FROM workflows WHERE workflow_id=$1::uuid",
+                            target_wf,
+                        )
+                    if _wf_row is None or str(_wf_row["owner_user_id"]) != str(user.get("id") or ""):
+                        return DemoWorkflowResponse(
+                            workflow_id=workflow_id,
+                            status="EXECUTION_ERROR",
+                            summary="Không có quyền chỉnh sửa lịch kia.",
+                        )
+            await pool.close()
+            outcome = await repair_conflict_task(target_wf, target_task)
+            view = await _public_view_from_db(target_wf)
+            if view is not None:
+                return view
+            return DemoWorkflowResponse(
+                workflow_id=target_wf,
+                status=outcome.get("status", "FAILED"),
+                summary=outcome.get("summary"),
+            )
+        else:
+            return DemoWorkflowResponse(
+                status="EXECUTION_ERROR",
+                summary="Lựa chọn không hợp lệ.",
+            )
+    finally:
+        await pool.close()
+
+    # keep_both: chỉ request nhận được RETURNING fingerprint (won=True) được resume.
+    if not won:
+        view = await _public_view_from_db(workflow_id)
+        if view is not None:
+            return view
+        return DemoWorkflowResponse(workflow_id=workflow_id, status="WAITING_APPROVAL")
+
+    try:
+        outcome = await resume_after_conflict_ack(
+            workflow_id,
+            owner_user_id=owner_id,
+            conflict_task_id=conflict_task_id,
+            **urls,
+        )
+    except ResumeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    view = await _public_view_from_db(workflow_id)
+    if view is not None:
+        return view
+    status = outcome.get("status", "FAILED")
+    return DemoWorkflowResponse(workflow_id=workflow_id, status=status)
 
 
 @router.get("/workflows/demo", response_model=DemoWorkflowListResponse)

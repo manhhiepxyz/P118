@@ -143,6 +143,11 @@ def repair_missing_fields(task_tool: str, error_code: ErrorCode, task_input: dic
         # parking_zone đã biến một lời từ chối đăng ký xe thành form đổi khu,
         # rồi huỷ dependency mà lần giữ chỗ mới cần dùng.
         return _NO_AVAILABILITY_FIELDS.get(task_tool, [])
+    if error_code == ErrorCode.SCHEDULE_CONFLICT_CHANGE_REQUESTED:
+        # Người dùng muốn đổi lịch của task này. Field cần hỏi lại giống
+        # NO_AVAILABILITY nhưng lý do hoàn toàn khác: không phải hết chỗ,
+        # mà là xung đột với lịch của chính họ.
+        return _NO_AVAILABILITY_FIELDS.get(task_tool, [])
     if error_code == ErrorCode.RESIDENT_ALREADY_EXISTS:
         return ["apartment_code"]
     if error_code == ErrorCode.VEHICLE_ALREADY_EXISTS:

@@ -1575,3 +1575,42 @@ BEGIN
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS workflow_id UUID REFERENCES workflows(workflow_id);
     CREATE INDEX IF NOT EXISTS idx_payments_workflow ON payments(workflow_id);
 END $$;
+
+
+-- 2026-08 — schedule_conflict_checks
+--
+-- Ghi lại xung đột lịch được phát hiện giữa hai task cùng người dùng. Boundary
+-- kiểm POTENTIAL_CONFLICT trước mọi side effect; người dùng xác nhận → cờ
+-- `acknowledged` bật lên, workflow tiếp tục.
+--
+-- `fingerprint` = SHA-256 (32 hex) của cặp task + lịch theo thứ tự chuẩn hoá;
+-- thay đổi task_id, attempt hoặc giờ thì fingerprint đổi → xác nhận cũ mất
+-- hiệu lực.
+DO $$
+BEGIN
+    IF to_regclass('schedule_conflict_checks') IS NOT NULL THEN
+        RETURN;
+    END IF;
+
+    CREATE TABLE schedule_conflict_checks (
+        id              UUID        NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+        fingerprint     VARCHAR(64) NOT NULL UNIQUE,
+        owner           TEXT        NOT NULL,
+        workflow_id     UUID        NOT NULL REFERENCES workflows(workflow_id),
+        task_id         VARCHAR(20) NOT NULL,
+        service_a       VARCHAR(60) NOT NULL,
+        date_a          TEXT        NOT NULL,
+        time_a          TEXT        NOT NULL,
+        workflow_id_b   UUID        NOT NULL,
+        task_id_b       VARCHAR(20) NOT NULL,
+        service_b       VARCHAR(60) NOT NULL,
+        date_b          TEXT        NOT NULL,
+        time_b          TEXT        NOT NULL,
+        acknowledged    BOOLEAN     NOT NULL DEFAULT FALSE,
+        acknowledged_at TIMESTAMPTZ,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX idx_conflict_checks_workflow ON schedule_conflict_checks(workflow_id);
+    CREATE INDEX idx_conflict_checks_owner ON schedule_conflict_checks(owner);
+END $$;

@@ -313,6 +313,9 @@ class DemoWorkflowEvent(BaseModel):
         # Chỉ phát khi PAYMENT_PROVIDER=vnpay; mock không bao giờ thấy giá trị
         # này. Phải có ở CẢ HAI Literal `stage` — xem cảnh báo phía trên.
         "WAITING_PAYMENT_GATEWAY",
+        # Phát hiện hai lịch cùng giờ, chờ người dùng xác nhận hoặc đổi một.
+        # Phải có ở CẢ HAI Literal `stage` — xem cảnh báo phía trên.
+        "WAITING_SCHEDULE_CONFLICT_CHECK",
         "EXECUTING",
         "TASK_RUNNING",
         "TASK_SUCCESS",
@@ -430,6 +433,14 @@ class DemoPaymentDecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
 
 
+class ConflictRespondRequest(BaseModel):
+    """Body của lệnh xác nhận xung đột lịch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    choice: Literal["keep_both", "change_a", "change_b"]
+
+
 class DemoSessionListResponse(BaseModel):
     """Danh sách workflow trong cùng một session/chat thread."""
 
@@ -501,8 +512,37 @@ class ClarificationAction(BaseModel):
 #
 # `discriminator="kind"` để Pydantic chọn đúng nhánh khi đọc, và để OpenAPI mô
 # tả được ba hình dạng thay vì một `dict[str, Any]`.
+
+
+class ConflictTaskInfo(BaseModel):
+    """Một đầu của cặp xung đột lịch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    task_id: str
+    service: str
+    service_label: str
+    datetime_display: str
+
+
+class ScheduleConflictAction(BaseModel):
+    """Hai lịch trùng giờ — chờ người dùng xác nhận hoặc đổi một lịch.
+
+    `task_a` là task trong workflow hiện tại (đang bị chặn).
+    `task_b` là task của workflow khác cùng người dùng.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["SCHEDULE_CONFLICT"] = "SCHEDULE_CONFLICT"
+    task_a: ConflictTaskInfo
+    task_b: ConflictTaskInfo
+    can_act: StrictBool
+
+
 CustomerAction = Annotated[
-    PaymentApprovalAction | ServiceProposalActionView | ClarificationAction,
+    PaymentApprovalAction | ServiceProposalActionView | ClarificationAction | ScheduleConflictAction,
     Field(discriminator="kind"),
 ]
 
@@ -605,6 +645,9 @@ class DemoWorkflowResponse(BaseModel):
             # Đã mở phiên thanh toán gateway (VNPay), chờ IPN xác nhận tiền.
             # Phải có ở CẢ HAI Literal `stage`.
             "WAITING_PAYMENT_GATEWAY",
+            # Phát hiện hai lịch cùng giờ, chờ người dùng xác nhận hoặc đổi.
+            # Phải có ở CẢ HAI Literal `stage`.
+            "WAITING_SCHEDULE_CONFLICT_CHECK",
             "EXECUTING",
             "TASK_RUNNING",
             "TASK_SUCCESS",

@@ -537,6 +537,16 @@ export async function decidePayment(
   );
 }
 
+export async function respondToConflict(
+  workflowId: string,
+  choice: 'keep_both' | 'change_a' | 'change_b',
+): Promise<AgentWorkflowResponse> {
+  return request<AgentWorkflowResponse>(
+    `/workflows/demo/${encodeURIComponent(workflowId)}/conflict-respond`,
+    { method: 'POST', body: { choice } },
+  )
+}
+
 /**
  * Khách đồng ý với đơn vị được đề xuất cho MỘT bước.
  *

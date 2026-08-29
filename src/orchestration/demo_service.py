@@ -53,6 +53,7 @@ from src.orchestration.provider_gateway import ProviderCall, call_provider
 from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
 from src.orchestration.repair_attempt import open_new_attempts
 from src.orchestration.runtime_provider import acquire_repository
+from src.orchestration.schedule_conflict import ScheduleConflictBoundary
 from src.orchestration.service_approval import (
     SERVICE_LABELS,
     ServiceApprovalBoundary,
@@ -511,6 +512,7 @@ async def run_demo_workflow(
     parent_workflow_id: str | None = None,
     session_id: str | None = None,
     on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
+    owner_user_id: str | None = None,
 ) -> dict[str, Any]:
     """Chạy LLM thật xuyên Planner graph và Runtime, rồi đóng DB pool."""
 
@@ -589,6 +591,12 @@ async def run_demo_workflow(
             approved=False,
             repository=repository,
         )
+        # Lớp ngoài cùng: cảnh báo xung đột lịch trước mọi side effect.
+        outermost_boundary = ScheduleConflictBoundary(
+            service_guarded_boundary,
+            repository=repository,
+            owner_user_id=owner_user_id,
+        )
         # Đường nhanh: một lượt gọi rẻ thay cho một lượt lập kế hoạch đắt.
         #
         # `FAST_LANE=0` tắt hoàn toàn và hệ thống chạy y như trước — công tắc có
@@ -607,7 +615,7 @@ async def run_demo_workflow(
             )
         graph = build_planner_graph(
             planner,
-            service_guarded_boundary,
+            outermost_boundary,
             on_stage=on_stage,
             parent_workflow_id=parent_workflow_id,
             session_id=session_id,
@@ -1395,6 +1403,119 @@ async def _park_for_repair(
     # thay lời chứng bằng một bản diễn giải, và bản ấy có thể nói sai điều
     # người duyệt đã cân nhắc.
     return {"workflow_id": workflow_id, "status": WorkflowStatus.FAILED.value, "repair_pending": True}
+
+
+async def resume_after_conflict_ack(
+    workflow_id: str,
+    owner_user_id: str,
+    conflict_task_id: str,
+    **urls: str,
+) -> dict[str, Any]:
+    """Chạy tiếp sau khi người dùng xác nhận "giữ nguyên" hai lịch trùng.
+
+    Xung đột đã được `acknowledge_conflict()` đánh dấu trước khi gọi đây.
+    `ScheduleConflictBoundary` sẽ đọc `acknowledged=True` và chuyển thẳng
+    xuống inner boundary mà không dừng nữa.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001
+    try:
+        record = await repository.get_workflow(workflow_id)
+        if record is None:
+            raise ResumeError("NOT_FOUND", "Không tìm thấy yêu cầu này.")
+        plan = _plan_from_task_rows(record["workflow"].get("goal") or "", record.get("tasks") or [])
+        if plan is None or not plan.tasks:
+            raise ResumeError("NO_PLAN", "Yêu cầu này không còn kế hoạch để chạy tiếp.")
+
+        # Reset task bị chặn bởi xung đột → PENDING để Executor chạy lại.
+        await repository.update_task_status(workflow_id, conflict_task_id, TaskStatus.PENDING)
+        await repository.update_workflow_status(workflow_id, WorkflowStatus.PENDING)
+
+        connectors = build_connectors(workflow_id=workflow_id, **urls)
+        repair_manager = RepairManager()
+        inner_boundary = ServiceApprovalBoundary(
+            ViewingApprovalBoundary(
+                PaymentApprovalBoundary(
+                    ValidatedExecutionBoundary(Executor(connectors, repository, on_failure=repair_manager)),
+                    False,
+                    repository=repository,
+                ),
+                False,
+                repository=repository,
+            ),
+            approved=False,
+            repository=repository,
+        )
+        guarded = ScheduleConflictBoundary(
+            inner_boundary,
+            repository=repository,
+            owner_user_id=owner_user_id,
+        )
+        seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
+        try:
+            await guarded.execute(
+                plan,
+                workflow_id,
+                finalize=False,
+                seed_statuses=seed_statuses,
+                seed_results=seed_results,
+            )
+        except PolicyInterruptionError as pause:
+            await persist_pending_approval(workflow_id, pause.partial_results or {}, plan)
+            return {"workflow_id": workflow_id, "status": WorkflowStatus.WAITING_APPROVAL.value}
+
+        return {"workflow_id": workflow_id, "status": WorkflowStatus.SUCCESS.value}
+    finally:
+        await pool.close()
+
+
+async def repair_conflict_task(
+    target_workflow_id: str,
+    target_task_id: str,
+) -> dict[str, Any]:
+    """Mở clarification cho task xung đột — người dùng cung cấp ngày/giờ mới.
+
+    Dùng cho change_a (workflow hiện tại) và change_b (workflow kia).
+    KHÔNG dùng NO_AVAILABILITY: xung đột là lựa chọn của khách, không phải
+    provider từ chối. Dùng SCHEDULE_CONFLICT_CHANGE_REQUESTED để câu hỏi lại
+    và ô nhập liệu phản ánh đúng ngữ cảnh.
+    """
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001
+    try:
+        record = await repository.get_workflow(target_workflow_id)
+        if record is None:
+            return {"workflow_id": target_workflow_id, "status": WorkflowStatus.FAILED.value}
+        plan = _plan_from_task_rows(record["workflow"].get("goal") or "", record.get("tasks") or [])
+        task = next((t for t in (plan.tasks if plan else []) if t.task_id == target_task_id), None)
+        if task is None:
+            return {"workflow_id": target_workflow_id, "status": WorkflowStatus.FAILED.value}
+
+        hints = {
+            target_task_id: RepairHint(
+                error_code=ErrorCode.SCHEDULE_CONFLICT_CHANGE_REQUESTED,
+                message="Lịch đang xung đột với một lịch hẹn khác của bạn.",
+                task_id=target_task_id,
+            )
+        }
+        await _persist_hints(repository, target_workflow_id, hints)
+        cau_hoi = _repair_answer_for(hints, plan)
+        await _persist_repair_clarification(repository, target_workflow_id, hints, plan, cau_hoi)
+        try:
+            await repository.save_assistant_response(
+                target_workflow_id,
+                answer=cau_hoi or "",
+                suggestions=[],
+                state="FALLBACK",
+                for_status="NEEDS_INFORMATION",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("repair_conflict_task: khong ghi duoc cau chot (%s)", type(exc).__name__)
+
+        await repository.update_workflow_status(target_workflow_id, WorkflowStatus.FAILED)
+        return {"workflow_id": target_workflow_id, "status": WorkflowStatus.FAILED.value, "repair_pending": True}
+    finally:
+        await pool.close()
 
 
 async def resume_after_service_decision(workflow_id: str, **urls: str) -> dict[str, Any]:

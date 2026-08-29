@@ -451,6 +451,23 @@ export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction |
     }
   }
 
+  // WAITING_APPROVAL + customer_action.kind = SCHEDULE_CONFLICT → xung đột lịch.
+  if (res.status === 'WAITING_APPROVAL' && res.customer_action?.kind === 'SCHEDULE_CONFLICT') {
+    const conflict = res.customer_action
+    return {
+      actionId: `conflict:${workflowId}`,
+      workflowId,
+      taskId: conflict.task_a.task_id,
+      kind: 'schedule_conflict',
+      status: 'WAITING_APPROVAL',
+      title: 'Lịch có khả năng trùng',
+      message: res.summary || '',
+      details: [],
+      fingerprint: `conflict:${workflowId}`,
+      explain: res.summary || '',
+    }
+  }
+
   // WAITING_APPROVAL + approval_actor=USER + customer_action (không có payment_quote)
   // → đang chờ khách chọn đơn vị chuyển nhà.
   //

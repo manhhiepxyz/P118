@@ -769,6 +769,8 @@ def build_planner_graph(
                 # `DemoWorkflowResponse`). Thiếu chỗ thứ ba thì Pydantic từ
                 # chối cả response — đã xảy ra một lần với lịch tham quan.
                 await emit("WAITING_PROVIDER_PROPOSAL")
+            elif exc.code == "SCHEDULE_CONFLICT_REQUIRED":
+                await emit("WAITING_SCHEDULE_CONFLICT_CHECK")
             elif exc.code == "SERVICE_APPROVAL_REQUIRED":
                 # Thiếu nhánh này, `ServiceApprovalBoundary` — cổng NGOÀI CÙNG,
                 # áp cho MỌI dịch vụ — rơi xuống `else` và mọi yêu cầu dịch vụ

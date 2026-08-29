@@ -124,6 +124,10 @@ class ErrorCode(StrEnum):
     PAYMENT_NOT_FOUND = "PAYMENT_NOT_FOUND"
     NO_AVAILABILITY = "NO_AVAILABILITY"
     PAYMENT_FAILED = "PAYMENT_FAILED"
+    # Người dùng chọn đổi lịch khi có cảnh báo xung đột. Không phải provider
+    # từ chối; không phải hết chỗ. Machinery repair/clarification tái sử dụng
+    # nhưng lý do và câu hỏi phải khác để không nói "nhà cung cấp từ chối".
+    SCHEDULE_CONFLICT_CHANGE_REQUESTED = "SCHEDULE_CONFLICT_CHANGE_REQUESTED"
     # Ba mã dưới đây provider vẫn phát ra từ trước, nhưng chưa có chỗ trong
     # enum nên connector gộp hết vào UNKNOWN_EXTERNAL_ERROR — và lý do thật
     # ("Không có dự án X trong danh mục") bị thay bằng "Vui lòng thử lại".

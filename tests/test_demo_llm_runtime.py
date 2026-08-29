@@ -263,14 +263,15 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
 
     def _build_graph(received_planner, received_boundary, *, on_stage=None, **kwargs):
         assert received_planner is planner
-        # Boundary NGOÀI CÙNG là cổng đơn vị cung cấp: mọi dịch vụ phải được
-        # bên kia nhận làm trước đã. Trong nó là cổng duyệt lịch tham quan, rồi
-        # tới payment → resident → runtime.
-        #
-        # Thứ tự này không tuỳ ý: đặt cổng đơn vị bên trong cổng thanh toán
-        # nghĩa là hỏi người dùng trả tiền cho một dịch vụ chưa ai nhận làm.
-        assert isinstance(received_boundary, ServiceApprovalBoundary)
-        viewing = received_boundary._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        # Boundary NGOÀI CÙNG là cảnh báo xung đột lịch (ScheduleConflictBoundary),
+        # bao ngoài cổng đơn vị cung cấp (ServiceApprovalBoundary). Thứ tự đúng:
+        # conflict → service → viewing → payment → resident → runtime.
+        from src.orchestration.schedule_conflict import ScheduleConflictBoundary
+
+        assert isinstance(received_boundary, ScheduleConflictBoundary)
+        service = received_boundary._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        assert isinstance(service, ServiceApprovalBoundary)
+        viewing = service._boundary  # noqa: SLF001 - test kiểm cấu trúc
         assert isinstance(viewing, demo_service.ViewingApprovalBoundary)
         inner = viewing._boundary  # noqa: SLF001 - test kiểm cấu trúc
         assert isinstance(inner, demo_service.PaymentApprovalBoundary)

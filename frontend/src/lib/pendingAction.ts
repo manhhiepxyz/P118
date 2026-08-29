@@ -25,7 +25,7 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 
-export type PendingKind = 'approval' | 'missing_info' | 'decision' | 'provider_proposal'
+export type PendingKind = 'approval' | 'missing_info' | 'decision' | 'provider_proposal' | 'schedule_conflict'
 
 /** Trạng thái đúng như backend đặt tên — không phát minh trạng thái mới. */
 export type PendingStatus =

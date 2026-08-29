@@ -246,6 +246,29 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
             subject = f"Lịch chuyển nhà {slot}" if slot else "Khung giờ chuyển nhà bạn chọn"
             return f"{subject} đã kín. Bạn chọn ngày hoặc giờ khác giúp mình nhé."
 
+    if code == "SCHEDULE_CONFLICT_CHANGE_REQUESTED":
+        # Người dùng chọn đổi lịch này vì xung đột với lịch hẹn khác.
+        # Không đề cập provider, không nói "hết chỗ" — đây là lựa chọn của khách.
+        if task_tool == "schedule_move":
+            date = _text(inputs.get("move_date"))
+            time_text = _text(inputs.get("move_time"))
+            slot = " ".join(p for p in (f"ngày {date}" if date else "", time_text) if p)
+            subject = f"Lịch chuyển nhà {slot}" if slot else "Lịch chuyển nhà"
+            return f"{subject} đang xung đột với một lịch hẹn khác của bạn. Bạn chọn ngày hoặc giờ mới giúp mình nhé."
+        if task_tool == "create_maintenance_request":
+            date = _text(inputs.get("preferred_date"))
+            time_text = _text(inputs.get("preferred_time"))
+            slot = " ".join(p for p in (f"ngày {date}" if date else "", time_text) if p)
+            subject = f"Lịch bảo trì {slot}" if slot else "Lịch bảo trì"
+            return f"{subject} đang xung đột với một lịch hẹn khác của bạn. Bạn chọn ngày hoặc giờ mới giúp mình nhé."
+        if task_tool == "schedule_property_viewing":
+            date = _text(inputs.get("viewing_date"))
+            time_text = _text(inputs.get("viewing_time"))
+            slot = " ".join(p for p in (f"ngày {date}" if date else "", time_text) if p)
+            subject = f"Lịch tham quan {slot}" if slot else "Lịch tham quan"
+            return f"{subject} đang xung đột với một lịch hẹn khác của bạn. Bạn chọn ngày hoặc giờ mới giúp mình nhé."
+        return "Lịch hẹn này đang xung đột với một lịch hẹn khác. Bạn chọn thời gian mới giúp mình nhé."
+
     if code == "VEHICLE_ALREADY_EXISTS":
         plate = _text(inputs.get("plate_number"))
         subject = f"Biển số {plate}" if plate else "Biển số này"

@@ -39,6 +39,7 @@ import {
   continueWorkflow,
   decidePayment,
   getWorkflow,
+  respondToConflict,
   startWorkflow,
 } from '../lib/agentApi'
 import type { AgentWorkflowResponse } from '../lib/types'
@@ -908,6 +909,10 @@ export function JourneyWorkspacePage() {
                 // chỗ vừa hết. Đo được: `book_parking` chạy lại với ZONE_A.
                 await continueWorkflow(action.workflowId, { fields: { [key]: matched } })
               : await continueWorkflow(action.workflowId, { message: value })
+      } else if (action.kind === 'schedule_conflict') {
+        // "Giữ nguyên" / "Đổi lịch A" / "Đổi lịch B" — value chứa choice.
+        const choice = (value ?? 'keep_both') as 'keep_both' | 'change_a' | 'change_b'
+        res = await respondToConflict(action.workflowId, choice)
       } else if (action.kind === 'provider_proposal') {
         // Câu hỏi thêm về đề xuất đơn vị — backend bắt ở `_tra_loi_ve_de_xuat`.
         //
@@ -1619,7 +1624,47 @@ export function JourneyWorkspacePage() {
                   }}
                 />
               )}
-              {pending && (
+              {pending?.kind === 'schedule_conflict' && live?.customer_action?.kind === 'SCHEDULE_CONFLICT' && (() => {
+                const conflict = live.customer_action
+                const taskA = conflict.task_a
+                const taskB = conflict.task_b
+                return (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm">
+                    <p className="mb-3 font-semibold text-amber-900">Lịch có khả năng trùng giờ</p>
+                    <div className="mb-4 space-y-1 rounded-lg bg-amber-100 px-3 py-2 text-amber-900">
+                      <div className="flex items-baseline gap-2">
+                        <span className="shrink-0 font-medium">A.</span>
+                        <span>{taskA.service_label} — {taskA.datetime_display}</span>
+                      </div>
+                      <div className="flex items-baseline gap-2">
+                        <span className="shrink-0 font-medium">B.</span>
+                        <span>{taskB.service_label} — {taskB.datetime_display}</span>
+                      </div>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        className="rounded-lg bg-white border border-amber-300 px-4 py-2 text-left text-amber-900 hover:bg-amber-100 transition-colors"
+                        onClick={() => { say('user', 'Giữ nguyên cả hai lịch'); respondTo(pending, 'APPROVE', 'keep_both', 'button') }}
+                      >
+                        Giữ nguyên cả hai lịch
+                      </button>
+                      <button
+                        className="rounded-lg bg-white border border-amber-300 px-4 py-2 text-left text-amber-900 hover:bg-amber-100 transition-colors"
+                        onClick={() => { say('user', `Đổi lịch ${taskA.service_label}`); respondTo(pending, 'APPROVE', 'change_a', 'button') }}
+                      >
+                        Đổi lịch A — {taskA.service_label}
+                      </button>
+                      <button
+                        className="rounded-lg bg-white border border-amber-300 px-4 py-2 text-left text-amber-900 hover:bg-amber-100 transition-colors"
+                        onClick={() => { say('user', `Đổi lịch ${taskB.service_label}`); respondTo(pending, 'APPROVE', 'change_b', 'button') }}
+                      >
+                        Đổi lịch B — {taskB.service_label}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })()}
+              {pending && pending.kind !== 'schedule_conflict' && (
                 <PendingCard
                   action={pending}
                   onApprove={() => respondTo(pending, 'APPROVE', undefined, 'button')}

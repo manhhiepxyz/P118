@@ -380,6 +380,7 @@ const FAILURE_TEXT: Record<string, string> = {
   VIEWING_NOT_FOUND: 'Không tìm thấy lịch tham quan này.',
   PROJECT_NOT_FOUND: 'Dự án này chưa nằm trong danh sách được hỗ trợ.',
   PAYMENT_FAILED: 'Thanh toán chưa thành công. Tiền chưa bị trừ, bạn thử lại nhé.',
+  SCHEDULE_CONFLICT_CHANGE_REQUESTED: 'Lịch hẹn này đang xung đột với một lịch hẹn khác. Bạn chọn thời gian mới giúp mình nhé.',
   MISSING_INFORMATION: 'Còn thiếu thông tin để thực hiện bước này.',
   INVALID_INPUT: 'Thông tin của bước này chưa hợp lệ. Bạn kiểm tra lại giúp mình nhé.',
   INVALID_TASK_PLAN: 'Kế hoạch cho yêu cầu này chưa hợp lệ.',
