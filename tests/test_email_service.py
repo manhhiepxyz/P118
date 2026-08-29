@@ -10,13 +10,10 @@ from src.services import email_service
 def _settings(**overrides):
     values = {
         "app_env": "test",
-        "smtp_host": "smtp.resend.com",
-        "smtp_port": 587,
-        "smtp_username": "resend",
-        "smtp_password": "re_test_only",
-        "smtp_from_email": "no-reply@account.c3-app-118.io.vn",
-        "smtp_from_name": "P-118",
-        "smtp_reply_to": None,
+        "resend_api_key": "re_test_only",
+        "resend_from_email": "no-reply@account.c3-app-118.io.vn",
+        "resend_from_name": "P-118",
+        "resend_reply_to": None,
         "frontend_base_url": "https://www.c3-app-118.io.vn",
     }
     values.update(overrides)
@@ -60,12 +57,13 @@ def test_workflow_update_email_uses_the_same_brand_and_plain_text_contract():
 async def test_resend_authentication_is_separate_from_the_visible_sender(monkeypatch):
     captured = {}
 
-    async def fake_send(message, **kwargs):
-        captured["message"] = message
-        captured["kwargs"] = kwargs
+    async def fake_post(*, api_key, payload):
+        captured["api_key"] = api_key
+        captured["payload"] = payload
+        return "email-test-id"
 
     monkeypatch.setattr(email_service, "get_settings", _settings)
-    monkeypatch.setattr(email_service.aiosmtplib, "send", fake_send)
+    monkeypatch.setattr(email_service, "_post_resend_email", fake_post)
 
     sent = await email_service._send_email_async(
         "tester@example.com",
@@ -73,55 +71,48 @@ async def test_resend_authentication_is_separate_from_the_visible_sender(monkeyp
     )
 
     assert sent is True
-    assert captured["message"]["From"] == "P-118 <no-reply@account.c3-app-118.io.vn>"
-    assert captured["message"]["To"] == "tester@example.com"
-    assert captured["message"].get_content_type() == "multipart/alternative"
-    assert [part.get_content_type() for part in captured["message"].get_payload()] == [
-        "text/plain",
-        "text/html",
-    ]
-    assert captured["kwargs"] == {
-        "hostname": "smtp.resend.com",
-        "port": 587,
-        "start_tls": True,
-        "username": "resend",
-        "password": "re_test_only",
-    }
+    assert captured["api_key"] == "re_test_only"
+    assert captured["payload"]["from"] == "P-118 <no-reply@account.c3-app-118.io.vn>"
+    assert captured["payload"]["to"] == ["tester@example.com"]
+    assert captured["payload"]["text"]
+    assert captured["payload"]["html"]
 
 
 @pytest.mark.asyncio
 async def test_reply_to_is_only_added_when_configured(monkeypatch):
     captured = {}
 
-    async def fake_send(message, **_kwargs):
-        captured["message"] = message
+    async def fake_post(*, api_key, payload):
+        captured["payload"] = payload
+        return "email-test-id"
 
     monkeypatch.setattr(
         email_service,
         "get_settings",
-        lambda: _settings(smtp_reply_to="support@c3-app-118.io.vn"),
+        lambda: _settings(resend_reply_to="support@c3-app-118.io.vn"),
     )
-    monkeypatch.setattr(email_service.aiosmtplib, "send", fake_send)
+    monkeypatch.setattr(email_service, "_post_resend_email", fake_post)
 
     await email_service._send_email_async("tester@example.com", email_service._otp_email("123456"))
 
-    assert captured["message"]["Reply-To"] == "support@c3-app-118.io.vn"
+    assert captured["payload"]["reply_to"] == "support@c3-app-118.io.vn"
 
 
 @pytest.mark.asyncio
 async def test_resend_without_a_verified_from_address_fails_closed(monkeypatch):
     called = False
 
-    async def fake_send(_message, **_kwargs):
+    async def fake_post(*, api_key, payload):
         nonlocal called
         called = True
+        return "email-test-id"
 
     monkeypatch.setattr(
         email_service,
         "get_settings",
-        lambda: _settings(smtp_from_email=None),
+        lambda: _settings(resend_from_email=""),
     )
-    monkeypatch.setattr(email_service.aiosmtplib, "send", fake_send)
+    monkeypatch.setattr(email_service, "_post_resend_email", fake_post)
 
     sent = await email_service._send_email_async(
         "tester@example.com",
@@ -133,31 +124,12 @@ async def test_resend_without_a_verified_from_address_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gmail_configuration_remains_backwards_compatible(monkeypatch):
-    captured = {}
+async def test_missing_resend_key_fails_closed_outside_development(monkeypatch):
+    monkeypatch.setattr(email_service, "get_settings", lambda: _settings(resend_api_key=""))
 
-    async def fake_send(message, **_kwargs):
-        captured["message"] = message
+    sent = await email_service._send_email_async("tester@example.com", email_service._otp_email("123456"))
 
-    monkeypatch.setattr(
-        email_service,
-        "get_settings",
-        lambda: _settings(
-            smtp_host="smtp.gmail.com",
-            smtp_username="p118.demo@gmail.com",
-            smtp_password="app-password",
-            smtp_from_email=None,
-        ),
-    )
-    monkeypatch.setattr(email_service.aiosmtplib, "send", fake_send)
-
-    sent = await email_service._send_email_async(
-        "tester@example.com",
-        email_service._otp_email("123456"),
-    )
-
-    assert sent is True
-    assert captured["message"]["From"] == "P-118 <p118.demo@gmail.com>"
+    assert sent is False
 
 
 @pytest.mark.asyncio

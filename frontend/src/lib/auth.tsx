@@ -9,14 +9,8 @@ import {
 } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 
-import {
-  getMe,
-  getStoredToken,
-  login as apiLogin,
-  logout as apiLogout,
-  register as apiRegister,
-  type RegisterProfileInput,
-} from './agentApi'
+import * as api from './agentApi'
+import type { GoogleVerifyResult, RegisterProfileInput } from './agentApi'
 import type { AuthUser } from './types'
 
 /* ---------------------------------------------------------------------------
@@ -50,6 +44,8 @@ interface AuthContextValue {
     otpCode: string,
     profile?: RegisterProfileInput,
   ) => Promise<void>
+  googleLogin: (credential: string) => Promise<GoogleVerifyResult>
+  googleRegister: (credential: string, username: string, phone?: string) => Promise<void>
   /** Đọc lại user qua /auth/me — dùng sau PATCH /users/me để UI cập nhật ngay. */
   refreshUser: () => Promise<void>
   logout: () => void
@@ -64,17 +60,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Khôi phục phiên khi app load.
   useEffect(() => {
-    const stored = getStoredToken()
+    const stored = api.getStoredToken()
     if (!stored) {
       setInitializing(false)
       return
     }
     setToken(stored)
-    getMe()
+    api.getMe()
       .then((u) => setUser(u))
       .catch(() => {
         // Token cũ/hết hạn — `agentApi` đã xoá nó khi gặp 401.
-        apiLogout()
+        api.logout()
         setToken(null)
         setUser(null)
       })
@@ -82,11 +78,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const login = useCallback(async (username: string, password: string) => {
-    const res = await apiLogin(username, password)
+    const res = await api.login(username, password)
     setToken(res.access_token)
     // Đọc lại qua /auth/me: response login chưa mang trạng thái liên kết cư
     // dân, mà UI cần nó ngay để biết dịch vụ nào đang mở.
-    setUser(await getMe())
+    setUser(await api.getMe())
   }, [])
 
   const register = useCallback(
@@ -98,19 +94,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       profile?: RegisterProfileInput,
     ) => {
       // Register trả user (không token) — tự login sau để có phiên.
-      await apiRegister(username, password, email, otpCode, profile)
+      await api.register(username, password, email, otpCode, profile)
       await login(username, password)
     },
     [login],
   )
 
+  const googleLogin = useCallback(async (credential: string) => {
+    const res = await api.googleVerify(credential)
+    if (res.status === 202) {
+      return res // Cần đăng ký
+    }
+    setToken(res.data.access_token)
+    setUser(await api.getMe())
+    return res
+  }, [])
+
+  const googleRegister = useCallback(async (credential: string, username: string, phone?: string) => {
+    const res = await api.googleRegister(credential, username, phone)
+    setToken(res.access_token)
+    setUser(await api.getMe())
+  }, [])
+
   const refreshUser = useCallback(async () => {
-    const u = await getMe()
+    const u = await api.getMe()
     setUser(u)
   }, [])
 
   const logout = useCallback(() => {
-    apiLogout()
+    api.logout()
     setToken(null)
     setUser(null)
   }, [])
@@ -124,10 +136,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isProvider: user?.role === 'provider',
       login,
       register,
+      googleLogin,
+      googleRegister,
       refreshUser,
       logout,
     }),
-    [user, token, initializing, login, register, refreshUser, logout],
+    [user, token, initializing, login, register, googleLogin, googleRegister, refreshUser, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

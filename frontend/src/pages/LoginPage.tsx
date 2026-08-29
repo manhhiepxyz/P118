@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff } from 'lucide-react'
+import { GoogleLogin } from '@react-oauth/google'
 
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
@@ -19,11 +20,12 @@ import { useToast } from '../lib/toast'
  * điện thoại, thứ duy nhất đáng chiếm màn hình là chính cái form.
  */
 export function LoginPage() {
-  const { login } = useAuth()
+  const { login, googleLogin } = useAuth()
   const toast = useToast()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string } | null)?.from ?? '/'
+  const googleEnabled = Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim())
 
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -120,7 +122,7 @@ export function LoginPage() {
                   htmlFor="login-username"
                   className="block text-[13px] font-medium text-[var(--text-secondary)]"
                 >
-                  Tên đăng nhập
+                  Tên đăng nhập hoặc Email
                 </label>
                 <input
                   id="login-username"
@@ -128,7 +130,7 @@ export function LoginPage() {
                   onChange={(e) => setUsername(e.target.value)}
                   autoComplete="username"
                   autoFocus
-                  placeholder="nguyen.van.a"
+                  placeholder="nguyen.van.a hoặc email"
                   className={field}
                 />
 
@@ -158,6 +160,15 @@ export function LoginPage() {
                   >
                     {show ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
                   </button>
+                </div>
+                <div className="mt-2 text-right">
+                  <Link
+                    to="/forgot-password"
+                    className="text-[13px] font-medium text-[var(--agent)] hover:underline"
+                    tabIndex={-1}
+                  >
+                    Quên mật khẩu?
+                  </Link>
                 </div>
 
                 {error && (
@@ -194,6 +205,46 @@ export function LoginPage() {
                     </>
                   )}
                 </button>
+                
+                {googleEnabled && (
+                  <>
+                    <div className="mt-6 flex items-center justify-between">
+                      <span className="w-1/5 border-b border-[var(--border-subtle)] lg:w-1/4"></span>
+                      <span className="text-xs text-[var(--text-muted)] uppercase">Hoặc</span>
+                      <span className="w-1/5 border-b border-[var(--border-subtle)] lg:w-1/4"></span>
+                    </div>
+
+                    <div className="mt-6 flex justify-center">
+                      <GoogleLogin
+                    onSuccess={async (credentialResponse) => {
+                      if (!credentialResponse.credential) return;
+                      try {
+                        setSubmitting(true);
+                        const res = await googleLogin(credentialResponse.credential);
+                        if (res.status === 202) {
+                          // Chuyển sang trang hoàn thiện thông tin
+                          navigate('/google-register', { state: { credential: credentialResponse.credential, data: res.data } });
+                        } else {
+                          toast.push('success', 'Đăng nhập thành công!');
+                          navigate(from, { replace: true });
+                        }
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : 'Không thể đăng nhập bằng Google.';
+                        setError(msg);
+                        toast.push('error', msg);
+                        setSubmitting(false);
+                      }
+                    }}
+                    onError={() => {
+                      setError('Đăng nhập Google thất bại.');
+                      toast.push('error', 'Đăng nhập Google thất bại.');
+                    }}
+                    useOneTap
+                      />
+                    </div>
+                  </>
+                )}
+
               </form>
             </div>
 

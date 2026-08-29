@@ -11,6 +11,10 @@ langchain>=0.3.0
 langchain-openai>=0.3.0
 langgraph>=0.2.0
 
+# Google Auth. `[requests]` bảo đảm transport mà `_verify_google_token` dùng
+# thực sự được cài; `google-auth-httplib2` không được import ở đâu.
+google-auth[requests]>=2.23.0
+
 # Database
 asyncpg>=0.29.0          # async PostgreSQL driver (dùng trực tiếp, không qua SQLAlchemy)
 sqlalchemy>=2.0.0      # bỏ comment nếu muốn dùng ORM sau này
@@ -27,4 +31,3 @@ httpx>=0.28.0
 
 # Email
 aiosmtplib>=3.0.1
-

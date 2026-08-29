@@ -5,16 +5,19 @@ from __future__ import annotations
 import html
 import logging
 from dataclasses import dataclass
-from email.headerregistry import Address
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from urllib.parse import quote, urlsplit
-
-import aiosmtplib
 
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _masked_email(value: str) -> str:
+    """Không đưa địa chỉ người nhận đầy đủ vào log."""
+    local, separator, domain = value.partition("@")
+    if not separator:
+        return "***"
+    return f"{local[:1]}***@{domain}"
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,83 @@ def _otp_email(otp_code: str) -> EmailContent:
                 <div style="margin-top:24px;padding:14px 16px;border-radius:12px;background:#f8fafc;
                             color:#667085;font-size:13px;line-height:1.55">
                   Nếu bạn không thực hiện yêu cầu đăng ký này, bạn có thể bỏ qua email.
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 36px;background:#f8fafc;border-top:1px solid #eaecf0;
+                         color:#98a2b3;font-size:12px;line-height:1.5">
+                Email tự động từ P-118 · c3-app-118.io.vn
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+    return EmailContent(subject=subject, text=text, html=html_body)
+
+
+def _reset_password_email(otp_code: str) -> EmailContent:
+    """Dựng email quên mật khẩu không phụ thuộc SMTP để có thể kiểm thử thuần."""
+    code = html.escape(otp_code)
+    display_code = f"{code[:3]} {code[3:]}" if len(code) == 6 else code
+    subject = "Mã xác nhận quên mật khẩu P-118"
+    text = (
+        "Mã xác nhận lấy lại mật khẩu P-118\n\n"
+        f"Mã xác thực của bạn: {display_code}\n\n"
+        "Mã có hiệu lực trong 5 phút. Không chia sẻ mã này với bất kỳ ai.\n"
+        "Nếu bạn không thực hiện yêu cầu này, hãy đổi mật khẩu tài khoản của bạn ngay."
+    )
+    html_body = f"""<!doctype html>
+<html lang="vi">
+  <body style="margin:0;background:#f1f6f5;font-family:Inter,Arial,sans-serif;color:#111827">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0">
+      Mã xác nhận lấy lại mật khẩu P-118 của bạn có hiệu lực trong 5 phút.
+    </div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f1f6f5">
+      <tr>
+        <td align="center" style="padding:32px 16px">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                 style="max-width:560px;background:#ffffff;border:1px solid #dce8e5;border-radius:20px;overflow:hidden">
+            <tr>
+              <td style="height:8px;background:#0f9d8f"></td>
+            </tr>
+            <tr>
+              <td style="padding:32px 36px 12px">
+                <table role="presentation" cellspacing="0" cellpadding="0">
+                  <tr>
+                    <td style="width:44px;height:44px;border-radius:12px;background:#0f9d8f;color:#ffffff;
+                               text-align:center;font-size:18px;font-weight:700">P</td>
+                    <td style="padding-left:12px">
+                      <div style="font-size:17px;font-weight:700;color:#111827">P-118</div>
+                      <div style="font-size:12px;color:#667085">Trợ lý điều phối dịch vụ cư dân</div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 36px 36px">
+                <h1 style="margin:0 0 12px;font-size:24px;line-height:1.3;color:#101828">
+                  Yêu cầu lấy lại mật khẩu
+                </h1>
+                <p style="margin:0;color:#475467;font-size:15px;line-height:1.65">
+                  Nhập mã dưới đây vào P-118 để đặt lại mật khẩu mới.
+                </p>
+                <div style="margin:24px 0;padding:20px;border-radius:14px;background:#eaf7f5;border:1px solid #b9e2dc;
+                            text-align:center;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+                            font-size:32px;font-weight:750;letter-spacing:8px;color:#087f73">
+                  {display_code}
+                </div>
+                <p style="margin:0;color:#475467;font-size:14px;line-height:1.65">
+                  Mã có hiệu lực trong <strong style="color:#101828">5 phút</strong>.
+                  P-118 không bao giờ yêu cầu bạn cung cấp mã này qua điện thoại hoặc tin nhắn.
+                </p>
+                <div style="margin-top:24px;padding:14px 16px;border-radius:12px;background:#f8fafc;
+                            color:#667085;font-size:13px;line-height:1.55">
+                  Nếu bạn không yêu cầu đổi mật khẩu, có thể ai đó đang cố truy cập tài khoản của bạn.
                 </div>
               </td>
             </tr>
@@ -200,56 +280,67 @@ def _workflow_update_email(assistant_message: str, workflow_url: str) -> EmailCo
     return EmailContent(subject=subject, text=text, html=html_body)
 
 
+async def _post_resend_email(*, api_key: str, payload: dict[str, object]) -> str:
+    """I/O boundary duy nhất của Resend; tách ra để test không gọi mạng."""
+    import httpx
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers=headers,
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        return str(response.json().get("id", ""))
+
+
 async def _send_email_async(to_email: str, content: EmailContent) -> bool:
     settings = get_settings()
+    masked_recipient = _masked_email(to_email)
 
-    if not settings.smtp_username or not settings.smtp_password or not settings.smtp_host:
+    if not settings.resend_api_key:
         if settings.app_env == "development":
-            logger.warning(
-                "SMTP chưa cấu hình. MOCK EMAIL TO %s | Subject: %s | Body: %s",
-                to_email,
-                content.subject,
-                content.text,
-            )
+            logger.warning("Resend chưa cấu hình. Không gửi email tới %s", masked_recipient)
         else:
-            logger.error("SMTP chưa cấu hình; email giao dịch không được gửi")
+            logger.error("Resend chưa cấu hình; email giao dịch không được gửi")
         return False
 
-    from_email = settings.smtp_from_email or settings.smtp_username
-    if "@" not in from_email:
-        logger.error("SMTP_FROM_EMAIL thiếu hoặc không hợp lệ")
+    if not settings.resend_from_email or "@" not in settings.resend_from_email:
+        logger.error("RESEND_FROM_EMAIL thiếu hoặc không hợp lệ")
         return False
 
-    msg = MIMEMultipart("alternative")
-    msg["From"] = str(Address(display_name=settings.smtp_from_name, addr_spec=from_email))
-    msg["To"] = to_email
-    msg["Subject"] = content.subject
-    if settings.smtp_reply_to:
-        msg["Reply-To"] = settings.smtp_reply_to
-
-    msg.attach(MIMEText(content.text, "plain", "utf-8"))
-    msg.attach(MIMEText(content.html, "html", "utf-8"))
+    payload = {
+        "from": f"{settings.resend_from_name} <{settings.resend_from_email}>",
+        "to": [to_email],
+        "subject": content.subject,
+        "text": content.text,
+        "html": content.html,
+    }
+    if settings.resend_reply_to:
+        payload["reply_to"] = settings.resend_reply_to
 
     try:
-        await aiosmtplib.send(
-            msg,
-            hostname=settings.smtp_host,
-            port=settings.smtp_port,
-            start_tls=True,
-            username=settings.smtp_username,
-            password=settings.smtp_password,
-        )
-        logger.info("Đã gửi email thành công tới %s", to_email)
+        email_id = await _post_resend_email(api_key=settings.resend_api_key, payload=payload)
+        logger.info("Đã gửi email thành công tới %s (ID: %s)", masked_recipient, email_id)
         return True
     except Exception as e:
-        logger.error("Lỗi gửi email tới %s: %s", to_email, type(e).__name__)
+        logger.error("Lỗi gửi email tới %s: %s", masked_recipient, type(e).__name__)
         # Không raise để không làm crash API hoặc Workflow nếu chạy background
         return False
 
 
 async def send_otp_email(to_email: str, otp_code: str) -> None:
-    """Gửi email chứa mã OTP để xác thực tài khoản."""
-    await _send_email_async(to_email, _otp_email(otp_code))
+    """Gửi OTP xác nhận qua email."""
+    content = _otp_email(otp_code)
+    await _send_email_async(to_email, content)
+
+
+async def send_reset_password_email(to_email: str, otp_code: str) -> None:
+    """Gửi OTP lấy lại mật khẩu qua email."""
+    content = _reset_password_email(otp_code)
+    await _send_email_async(to_email, content)
 
 
 async def send_workflow_batch_email(

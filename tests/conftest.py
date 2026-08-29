@@ -200,13 +200,15 @@ def _test_jwt_secret(monkeypatch):
 @pytest.fixture
 def hop_thu_otp():
     """Hộp thư test, đã cắm vào app. Gỡ ra khi bài kiểm xong."""
-    from src.api.deps import get_otp_email_sender
+    from src.api.deps import get_otp_email_sender, get_reset_password_email_sender
     from src.main import app
     from tests._email_outbox import HopThuTest
 
     hop = HopThuTest()
     app.dependency_overrides[get_otp_email_sender] = lambda: hop.gui
+    app.dependency_overrides[get_reset_password_email_sender] = lambda: hop.gui
     try:
         yield hop
     finally:
         app.dependency_overrides.pop(get_otp_email_sender, None)
+        app.dependency_overrides.pop(get_reset_password_email_sender, None)

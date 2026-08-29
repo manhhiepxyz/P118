@@ -606,10 +606,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email
 
 
 CREATE TABLE IF NOT EXISTS registration_otps (
-    email VARCHAR(255) PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    purpose VARCHAR(32) NOT NULL
+        CONSTRAINT ck_registration_otps_purpose CHECK (purpose IN ('registration', 'password_reset')),
     otp_code VARCHAR(10) NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (email, purpose)
 );
 
 

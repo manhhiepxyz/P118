@@ -165,3 +165,10 @@ def get_otp_email_sender() -> Any:
     from src.services.email_service import send_otp_email
 
     return send_otp_email
+
+
+def get_reset_password_email_sender() -> Any:
+    """Hàm gửi email OTP quên mật khẩu. Production luôn nhận bản thật."""
+    from src.services.email_service import send_reset_password_email
+
+    return send_reset_password_email

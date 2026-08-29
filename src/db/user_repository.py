@@ -228,3 +228,16 @@ class UserRepository:
                 user_id,
             )
             return dict(row) if row is not None else None
+
+    async def update_password(self, email: str, new_password_hash: str) -> bool:
+        """Cập nhật mật khẩu cho user (phục vụ quên mật khẩu).
+
+        Sử dụng `email` thay vì `user_id` để tương thích trực tiếp với luồng quên mật khẩu.
+        """
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE email = $2 AND archived_at IS NULL",
+                new_password_hash,
+                email,
+            )
+            return result == "UPDATE 1"
