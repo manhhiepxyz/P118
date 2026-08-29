@@ -468,11 +468,10 @@ export function ProfilePage() {
                   done: linked,
                   note: linked ? 'Đơn vị xác thực đã duyệt' : 'Chưa liên kết bất động sản',
                 },
-                // TODO(backend): chưa có cờ xác minh riêng cho từng kênh.
-                // Không đánh dấu ✓ khi không có bằng chứng — đó chính là mâu
-                // thuẫn của bản cũ.
+                // TODO(backend): chưa có cờ xác minh riêng cho điện thoại/eKYC.
+                // Email đã được xác minh qua OTP khi đăng ký.
                 { label: 'Số điện thoại', done: false, note: user.phone ? 'Đã khai, chưa xác minh' : 'Chưa khai' },
-                { label: 'Email', done: false, note: user.email ? 'Đã khai, chưa xác minh' : 'Chưa khai' },
+                { label: 'Email', done: !!user.email, note: user.email ? 'Đã xác minh' : 'Chưa khai' },
                 { label: 'Danh tính (eKYC)', done: false, note: 'Chưa xác minh' },
               ].map((row) => (
                 <li key={row.label} className="flex items-center gap-4 py-4">

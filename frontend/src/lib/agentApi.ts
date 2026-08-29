@@ -423,6 +423,55 @@ export async function sendOtp(data: any): Promise<{ message: string }> {
   });
 }
 
+export async function forgotPassword(email: string): Promise<{ message: string }> {
+  return request<{ message: string }>("/auth/forgot-password", {
+    method: "POST",
+    body: { email },
+    anonymous: true,
+  });
+}
+
+export async function resetPassword(email: string, otpCode: string, newPassword: string): Promise<{ message: string }> {
+  return request<{ message: string }>("/auth/reset-password", {
+    method: "POST",
+    body: { email, otp_code: otpCode, new_password: newPassword },
+    anonymous: true,
+  });
+}
+
+/** 
+ * Gửi Google ID token để xác minh. 
+ * Nếu status là 202, ném ApiError (hoặc xử lý riêng ở nơi gọi) để lấy thông tin email, name.
+ * Nếu thành công (200), trả về LoginResponse chứa token.
+ */
+export async function googleVerify(credential: string): Promise<LoginResponse | any> {
+  const response = await fetch(`${BASE}/auth/google/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ credential }),
+  });
+  if (response.status === 202) {
+    return { status: 202, data: await response.json() };
+  }
+  if (!response.ok) {
+    const fallback = "Đã có lỗi xảy ra. Vui lòng thử lại.";
+    throw new ApiError(response.status, messageForStatus(response.status, fallback));
+  }
+  const data = await response.json() as LoginResponse;
+  storeToken(data.access_token);
+  return { status: 200, data };
+}
+
+export async function googleRegister(credential: string, username: string, phone?: string): Promise<LoginResponse> {
+  const data = await request<LoginResponse>("/auth/google/register", {
+    method: "POST",
+    body: { credential, username, phone },
+    anonymous: true,
+  });
+  storeToken(data.access_token);
+  return data;
+}
+
 export async function getMe(): Promise<AuthUser> {
   return request<AuthUser>("/auth/me");
 }

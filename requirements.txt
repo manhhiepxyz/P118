@@ -11,6 +11,10 @@ langchain>=0.3.0
 langchain-openai>=0.3.0
 langgraph>=0.2.0
 
+# Google Auth
+google-auth>=2.23.0
+google-auth-httplib2>=0.1.1
+
 # Database
 asyncpg>=0.29.0          # async PostgreSQL driver (dùng trực tiếp, không qua SQLAlchemy)
 sqlalchemy>=2.0.0      # bỏ comment nếu muốn dùng ORM sau này

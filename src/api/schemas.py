@@ -139,6 +139,18 @@ class RegisterRequest(RegistrationData):
     otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="Mã OTP 6 số")
 
 
+class ForgotPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(min_length=5, max_length=150, pattern=r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+
+
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(min_length=5, max_length=150, pattern=r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+    otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="Mã OTP 6 số")
+    new_password: str = Field(min_length=1, max_length=128)
+
+
 class LoginRequest(BaseModel):
     """Body cho POST /auth/login — username + password (JSON, không form)."""
 
@@ -146,6 +158,23 @@ class LoginRequest(BaseModel):
 
     username: str = Field(min_length=1, max_length=50)
     password: str = Field(min_length=1, max_length=128)
+
+
+class GoogleVerifyRequest(BaseModel):
+    """Body cho POST /auth/google/verify — xác thực token của Google."""
+
+    model_config = ConfigDict(extra="forbid")
+    credential: str = Field(..., description="ID Token do Google cấp")
+
+
+class GoogleRegisterRequest(BaseModel):
+    """Body cho POST /auth/google/register — đăng ký với token Google + username."""
+
+    model_config = ConfigDict(extra="forbid")
+    credential: str = Field(..., description="ID Token do Google cấp")
+    username: str = Field(min_length=3, max_length=50)
+    phone: str | None = Field(default=None, min_length=8, max_length=20)
+
 
 
 class UserResponse(BaseModel):

@@ -19,8 +19,10 @@ import { RegisterPage } from './pages/RegisterPage'
 import { VehicleRegistrationPage } from './pages/VehicleRegistrationPage'
 import { WorkflowPage } from './pages/WorkflowPage'
 import { PaymentResultPage } from './pages/PaymentResultPage'
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
 import { JourneyWorkspacePage } from './pages/JourneyWorkspacePage'
 import { WorkflowsPage } from './pages/WorkflowsPage'
+import { GoogleRegisterPage } from './pages/GoogleRegisterPage'
 
 /**
  * Trang chủ theo role:
@@ -62,6 +64,8 @@ export default function App() {
           {/* Auth — không cần AppLayout (màn hình riêng) */}
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
+          <Route path="/google-register" element={<GoogleRegisterPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
 
           {/* Cổng xác thực của bên thứ 3 — trang TOÀN MÀN HÌNH, không sidebar
               P-118, branding riêng (ReviewPortalLayout). ProviderRoute: chỉ

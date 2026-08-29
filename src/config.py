@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440  # 24h — demo, không cần refresh token
 
+    # Google Auth
+    google_client_id: str = ""
+
     # Vector Store
     chroma_persist_dir: str = "./data/chroma"
 
@@ -200,17 +203,10 @@ class Settings(BaseSettings):
     daily_workflow_quota: int = 200
     daily_quota_window_hours: int = 24
 
-    # Email / SMTP
-    smtp_host: str | None = Field(default=None, description="SMTP server host, e.g. smtp.gmail.com")
-    smtp_port: int = Field(default=587, description="SMTP server port")
-    smtp_username: str | None = Field(default=None, description="SMTP account username/email")
-    smtp_password: str | None = Field(default=None, description="SMTP account password (or App Password)")
-    # Tài khoản xác thực SMTP không nhất thiết là địa chỉ người gửi. Resend,
-    # chẳng hạn, dùng username cố định `resend` nhưng yêu cầu From thuộc domain
-    # đã xác minh. Tách hai khái niệm để không phát thư với From="resend".
-    smtp_from_email: str | None = Field(default=None, description="Verified From address")
-    smtp_from_name: str = Field(default="P-118", description="Friendly sender name")
-    smtp_reply_to: str | None = Field(default=None, description="Optional Reply-To address")
+    # Email / Resend API
+    resend_api_key: str = ""
+    resend_from_email: str = "no-reply@c3-app-118.io.vn"
+    resend_from_name: str = "P-118"
 
 
 @lru_cache
