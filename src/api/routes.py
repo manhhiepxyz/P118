@@ -1614,6 +1614,10 @@ async def _run_demo_job(
                 ngu_canh.setdefault(name, value)
 
         response = _demo_response(state, approve_mock_payment)
+        # Ghim workflow FAILED với mã riêng khi lỗi hệ thống conflict persistence.
+        # Làm ở đây (async caller) vì _demo_response là sync và không thể await.
+        if response.error_code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR" and workflow_id:
+            await _mark_workflow_failed_safely(workflow_id, "SCHEDULE_CONFLICT_PERSISTENCE_ERROR")
         _append_job_event(job, _terminal_stage_for(response))
         await _persist_events(workflow_id, job)
         job["message"] = response.summary or response.question or job["message"]
@@ -2664,15 +2668,31 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
                     datetime_display=f"{_conflict.get('date_b', '')} {_conflict.get('time_b', '')}".strip(),
                 )
                 _conflict_action = ScheduleConflictAction(task_a=_task_a, task_b=_task_b, can_act=True)
+                _gap_cold = None
+                try:
+                    from src.orchestration.schedule_conflict import _minutes_between
+
+                    _gap_cold = _minutes_between(_conflict.get("time_a", ""), _conflict.get("time_b", ""))
+                except Exception:  # noqa: BLE001
+                    pass
+                _gap_str_cold = (
+                    f", cách nhau {_gap_cold} phút"
+                    if _gap_cold is not None and _gap_cold > 0
+                    else " cùng giờ"
+                    if _gap_cold == 0
+                    else ""
+                )
                 return DemoWorkflowResponse(
                     workflow_id=workflow_id,
                     status="WAITING_APPROVAL",
                     stage="WAITING_SCHEDULE_CONFLICT_CHECK",
                     message=_STAGE_MESSAGES.get("WAITING_SCHEDULE_CONFLICT_CHECK"),
                     summary=(
-                        f"Lịch {_task_a.service_label} ({_task_a.datetime_display}) "
-                        f"và {_task_b.service_label} ({_task_b.datetime_display}) "
-                        "có thể bị trùng giờ."
+                        f"Bạn đang có hai lịch trong cùng ngày{_gap_str_cold}: "
+                        f"{_task_a.service_label} lúc {_task_a.datetime_display} "
+                        f"và {_task_b.service_label} lúc {_task_b.datetime_display}. "
+                        "Bạn đã kiểm tra kỹ chưa? Mình có thể giúp bạn đổi một lịch, "
+                        "hoặc giữ nguyên nếu đây đúng là điều bạn muốn."
                     ),
                     customer_action=_conflict_action,
                     plan=_plan_view(plan),
@@ -3813,13 +3833,26 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             datetime_display=f"{date_b} {time_b}".strip(),
         )
         conflict_action = ScheduleConflictAction(task_a=task_a, task_b=task_b, can_act=True)
-        dt_display = f"{date_a} {time_a}".strip()
+        _gap_inline = None
+        try:
+            from src.orchestration.schedule_conflict import _minutes_between
+
+            _gap_inline = _minutes_between(time_a, time_b)
+        except Exception:  # noqa: BLE001
+            pass
+        _gap_str_inline = (
+            f", cách nhau {_gap_inline} phút"
+            if _gap_inline is not None and _gap_inline > 0
+            else " cùng giờ"
+            if _gap_inline == 0
+            else ""
+        )
         summary = (
-            f"Mình thấy bạn đang có 2 lịch cùng lúc: "
-            f"{task_a.service_label} lúc {dt_display} và {task_b.service_label} lúc {dt_display}. "
-            "Bạn đã kiểm tra kỹ thời gian này chưa? "
-            "Nếu cần, mình có thể giúp bạn đổi một trong hai lịch; "
-            "còn nếu đây đúng là điều bạn muốn, mình sẽ giữ nguyên và tiếp tục gửi yêu cầu."
+            f"Bạn đang có hai lịch trong cùng ngày{_gap_str_inline}: "
+            f"{task_a.service_label} lúc {task_a.datetime_display} "
+            f"và {task_b.service_label} lúc {task_b.datetime_display}. "
+            "Bạn đã kiểm tra kỹ chưa? Mình có thể giúp bạn đổi một lịch, "
+            "hoặc giữ nguyên nếu đây đúng là điều bạn muốn."
         )
         return DemoWorkflowResponse(
             status="WAITING_APPROVAL",
@@ -3848,6 +3881,16 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             # ĐƠN VỊ quyết, không phải khách. Giao diện đọc trường này để KHÔNG
             # dựng nút xác nhận thanh toán.
             approval_actor="PROVIDER",
+            plan=plan_view,
+        )
+    if policy_error == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR":
+        # Lỗi hệ thống khi lưu conflict check — không phải pause chờ user.
+        # Trả error_code tường minh trong response; caller async sẽ ghim FAILED vào DB.
+        return DemoWorkflowResponse(
+            status="EXECUTION_ERROR",
+            workflow_id=state.get("workflow_id"),
+            error_code="SCHEDULE_CONFLICT_PERSISTENCE_ERROR",
+            summary="Có lỗi hệ thống khi lưu kiểm tra xung đột lịch. Yêu cầu chưa được thực hiện.",
             plan=plan_view,
         )
     if policy_error is not None:
@@ -5913,6 +5956,16 @@ async def _demo_workflow_status(
                 service_label=_svc_labels2.get(_svc_b2, _svc_b2),
                 datetime_display=f"{_conflict_row.get('date_b', '')} {_conflict_row.get('time_b', '')}".strip(),
             )
+            _gap2 = None
+            try:
+                from src.orchestration.schedule_conflict import _minutes_between
+
+                _gap2 = _minutes_between(_conflict_row.get("time_a", ""), _conflict_row.get("time_b", ""))
+            except Exception:  # noqa: BLE001
+                pass
+            _gap_str2 = (
+                f", cách nhau {_gap2} phút" if _gap2 is not None and _gap2 > 0 else " cùng giờ" if _gap2 == 0 else ""
+            )
             return await _with_stored_answer(
                 DemoWorkflowResponse(
                     workflow_id=workflow_id,
@@ -5920,9 +5973,11 @@ async def _demo_workflow_status(
                     stage="WAITING_SCHEDULE_CONFLICT_CHECK",
                     message=_STAGE_MESSAGES.get("WAITING_SCHEDULE_CONFLICT_CHECK"),
                     summary=(
-                        f"Lịch {_task_a2.service_label} ({_task_a2.datetime_display}) "
-                        f"và {_task_b2.service_label} ({_task_b2.datetime_display}) "
-                        "có thể bị trùng giờ."
+                        f"Bạn đang có hai lịch trong cùng ngày{_gap_str2}: "
+                        f"{_task_a2.service_label} lúc {_task_a2.datetime_display} "
+                        f"và {_task_b2.service_label} lúc {_task_b2.datetime_display}. "
+                        "Bạn đã kiểm tra kỹ chưa? Mình có thể giúp bạn đổi một lịch, "
+                        "hoặc giữ nguyên nếu đây đúng là điều bạn muốn."
                     ),
                     customer_action=ScheduleConflictAction(task_a=_task_a2, task_b=_task_b2, can_act=True),
                     plan=_plan_view(_plan_from_job_or_record(job, record)),

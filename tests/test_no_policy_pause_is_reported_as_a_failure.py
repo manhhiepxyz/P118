@@ -55,13 +55,17 @@ def _all_policy_codes() -> set[str]:
     return seen
 
 
-# Những mã CỐ Ý đi chung nhánh "thất bại": chúng là từ chối quyền, không phải
-# một lần chờ ai đó bấm nút. Danh sách này phải ngắn và phải được biện minh —
-# thêm một mã vào đây là tuyên bố rằng người dùng không chờ được gì cả.
+# Những mã CỐ Ý đi chung nhánh "thất bại": chúng là từ chối quyền hoặc lỗi hệ
+# thống không thể retry từ UI — không phải một lần chờ ai đó bấm nút.
+# Danh sách này phải ngắn và phải được biện minh — thêm một mã vào đây là tuyên
+# bố rằng người dùng không chờ được gì cả.
 _DELIBERATELY_TERMINAL = {
     "RESIDENT_ACCESS_REQUIRED",
     "RESIDENT_DIRECTORY_UNAVAILABLE",
     "RESIDENT_LINKING_OUTSIDE_AGENT",
+    # Lỗi DB khi lưu conflict check — người dùng không thể retry từ UI.
+    # routes.py trả EXECUTION_ERROR kèm error_code tường minh, không UNKNOWN_EXTERNAL_ERROR.
+    "SCHEDULE_CONFLICT_PERSISTENCE_ERROR",
 }
 
 

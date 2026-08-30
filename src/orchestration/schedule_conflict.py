@@ -13,13 +13,16 @@ Nguyên tắc bất biến
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import logging
+
+# asyncpg 0.31 trả JSONB là str, không phải dict — phải json.loads() tường minh.
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
-from src.common.enums import TaskStatus
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import TaskPlan
@@ -44,16 +47,36 @@ _SERVICE_LABELS: dict[str, str] = {
     "schedule_property_viewing": "Đặt lịch tham quan",
 }
 
+# Cửa sổ xung đột: hai lịch cách nhau <= 60 phút cùng ngày → conflict.
+_CONFLICT_WINDOW_MINUTES = 60
+
+
+def _minutes_between(time_a: str, time_b: str) -> int | None:
+    """Abs minutes between two HH:MM times. None if parse fails."""
+    try:
+        ta = datetime.time.fromisoformat(time_a)
+        tb = datetime.time.fromisoformat(time_b)
+        return abs(ta.hour * 60 + ta.minute - tb.hour * 60 - tb.minute)
+    except ValueError:
+        return None
+
+
+def _times_conflict(time_a: str, time_b: str) -> bool:
+    """True khi |khoảng cách phút| <= _CONFLICT_WINDOW_MINUTES."""
+    gap = _minutes_between(time_a, time_b)
+    return gap is not None and gap <= _CONFLICT_WINDOW_MINUTES
+
 
 @dataclass(frozen=True)
 class ConflictMatch:
-    """Task khác của cùng người dùng có cùng mốc bắt đầu."""
+    """Task khác của cùng người dùng có mốc bắt đầu trong cửa sổ xung đột."""
 
     other_workflow_id: str
     other_task_id: str
     other_tool: str
     other_date: str
     other_time: str
+    minutes_gap: int = 0
 
 
 class ScheduleConflictRequiredError(PolicyInterruptionError):
@@ -64,6 +87,23 @@ class ScheduleConflictRequiredError(PolicyInterruptionError):
     """
 
     code = "SCHEDULE_CONFLICT_REQUIRED"
+
+
+class ScheduleConflictPersistenceError(PolicyInterruptionError):
+    """Lỗi hệ thống khi persist hoặc INSERT conflict row.
+
+    PolicyInterruptionError để graph.py và routes.py nhận mã ổn định.
+    _DELIBERATELY_TERMINAL trong test: đây là lỗi hệ thống không thể retry từ UI,
+    KHÔNG phải pause chờ người dùng bấm nút.
+
+    Transaction boundary:
+    - persist_plan fails → exception này, chưa có conflict row (có thể chưa có workflow row).
+    - save_conflict_and_pause_atomic fails → transaction rollback, không có conflict row
+      cũng không có status WAITING_APPROVAL; workflow đã persist (nếu persist_plan đã chạy)
+      sẽ được ghim FAILED với mã này bởi routes.py.
+    """
+
+    code = "SCHEDULE_CONFLICT_PERSISTENCE_ERROR"
 
 
 def extract_datetime(tool: str, input_data: dict[str, Any]) -> tuple[str, str] | None:
@@ -113,10 +153,10 @@ async def find_conflicting_task(
     date_str: str,
     time_str: str,
 ) -> ConflictMatch | None:
-    """Tìm task cùng chủ, khác workflow, cùng mốc bắt đầu, chưa terminal.
+    """Tìm task cùng chủ, khác workflow, trong cửa sổ xung đột 60 phút, chưa terminal.
 
-    Chỉ so ngày+giờ — không suy duration, không tự biết slot chung cư dài
-    bao nhiêu. Provider quyết định tài nguyên thật.
+    Lọc theo ngày ở DB; lọc cửa sổ 60 phút ở Python để dùng _times_conflict().
+    Ưu tiên khoảng cách nhỏ nhất; tie-break bằng workflow_id + task_id string sort.
     """
     query = """
         SELECT wt.workflow_id::text AS workflow_id,
@@ -130,43 +170,53 @@ async def find_conflicting_task(
           AND wt.status != ALL($3::text[])
           AND (
               (wt.tool = 'schedule_move'
-               AND wt.input_data->>'move_date' = $4
-               AND wt.input_data->>'move_time' = $5)
+               AND wt.input_data->>'move_date' = $4)
               OR
               (wt.tool = 'create_maintenance_request'
-               AND wt.input_data->>'preferred_date' = $4
-               AND wt.input_data->>'preferred_time' = $5)
+               AND wt.input_data->>'preferred_date' = $4)
               OR
               (wt.tool = 'schedule_property_viewing'
-               AND wt.input_data->>'viewing_date' = $4
-               AND wt.input_data->>'viewing_time' = $5)
+               AND wt.input_data->>'viewing_date' = $4)
           )
-        LIMIT 1
+        ORDER BY wt.workflow_id::text, wt.task_id
     """
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
+        rows = await conn.fetch(
             query,
             owner_id,
             current_workflow_id,
             list(_TERMINAL_STATUSES),
             date_str,
-            time_str,
         )
-    if row is None:
+    if not rows:
         return None
 
-    input_data = dict(row["input_data"] or {})
-    other_dt = extract_datetime(row["tool"], input_data)
-    if other_dt is None:
-        return None
+    best: ConflictMatch | None = None
+    best_gap: int = _CONFLICT_WINDOW_MINUTES + 1
 
-    return ConflictMatch(
-        other_workflow_id=str(row["workflow_id"]),
-        other_task_id=str(row["task_id"]),
-        other_tool=str(row["tool"]),
-        other_date=other_dt[0],
-        other_time=other_dt[1],
-    )
+    for row in rows:
+        raw = row["input_data"]
+        input_data: dict = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        other_dt = extract_datetime(row["tool"], input_data)
+        if other_dt is None:
+            continue
+        gap = _minutes_between(time_str, other_dt[1])
+        if gap is None:
+            continue
+        if gap > _CONFLICT_WINDOW_MINUTES:
+            continue
+        if gap < best_gap:
+            best_gap = gap
+            best = ConflictMatch(
+                other_workflow_id=str(row["workflow_id"]),
+                other_task_id=str(row["task_id"]),
+                other_tool=str(row["tool"]),
+                other_date=other_dt[0],
+                other_time=other_dt[1],
+                minutes_gap=gap,
+            )
+
+    return best
 
 
 async def is_acknowledged(pool: Any, fingerprint: str) -> bool:
@@ -336,11 +386,13 @@ async def clear_conflict_check(pool: Any, workflow_id: str) -> None:
 def find_intraplan_conflict(
     plan: TaskPlan,
     done_ids: set[str],
-) -> tuple[Any, Any, tuple[str, str]] | None:
-    """Tìm cặp task TRONG CÙNG plan có cùng mốc bắt đầu, chưa hoàn thành.
+) -> tuple[Any, Any, tuple[str, str], tuple[str, str], int] | None:
+    """Tìm cặp task TRONG CÙNG plan trong cửa sổ 60 phút, chưa terminal.
 
-    Trả (task_a, task_b, (date, time)) của cặp đầu tiên tìm thấy, hoặc None.
-    Không suy duration — chỉ so ngày+giờ.
+    Trả (task_a, task_b, dt_a, dt_b, minutes_gap) của cặp tối ưu:
+    - gap nhỏ nhất;
+    - tie-break ổn định bằng (task_a.task_id, task_b.task_id).
+    Không suy duration — chỉ so ngày+giờ với cửa sổ 60 phút.
     """
     dated: list[tuple[Any, tuple[str, str]]] = []
     for task in plan.tasks:
@@ -351,13 +403,28 @@ def find_intraplan_conflict(
             continue
         dated.append((task, dt))
 
+    best: tuple[Any, Any, tuple[str, str], tuple[str, str], int] | None = None
+    best_key: tuple[int, str, str] = (_CONFLICT_WINDOW_MINUTES + 1, "", "")
+
     for i in range(len(dated)):
         for j in range(i + 1, len(dated)):
             task_a, dt_a = dated[i]
             task_b, dt_b = dated[j]
-            if dt_a == dt_b:
-                return task_a, task_b, dt_a
-    return None
+            if dt_a[0] != dt_b[0]:
+                continue
+            gap = _minutes_between(dt_a[1], dt_b[1])
+            if gap is None or gap > _CONFLICT_WINDOW_MINUTES:
+                continue
+            key = (gap, task_a.task_id, task_b.task_id)
+            if key < best_key:
+                best_key = key
+                best = (task_a, task_b, dt_a, dt_b, gap)
+
+    return best
+
+
+# Type alias for the optional persist_plan callable
+_PersistPlanFn = Callable[..., Coroutine[Any, Any, None]]
 
 
 class ScheduleConflictBoundary:
@@ -373,10 +440,12 @@ class ScheduleConflictBoundary:
         *,
         repository: Any | None = None,
         owner_user_id: str | None = None,
+        persist_plan: _PersistPlanFn | None = None,
     ) -> None:
         self._boundary = boundary
         self._repository = repository
         self._owner = owner_user_id
+        self._persist_plan = persist_plan
 
     async def execute(
         self,
@@ -401,9 +470,11 @@ class ScheduleConflictBoundary:
             )
 
         pool = self._repository._pool  # noqa: SLF001
-        settled = {TaskStatus.SUCCESS.value, TaskStatus.CANCELLED.value}
+        # Chỉ CANCELLED/FAILED/SKIPPED bị bỏ qua khi kiểm xung đột.
+        # SUCCESS vẫn tham gia — lịch đã thực thi thành công là lịch đang tồn tại thật.
+        _skip = frozenset({"CANCELLED", "FAILED", "SKIPPED"})
         done_ids = {
-            tid for tid, st in (seed_statuses or {}).items() if (st.value if hasattr(st, "value") else st) in settled
+            tid for tid, st in (seed_statuses or {}).items() if (st.value if hasattr(st, "value") else st) in _skip
         }
         wf_id = workflow_id or ""
 
@@ -411,7 +482,7 @@ class ScheduleConflictBoundary:
         # Kiểm trước; nếu có lỗi bất kỳ → propagate, không gọi inner.execute.
         intra = find_intraplan_conflict(plan, done_ids)
         if intra is not None:
-            task_a, task_b, dt_a = intra
+            task_a, task_b, dt_a, dt_b, _gap = intra
             fingerprint = compute_fingerprint(
                 self._owner,
                 wf_id,
@@ -421,27 +492,44 @@ class ScheduleConflictBoundary:
                 wf_id,
                 task_b.task_id,
                 task_b.tool,
-                dt_a,
+                dt_b,
             )
             # is_acknowledged lỗi → propagate (fail-closed: không biết ack thì không tiếp tục)
             if not await is_acknowledged(pool, fingerprint):
+                # Part A: persist workflow row trước khi INSERT conflict (FK constraint).
+                if self._persist_plan is not None:
+                    try:
+                        await self._persist_plan(self._repository, wf_id, plan)
+                    except Exception as _persist_exc:  # noqa: BLE001
+                        raise ScheduleConflictPersistenceError(
+                            f"persist_plan thất bại trước intra-plan conflict: {type(_persist_exc).__name__}",
+                            workflow_id=wf_id,
+                        ) from _persist_exc
                 # Atomic: INSERT conflict + UPDATE task/workflow trong một transaction.
-                # Lỗi ở bất kỳ bước nào → rollback toàn bộ, exception propagates.
-                await save_conflict_and_pause_atomic(
-                    pool,
-                    fingerprint=fingerprint,
-                    owner=self._owner,
-                    workflow_id=wf_id,
-                    task_id=task_a.task_id,
-                    service_a=task_a.tool,
-                    date_a=dt_a[0],
-                    time_a=dt_a[1],
-                    workflow_id_b=wf_id,
-                    task_id_b=task_b.task_id,
-                    service_b=task_b.tool,
-                    date_b=dt_a[0],
-                    time_b=dt_a[1],
-                )
+                # Nếu INSERT hoặc UPDATE thất bại → PostgreSQL rollback toàn bộ,
+                # sau đó bọc lại thành ScheduleConflictPersistenceError (typed) để
+                # routes.py ghim workflow FAILED với mã ổn định (không UNKNOWN_EXTERNAL_ERROR).
+                try:
+                    await save_conflict_and_pause_atomic(
+                        pool,
+                        fingerprint=fingerprint,
+                        owner=self._owner,
+                        workflow_id=wf_id,
+                        task_id=task_a.task_id,
+                        service_a=task_a.tool,
+                        date_a=dt_a[0],
+                        time_a=dt_a[1],
+                        workflow_id_b=wf_id,
+                        task_id_b=task_b.task_id,
+                        service_b=task_b.tool,
+                        date_b=dt_b[0],
+                        time_b=dt_b[1],
+                    )
+                except Exception as _atomic_exc:  # noqa: BLE001
+                    raise ScheduleConflictPersistenceError(
+                        f"conflict INSERT thất bại (intra-plan): {type(_atomic_exc).__name__}",
+                        workflow_id=wf_id,
+                    ) from _atomic_exc
                 raise ScheduleConflictRequiredError(
                     "Phát hiện xung đột lịch trong cùng kế hoạch.",
                     workflow_id=wf_id,
@@ -453,8 +541,8 @@ class ScheduleConflictBoundary:
                         "conflict_workflow_b": wf_id,
                         "conflict_task_b": task_b.task_id,
                         "conflict_service_b": task_b.tool,
-                        "conflict_date_b": dt_a[0],
-                        "conflict_time_b": dt_a[1],
+                        "conflict_date_b": dt_b[0],
+                        "conflict_time_b": dt_b[1],
                         "fingerprint": fingerprint,
                     },
                 )
@@ -491,22 +579,39 @@ class ScheduleConflictBoundary:
             if await is_acknowledged(pool, fingerprint):
                 continue
 
+            # Part A: persist workflow row trước khi INSERT conflict (FK constraint).
+            if self._persist_plan is not None:
+                try:
+                    await self._persist_plan(self._repository, wf_id, plan)
+                except Exception as _persist_exc:  # noqa: BLE001
+                    raise ScheduleConflictPersistenceError(
+                        f"persist_plan thất bại trước cross-workflow conflict: {type(_persist_exc).__name__}",
+                        workflow_id=wf_id,
+                    ) from _persist_exc
+
             # Atomic: INSERT + UPDATE task + UPDATE workflow.
-            await save_conflict_and_pause_atomic(
-                pool,
-                fingerprint=fingerprint,
-                owner=self._owner,
-                workflow_id=wf_id,
-                task_id=task.task_id,
-                service_a=task.tool,
-                date_a=dt[0],
-                time_a=dt[1],
-                workflow_id_b=match.other_workflow_id,
-                task_id_b=match.other_task_id,
-                service_b=match.other_tool,
-                date_b=match.other_date,
-                time_b=match.other_time,
-            )
+            # Nếu thất bại → PostgreSQL rollback, bọc lại thành ScheduleConflictPersistenceError.
+            try:
+                await save_conflict_and_pause_atomic(
+                    pool,
+                    fingerprint=fingerprint,
+                    owner=self._owner,
+                    workflow_id=wf_id,
+                    task_id=task.task_id,
+                    service_a=task.tool,
+                    date_a=dt[0],
+                    time_a=dt[1],
+                    workflow_id_b=match.other_workflow_id,
+                    task_id_b=match.other_task_id,
+                    service_b=match.other_tool,
+                    date_b=match.other_date,
+                    time_b=match.other_time,
+                )
+            except Exception as _atomic_exc:  # noqa: BLE001
+                raise ScheduleConflictPersistenceError(
+                    f"conflict INSERT thất bại (cross-workflow): {type(_atomic_exc).__name__}",
+                    workflow_id=wf_id,
+                ) from _atomic_exc
             raise ScheduleConflictRequiredError(
                 "Phát hiện xung đột lịch chưa xác nhận.",
                 workflow_id=wf_id,

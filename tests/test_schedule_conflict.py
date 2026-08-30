@@ -181,7 +181,7 @@ def test_fingerprint_differs_across_owners() -> None:
 async def test_find_conflict_ignores_terminal_tasks() -> None:
     """Task đã CANCELLED/FAILED/SKIPPED không tính vào conflict."""
     mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(return_value=None)  # DB trả None = không tìm thấy
+    mock_conn.fetch = AsyncMock(return_value=[])  # DB trả [] = không tìm thấy
     mock_pool = MagicMock()
     mock_pool.acquire = MagicMock(return_value=_AsyncCtx(mock_conn))
 
@@ -195,7 +195,7 @@ async def test_find_conflict_ignores_terminal_tasks() -> None:
     assert result is None
 
     # Xác minh query loại trừ terminal statuses
-    call_args = mock_conn.fetchrow.call_args
+    call_args = mock_conn.fetch.call_args
     assert call_args is not None
     terminal_arg = call_args.args[3] if len(call_args.args) > 3 else call_args.args[-3]
     assert set(terminal_arg) >= _TERMINAL_STATUSES
@@ -208,7 +208,7 @@ async def test_find_conflict_ignores_terminal_tasks() -> None:
 async def test_find_conflict_only_same_owner() -> None:
     """Query lọc theo owner_user_id — không mượn lịch của user khác."""
     mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(return_value=None)
+    mock_conn.fetch = AsyncMock(return_value=[])
     mock_pool = MagicMock()
     mock_pool.acquire = MagicMock(return_value=_AsyncCtx(mock_conn))
 
@@ -220,7 +220,7 @@ async def test_find_conflict_only_same_owner() -> None:
         time_str="09:00",
     )
     # owner_id phải là tham số đầu tiên trong query
-    call_args = mock_conn.fetchrow.call_args
+    call_args = mock_conn.fetch.call_args
     assert "user-A" in call_args.args
 
 
@@ -343,19 +343,19 @@ async def test_boundary_raises_when_conflict_found_and_not_acked() -> None:
     inner.execute = AsyncMock(return_value=("wf-1", {}))
 
     mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(
-        side_effect=[
-            # find_conflicting_task → tìm thấy task khác
+    # find_conflicting_task now uses conn.fetch (returns list)
+    mock_conn.fetch = AsyncMock(
+        return_value=[
             {
                 "workflow_id": "wf-b",
                 "task_id": "T2",
                 "tool": "create_maintenance_request",
                 "input_data": {"preferred_date": "2030-01-01", "preferred_time": "09:00"},
             },
-            # is_acknowledged → chưa xác nhận
-            {"acknowledged": False},
         ]
     )
+    # is_acknowledged uses conn.fetchrow
+    mock_conn.fetchrow = AsyncMock(return_value={"acknowledged": False})
     mock_conn.execute = AsyncMock()
     # save_conflict_and_pause_atomic dùng conn.transaction() → phải là sync callable
     mock_conn.transaction = MagicMock(return_value=_AsyncCtx(None))
@@ -402,19 +402,19 @@ async def test_boundary_passes_through_when_conflict_acknowledged() -> None:
     inner.execute = AsyncMock(return_value=("wf-1", {}))
 
     mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(
-        side_effect=[
-            # find_conflicting_task → tìm thấy task khác
+    # find_conflicting_task now uses conn.fetch (returns list)
+    mock_conn.fetch = AsyncMock(
+        return_value=[
             {
                 "workflow_id": "wf-b",
                 "task_id": "T2",
                 "tool": "create_maintenance_request",
                 "input_data": {"preferred_date": "2030-01-01", "preferred_time": "09:00"},
             },
-            # is_acknowledged → ĐÃ xác nhận
-            {"acknowledged": True},
         ]
     )
+    # is_acknowledged uses conn.fetchrow
+    mock_conn.fetchrow = AsyncMock(return_value={"acknowledged": True})
     mock_pool = MagicMock()
     mock_pool.acquire = MagicMock(return_value=_AsyncCtx(mock_conn))
 
@@ -454,7 +454,8 @@ async def test_boundary_no_conflict_when_no_match_in_db() -> None:
     inner.execute = AsyncMock(return_value=("wf-1", {}))
 
     mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(return_value=None)  # không xung đột
+    mock_conn.fetch = AsyncMock(return_value=[])  # không xung đột
+    mock_conn.fetchrow = AsyncMock(return_value=None)
     mock_pool = MagicMock()
     mock_pool.acquire = MagicMock(return_value=_AsyncCtx(mock_conn))
 
@@ -501,17 +502,9 @@ async def test_multiple_polls_before_ack_do_not_call_provider() -> None:
     not_acked = {"acknowledged": False}
 
     mock_conn = AsyncMock()
-    # Mỗi lần poll sẽ check conflict (lần 1) và check ack (lần 2)
-    mock_conn.fetchrow = AsyncMock(
-        side_effect=[
-            conflict_row,
-            not_acked,
-            conflict_row,
-            not_acked,
-            conflict_row,
-            not_acked,
-        ]
-    )
+    # find_conflicting_task uses conn.fetch; is_acknowledged uses conn.fetchrow
+    mock_conn.fetch = AsyncMock(return_value=[conflict_row])
+    mock_conn.fetchrow = AsyncMock(return_value=not_acked)
     mock_conn.execute = AsyncMock()
     mock_conn.transaction = MagicMock(return_value=_AsyncCtx(None))
     mock_pool = MagicMock()
@@ -633,7 +626,9 @@ async def test_cross_workflow_read_failure_propagates_not_swallowed() -> None:
     # Với một task đơn lẻ, find_intraplan_conflict trả None ngay (không cần DB).
     # Cuộc gọi fetchrow đầu tiên là từ find_conflicting_task → raise để test propagation.
     mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(side_effect=db_error)
+    # find_conflicting_task now uses conn.fetch — raise here to test propagation
+    mock_conn.fetch = AsyncMock(side_effect=db_error)
+    mock_conn.fetchrow = AsyncMock()
     mock_conn.execute = AsyncMock()
     mock_conn.transaction = MagicMock(return_value=_AsyncCtx(None))
     mock_pool = MagicMock()
@@ -665,3 +660,314 @@ async def test_cross_workflow_read_failure_propagates_not_swallowed() -> None:
 
     assert exc_info.value is db_error, "phải là chính exception gốc, không wrap"
     inner.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Part A — persist_plan called before save_conflict_and_pause_atomic
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_boundary_calls_persist_plan_before_save_when_provided() -> None:
+    """When persist_plan is provided, it must be called BEFORE conn.execute (save_conflict)."""
+    from src.orchestration.schedule_conflict import ScheduleConflictBoundary
+
+    inner = AsyncMock()
+    inner.execute = AsyncMock(return_value=("wf-1", {}))
+
+    call_order: list[str] = []
+
+    async def fake_persist_plan(repo, wf_id, plan):
+        call_order.append("persist")
+
+    mock_conn = AsyncMock()
+
+    async def recording_execute(*args, **kwargs):
+        call_order.append("db_execute")
+
+    mock_conn.execute = recording_execute
+    # find_conflicting_task uses conn.fetch (returns list)
+    mock_conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "workflow_id": "wf-b",
+                "task_id": "T2",
+                "tool": "create_maintenance_request",
+                "input_data": {"preferred_date": "2030-01-01", "preferred_time": "09:00"},
+            },
+        ]
+    )
+    # is_acknowledged uses conn.fetchrow
+    mock_conn.fetchrow = AsyncMock(return_value={"acknowledged": False})
+    mock_conn.transaction = MagicMock(return_value=_AsyncCtx(None))
+    mock_pool = MagicMock()
+    mock_pool.acquire = MagicMock(return_value=_AsyncCtx(mock_conn))
+
+    mock_repo = AsyncMock()
+    mock_repo._pool = mock_pool  # noqa: SLF001
+
+    from src.common.task_plan import Task, TaskPlan
+
+    plan = TaskPlan(
+        goal="chuyển nhà",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="schedule_move",
+                input={"move_date": "2030-01-01", "move_time": "09:00"},
+                depends_on=[],
+            )
+        ],
+    )
+
+    boundary = ScheduleConflictBoundary(
+        inner,
+        repository=mock_repo,
+        owner_user_id="user-1",
+        persist_plan=fake_persist_plan,
+    )
+    with pytest.raises(ScheduleConflictRequiredError):
+        await boundary.execute(plan, "wf-1")
+
+    # persist must come BEFORE db_execute
+    assert "persist" in call_order, "persist_plan was not called"
+    assert "db_execute" in call_order, "save_conflict db execute was not called"
+    persist_idx = call_order.index("persist")
+    db_idx = call_order.index("db_execute")
+    assert persist_idx < db_idx, f"persist must come before db_execute, got order: {call_order}"
+
+
+# ---------------------------------------------------------------------------
+# Part D — ScheduleConflictPersistenceError typed + fault injection
+# ---------------------------------------------------------------------------
+
+
+class _AsyncCtxLocal:
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *_):
+        pass
+
+
+def _make_cross_workflow_plan():
+    from src.common.task_plan import Task, TaskPlan
+
+    return TaskPlan(
+        goal="chuyển nhà",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="schedule_move",
+                input={"move_date": "2030-01-01", "move_time": "09:00"},
+                depends_on=[],
+            )
+        ],
+    )
+
+
+def _mock_pool_with_conn(mock_conn):
+    mock_pool = MagicMock()
+    mock_pool.acquire = MagicMock(return_value=_AsyncCtxLocal(mock_conn))
+    return mock_pool
+
+
+def test_persistence_error_has_correct_code() -> None:
+    """ScheduleConflictPersistenceError.code phải là SCHEDULE_CONFLICT_PERSISTENCE_ERROR."""
+    from src.orchestration.schedule_conflict import ScheduleConflictPersistenceError
+
+    err = ScheduleConflictPersistenceError("test", workflow_id="wf-1")
+    assert err.code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_fault_persist_plan_workflow_fails_raises_persistence_error() -> None:
+    """persist_plan lỗi ở giữa → ScheduleConflictPersistenceError, không phải exception gốc.
+
+    Transaction boundary: persist_plan chưa xong → conflict row chưa được INSERT.
+    """
+    from src.orchestration.schedule_conflict import (
+        ScheduleConflictBoundary,
+        ScheduleConflictPersistenceError,
+    )
+
+    inner = AsyncMock()
+    inner.execute = AsyncMock(return_value=("wf-1", {}))
+
+    persist_error = RuntimeError("DB write timeout")
+
+    async def failing_persist(repo, wf_id, plan):
+        raise persist_error
+
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "workflow_id": "wf-b",
+                "task_id": "T2",
+                "tool": "create_maintenance_request",
+                "input_data": {"preferred_date": "2030-01-01", "preferred_time": "09:00"},
+            },
+        ]
+    )
+    mock_conn.fetchrow = AsyncMock(return_value={"acknowledged": False})
+    mock_conn.execute = AsyncMock()
+    mock_conn.transaction = MagicMock(return_value=_AsyncCtxLocal(None))
+    mock_repo = AsyncMock()
+    mock_repo._pool = _mock_pool_with_conn(mock_conn)  # noqa: SLF001
+
+    boundary = ScheduleConflictBoundary(
+        inner,
+        repository=mock_repo,
+        owner_user_id="user-1",
+        persist_plan=failing_persist,
+    )
+    with pytest.raises(ScheduleConflictPersistenceError) as exc_info:
+        await boundary.execute(_make_cross_workflow_plan(), "wf-1")
+
+    assert exc_info.value.code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR"
+    # conflict INSERT chưa được gọi (conn.execute không được gọi trong transaction)
+    inner.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fault_conflict_insert_fails_rolls_back() -> None:
+    """persist_plan xong, INSERT conflict lỗi → rollback, ScheduleConflictPersistenceError wrap nguyên nhân.
+
+    Transaction boundary: asyncpg rollback toàn bộ khi conn.execute ném exception bên trong transaction.
+    Nguyên nhân gốc được giữ trong __cause__ để log có đủ context.
+    """
+    from src.orchestration.schedule_conflict import ScheduleConflictBoundary, ScheduleConflictPersistenceError
+
+    inner = AsyncMock()
+    persist_called = []
+
+    async def ok_persist(repo, wf_id, plan):
+        persist_called.append("ok")
+
+    conflict_insert_error = Exception("unique constraint violation")
+    execute_calls = []
+
+    async def failing_execute(*args, **kwargs):
+        execute_calls.append(args[0][:30] if args else "?")
+        raise conflict_insert_error
+
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "workflow_id": "wf-b",
+                "task_id": "T2",
+                "tool": "create_maintenance_request",
+                "input_data": {"preferred_date": "2030-01-01", "preferred_time": "09:00"},
+            },
+        ]
+    )
+    mock_conn.fetchrow = AsyncMock(return_value={"acknowledged": False})
+    mock_conn.execute = failing_execute
+
+    class _TxCtx:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, *_):
+            # asyncpg giả: không suppress exception
+            return False
+
+    mock_conn.transaction = MagicMock(return_value=_TxCtx())
+    mock_repo = AsyncMock()
+    mock_repo._pool = _mock_pool_with_conn(mock_conn)  # noqa: SLF001
+
+    boundary = ScheduleConflictBoundary(
+        inner,
+        repository=mock_repo,
+        owner_user_id="user-1",
+        persist_plan=ok_persist,
+    )
+    with pytest.raises(ScheduleConflictPersistenceError) as exc_info:
+        await boundary.execute(_make_cross_workflow_plan(), "wf-1")
+
+    assert exc_info.value.code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR"
+    assert exc_info.value.__cause__ is conflict_insert_error, "nguyên nhân gốc phải được giữ trong __cause__"
+    assert persist_called == ["ok"], "persist_plan phải được gọi trước khi INSERT lỗi"
+    inner.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fault_task_status_update_fails_rolls_back() -> None:
+    """INSERT conflict xong, UPDATE task status lỗi → transaction rollback, ScheduleConflictPersistenceError.
+
+    Transaction boundary: save_conflict_and_pause_atomic bọc INSERT + 2 UPDATE trong
+    một transaction. Nếu bất kỳ bước nào thất bại, asyncpg rollback toàn bộ.
+    Conflict row không được commit nếu UPDATE workflow_tasks thất bại.
+    """
+    from src.orchestration.schedule_conflict import ScheduleConflictBoundary, ScheduleConflictPersistenceError
+
+    inner = AsyncMock()
+    execute_calls = []
+    update_error = Exception("deadlock on workflow_tasks")
+
+    async def selective_execute(*args, **kwargs):
+        sql = args[0] if args else ""
+        execute_calls.append(sql[:40])
+        if "UPDATE workflow_tasks" in sql:
+            raise update_error
+
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "workflow_id": "wf-b",
+                "task_id": "T2",
+                "tool": "create_maintenance_request",
+                "input_data": {"preferred_date": "2030-01-01", "preferred_time": "09:00"},
+            },
+        ]
+    )
+    mock_conn.fetchrow = AsyncMock(return_value={"acknowledged": False})
+    mock_conn.execute = selective_execute
+
+    class _TxCtx:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, *_):
+            return False
+
+    mock_conn.transaction = MagicMock(return_value=_TxCtx())
+    mock_repo = AsyncMock()
+    mock_repo._pool = _mock_pool_with_conn(mock_conn)  # noqa: SLF001
+
+    boundary = ScheduleConflictBoundary(inner, repository=mock_repo, owner_user_id="user-1")
+    with pytest.raises(ScheduleConflictPersistenceError) as exc_info:
+        await boundary.execute(_make_cross_workflow_plan(), "wf-1")
+
+    assert exc_info.value.code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR"
+    assert exc_info.value.__cause__ is update_error, "nguyên nhân gốc phải được giữ trong __cause__"
+    # INSERT phải đã được gọi (bên trong transaction), nhưng UPDATE gây rollback
+    insert_sqls = [s for s in execute_calls if "INSERT" in s.upper()]
+    assert insert_sqls, "INSERT phải được gọi trước khi UPDATE lỗi"
+    inner.execute.assert_not_called()
+
+
+def test_persistence_error_does_not_become_unknown_external_error() -> None:
+    """ScheduleConflictPersistenceError là PolicyInterruptionError nhưng KHÔNG trở thành UNKNOWN_EXTERNAL_ERROR.
+
+    ScheduleConflictPersistenceError kế thừa PolicyInterruptionError với code tường minh.
+    graph.py bắt PolicyInterruptionError và phát EXECUTION_FAILED (không phải UNKNOWN_EXTERNAL_ERROR).
+    routes.py đọc policy_error == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR" → EXECUTION_ERROR với error_code tường minh.
+    UNKNOWN_EXTERNAL_ERROR chỉ xuất hiện khi task executor ghi error_code vào DB mà không có route riêng.
+    """
+    from src.common.policy import PolicyInterruptionError
+    from src.orchestration.schedule_conflict import ScheduleConflictPersistenceError
+
+    err = ScheduleConflictPersistenceError("persist lỗi", workflow_id="wf-1")
+    assert err.code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR"
+    # LÀ PolicyInterruptionError — graph.py có nhánh riêng, không rơi vào except Exception
+    assert isinstance(err, PolicyInterruptionError), (
+        "ScheduleConflictPersistenceError phải là PolicyInterruptionError — "
+        "graph.py và routes.py xử lý tường minh, không dùng catch-all"
+    )
+    # Không bao giờ trở thành UNKNOWN_EXTERNAL_ERROR
+    assert err.code != "UNKNOWN_EXTERNAL_ERROR"

@@ -771,6 +771,10 @@ def build_planner_graph(
                 await emit("WAITING_PROVIDER_PROPOSAL")
             elif exc.code == "SCHEDULE_CONFLICT_REQUIRED":
                 await emit("WAITING_SCHEDULE_CONFLICT_CHECK")
+            elif exc.code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR":
+                # Lỗi hệ thống khi ghi DB — không phải pause chờ user.
+                # EXECUTION_FAILED đúng: không có action nào user có thể làm.
+                await emit("EXECUTION_FAILED")
             elif exc.code == "SERVICE_APPROVAL_REQUIRED":
                 # Thiếu nhánh này, `ServiceApprovalBoundary` — cổng NGOÀI CÙNG,
                 # áp cho MỌI dịch vụ — rơi xuống `else` và mọi yêu cầu dịch vụ

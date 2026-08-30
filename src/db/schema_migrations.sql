@@ -1634,6 +1634,10 @@ BEGIN
     IF to_regclass('schedule_conflict_checks') IS NOT NULL THEN
         RETURN;
     END IF;
+    -- Legacy schema không có workflows → FK constraint sẽ fail; bỏ qua an toàn.
+    IF to_regclass('workflows') IS NULL THEN
+        RETURN;
+    END IF;
 
     CREATE TABLE schedule_conflict_checks (
         id              UUID        NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,

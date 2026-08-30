@@ -329,11 +329,11 @@ def test_the_union_is_discriminated_by_kind_in_the_published_contract():
 
     Điều đó thay đổi hai thứ mà bài kiểm hành vi không thấy:
 
-      * OpenAPI mô tả ba hình dạng kèm bản đồ `kind → schema`, nên client sinh
+      * OpenAPI mô tả bốn hình dạng kèm bản đồ `kind → schema`, nên client sinh
         tự động (TypeScript) thu hẹp được kiểu. Không có nó, client nhận một
         union phẳng và phải tự đoán — đúng thứ bản vá này vừa gỡ bỏ;
       * lỗi validate nêu đúng nhánh. Union không discriminator báo lỗi của CẢ
-        BA nhánh cho một payload sai, và người đọc phải tự tìm nhánh nào là ý
+        BỐN nhánh cho một payload sai, và người đọc phải tự tìm nhánh nào là ý
         họ.
     """
     from src.models.schemas import DemoWorkflowResponse
@@ -346,7 +346,9 @@ def test_the_union_is_discriminated_by_kind_in_the_published_contract():
     )
     assert nhanh is not None, f"union không có discriminator: {khoi}"
     assert nhanh["propertyName"] == "kind", nhanh
-    assert set(nhanh["mapping"]) == {"PAYMENT_APPROVAL", "PROVIDER_PROPOSAL", "CLARIFICATION"}, nhanh
+    assert set(nhanh["mapping"]) == {"PAYMENT_APPROVAL", "PROVIDER_PROPOSAL", "CLARIFICATION", "SCHEDULE_CONFLICT"}, (
+        nhanh
+    )
 
 
 def test_a_payload_whose_kind_does_not_match_its_shape_is_refused():

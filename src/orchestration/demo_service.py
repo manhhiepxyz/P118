@@ -592,10 +592,12 @@ async def run_demo_workflow(
             repository=repository,
         )
         # Lớp ngoài cùng: cảnh báo xung đột lịch trước mọi side effect.
+        # persist_plan đảm bảo workflow row tồn tại trước khi INSERT conflict (FK constraint).
         outermost_boundary = ScheduleConflictBoundary(
             service_guarded_boundary,
             repository=repository,
             owner_user_id=owner_user_id,
+            persist_plan=persist_full_plan,
         )
         # Đường nhanh: một lượt gọi rẻ thay cho một lượt lập kế hoạch đắt.
         #
@@ -1450,6 +1452,7 @@ async def resume_after_conflict_ack(
             inner_boundary,
             repository=repository,
             owner_user_id=owner_user_id,
+            persist_plan=persist_full_plan,
         )
         seed_statuses, seed_results = await _seed_completed(repository, workflow_id)
         try:

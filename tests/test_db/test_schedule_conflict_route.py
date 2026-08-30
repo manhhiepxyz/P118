@@ -499,6 +499,422 @@ async def test_change_b_intent_via_chat_targets_maintenance_task(client, db_pool
 
 
 # ---------------------------------------------------------------------------
+# Test 10 — Cold GET reads SCHEDULE_CONFLICT_PERSISTENCE_ERROR from DB
+# (Task 1, Part D: error_code travels graph → DB → cold GET)
+# ---------------------------------------------------------------------------
+
+
+async def test_cold_get_reads_schedule_conflict_persistence_error_from_db(client, db_pool) -> None:
+    """After a persistence failure, workflows.error_code must come back in HTTP GET.
+
+    Proof: write the failure directly with _mark_workflow_failed_safely (the same
+    function routes.py calls), clear _DEMO_JOBS to force the cold path, then
+    verify the GET response carries the exact code — not UNKNOWN_EXTERNAL_ERROR,
+    not EXECUTION_ERROR, not None.
+
+    # route test (Part D, real PostgreSQL + HTTP)
+    """
+    from src.api import routes as _routes
+    from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+
+    token = await _register_and_login(client, "sc_persist_cold_get")
+    owner_id = str(await db_pool.fetchval("SELECT id FROM users WHERE username = 'sc_persist_cold_get'"))
+
+    repository = PostgreSQLWorkflowStateRepository(db_pool)
+    wid = str(uuid.uuid4())
+    await repository.create_shell_and_session(
+        workflow_id=wid,
+        owner_user_id=owner_id,
+        session_id=str(uuid.uuid4()),
+        goal="Đặt lịch chuyển nhà",
+        account_state="resident",
+        resident_id=None,
+    )
+
+    # Simulate what routes.py does when ScheduleConflictPersistenceError is caught.
+    await _routes._mark_workflow_failed_safely(wid, "SCHEDULE_CONFLICT_PERSISTENCE_ERROR")
+
+    # Verify DB state before the HTTP round-trip.
+    row = await db_pool.fetchrow("SELECT status, error_code FROM workflows WHERE workflow_id = $1::uuid", wid)
+    assert row is not None
+    assert row["status"] == "FAILED", f"expected FAILED, got {row['status']}"
+    assert row["error_code"] == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR", (
+        f"expected SCHEDULE_CONFLICT_PERSISTENCE_ERROR in DB, got {row['error_code']}"
+    )
+
+    # Cold GET: no _DEMO_JOBS entry — force the DB reconstruction path.
+    _routes._DEMO_JOBS.pop(wid, None)
+    res = await client.get(
+        f"/api/v1/workflows/demo/{wid}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+
+    # Must NOT degrade to UNKNOWN_EXTERNAL_ERROR or lose the code entirely.
+    assert body.get("error_code") == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR", (
+        f"cold GET must carry SCHEDULE_CONFLICT_PERSISTENCE_ERROR, got {body.get('error_code')!r}; full body: {body}"
+    )
+    assert body.get("status") in {"FAILED", "EXECUTION_ERROR"}, (
+        f"expected a terminal status, got {body.get('status')!r}"
+    )
+
+    _routes._DEMO_JOBS.pop(wid, None)
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — Fault injection: persist_full_plan OK, then FK violation rolls back,
+#           workflow pinned FAILED with stable error code (Task 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_fault_injection_persist_ok_then_conflict_insert_fk_violation(client, db_pool) -> None:
+    """persist_full_plan succeeds; save_conflict_and_pause_atomic fails via FK.
+
+    Steps:
+    1. persist_full_plan — workflow and task rows written to DB.
+    2. save_conflict_and_pause_atomic with a NON-EXISTENT workflow_id in the
+       schedule_conflict_checks FK → PostgreSQL FK violation → real rollback.
+    3. Prove rollback: no conflict_checks row committed, no task status changed.
+    4. _mark_workflow_failed_safely — pins the workflow FAILED with stable code.
+    5. Cold GET — reads SCHEDULE_CONFLICT_PERSISTENCE_ERROR from DB.
+
+    This test does NOT mock the PostgreSQL transaction; the rollback proof is
+    the absence of rows in schedule_conflict_checks, measured by SQL SELECT.
+
+    # route test (Task 2, real PostgreSQL fault injection)
+    """
+    import asyncpg
+
+    from src.api import routes as _routes
+    from src.common.task_plan import Task, TaskPlan
+    from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+    from src.orchestration.payment_approval import persist_full_plan
+    from src.orchestration.schedule_conflict import save_conflict_and_pause_atomic
+
+    token = await _register_and_login(client, "sc_fault_inject")
+    owner_id = str(await db_pool.fetchval("SELECT id FROM users WHERE username = 'sc_fault_inject'"))
+
+    repository = PostgreSQLWorkflowStateRepository(db_pool)
+    wid = str(uuid.uuid4())
+    await repository.create_shell_and_session(
+        workflow_id=wid,
+        owner_user_id=owner_id,
+        session_id=str(uuid.uuid4()),
+        goal="Đặt lịch chuyển nhà và bảo trì",
+        account_state="resident",
+        resident_id=None,
+    )
+
+    # Step 1: persist_full_plan — creates workflow + task rows (idempotent).
+    plan = TaskPlan(
+        goal="Đặt lịch chuyển nhà và bảo trì",
+        tasks=[
+            Task(
+                task_id="T1",
+                tool="schedule_move",
+                depends_on=[],
+                input={
+                    "move_date": _DATE,
+                    "move_time": _TIME,
+                    "origin": "A",
+                    "destination": "B",
+                    "contact_phone": "0901234567",
+                },
+            ),
+            Task(
+                task_id="T2",
+                tool="create_maintenance_request",
+                depends_on=[],
+                input={
+                    "preferred_date": _DATE,
+                    "preferred_time": _TIME,
+                    "issue_description": "vòi hỏng",
+                    "unit_id": "U1",
+                },
+            ),
+        ],
+    )
+    await persist_full_plan(repository, wid, plan)
+
+    # Verify workflow row exists (persist_full_plan succeeded).
+    wf_status_before = await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id = $1::uuid", wid)
+    assert wf_status_before is not None, "persist_full_plan must have created the workflow row"
+
+    task_statuses_before = {
+        row["task_id"]: row["status"]
+        for row in await db_pool.fetch(
+            "SELECT task_id, status FROM workflow_tasks WHERE workflow_id = $1::uuid ORDER BY task_id", wid
+        )
+    }
+    assert "T1" in task_statuses_before and "T2" in task_statuses_before, "task rows must exist"
+
+    # Step 2: call save_conflict_and_pause_atomic with a NON-EXISTENT workflow_id
+    # to trigger a real PostgreSQL FK violation → real rollback.
+    ghost_wf_id = str(uuid.uuid4())  # guaranteed absent from workflows table
+
+    fk_error: Exception | None = None
+    try:
+        await save_conflict_and_pause_atomic(
+            db_pool,
+            fingerprint="deadbeef" * 4,  # 32 hex chars
+            owner=owner_id,
+            workflow_id=ghost_wf_id,  # ← FK violation: not in workflows
+            task_id="T1",
+            service_a=_SVC_MOVE,
+            date_a=_DATE,
+            time_a=_TIME,
+            workflow_id_b=wid,
+            task_id_b="T2",
+            service_b=_SVC_MAINT,
+            date_b=_DATE,
+            time_b=_TIME,
+        )
+    except asyncpg.ForeignKeyViolationError as exc:
+        fk_error = exc
+    except Exception as exc:  # noqa: BLE001
+        fk_error = exc
+
+    assert fk_error is not None, "save_conflict_and_pause_atomic must have raised on FK violation"
+
+    # Step 3: prove real PostgreSQL rollback — the conflict row must NOT be committed.
+    conflict_count = await db_pool.fetchval(
+        "SELECT count(*) FROM schedule_conflict_checks WHERE workflow_id = $1::uuid",
+        ghost_wf_id,
+    )
+    assert conflict_count == 0, (
+        f"FK violation must have rolled back; expected 0 conflict rows for ghost_wf_id, got {conflict_count}"
+    )
+
+    # Also prove the REAL workflow's task statuses are unchanged.
+    task_statuses_after = {
+        row["task_id"]: row["status"]
+        for row in await db_pool.fetch(
+            "SELECT task_id, status FROM workflow_tasks WHERE workflow_id = $1::uuid ORDER BY task_id", wid
+        )
+    }
+    assert task_statuses_after == task_statuses_before, (
+        f"task statuses must not have changed; before={task_statuses_before}, after={task_statuses_after}"
+    )
+
+    # Step 4: _mark_workflow_failed_safely — same function routes.py calls when it
+    # catches ScheduleConflictPersistenceError wrapping the FK error.
+    await _routes._mark_workflow_failed_safely(wid, "SCHEDULE_CONFLICT_PERSISTENCE_ERROR")
+
+    wf_row = await db_pool.fetchrow("SELECT status, error_code FROM workflows WHERE workflow_id = $1::uuid", wid)
+    assert wf_row["status"] == "FAILED", f"workflow must be FAILED, got {wf_row['status']}"
+    assert wf_row["error_code"] == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR", (
+        f"error_code must be SCHEDULE_CONFLICT_PERSISTENCE_ERROR, got {wf_row['error_code']!r}"
+    )
+
+    # Step 5: cold GET must read back the stable error code.
+    _routes._DEMO_JOBS.pop(wid, None)
+    res = await client.get(
+        f"/api/v1/workflows/demo/{wid}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body.get("error_code") == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR", (
+        f"cold GET must return SCHEDULE_CONFLICT_PERSISTENCE_ERROR, got {body.get('error_code')!r}"
+    )
+    # Must NOT become UNKNOWN_EXTERNAL_ERROR.
+    assert body.get("error_code") != "UNKNOWN_EXTERNAL_ERROR", (
+        "ScheduleConflictPersistenceError must never degrade to UNKNOWN_EXTERNAL_ERROR"
+    )
+
+    _routes._DEMO_JOBS.pop(wid, None)
+
+
+# ---------------------------------------------------------------------------
+# Test 12 — Production-path: boundary detects conflict, persist_plan OK,
+#            save_conflict fault-injected, _run_demo_job pins FAILED, cold GET.
+#            Does NOT call _mark_workflow_failed_safely directly.
+# ---------------------------------------------------------------------------
+
+
+async def test_production_path_boundary_persist_ok_save_conflict_fails(client, db_pool, monkeypatch) -> None:
+    """Graph thật → ScheduleConflictBoundary thật → persist OK → save lỗi → graph gán mã → job ghim FAILED.
+
+    Chuỗi chứng minh:
+    1. build_planner_graph chạy thật; Planner được fake tại tầng LLM để trả plan có
+       hai schedule_property_viewing cùng khung giờ (intra-plan conflict).
+    2. validate_node đi qua — project_id, viewing_date, viewing_time đầy đủ và hợp lệ.
+    3. execute_node gọi ScheduleConflictBoundary thật → phát hiện xung đột →
+       persist_full_plan tạo task rows trong workflow_tasks.
+    4. save_conflict_and_pause_atomic bị fault-inject → ScheduleConflictPersistenceError.
+    5. Graph (execute_node error handler) tự đặt policy_error = SCHEDULE_CONFLICT_PERSISTENCE_ERROR.
+       Test KHÔNG tự dựng dict {"policy_error": ...}.
+    6. _run_demo_job nhận state từ graph → _demo_response → _mark_workflow_failed_safely
+       được gọi tự động — test KHÔNG gọi nó.
+    7. Cold GET trả: status FAILED, stage EXECUTION_FAILED (không phải FINISHED),
+       error_code SCHEDULE_CONFLICT_PERSISTENCE_ERROR, message từ failure_for_code.
+    """
+    import asyncio
+
+    from src.agents.graph import build_planner_graph
+    from src.agents.planner import PlannerResult
+    from src.api.routes import _run_demo_job as _original_run_demo_job
+    from src.common.task_plan import Task, TaskPlan
+    from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
+    from src.orchestration.payment_approval import persist_full_plan
+    from src.orchestration.schedule_conflict import ScheduleConflictBoundary
+
+    token = await _register_and_login(client, "sc_prod_fault")
+    owner_id = str(await db_pool.fetchval("SELECT id FROM users WHERE username = 'sc_prod_fault'"))
+
+    # Step 1: POST /start — creates shell in DB, intercepts _run_demo_job.
+    scheduled: list[tuple[Any, Any]] = []
+
+    async def _defer(*args: Any, **kwargs: Any) -> None:
+        scheduled.append((args, kwargs))
+
+    monkeypatch.setattr(routes, "_run_demo_job", _defer)
+
+    res = await client.post(
+        "/api/v1/workflows/demo/start",
+        json={"goal": "Đặt lịch tham quan hai lượt cùng khung giờ"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 202, res.text
+    workflow_id = res.json()["workflow_id"]
+    await asyncio.sleep(0)
+    assert scheduled, "background job must have been scheduled"
+
+    shell_status = await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id = $1::uuid", workflow_id)
+    assert shell_status is not None, "shell must be in DB after POST /start"
+
+    # Step 2: Fault-inject save_conflict_and_pause_atomic to raise.
+    async def _failing_save_conflict(*_a: Any, **_kw: Any) -> None:
+        raise Exception("simulated DB error: conflict insert failed")
+
+    monkeypatch.setattr(
+        "src.orchestration.schedule_conflict.save_conflict_and_pause_atomic",
+        _failing_save_conflict,
+    )
+
+    # Step 3: Replace run_demo_workflow with a function that runs build_planner_graph
+    # for real, faking only the Planner (LLM) to inject a conflicting plan.
+    # The graph's execute_node catches ScheduleConflictPersistenceError and sets
+    # policy_error in the returned state — this test does NOT construct that dict.
+    async def _fake_run_demo(
+        goal: str, *, workflow_id: str, owner_user_id: str | None = None, **_kw: Any
+    ) -> dict[str, Any]:
+        # Plan với hai task schedule_property_viewing cùng khung giờ.
+        # Tất cả required fields có mặt để validate_node không từ chối.
+        conflicting_plan = TaskPlan(
+            goal=goal,
+            tasks=[
+                Task(
+                    task_id="T1",
+                    tool="schedule_property_viewing",
+                    depends_on=[],
+                    input={"project_id": "PRJ-004", "viewing_date": _DATE, "viewing_time": _TIME},
+                ),
+                Task(
+                    task_id="T2",
+                    tool="schedule_property_viewing",
+                    depends_on=[],
+                    input={"project_id": "PRJ-004", "viewing_date": _DATE, "viewing_time": _TIME},
+                ),
+            ],
+        )
+
+        class _FakePlanner:
+            async def plan(self, *_a: Any, **_kw: Any) -> PlannerResult:
+                return PlannerResult(status="READY", plan=conflicting_plan)
+
+        class _StubInner:
+            async def execute(self, *_a: Any, **_kw: Any) -> Any:
+                return {}, {}
+
+        repository = PostgreSQLWorkflowStateRepository(db_pool)
+
+        class _GuardedPool:
+            def __init__(self, pool: Any) -> None:
+                self._inner = pool
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            async def close(self) -> None:
+                pass  # không đóng pool dùng chung của test
+
+        repository._pool = _GuardedPool(db_pool)  # noqa: SLF001
+
+        outermost_boundary = ScheduleConflictBoundary(
+            _StubInner(),
+            repository=repository,
+            owner_user_id=str(owner_user_id or owner_id),
+            persist_plan=persist_full_plan,
+        )
+
+        graph = build_planner_graph(_FakePlanner(), outermost_boundary)
+        # graph.ainvoke chạy validate_node → execute_node → ScheduleConflictBoundary.execute()
+        # → persist OK → save_conflict fault-injected → ScheduleConflictPersistenceError
+        # → graph execute_node error handler → {"policy_error": "SCHEDULE_CONFLICT_PERSISTENCE_ERROR"}
+        return await graph.ainvoke(
+            {
+                "goal": goal,
+                "existing_context": {},
+                "user_answers": {},
+                "workflow_id": workflow_id,
+            }
+        )
+
+    monkeypatch.setattr(routes, "run_demo_workflow", _fake_run_demo)
+
+    # Step 4: Run the real _run_demo_job (not _defer) so it calls graph and then pins FAILED.
+    args, kwargs = scheduled[0]
+    await _original_run_demo_job(*args, **kwargs)
+
+    # Step 5: Two task rows from persist_full_plan.
+    task_count = await db_pool.fetchval("SELECT count(*) FROM workflow_tasks WHERE workflow_id = $1::uuid", workflow_id)
+    assert task_count == 2, f"persist_plan must have created 2 task rows; got {task_count}"
+
+    # Step 6: No conflict_check row (save_conflict was fault-injected before INSERT).
+    conflict_count = await db_pool.fetchval(
+        "SELECT count(*) FROM schedule_conflict_checks WHERE workflow_id = $1::uuid",
+        workflow_id,
+    )
+    assert conflict_count == 0, f"expected 0 conflict rows; got {conflict_count}"
+
+    # Step 7: _run_demo_job pinned FAILED automatically — test did NOT call _mark_workflow_failed_safely.
+    wf_row = await db_pool.fetchrow(
+        "SELECT status, error_code FROM workflows WHERE workflow_id = $1::uuid", workflow_id
+    )
+    assert wf_row["status"] == "FAILED", f"_run_demo_job must pin FAILED automatically; got {wf_row['status']}"
+    assert wf_row["error_code"] == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR", (
+        f"error_code must be SCHEDULE_CONFLICT_PERSISTENCE_ERROR; got {wf_row['error_code']!r}"
+    )
+
+    # Step 8: Cold GET reads stable code from DB — stage EXECUTION_FAILED, not FINISHED.
+    routes._DEMO_JOBS.pop(workflow_id, None)
+    res2 = await client.get(
+        f"/api/v1/workflows/demo/{workflow_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res2.status_code == 200, res2.text
+    body = res2.json()
+    assert body.get("status") in {"FAILED", "EXECUTION_ERROR"}, (
+        f"cold GET status must be terminal; got {body.get('status')!r}"
+    )
+    assert body.get("stage") == "EXECUTION_FAILED", (
+        f"stage must be EXECUTION_FAILED (not FINISHED); got {body.get('stage')!r}"
+    )
+    assert body.get("error_code") == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR", (
+        f"cold GET must return SCHEDULE_CONFLICT_PERSISTENCE_ERROR; got {body.get('error_code')!r}"
+    )
+    from src.common.failures import SCHEDULE_CONFLICT_PERSISTENCE_ERROR as _KIND
+
+    assert body.get("message") == _KIND.message, (
+        f"cold GET message must come from failure_for_code; got {body.get('message')!r}"
+    )
+
+    routes._DEMO_JOBS.pop(workflow_id, None)
+
+
+# ---------------------------------------------------------------------------
 # Test 6 — UNKNOWN intent does NOT call Planner; returns conflict card
 # ---------------------------------------------------------------------------
 

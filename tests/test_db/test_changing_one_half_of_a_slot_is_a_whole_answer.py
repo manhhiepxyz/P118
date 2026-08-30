@@ -28,12 +28,15 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import date
 
 import pytest
 
+from src.common.field_parsers import dat_ngay_hom_nay
 from tests.test_db.conftest import _register_and_login
 
 NGAY_MOI = "2026-08-28"
+_NGAY_MOI_DATE = date.fromisoformat(NGAY_MOI)
 
 
 async def _khung_gio_bi_tu_choi(pool, owner) -> str:
@@ -92,11 +95,12 @@ async def test_answering_only_the_date_does_not_ask_for_the_time_again(client, d
     owner = await db_pool.fetchval("SELECT id FROM users WHERE username=$1", ten)
     wid = await _khung_gio_bi_tu_choi(db_pool, owner)
 
-    res = await client.post(
-        f"/api/v1/workflows/demo/{wid}/continue",
-        json={"message": f"đổi qua ngày {NGAY_MOI}"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    with dat_ngay_hom_nay(_NGAY_MOI_DATE):
+        res = await client.post(
+            f"/api/v1/workflows/demo/{wid}/continue",
+            json={"message": f"đổi qua ngày {NGAY_MOI}"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
     assert res.status_code == 202, res.text
     body = res.json()
     con_thieu = list(body.get("missing_fields") or [])
@@ -143,11 +147,12 @@ async def test_a_first_time_question_still_asks_for_everything(client, db_pool):
         "schedule_property_viewing",
         ["project_id", "viewing_date", "viewing_time"],
     )
-    res = await client.post(
-        f"/api/v1/workflows/demo/{wid}/continue",
-        json={"message": NGAY_MOI},
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    with dat_ngay_hom_nay(_NGAY_MOI_DATE):
+        res = await client.post(
+            f"/api/v1/workflows/demo/{wid}/continue",
+            json={"message": NGAY_MOI},
+            headers={"Authorization": f"Bearer {token}"},
+        )
     assert res.status_code == 202, res.text
     body = res.json()
     assert body.get("status") == "NEEDS_INFORMATION"
