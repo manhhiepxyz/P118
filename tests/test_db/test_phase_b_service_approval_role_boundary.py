@@ -29,9 +29,7 @@ import pytest
 from tests.test_db.conftest import _register_and_login, dang_nhap_don_vi
 
 
-async def _seed_awaiting_service_approval(
-    db_pool, *, owner_user_id, don_vi: str = "FIX-01"
-) -> tuple[str, str]:
+async def _seed_awaiting_service_approval(db_pool, *, owner_user_id, don_vi: str = "FIX-01") -> tuple[str, str]:
     workflow_id = str(uuid.uuid4())
     task_id = "T1"
     await db_pool.execute(
@@ -129,9 +127,7 @@ async def test_a_provider_can_decide_a_service_approval_of_its_own_unit(client, 
     token, _ = await dang_nhap_don_vi(client, db_pool, "svcappr_nha_cung_cap", don_vi=("FIX-01",))
     await _register_and_login(client, "svcappr_chu_khac")
     other_owner_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'svcappr_chu_khac'")
-    workflow_id, task_id = await _seed_awaiting_service_approval(
-        db_pool, owner_user_id=other_owner_id, don_vi="FIX-01"
-    )
+    workflow_id, task_id = await _seed_awaiting_service_approval(db_pool, owner_user_id=other_owner_id, don_vi="FIX-01")
 
     response = await client.post(
         f"/api/v1/service-approvals/{workflow_id}/{task_id}/decide",
@@ -165,9 +161,7 @@ async def test_a_provider_cannot_decide_a_service_approval_that_is_not_theirs(cl
     token, _ = await dang_nhap_don_vi(client, db_pool, "svcappr_don_vi_khac", don_vi=("MOV-01",))
     await _register_and_login(client, "svcappr_chu_cua_fix")
     owner_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'svcappr_chu_cua_fix'")
-    workflow_id, task_id = await _seed_awaiting_service_approval(
-        db_pool, owner_user_id=owner_id, don_vi="FIX-01"
-    )
+    workflow_id, task_id = await _seed_awaiting_service_approval(db_pool, owner_user_id=owner_id, don_vi="FIX-01")
 
     response = await client.post(
         f"/api/v1/service-approvals/{workflow_id}/{task_id}/decide",
@@ -181,8 +175,7 @@ async def test_a_provider_cannot_decide_a_service_approval_that_is_not_theirs(cl
 
     assert response.status_code == 404, response.text
     row = await db_pool.fetchrow(
-        "SELECT status, decided_by, reject_reason FROM service_approvals "
-        "WHERE workflow_id = $1::uuid AND task_id = $2",
+        "SELECT status, decided_by, reject_reason FROM service_approvals WHERE workflow_id = $1::uuid AND task_id = $2",
         workflow_id,
         task_id,
     )

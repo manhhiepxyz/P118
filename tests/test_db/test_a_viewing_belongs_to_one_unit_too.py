@@ -422,9 +422,7 @@ async def test_a_row_written_through_the_old_view_has_no_owner_and_stays_hidden(
         wid,
     )
 
-    chu = await db_pool.fetchval(
-        "SELECT service_provider_id FROM service_approvals WHERE workflow_id = $1::uuid", wid
-    )
+    chu = await db_pool.fetchval("SELECT service_provider_id FROM service_approvals WHERE workflow_id = $1::uuid", wid)
     assert chu is None, f"trigger đã bắt đầu gán đơn vị ({chu}) — đọc lại ghi chú NỢ cuối file"
     assert wid not in _ma((await client.get(VIEWING, headers=_auth(tok))).json())
 
