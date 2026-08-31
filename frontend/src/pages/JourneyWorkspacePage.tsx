@@ -859,6 +859,10 @@ export function JourneyWorkspacePage() {
       let res: AgentWorkflowResponse
       if (action.kind === 'approval') {
         res = await decidePayment(action.workflowId, intent === 'REJECT' ? 'reject' : 'approve')
+        if (intent !== 'REJECT' && res.payment_redirect_url) {
+          window.location.href = res.payment_redirect_url
+          return
+        }
       } else if (action.kind === 'missing_info') {
         if (intent === 'REJECT') {
           // Từ chối phải THẬT SỰ dừng, không chỉ nói là đã dừng.
