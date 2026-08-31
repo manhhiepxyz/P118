@@ -9,6 +9,7 @@ on:
 jobs:
   lint-and-test:
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
 
     # PostgreSQL ephemeral cho job này. Không có credential thật ở đây:
     # container chỉ sống trong thời gian job chạy, chỉ nghe trên localhost của
