@@ -484,7 +484,7 @@ export function WorkflowPage() {
                     có nút mà tiêu đề là một dấu gạch là card mời người ta bấm
                     vào thứ họ không đọc được. Backend đã chặn tiêu đề rỗng
                     bằng `min_length=1`, nên chỗ này không cần bản dự phòng. */}
-                {action.title}
+                {'title' in action ? action.title : 'PHÁT HIỆN TRÙNG LỊCH'}
               </p>
 
               {action.kind === 'PAYMENT_APPROVAL' && (
