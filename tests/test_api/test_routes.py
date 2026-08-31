@@ -211,14 +211,14 @@ def test_follow_up_extracts_parking_zone_and_plate_from_one_answer() -> None:
 
 def test_follow_up_extracts_the_exact_vehicle_answer_used_in_terminal() -> None:
     answers, unresolved = routes._extract_follow_up_answers(
-        "51A-202929, ôto, 29/8/2026, khu A",
+        "51A-202929, ôto, 20/12/2027, khu A",
         ["plate_number", "vehicle_type", "booking_date", "parking_zone"],
     )
 
     assert answers == {
         "plate_number": "51A-202929",
         "vehicle_type": "car",
-        "booking_date": "2026-08-29",
+        "booking_date": "2027-12-20",
         "parking_zone": "ZONE_A",
     }
     assert unresolved == []
@@ -242,13 +242,13 @@ def test_follow_up_normalizes_common_vietnamese_vehicle_names(value, expected) -
 
 def test_follow_up_extracts_project_date_and_time_from_one_natural_answer() -> None:
     answers, unresolved = routes._extract_follow_up_answers(
-        "Vinhomes Ocean Park, ngày 29/8/2026 lúc 10:00",
+        "Vinhomes Ocean Park, ngày 20/12/2027 lúc 10:00",
         ["project_id", "viewing_date", "viewing_time"],
     )
 
     assert answers == {
         "project_id": "PRJ-007",
-        "viewing_date": "2026-08-29",
+        "viewing_date": "2027-12-20",
         "viewing_time": "10:00",
     }
     assert unresolved == []

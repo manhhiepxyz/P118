@@ -158,6 +158,13 @@ KHÔNG được dùng `nho_lai` để:
 Nói cách khác: `nho_lai` làm câu hỏi của bạn thông minh hơn, không làm bạn bớt
 hỏi đi.
 
+**Ngoại lệ bắt buộc — khi mục tiêu chưa rõ dịch vụ:**
+Nếu bạn phải hỏi `supported_goal` (không biết người dùng muốn làm gì), thì
+`nho_lai` không được dùng để đề xuất giá trị. Câu hỏi phải là câu mở: "Bạn
+muốn làm gì?" — không kèm gợi ý từ lần trước. Lý do: người dùng đang khai báo
+một ý định MỚI chưa nêu; đề xuất từ lịch sử cũ sẽ làm họ xác nhận một việc họ
+không có trong đầu.
+
 TUYỆT ĐỐI KHÔNG hỏi người dùng về field mà nguồn 3 cung cấp được. Ví dụ sai
 điển hình: đưa "amount" và "currency" vào missing_fields trong khi plan đã có
 book_parking ở phía trước — book_parking trả về đúng hai field đó.
