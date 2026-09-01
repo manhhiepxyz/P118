@@ -6,6 +6,7 @@ import { maxDate, minDate } from '../../lib/dateBounds'
 
 interface Props {
   action: PendingAction
+  paymentRedirectUrl?: string | null
   onApprove: () => void
   onReject: () => void
   /** Toàn bộ ô đã điền, theo khoá backend đang chờ. */
@@ -27,7 +28,7 @@ interface Props {
 const CONTROL =
   'mt-2 h-11 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)]'
 
-export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
+export function PendingCard({ action, paymentRedirectUrl, onApprove, onReject, onValue }: Props) {
   // Một ô nhập cho MỖI field backend đang chờ.
   //
   // Backend áp luật all-or-none cho câu trả lời dạng form: thiếu một ô là từ
@@ -154,6 +155,19 @@ export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
         <p className="mt-5 text-[13.5px] leading-[1.6] text-[var(--text-secondary)]">
           {action.explain}
         </p>
+      ) : paymentRedirectUrl ? (
+        <div className="mt-5 space-y-2.5">
+          <a
+            href={paymentRedirectUrl}
+            className="press inline-flex h-11 w-full cursor-pointer items-center justify-center rounded-[var(--r-sm)] text-[14.5px] font-semibold text-center"
+            style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
+          >
+            Thanh toán ngay
+          </a>
+          <p className="pt-0.5 text-[12.5px] leading-[1.5] text-[var(--text-muted)]">
+            Yêu cầu thanh toán đã được tạo. Bạn hãy nhấn vào nút trên để mở trang thanh toán nhé.
+          </p>
+        </div>
       ) : (
         <div className="mt-5 space-y-2.5">
           <button
