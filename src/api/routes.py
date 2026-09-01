@@ -5524,6 +5524,27 @@ def _waiting_approval_view(
             task.status = "WAITING_APPROVAL"
             task.message = "Đang chờ bạn phê duyệt thanh toán."
 
+    payment_redirect_url = None
+    if pending.get("approval_status") == "APPROVED" and pending.get("payment_id"):
+        from src.config import get_settings
+        settings = get_settings()
+        if settings.payment_provider == "vnpay":
+            from src.connectors.vnpay import VnPaySessionConfig, build_payment_url
+            config = VnPaySessionConfig(
+                tmn_code=settings.vnpay_tmn_code,
+                hash_secret=settings.vnpay_hash_secret,
+                payment_url=settings.vnpay_payment_url,
+                ttl_minutes=settings.vnpay_session_ttl_minutes,
+            )
+            payment_redirect_url = build_payment_url(
+                config,
+                txn_ref=pending["payment_id"],
+                amount_vnd=pending["amount"],
+                order_info=f"Thanh toan phi dat cho {pending['booking_id']}",
+                ip_addr="127.0.0.1",
+                return_url=f"{settings.public_base_url.rstrip('/')}/api/v1/webhooks/vnpay/return",
+            )
+
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status="WAITING_APPROVAL",
@@ -5534,6 +5555,7 @@ def _waiting_approval_view(
             "amount": pending["amount"],
             "currency": pending["currency"],
         },
+        payment_redirect_url=payment_redirect_url,
         # Tiền của khách thì khách quyết — cùng lý do như nhánh tham quan, đặt
         # ở cả đường dựng lại từ database.
         approval_actor="USER",

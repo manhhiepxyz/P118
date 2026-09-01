@@ -138,6 +138,13 @@ async def vnpay_ipn(http_request: Request) -> dict[str, str]:
 
     try:
         await resume_vnpay_after_gateway(str(payment["workflow_id"]))
+        
+        # Gọi ResponseAgent để tạo thông báo hoàn tất và làm mới cache. Thiếu
+        # bước này, giao diện polling sẽ mắc kẹt với response WAITING_APPROVAL cũ.
+        from src.api.routes import _DEMO_JOBS, request_fresh_answer
+        workflow_id = str(payment["workflow_id"])
+        job = _DEMO_JOBS.get(workflow_id)
+        request_fresh_answer(workflow_id, job=job)
     except ResumeError as exc:
         # Tiền ĐÃ VỀ nhưng workflow chưa chốt được — sweeper hàn lại. Trả 00
         # để VNPay ngừng retry: retry chỉ thấy ALREADY_CONFIRMED, vô ích.

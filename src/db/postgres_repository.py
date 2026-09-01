@@ -122,32 +122,41 @@ class PostgreSQLWorkflowStateRepository:
         await self.workflows.create_shell_and_session(**kwargs)
 
     async def get_pending_payment_view(self, workflow_id: str) -> dict | None:
-        """Báo giá của khoản thanh toán ĐANG CHỜ DUYỆT, hoặc None.
+        """Báo giá của khoản thanh toán ĐANG CHỜ DUYỆT hoặc CHỜ THANH TOÁN (đã mở VNPay), hoặc None.
 
         Số tiền đọc từ `parking_bookings`, KHÔNG từ snapshot trong
         `payment_approvals`: booking là dữ liệu provider đã ghi khi giữ chỗ, còn
         snapshot chỉ là bản chép lại có thể lệch.
-
-        Chỉ trả khi `status = 'AWAITING'`. Approval đã quyết định không được kéo
-        một workflow đã kết thúc quay lại màn chờ duyệt.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT a.task_id, b.booking_id, b.amount, b.currency
+                SELECT a.task_id, b.booking_id, b.amount, b.currency, a.status as approval_status,
+                       p.payment_id, p.payment_status 
                 FROM payment_approvals AS a
                 JOIN parking_bookings AS b ON b.booking_id = a.booking_id
-                WHERE a.workflow_id = $1 AND a.status = 'AWAITING'
+                LEFT JOIN payments AS p ON p.workflow_id = a.workflow_id 
+                                        AND p.booking_id = a.booking_id 
+                                        AND p.provider = 'vnpay'
+                                        AND p.payment_status = 'PENDING'
+                WHERE a.workflow_id = $1 AND a.status IN ('AWAITING', 'APPROVED')
+                ORDER BY p.created_at DESC NULLS LAST
+                LIMIT 1
                 """,
                 _uuid(workflow_id),
             )
         if row is None:
             return None
+        if row["approval_status"] == "APPROVED" and row["payment_status"] != "PENDING":
+            return None
+            
         return {
             "task_id": row["task_id"],
             "booking_id": row["booking_id"],
             "amount": int(row["amount"]),
             "currency": row["currency"],
+            "approval_status": row["approval_status"],
+            "payment_id": str(row["payment_id"]) if row["payment_id"] else None,
         }
 
     async def get_pending_viewing_view(self, workflow_id: str) -> dict | None:
