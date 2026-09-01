@@ -77,9 +77,7 @@ async def count_pending_verification_records(pool: Any) -> int:
     PostgreSQL chia sẻ — đọc thẳng qua pool của main app (như
     `verification_routes` đang materialize bằng pool), không gọi lại provider.
     """
-    count = await pool.fetchval(
-        "SELECT COUNT(*) FROM verification_records WHERE status = 'PENDING'"
-    )
+    count = await pool.fetchval("SELECT COUNT(*) FROM verification_records WHERE status = 'PENDING'")
     return int(count or 0)
 
 
@@ -90,7 +88,5 @@ async def count_pending_viewing_approvals(pool: Any) -> int:
     pool của main app, không gọi lại Tour provider (provider chưa biết lịch
     cho tới khi được duyệt; yêu cầu chỉ tồn tại ở PostgreSQL).
     """
-    count = await pool.fetchval(
-        "SELECT COUNT(*) FROM viewing_approvals WHERE status = 'AWAITING'"
-    )
+    count = await pool.fetchval("SELECT COUNT(*) FROM viewing_approvals WHERE status = 'AWAITING'")
     return int(count or 0)

@@ -197,6 +197,14 @@ export function ChatWorkflowCard({
       // Body CHỈ có `decision`. Số tiền và mã đặt chỗ là dữ liệu có thẩm quyền
       // của backend; gửi từ browser là để người dùng tự định giá dịch vụ.
       const next = await decidePayment(currentId, decision)
+      // PAYMENT_PROVIDER=vnpay: duyệt chỉ MỞ PHIÊN — response mang URL gateway
+      // đã ký. Chuyển hướng cả cửa sổ (không tab mới): sau khi trả tiền,
+      // VNPay đưa trình duyệt về /payment/result rồi polling tự chốt SUCCESS.
+      // Mock không bao giờ trả field này, luồng cũ chạy nguyên trạng.
+      if (decision === 'approve' && next.payment_redirect_url) {
+        window.location.href = next.payment_redirect_url
+        return
+      }
       announced.current = null
       accept(next)
     } catch (e) {
@@ -247,7 +255,6 @@ export function ChatWorkflowCard({
 
   const running = data.status === 'PENDING' || data.status === 'RUNNING'
   const composingReply = data.status === 'NEEDS_INFORMATION' && data.response_state === 'PENDING'
-  const quote = data.payment_quote ?? {}
   const activity = currentActivity(data)
   // Cùng status WAITING_APPROVAL nhưng là chờ ĐƠN VỊ xác nhận (khách không bấm gì).
   const statusLabel =
@@ -392,18 +399,22 @@ export function ChatWorkflowCard({
         </div>
       )}
 
-      {/* Duyệt thanh toán — cũng nằm trong hội thoại. */}
-      {data.status === 'WAITING_APPROVAL' && !data.viewing_approval && (
+      {/* Duyệt thanh toán — cũng nằm trong hội thoại.
+
+          Điều kiện là `customer_action.kind === 'PAYMENT_APPROVAL'`, KHÔNG phải
+          `status === 'WAITING_APPROVAL' && !viewing_approval`. Điều kiện cũ
+          đúng một lần trên bốn: cùng status ấy còn dùng cho chờ chọn đơn vị,
+          chờ bổ sung thông tin và chờ đơn vị nhận việc — và cả ba đều nhận nút
+          "Xác nhận thanh toán" cho một khoản tiền không tồn tại. */}
+      {data.customer_action?.kind === 'PAYMENT_APPROVAL' && (
         <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-950/30">
           <p className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
             <ShieldAlert className="h-4 w-4 shrink-0 text-amber-600" aria-hidden />
-            Cần bạn xác nhận khoản thanh toán
+            {data.customer_action.title}
           </p>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Phí chỗ đỗ xe cho yêu cầu này. Chúng tôi chỉ thu sau khi bạn đồng ý.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{data.customer_action.body}</p>
           <p className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
-            {formatVnd(quote.amount, quote.currency)}
+            {formatVnd(data.customer_action.amount, data.customer_action.currency)}
           </p>
 
           {decisionError && <p className="mt-2 text-sm text-red-600">{decisionError}</p>}

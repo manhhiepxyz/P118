@@ -13,7 +13,7 @@ import {
   XCircle,
 } from 'lucide-react'
 
-import type { AgentDisplayTaskStatus, AgentDisplayWorkflowStatus } from './types'
+import type { AgentDisplayTaskStatus, AgentDisplayWorkflowStatus, AgentWorkflowStage } from './types'
 
 /* ---------------------------------------------------------------------------
    Status config — màu + icon + label VN theo docs/ui-design-prompts.md §1.
@@ -180,12 +180,23 @@ export const TASK_STATUS: Record<AgentDisplayTaskStatus, StatusConfig> = {
 export const TOOL_LABELS: Record<string, string> = {
   register_vehicle: 'Đăng ký phương tiện',
   book_parking: 'Đặt chỗ đậu xe',
+  change_parking_zone: 'Đổi khu đỗ xe',
+  cancel_property_viewing: 'Huỷ lịch tham quan',
+  cancel_parking: 'Huỷ chỗ đỗ xe',
+  cancel_maintenance: 'Huỷ yêu cầu bảo trì',
+  cancel_move: 'Huỷ lịch chuyển nhà',
+  cancel_shuttle: 'Huỷ xe đưa đón',
   pay_fee: 'Thanh toán phí',
   search_properties: 'Tìm bất động sản',
   schedule_property_viewing: 'Đặt lịch xem nhà',
   register_property_interest: 'Đăng ký quan tâm',
   create_maintenance_request: 'Yêu cầu bảo trì',
   schedule_move: 'Đăng ký chuyển nhà',
+  // Thiếu hai dòng này thì `toolLabel` trả về NGUYÊN TÊN TOOL, và người dùng
+  // đọc được "book_shuttle" giữa một hàng nhãn tiếng Việt. Đo được trên màn
+  // hình thật.
+  book_shuttle: 'Đặt xe đưa đón',
+  register_resident: 'Đăng ký cư dân',
 }
 
 export function toolLabel(tool: string): string {
@@ -326,7 +337,203 @@ export function formatDate(value: string | null | undefined): string {
   })
 }
 
-/** Phân loại lỗi hiển thị cho task FAILED. */
-export function describeFailure(task: { error_code?: string | null; error_message?: string | null }): string {
-  return task.error_message ?? task.error_code ?? 'Lỗi không xác định'
+/**
+ * Câu giải thích lỗi cho task FAILED — luôn là TIẾNG VIỆT, không bao giờ là mã.
+ *
+ * Bản trước rơi thẳng về `error_code` khi backend không kèm `error_message`, nên
+ * người dùng đọc được đúng chuỗi `EXECUTION_ERROR` trên màn hình. Mã lỗi là từ
+ * vựng nội bộ: nó nói cho người viết code biết chuyện gì, và nói cho người dùng
+ * biết rằng có thứ gì đó đã rò rỉ ra ngoài.
+ *
+ * Bảng này chỉ dịch những mã mà người dùng CÓ THỂ gặp và làm được gì đó. Mã lạ
+ * rơi về một câu chung — thà mơ hồ còn hơn để lọt từ vựng nội bộ, và câu chung
+ * vẫn nói được điều quan trọng nhất: thử lại được hay không.
+ */
+const FAILURE_TEXT: Record<string, string> = {
+  EXECUTION_ERROR: 'Bước này chưa chạy xong được. Bạn thử lại giúp mình nhé.',
+  VALIDATION_ERROR: 'Thông tin gửi đi chưa hợp lệ, mình chưa thực hiện được bước này.',
+  PLANNING_ERROR: 'Mình chưa lập được kế hoạch cho yêu cầu này.',
+  SERVICE_UNAVAILABLE: 'Dịch vụ bên cung cấp đang tạm ngừng. Bạn thử lại sau ít phút nhé.',
+  UNKNOWN_EXTERNAL_ERROR: 'Bên cung cấp dịch vụ trả về lỗi không rõ. Bạn thử lại giúp mình nhé.',
+  ACTION_DENIED: 'Việc này cần quyền mà tài khoản của bạn chưa có.',
+  DATABASE_UNAVAILABLE: 'Hệ thống đang bận, chưa ghi lại được. Bạn thử lại sau ít phút nhé.',
+  LLM_CONFIGURATION_ERROR: 'Hệ thống chưa sẵn sàng xử lý yêu cầu. Bạn báo giúp ban quản lý nhé.',
+
+  // Lỗi NGHIỆP VỤ — mỗi mã một tình huống khác nhau, và người dùng cần biết
+  // ĐÚNG cái nào để biết phải làm gì.
+  //
+  // Trước đây 22/25 mã không có dòng nào ở đây, nên tất cả rơi vào cùng một
+  // câu "Yêu cầu này dừng giữa chừng." — "xe đã có chỗ rồi" và "khu đã hết
+  // chỗ" hiện ra y hệt nhau, dù một cái nghĩa là không cần làm gì, còn cái kia
+  // nghĩa là phải đổi khu.
+  NO_AVAILABILITY: 'Khu vực đỗ xe đã hết chỗ cho ngày này. Bạn chọn ngày hoặc khu khác nhé.',
+  BOOKING_ALREADY_EXISTS: 'Xe này đã có chỗ đỗ trong ngày được chọn — chỗ đó vẫn được giữ.',
+  VEHICLE_ALREADY_EXISTS: 'Xe này đã được đăng ký trước đó rồi.',
+  RESIDENT_ALREADY_EXISTS: 'Căn hộ này đã được đăng ký. Bạn kiểm tra lại mã căn hộ nhé.',
+  VIEWING_ALREADY_BOOKED: 'Khung giờ tham quan này đã có người đặt. Bạn chọn giờ khác nhé.',
+  SHUTTLE_ALREADY_BOOKED: 'Xe đưa đón cho lịch này đã được đặt rồi.',
+  INTEREST_ALREADY_EXISTS: 'Bạn đã đăng ký nhận tư vấn cho dự án này rồi.',
+  VEHICLE_NOT_FOUND: 'Không tìm thấy xe này trong hệ thống. Bạn đăng ký xe trước nhé.',
+  RESIDENT_NOT_FOUND: 'Chưa tìm thấy hồ sơ cư dân của bạn. Bạn xác minh căn hộ trước nhé.',
+  BOOKING_NOT_FOUND: 'Không tìm thấy chỗ đỗ đã đặt.',
+  PAYMENT_NOT_FOUND: 'Không tìm thấy khoản thanh toán này.',
+  VIEWING_NOT_FOUND: 'Không tìm thấy lịch tham quan này.',
+  PROJECT_NOT_FOUND: 'Dự án này chưa nằm trong danh sách được hỗ trợ.',
+  PAYMENT_FAILED: 'Thanh toán chưa thành công. Tiền chưa bị trừ, bạn thử lại nhé.',
+  SCHEDULE_CONFLICT_CHANGE_REQUESTED: 'Lịch hẹn này đang xung đột với một lịch hẹn khác. Bạn chọn thời gian mới giúp mình nhé.',
+  MISSING_INFORMATION: 'Còn thiếu thông tin để thực hiện bước này.',
+  INVALID_INPUT: 'Thông tin của bước này chưa hợp lệ. Bạn kiểm tra lại giúp mình nhé.',
+  INVALID_TASK_PLAN: 'Kế hoạch cho yêu cầu này chưa hợp lệ.',
+  APPROVAL_REQUIRED: 'Bước này đang chờ được duyệt.',
+  DEPENDENCY_ERROR: 'Bước này chưa chạy vì bước trước đó chưa xong.',
+  SERVICE_TIMEOUT: 'Bên cung cấp dịch vụ phản hồi quá lâu. Bạn thử lại sau ít phút nhé.',
+  INTERNAL_SERVICE_ERROR: 'Bên cung cấp dịch vụ gặp sự cố. Bạn thử lại sau ít phút nhé.',
+  UNKNOWN_TOOL: 'Hệ thống chưa hỗ trợ việc này.',
+}
+
+/**
+ * Vì sao yêu cầu này chưa xong — câu cho NGƯỜI dùng, kèm việc họ làm được tiếp.
+ *
+ * Danh sách Lịch sử gộp "đang chạy / đang chờ quyết / dừng giữa chừng" vào một
+ * nhóm "Chưa xong", vì từ chỗ người dùng đứng cả ba là cùng một câu. Phép gộp
+ * đó chỉ đúng nếu trang chi tiết THẬT SỰ nói ra vấn đề cụ thể — nếu không, ta
+ * vừa bỏ ba lối vào vừa không đưa gì vào chỗ chúng dẫn tới.
+ *
+ * `retryable` quyết định vế thứ hai. Mời người dùng "thử lại" một lỗi không thể
+ * thử lại là bắt họ lặp cùng một thất bại; im lặng với một lỗi thử lại được là
+ * bỏ rơi họ ở đúng chỗ họ tự thoát ra được.
+ */
+export function describeWorkflowFailure(
+  errorCode: string | null | undefined,
+  retryable: boolean | null | undefined,
+): string {
+  const why = errorCode ? (FAILURE_TEXT[errorCode] ?? 'Yêu cầu này dừng giữa chừng.') : 'Yêu cầu này dừng giữa chừng.'
+  // `retryable` có BA giá trị, không phải hai.
+  //
+  // `null`/`undefined` nghĩa là hệ thống KHÔNG BIẾT — mã lỗi nghiệp vụ do
+  // connector trả về không nằm trong sổ phân loại hạ tầng. Gộp nó vào nhánh
+  // `false` thì người gặp "đã có chỗ đỗ trong ngày này" bị bảo "gửi lại cũng
+  // sẽ hỏng như cũ", trong khi chỉ cần đổi ngày là chạy. Một câu khuyên bỏ
+  // cuộc, phát cho đúng người sửa được.
+  if (retryable === null || retryable === undefined) return why
+  const next = retryable
+    ? 'Bạn gửi lại yêu cầu này là mình chạy tiếp được.'
+    : 'Việc này cần được xử lý lại từ phía hệ thống, bạn gửi lại cũng sẽ hỏng như cũ.'
+  return `${why} ${next}`
+}
+
+
+export function describeFailure(task: {
+  error_code?: string | null
+  error_message?: string | null
+  message?: string | null
+}): string {
+  // `message` TRƯỚC `error_message`.
+  //
+  // `message` là câu backend đã dựng cho người đọc, có tên bước và tình huống
+  // cụ thể. `error_message` là câu THÔ của provider — và provider nói tiếng
+  // Anh: "Vehicle already booked for that date". Ưu tiên ngược lại nghĩa là
+  // đẩy nguyên văn tiếng Anh ra trước mặt khách hàng.
+  if (task.message) return task.message
+  if (task.error_message) return task.error_message
+  const code = task.error_code
+  if (!code) return 'Bước này chưa hoàn thành được.'
+  return FAILURE_TEXT[code] ?? 'Bước này chưa hoàn thành được. Bạn thử lại giúp mình nhé.'
+}
+
+/* ---------------------------------------------------------------------------
+   Giai đoạn — nhãn + màu + câu dự phòng.
+
+   `Record<AgentWorkflowStage, …>` chứ không phải `Partial`: TypeScript bắt
+   thiếu ngay khi backend thêm một giai đoạn. Thiếu một entry ở đây nghĩa là
+   giao diện rơi về một nhãn mặc định, và nhãn mặc định luôn nói sai — nó nói
+   về một tình huống nào đó khác.
+
+   Đã xảy ra một lần ở backend: giai đoạn chờ khách CHỌN ĐƠN VỊ dùng lại câu
+   của giai đoạn chờ khách TRẢ TIỀN, và khách đi tìm một nút không tồn tại.
+--------------------------------------------------------------------------- */
+
+export interface StageConfig {
+  label: string
+  /** Câu hiện khi backend không gửi `message` — không bao giờ để trống. */
+  fallback: string
+  badge: string
+}
+
+export const WORKFLOW_STAGE: Record<AgentWorkflowStage, StageConfig> = {
+  PLANNING: {
+    label: 'Đang chuẩn bị',
+    fallback: 'P-118 đang chuẩn bị kế hoạch thực hiện.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  PLANNED: {
+    label: 'Đã có kế hoạch',
+    fallback: 'Đã xác định các bước cần thực hiện.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  VALIDATING: {
+    label: 'Đang kiểm tra',
+    fallback: 'Đang kiểm tra thông tin và điều kiện thực hiện.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  VALIDATED: {
+    label: 'Sẵn sàng',
+    fallback: 'Kế hoạch đã sẵn sàng.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  RESIDENT_CHECKING: {
+    label: 'Đang xác minh cư dân',
+    fallback: 'Đang kiểm tra liên kết cư dân với ban quản lý.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  RESIDENT_VERIFIED: {
+    label: 'Đã xác minh',
+    fallback: 'Đã xác nhận tài khoản cư dân.',
+    badge: 'text-emerald-600 bg-emerald-50',
+  },
+  WAITING_APPROVAL: {
+    label: 'Chờ bạn xác nhận thanh toán',
+    fallback: 'Đang chờ bạn xác nhận khoản thanh toán.',
+    badge: 'text-amber-600 bg-amber-50',
+  },
+  /* Chờ CHÍNH KHÁCH chọn đơn vị. Nhãn phải nói rõ là CHỌN ĐƠN VỊ:
+     "đang chờ đơn vị" đọc thành "bạn không phải làm gì" — sai, khách là người
+     duy nhất còn phải làm; "chờ thanh toán" gửi họ đi tìm một nút trả tiền
+     không tồn tại; và bất cứ nhãn nào nghe như đã xong đều che mất một việc
+     đang treo. */
+  WAITING_PROVIDER_PROPOSAL: {
+    label: 'Chờ bạn xác nhận đơn vị cung cấp',
+    fallback: 'Đang chờ bạn xác nhận đơn vị và báo giá.',
+    badge: 'text-amber-600 bg-amber-50',
+  },
+  /* KHÔNG có chữ "đang chờ": ở trạng thái này không ai đang chờ ai. Đơn vị đã
+     trả lời, việc đã dừng, và khách là người duy nhất còn phải quyết định.
+     Nhãn nói "đang chờ đơn vị" sẽ đọc thành "bạn không phải làm gì" — và
+     workflow trở thành một ngõ cụt không ai bấm gì. */
+  WAITING_PROVIDER_RESELECTION: {
+    label: 'Đơn vị đã từ chối',
+    fallback: 'Đơn vị đã từ chối. Bạn chọn giúp mình bước tiếp theo nhé.',
+    badge: 'text-red-600 bg-red-50',
+  },
+  EXECUTING: {
+    label: 'Đang thực hiện',
+    fallback: 'Đang thực hiện yêu cầu.',
+    badge: 'text-blue-600 bg-blue-50',
+  },
+  FINISHED: {
+    label: 'Hoàn tất',
+    fallback: 'Yêu cầu đã hoàn tất.',
+    badge: 'text-emerald-600 bg-emerald-50',
+  },
+  CHAT: {
+    label: 'Trò chuyện',
+    fallback: 'P-118 đang trả lời.',
+    badge: 'text-slate-500 bg-slate-100',
+  },
+}
+
+/** Nhãn của một giai đoạn; `null`/lạ thì không đoán, trả `null`. */
+export function stageLabel(stage: AgentWorkflowStage | null | undefined): string | null {
+  if (!stage) return null
+  return WORKFLOW_STAGE[stage]?.label ?? null
 }

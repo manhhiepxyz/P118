@@ -29,6 +29,17 @@ class AgentState(TypedDict, total=False):
     # --- Input của planner graph --------------------------------------------
     goal: str
     existing_context: dict[str, Any]
+    # Ký ức hội thoại — các lượt hỏi–đáp TRƯỚC của cùng người dùng.
+    #
+    # PHẢI khai báo ở đây. `AgentState` là TypedDict và LangGraph bỏ IM LẶNG mọi
+    # khoá không có trong schema: thiếu dòng này thì `recalled` vẫn truyền được
+    # vào graph, vẫn không có lỗi nào, và Planner chỉ đơn giản không bao giờ
+    # nhận được ký ức.
+    #
+    # KHÁC `existing_context`: đó là dữ kiện của lần này, còn đây là chuyện cũ.
+    # Xem `Planner._fields_taken_from_recall` — chuyện cũ không được phép trở
+    # thành hành động mà chưa ai xác nhận.
+    recalled: list[dict[str, Any]]
 
     # Câu người dùng vừa trả lời cho câu hỏi bổ sung — PHẢI khai ở đây.
     #
@@ -56,6 +67,17 @@ class AgentState(TypedDict, total=False):
     question: str
     # Message an toàn: không chứa goal, context hay raw LLM response.
     planning_error: str
+    # Điều người dùng đã NÓI RÕ trong goal, do Planner trích ra và code kiểm
+    # (`graph._facts_as_context()`) — PHẢI khai ở đây, cùng lý do `recalled`/
+    # `user_answers`: LangGraph loại bỏ IM LẶNG mọi khoá node trả về mà
+    # `AgentState` không khai báo. Thiếu dòng này, `plan_node` VẪN trả
+    # `explicit_facts` trong dict cập nhật của MỌI nhánh (READY/QUESTION/
+    # NEEDS_INFORMATION) mà không có lỗi nào — nhưng nó không bao giờ tới
+    # `state` cuối cùng, và `api/routes.py` (đọc `state.get("explicit_facts")`
+    # để ghim vào `existing_context` cho lượt hỏi lại sau) luôn nhận `{}`: một
+    # xác nhận rõ ràng của người dùng ở lượt 1 ("cần thang máy") không bao giờ
+    # được nhớ sang lượt 2.
+    explicit_facts: dict[str, bool]
     # Có giá trị nghĩa là còn thiếu input NHƯNG không hỏi người dùng được một
     # cách an toàn (ID nội bộ, dữ liệu thanh toán, field lạ). Khác
     # NEEDS_INFORMATION ở chỗ không có form nào để render: phải từ chối an toàn.

@@ -7,7 +7,7 @@ import httpx
 
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
-from src.connectors.base import Connector
+from src.connectors.base import Connector, ProviderCallContext
 
 
 class PropertyConnector(Connector):
@@ -53,7 +53,16 @@ class PropertyConnector(Connector):
         """
         return tool_name == "search_properties"
 
-    async def execute(self, tool_name: str, input_data: dict[str, Any]) -> StandardResult:
+    async def execute(
+        self,
+        tool_name: str,
+        input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
+    ) -> StandardResult:
+        # Tool của connector này không mang khoá idempotency; `context` có mặt
+        # để hợp đồng đồng nhất, và bỏ qua ở đây là cố ý.
+        del context
         routes = {
             "search_properties": ("/api/properties/search", ("properties", "result_count")),
             "schedule_property_viewing": (

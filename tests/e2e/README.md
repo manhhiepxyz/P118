@@ -11,6 +11,33 @@ nên không tầng nào phát hiện được một `docker-compose.yml` sai c�
 | `browser_acceptance.mjs` | 41 khẳng định qua DOM thật (Playwright) | `npm test` |
 | `bad-llm.override.yml` | cấu hình LLM sai, dùng cho mục 5 và cho mutation | (không chạy trực tiếp) |
 
+## Harness chọn lại đơn vị cung cấp (`p118_e2e_db`, backend local cổng 8100)
+
+Ba file dưới đây KHÔNG chạy trên stack Docker. Chúng cần một backend local nối
+vào `p118_e2e_db` với `SERVICE_PROVIDER_MATCHING=1`, vì chúng ghi dữ liệu nghiệp
+vụ và `p118_db` là kho demo — mỗi lần chạy đều đếm `p118_db` trước/sau và dừng
+nếu nó đổi.
+
+| File | Kiểm gì | Gọi model? |
+|---|---|---|
+| `provider_reselection_journey.mjs` | giao diện + ba endpoint, dữ liệu gieo bằng SQL | không |
+| `reselection_through_the_model.mjs` | cả đường từ MỘT CÂU tiếng Việt → SUCCESS, kèm bài đối chứng `INVALID_REQUEST` | **có** |
+| `reselection_across_restarts.mjs` | ba khe, mỗi khe GIẾT và khởi động lại backend | không |
+
+`reselection_across_restarts.mjs` chạy theo pha và **harness gọi nó phải sở hữu
+vòng đời backend** — nó không tự dựng backend:
+
+```
+node reselection_across_restarts.mjs seed      # rồi restart backend
+node reselection_across_restarts.mjs verify1   # rồi restart backend
+node reselection_across_restarts.mjs verify2   # rồi restart backend
+node reselection_across_restarts.mjs verify3
+```
+
+PostgreSQL và volume KHÔNG bị đụng; chỉ tiến trình backend bị giết. Đây là bài
+DUY NHẤT trả lời được "một tiến trình thứ hai đọc dữ liệu này thì thấy gì" — các
+bài `_DEMO_JOBS.clear()` trong `tests/test_db/` là ĐỌC NGUỘI, không phải restart.
+
 ## Chuẩn bị
 
 ```bash

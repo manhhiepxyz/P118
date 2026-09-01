@@ -1,260 +1,107 @@
-"""Khách hàng xin liên kết căn hộ; admin quyết định. Không ai tự nâng quyền.
+"""Đường CŨ để xin liên kết căn hộ đã đóng. Bất biến của nó thì không mất.
 
-Trước lượt này, customer không có đường nào bắt đầu việc liên kết — admin phải
-tự gõ UUID tài khoản và mã cư dân, hai thứ chỉ tồn tại ngoài hệ thống. Thêm một
-đường cho khách hàng là cần thiết, nhưng nó chạm thẳng vào ranh giới tin cậy
-quan trọng nhất của sản phẩm, nên phần lớn test ở đây là về những gì khách hàng
-KHÔNG được làm.
+File này từng kiểm bốn route:
+
+    POST /auth/resident-link-requests            khách nộp đơn
+    GET  /auth/resident-link-requests/me         khách xem trạng thái
+    GET  /admin/resident-link-requests           admin xem hàng đợi
+    POST /admin/resident-link-requests/{id}/decision   admin quyết định
+
+Cả bốn đã bị xoá. Vấn đề không nằm ở chỗ chúng thiếu kiểm tra — chúng có khá
+nhiều — mà ở chỗ NGƯỜI QUYẾT ĐỊNH sai: admin của hệ thống không phải bên xác
+minh quyền sở hữu căn hộ. Đường canonical là `/verification-records`, nơi hồ sơ
+có ảnh chứng minh và ĐƠN VỊ CUNG CẤP là bên ký.
+
+Phân loại các bất biến cũ và chỗ chúng sống tiếp:
+
+    khách không tự quyết định đơn của mình        → ở đây (route đã đóng) +
+                                                    `test_only_a_provider_opens_resident_rights`
+    khách không đọc được hàng đợi nội bộ          → như trên
+    khách không nhét được trường quyền vào body   → không còn body nào để nhét
+    duyệt hai lần không tạo dữ liệu thứ hai       → `system_docker.py`, vì nó
+                                                    cần Ownership provider thật
+    duyệt mở quyền trong MỘT transaction          → như trên
+    từ chối không mở quyền                        → như trên
+    hàng đợi che tên và giấu ID nội bộ            → `/admin/requests` + queue
+                                                    provider của `/review`
+
+Ba bất biến cuối KHÔNG kiểm được ở tầng ASGI này: `/verification-records` gọi
+Ownership provider qua HTTP, và trong pytest nó trỏ tới một service đọc database
+KHÁC. Ghi ra đây thay vì giả vờ đã phủ.
 """
 
 from __future__ import annotations
+
+import uuid
 
 import pytest
 
 from tests.test_db.conftest import _register_and_login
 
-APARTMENT = {"apartment_code": "L-1201", "residential_area": "Vinhomes Ocean Park", "full_name": "Nguyen Van Canary"}
+CREATE = "/api/v1/auth/resident-link-requests"
+MINE = "/api/v1/auth/resident-link-requests/me"
+QUEUE = "/api/v1/admin/resident-link-requests"
 
 
-async def _admin_token(client, db_pool, username: str) -> str:
+async def _user(client, db_pool, username, role=None):
     await _register_and_login(client, username)
-    await db_pool.execute("UPDATE users SET role = 'admin' WHERE username = $1", username)
-    # Role nằm trong token, nên phải lấy token MỚI sau khi nâng quyền.
+    if role:
+        await db_pool.execute("UPDATE users SET role=$2 WHERE username=$1", username, role)
     return await _register_and_login(client, username)
 
 
-async def _pending_request(client, token: str) -> dict:
-    response = await client.post(
-        "/api/v1/auth/resident-link-requests",
-        headers={"Authorization": f"Bearer {token}"},
-        json=APARTMENT,
-    )
-    assert response.status_code == 201, response.text
-    return response.json()
+def _auth(t):
+    return {"Authorization": f"Bearer {t}"}
 
 
-# ---------------------------------------------------------------------------
-# Đường đi đúng
-# ---------------------------------------------------------------------------
+async def _link_count(db_pool) -> int:
+    return await db_pool.fetchval("SELECT count(*) FROM user_resident_links")
 
 
+@pytest.mark.parametrize("vai", ["customer", "admin", "provider"], ids=["khách", "admin", "đơn-vị"])
 @pytest.mark.asyncio
-async def test_a_customer_can_ask_and_then_watch_the_status(client, db_pool):
-    token = await _register_and_login(client, "lr_flow_user")
-    created = await _pending_request(client, token)
+async def test_nobody_can_open_the_legacy_link_request_flow(client, db_pool, vai):
+    """Không vai nào còn nộp hay đọc được đơn theo đường cũ.
 
-    assert created["status"] == "PENDING"
-    assert "resident_id" not in created, "mã cư dân là dữ liệu nội bộ"
-
-    mine = (
-        await client.get("/api/v1/auth/resident-link-requests/me", headers={"Authorization": f"Bearer {token}"})
-    ).json()
-    assert mine["request_id"] == created["request_id"]
-    assert mine["status"] == "PENDING"
-
-
-@pytest.mark.asyncio
-async def test_approval_opens_the_services_in_one_transaction(client, db_pool):
-    token = await _register_and_login(client, "lr_ok_user")
-    created = await _pending_request(client, token)
-    admin = await _admin_token(client, db_pool, "lr_ok_admin")
-
-    decided = await client.post(
-        f"/api/v1/admin/resident-link-requests/{created['request_id']}/decision",
-        headers={"Authorization": f"Bearer {admin}"},
-        json={"decision": "approve"},
-    )
-    assert decided.status_code == 200, decided.text
-
-    user_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'lr_ok_user'")
-    link = await db_pool.fetchrow(
-        "SELECT resident_id, verification_status FROM user_resident_links WHERE user_id = $1", user_id
-    )
-    assert link is not None, "duyệt xong mà không có liên kết"
-    assert link["verification_status"] == "VERIFIED"
-
-    resident = await db_pool.fetchrow(
-        "SELECT apartment_code FROM residents WHERE resident_id = $1", link["resident_id"]
-    )
-    assert resident["apartment_code"] == APARTMENT["apartment_code"]
-
-    # Quyền phải mở ngay ở đường đọc thật, không chỉ ở bảng.
-    fresh = await _register_and_login(client, "lr_ok_user")
-    me = (await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {fresh}"})).json()
-    assert me["resident_verification_status"] == "VERIFIED"
-
-
-@pytest.mark.asyncio
-async def test_rejection_leaves_the_account_without_access(client, db_pool):
-    token = await _register_and_login(client, "lr_no_user")
-    created = await _pending_request(client, token)
-    admin = await _admin_token(client, db_pool, "lr_no_admin")
-
-    await client.post(
-        f"/api/v1/admin/resident-link-requests/{created['request_id']}/decision",
-        headers={"Authorization": f"Bearer {admin}"},
-        json={"decision": "reject"},
-    )
-
-    user_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'lr_no_user'")
-    link = await db_pool.fetchval("SELECT 1 FROM user_resident_links WHERE user_id = $1", user_id)
-    assert link is None, "từ chối mà vẫn tạo liên kết"
-
-    fresh = await _register_and_login(client, "lr_no_user")
-    me = (await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {fresh}"})).json()
-    assert me["resident_verification_status"] != "VERIFIED"
-
-
-# ---------------------------------------------------------------------------
-# Ranh giới tin cậy
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "extra",
-    [
-        {"resident_id": "RES-001"},
-        {"verification_status": "VERIFIED"},
-        {"user_id": "00000000-0000-4000-8000-000000000001"},
-        {"status": "APPROVED"},
-    ],
-)
-async def test_a_customer_cannot_smuggle_authority_fields(client, db_pool, extra):
-    """Gửi kèm `resident_id` hay `VERIFIED` phải là 422, không phải bị bỏ qua.
-
-    Bỏ qua im lặng cũng an toàn hôm nay, nhưng nó không nói cho ai biết rằng có
-    người đang thử — và ngày mai một refactor vô tình đọc tới field đó.
+    Kể cả provider: họ quyết định ở `/verification-records`, không ở đây. Một
+    đường thứ hai còn mở cho đúng một vai vẫn là một đường thứ hai.
     """
-    token = await _register_and_login(client, f"lr_smuggle_{list(extra)[0]}")
-    response = await client.post(
-        "/api/v1/auth/resident-link-requests",
-        headers={"Authorization": f"Bearer {token}"},
-        json={**APARTMENT, **extra},
+    token = await _user(client, db_pool, f"dl_{vai}", role=None if vai == "customer" else vai)
+    truoc = await _link_count(db_pool)
+
+    tao = await client.post(
+        CREATE,
+        json={"apartment_code": "DL01", "residential_area": "Toà S1", "full_name": "Nguyen Van Cu"},
+        headers=_auth(token),
     )
-    assert response.status_code == 422, response.text
+    cua_toi = await client.get(MINE, headers=_auth(token))
+    hang_doi = await client.get(QUEUE, headers=_auth(token))
+    quyet_dinh = await client.post(
+        f"{QUEUE}/{uuid.uuid4()}/decision", json={"decision": "approve"}, headers=_auth(token)
+    )
+
+    for ten, response in (
+        ("tạo đơn", tao),
+        ("xem đơn", cua_toi),
+        ("hàng đợi", hang_doi),
+        ("quyết định", quyet_dinh),
+    ):
+        assert response.status_code in (403, 404, 405), f"{vai} vẫn {ten} được ({response.status_code})"
+    assert await _link_count(db_pool) == truoc, "quyền cư dân đổi qua một đường đã đóng"
 
 
 @pytest.mark.asyncio
-async def test_a_customer_cannot_decide_their_own_request(client, db_pool):
-    token = await _register_and_login(client, "lr_self_user")
-    created = await _pending_request(client, token)
-
-    response = await client.post(
-        f"/api/v1/admin/resident-link-requests/{created['request_id']}/decision",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"decision": "approve"},
-    )
-    assert response.status_code in {401, 403}, response.text
-
-    user_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'lr_self_user'")
-    assert await db_pool.fetchval("SELECT 1 FROM user_resident_links WHERE user_id = $1", user_id) is None
+async def test_an_anonymous_caller_gets_nothing_from_the_legacy_flow(client, db_pool):
+    for path in (CREATE, MINE, QUEUE):
+        assert (await client.get(path)).status_code in (401, 404, 405), path
 
 
 @pytest.mark.asyncio
-async def test_a_customer_cannot_read_the_pending_queue(client, db_pool):
-    token = await _register_and_login(client, "lr_queue_user")
-    response = await client.get("/api/v1/admin/resident-link-requests", headers={"Authorization": f"Bearer {token}"})
-    assert response.status_code in {401, 403}
+async def test_the_legacy_table_is_unreachable_but_its_data_is_not_destroyed(client, db_pool):
+    """Đóng đường HTTP, GIỮ dữ liệu.
 
-
-@pytest.mark.asyncio
-async def test_one_pending_request_per_account(client, db_pool):
-    """Bấm gửi mười lần không được tạo mười dòng chờ duyệt giống hệt nhau."""
-    token = await _register_and_login(client, "lr_dup_user")
-    await _pending_request(client, token)
-
-    again = await client.post(
-        "/api/v1/auth/resident-link-requests",
-        headers={"Authorization": f"Bearer {token}"},
-        json=APARTMENT,
-    )
-    assert again.status_code == 409, again.text
-
-    user_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'lr_dup_user'")
-    count = await db_pool.fetchval(
-        "SELECT count(*) FROM resident_link_requests WHERE user_id = $1 AND status = 'PENDING'", user_id
-    )
-    assert count == 1
-
-
-@pytest.mark.asyncio
-async def test_a_second_approval_is_refused_not_repeated(client, db_pool):
-    """Hai admin bấm cùng lúc: người đến sau nhận 409, không duyệt lại."""
-    token = await _register_and_login(client, "lr_twice_user")
-    created = await _pending_request(client, token)
-    admin = await _admin_token(client, db_pool, "lr_twice_admin")
-    headers = {"Authorization": f"Bearer {admin}"}
-
-    first = await client.post(
-        f"/api/v1/admin/resident-link-requests/{created['request_id']}/decision",
-        headers=headers,
-        json={"decision": "approve"},
-    )
-    second = await client.post(
-        f"/api/v1/admin/resident-link-requests/{created['request_id']}/decision",
-        headers=headers,
-        json={"decision": "approve"},
-    )
-    assert first.status_code == 200
-    assert second.status_code == 409, second.text
-
-
-@pytest.mark.asyncio
-async def test_the_queue_masks_names_and_hides_internal_ids(client, db_pool):
-    token = await _register_and_login(client, "lr_mask_user")
-    await _pending_request(client, token)
-    admin = await _admin_token(client, db_pool, "lr_mask_admin")
-
-    raw = (await client.get("/api/v1/admin/resident-link-requests", headers={"Authorization": f"Bearer {admin}"})).text
-
-    assert "Nguyen Van Canary" not in raw, "danh sách hiện tên đầy đủ"
-    assert "N***** V** C*****" in raw, "tên phải được mask theo từng từ"
-    assert "resident_id" not in raw
-
-
-@pytest.mark.asyncio
-async def test_the_decision_body_carries_only_the_decision(client, db_pool):
-    """Nhận `user_id` từ body cho phép duyệt yêu cầu này, mở quyền cho người khác."""
-    token = await _register_and_login(client, "lr_body_user")
-    created = await _pending_request(client, token)
-    admin = await _admin_token(client, db_pool, "lr_body_admin")
-
-    response = await client.post(
-        f"/api/v1/admin/resident-link-requests/{created['request_id']}/decision",
-        headers={"Authorization": f"Bearer {admin}"},
-        json={"decision": "approve", "user_id": "00000000-0000-4000-8000-000000000009"},
-    )
-    assert response.status_code == 422, response.text
-
-
-@pytest.mark.asyncio
-async def test_an_already_linked_account_cannot_ask_for_another_apartment(client, db_pool):
-    token = await _register_and_login(client, "lr_linked_user")
-    created = await _pending_request(client, token)
-    admin = await _admin_token(client, db_pool, "lr_linked_admin")
-    await client.post(
-        f"/api/v1/admin/resident-link-requests/{created['request_id']}/decision",
-        headers={"Authorization": f"Bearer {admin}"},
-        json={"decision": "approve"},
-    )
-
-    again = await client.post(
-        "/api/v1/auth/resident-link-requests",
-        headers={"Authorization": f"Bearer {token}"},
-        json={**APARTMENT, "apartment_code": "L-9999"},
-    )
-    assert again.status_code == 409, again.text
-
-
-@pytest.mark.asyncio
-async def test_an_unknown_request_id_does_not_confirm_or_deny(client, db_pool):
-    """404 không được dùng để dò xem một mã yêu cầu có thật hay không."""
-    admin = await _admin_token(client, db_pool, "lr_probe_admin")
-    response = await client.post(
-        "/api/v1/admin/resident-link-requests/00000000-0000-4000-8000-0000000000ff/decision",
-        headers={"Authorization": f"Bearer {admin}"},
-        json={"decision": "approve"},
-    )
-    assert response.status_code == 409
-    assert "không tồn tại" not in response.text.lower()
+    Xoá bảng cùng lúc với route là trộn hai việc: một việc có thể hoàn tác bằng
+    một dòng route, một việc thì không. Đơn cũ vẫn phải đọc được để đối soát.
+    """
+    ton_tai = await db_pool.fetchval("SELECT to_regclass('resident_link_requests') IS NOT NULL")
+    assert ton_tai, "bảng đơn cũ bị xoá mất — dữ liệu đối soát không còn"

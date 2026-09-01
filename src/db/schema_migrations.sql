@@ -147,7 +147,11 @@ $$;
 -- là snapshot từ bảng `users` (đừng JOIN lúc sau — user có thể đổi họ tên).
 DO $$
 BEGIN
-    IF to_regclass('workflows') IS NOT NULL THEN
+    -- `viewing_approvals` giờ là KHUNG NHÌN trên `service_approvals` (xem
+    -- migration "GỘP hai hàng đợi duyệt" ở cuối file). Khối này chỉ còn có
+    -- nghĩa với database chưa từng chạy tới đó; chạm vào một view thì
+    -- `CREATE INDEX` đổ `WrongObjectTypeError` và cả file migration dừng lại.
+    IF to_regclass('workflows') IS NOT NULL AND to_regclass('viewing_approvals') IS NULL THEN
         CREATE TABLE IF NOT EXISTS viewing_approvals (
             workflow_id      UUID         PRIMARY KEY REFERENCES workflows(workflow_id),
             task_id          VARCHAR(20)  NOT NULL,
@@ -707,7 +711,14 @@ $$;
 -- Chỉ NỚI ràng buộc, không xoá dòng nào: bằng chứng ai yêu cầu gì vẫn giữ.
 DO $$
 BEGIN
-    IF to_regclass('viewing_approvals') IS NOT NULL THEN
+    -- Chỉ khi nó còn là BẢNG. Sau khi gộp hàng đợi, `viewing_approvals` là
+    -- khung nhìn và `ALTER TABLE` trên view đổ `WrongObjectTypeError` — lỗi ấy
+    -- dừng CẢ file migration, nên mọi thay đổi sau nó cũng không chạy.
+    -- Ràng buộc tương ứng giờ nằm trên `service_approvals`.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+         WHERE table_name = 'viewing_approvals' AND table_type = 'BASE TABLE'
+    ) THEN
         ALTER TABLE viewing_approvals DROP CONSTRAINT IF EXISTS viewing_approvals_status_check;
         ALTER TABLE viewing_approvals
             ADD CONSTRAINT viewing_approvals_status_check
@@ -715,3 +726,938 @@ BEGIN
     END IF;
 END
 $$;
+
+
+-- Sức chứa 0 phải hợp lệ: nó nghĩa là khu KHÔNG còn nhận đăng ký.
+--
+-- Ràng buộc cũ `CHECK (capacity > 0)` cấm đúng trạng thái ấy, nên muốn diễn lại
+-- luồng "khu A hết chỗ → đổi sang khu B" thì phải gieo booking giả cho từng
+-- ngày — vừa sai sự thật vừa không bao giờ phủ hết ngày.
+DO $$
+BEGIN
+    IF to_regclass('zone_capacity_config') IS NOT NULL THEN
+        ALTER TABLE zone_capacity_config DROP CONSTRAINT IF EXISTS zone_capacity_config_capacity_check;
+        ALTER TABLE zone_capacity_config ADD CONSTRAINT zone_capacity_config_capacity_check CHECK (capacity >= 0);
+    END IF;
+END
+$$;
+
+-- Ràng buộc THỨ HAI, dễ bỏ sót.
+--
+-- `parking_capacity` (bảng theo NGÀY) có check riêng, tách khỏi
+-- `zone_capacity_config` (bảng cấu hình). Nới mỗi bảng cấu hình thì seed chạy
+-- tới câu đồng bộ là đổ `CheckViolationError`, và vì migration dừng ở đó nên
+-- cả file seed không hoàn tất.
+DO $$
+BEGIN
+    IF to_regclass('parking_capacity') IS NOT NULL THEN
+        ALTER TABLE parking_capacity DROP CONSTRAINT IF EXISTS parking_capacity_capacity_check;
+        ALTER TABLE parking_capacity ADD CONSTRAINT parking_capacity_capacity_check CHECK (capacity >= 0);
+    END IF;
+END
+$$;
+
+-- Hàng đợi duyệt của ĐƠN VỊ CUNG CẤP, cho mọi dịch vụ.
+--
+-- `viewing_approvals` chỉ phục vụ lịch tham quan và mang cột riêng của nó
+-- (project_id, viewing_date...). Sáu dịch vụ còn lại — đăng ký xe, chỗ đỗ,
+-- bảo trì, chuyển nhà, xe đưa đón, đăng ký tư vấn — chạy thẳng, không ai duyệt.
+--
+-- Một dòng cho MỖI BƯỚC cần duyệt, không phải mỗi workflow: một yêu cầu có thể
+-- gồm nhiều dịch vụ của nhiều đơn vị khác nhau, và mỗi đơn vị chỉ quyết định
+-- phần của mình.
+--
+-- `details` là JSONB thay vì cột cứng: mỗi dịch vụ có dữ kiện khác nhau, và
+-- thêm một dịch vụ không được kéo theo một lần đổi schema.
+CREATE TABLE IF NOT EXISTS service_approvals (
+    workflow_id       UUID         NOT NULL,
+    task_id           VARCHAR(20)  NOT NULL,
+    tool              VARCHAR(64)  NOT NULL,
+    service_label     VARCHAR(120) NOT NULL,
+    details           JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    status            VARCHAR(20)  NOT NULL DEFAULT 'AWAITING'
+                      CHECK (status IN ('AWAITING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+    applicant_user_id UUID,
+    applicant_name    VARCHAR(200),
+    applicant_phone   VARCHAR(20),
+    reject_reason     VARCHAR(500),
+    decided_by        VARCHAR(100),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decided_at        TIMESTAMPTZ,
+    PRIMARY KEY (workflow_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_approvals_status
+    ON service_approvals (status, created_at);
+
+
+-- 2026-08 — GỘP hai hàng đợi duyệt thành MỘT.
+--
+-- `viewing_approvals` ra đời trước, phục vụ riêng lịch tham quan.
+-- `service_approvals` ra sau, phục vụ sáu dịch vụ còn lại. Hai bảng nghĩa là
+-- hai chỗ để lệch nhau, và người duyệt phải nhìn hai danh sách.
+--
+-- Gộp bằng cách giữ MỘT bảng vật lý (`service_approvals`) và biến
+-- `viewing_approvals` thành KHUNG NHÌN trên nó. 108 chỗ đọc trong mã nguồn
+-- không phải sửa dòng nào; chỉ 5 lệnh GHI được chuyển hướng — và cả 5 nằm
+-- trong cùng một file.
+--
+-- Dữ liệu cũ được chuyển sang trước khi bỏ bảng: một lịch tham quan đang chờ
+-- đơn vị duyệt mà biến mất giữa lúc nâng cấp là một khách bị bỏ rơi.
+DO $$
+BEGIN
+    -- Chỉ chạy khi `viewing_approvals` còn là BẢNG. Chạy lần hai thì nó đã là
+    -- view và khối này không làm gì.
+    IF to_regclass('viewing_approvals') IS NOT NULL
+       AND EXISTS (
+           SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'viewing_approvals' AND table_type = 'BASE TABLE'
+       )
+    THEN
+        INSERT INTO service_approvals
+            (workflow_id, task_id, tool, service_label, details, status,
+             applicant_user_id, applicant_name, applicant_phone,
+             reject_reason, decided_by, created_at, decided_at)
+        SELECT v.workflow_id, v.task_id, 'schedule_property_viewing',
+               'Đặt lịch tham quan',
+               jsonb_strip_nulls(jsonb_build_object(
+                   'project_id', v.project_id,
+                   'project_name', v.project_name,
+                   'viewing_date', to_char(v.viewing_date, 'YYYY-MM-DD'),
+                   'viewing_time', v.viewing_time,
+                   'passenger_count', v.passenger_count,
+                   'wants_shuttle', v.wants_shuttle
+               )),
+               v.status, v.applicant_user_id, v.applicant_name, v.applicant_phone,
+               v.reject_reason, v.decided_by, v.created_at, v.decided_at
+          FROM viewing_approvals v
+        ON CONFLICT (workflow_id, task_id) DO NOTHING;
+
+        -- ĐỔI TÊN, không xoá. Dữ liệu đã được chép sang bảng gộp ở trên,
+        -- nhưng "đã chép" chỉ đúng nếu câu INSERT chạy trọn — và một lệnh
+        -- `DROP TABLE` thì không có đường lùi. Bảng cũ nằm lại dưới tên
+        -- `_legacy` cho tới khi có người xác nhận bản gộp chạy ổn; xoá nó là
+        -- một quyết định riêng, có người bấm.
+        ALTER TABLE viewing_approvals RENAME TO viewing_approvals_legacy;
+    END IF;
+
+    IF to_regclass('viewing_approvals') IS NULL THEN
+        -- Cùng TÊN CỘT với bảng cũ: mọi truy vấn đọc giữ nguyên.
+        --
+        -- `wants_shuttle` có COALESCE vì bảng cũ khai NOT NULL DEFAULT FALSE,
+        -- còn `details` thì bỏ hẳn khoá khi giá trị là NULL — đọc ra NULL sẽ
+        -- làm mọi nhánh `if wants_shuttle` đổi nghĩa.
+        EXECUTE $view$
+            CREATE VIEW viewing_approvals AS
+            SELECT workflow_id, task_id, status,
+                   details->>'project_id'                        AS project_id,
+                   details->>'project_name'                      AS project_name,
+                   (details->>'viewing_date')::date              AS viewing_date,
+                   details->>'viewing_time'                      AS viewing_time,
+                   (details->>'passenger_count')::int            AS passenger_count,
+                   COALESCE((details->>'wants_shuttle')::boolean, FALSE) AS wants_shuttle,
+                   applicant_user_id, applicant_name, applicant_phone,
+                   reject_reason, decided_by, created_at, decided_at
+              FROM service_approvals
+             WHERE tool = 'schedule_property_viewing'
+        $view$;
+    END IF;
+END
+$$;
+
+
+-- Khung nhìn `viewing_approvals` GHI ĐƯỢC.
+--
+-- Gộp hàng đợi thì mọi chỗ ĐỌC giữ nguyên nhờ khung nhìn, nhưng chỗ GHI thì
+-- không: PostgreSQL từ chối `INSERT` vào một view có cột dẫn xuất
+-- (`details->>'project_id'` không phải cột của bảng gốc).
+--
+-- Đo được: 12 test đỏ ngay khi gộp, tất cả vì chúng seed dữ liệu bằng `INSERT
+-- INTO viewing_approvals`. Sửa từng test là bỏ sót — mã cũ, script vận hành và
+-- test chưa viết đều có thể ghi vào đây.
+--
+-- Trigger dịch ngược: cột riêng của tham quan gói lại thành `details`, phần
+-- còn lại đi thẳng. Sau đó bảng chỉ còn MỘT, mà giao diện cũ vẫn nguyên vẹn.
+CREATE OR REPLACE FUNCTION viewing_approvals_write() RETURNS trigger AS $fn$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO service_approvals (
+            workflow_id, task_id, tool, service_label, details, status,
+            applicant_user_id, applicant_name, applicant_phone,
+            reject_reason, decided_by, created_at, decided_at
+        ) VALUES (
+            NEW.workflow_id, NEW.task_id, 'schedule_property_viewing',
+            'Đặt lịch tham quan',
+            jsonb_strip_nulls(jsonb_build_object(
+                'project_id', NEW.project_id,
+                'project_name', NEW.project_name,
+                'viewing_date', to_char(NEW.viewing_date, 'YYYY-MM-DD'),
+                'viewing_time', NEW.viewing_time,
+                'passenger_count', NEW.passenger_count,
+                'wants_shuttle', NEW.wants_shuttle
+            )),
+            COALESCE(NEW.status, 'AWAITING'),
+            NEW.applicant_user_id, NEW.applicant_name, NEW.applicant_phone,
+            NEW.reject_reason, NEW.decided_by,
+            COALESCE(NEW.created_at, NOW()), NEW.decided_at
+        )
+        -- GHIM LẠI nghĩa là cần một quyết định MỚI — không phải "đã có rồi, thôi".
+        --
+        -- `DO NOTHING` ở đây là bản sao còn sót của luật cũ; luật mới đã được
+        -- sửa ở `save_pending_service_approvals` cho các dịch vụ khác, nhưng
+        -- lịch tham quan đi qua view này nên nó giữ nguyên hành vi cũ. Một luật,
+        -- hai bản cài đặt — và bản cũ mới là bản người dùng chạm vào.
+        --
+        -- Đo được trên 09430928, sau khi đổi ngày tham quan bằng lời:
+        --
+        --     workflow_tasks.T1   WAITING_APPROVAL   viewing_date 2026-09-30
+        --     service_approvals   EXPIRED            viewing_date 2026-09-10
+        --
+        -- Bước chờ một quyết định, hồ sơ thì đã hết hạn và mang ngày CŨ. Không
+        -- ai được hỏi, không gì tới đơn vị tour, và yêu cầu treo vĩnh viễn.
+        ON CONFLICT (workflow_id, task_id) DO UPDATE SET
+            status        = COALESCE(EXCLUDED.status, 'AWAITING'),
+            details       = EXCLUDED.details,
+            decided_by    = NULL,
+            decided_at    = NULL,
+            reject_reason = NULL,
+            created_at    = NOW()
+        WHERE service_approvals.status IN ('AWAITING', 'EXPIRED');
+        RETURN NEW;
+    END IF;
+
+    UPDATE service_approvals SET
+        status            = COALESCE(NEW.status, status),
+        reject_reason     = NEW.reject_reason,
+        decided_by        = NEW.decided_by,
+        decided_at        = NEW.decided_at,
+        applicant_name    = NEW.applicant_name,
+        applicant_phone   = NEW.applicant_phone,
+        details           = details || jsonb_strip_nulls(jsonb_build_object(
+                                'project_id', NEW.project_id,
+                                'project_name', NEW.project_name,
+                                'viewing_date', to_char(NEW.viewing_date, 'YYYY-MM-DD'),
+                                'viewing_time', NEW.viewing_time,
+                                'passenger_count', NEW.passenger_count,
+                                'wants_shuttle', NEW.wants_shuttle
+                            ))
+     WHERE workflow_id = OLD.workflow_id
+       AND task_id = OLD.task_id
+       AND tool = 'schedule_property_viewing';
+    RETURN NEW;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS viewing_approvals_write_trg ON viewing_approvals;
+CREATE TRIGGER viewing_approvals_write_trg
+    INSTEAD OF INSERT OR UPDATE ON viewing_approvals
+    FOR EACH ROW EXECUTE FUNCTION viewing_approvals_write();
+
+-- =============================================================
+-- 2026-08 — Observability Metrics
+-- =============================================================
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL THEN
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS total_cost NUMERIC(10, 4) NOT NULL DEFAULT 0.0;
+        ALTER TABLE workflows ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
+    END IF;
+END
+$$;
+
+
+-- 2026-08 — workflow_tasks: bằng chứng gửi provider
+--
+-- Ba cột, và thứ tự các bước ở đây có nghĩa. Cột được thêm KHÔNG default trước,
+-- rồi backfill row cũ thành `UNKNOWN`, rồi mới đặt default `NOT_SUBMITTED` cho
+-- row mới.
+--
+-- Thêm thẳng với `DEFAULT 'NOT_SUBMITTED'` sẽ backfill mọi row cũ thành "chưa
+-- gửi" — một khẳng định không ai kiểm được, và nó nghiêng đúng về phía nguy
+-- hiểm: lần chạy sau sẽ gửi lại một việc có thể đã được provider ghi nhận.
+-- Dữ liệu không có bằng chứng phải là `UNKNOWN`.
+DO $$
+BEGIN
+    IF to_regclass('workflow_tasks') IS NOT NULL THEN
+        ALTER TABLE workflow_tasks
+            ADD COLUMN IF NOT EXISTS provider_submission_status VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS external_request_id        VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS provider_idempotency_key   VARCHAR(160);
+
+        -- Idempotent: chạy lại chỉ chạm những row còn NULL.
+        UPDATE workflow_tasks SET provider_submission_status = 'UNKNOWN'
+         WHERE provider_submission_status IS NULL;
+
+        ALTER TABLE workflow_tasks
+            ALTER COLUMN provider_submission_status SET DEFAULT 'NOT_SUBMITTED';
+        -- `SET NOT NULL` vốn CHẠY LẶP ĐƯỢC: gọi lại trên cột đã NOT NULL không
+        -- lỗi. Nên một `EXCEPTION WHEN others` quanh nó không bảo vệ gì — nó chỉ
+        -- che một lỗi thật. Và lỗi thật ở đúng bước này nghĩa là deployment đi
+        -- tiếp với một cột còn cho phép NULL, tức mọi hàng rào dựng trên cột ấy
+        -- im lặng biến mất. Hỏng thì migration phải dừng.
+        ALTER TABLE workflow_tasks
+            ALTER COLUMN provider_submission_status SET NOT NULL;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'ck_workflow_tasks_submission_status'
+        ) THEN
+            ALTER TABLE workflow_tasks
+                ADD CONSTRAINT ck_workflow_tasks_submission_status
+                CHECK (provider_submission_status IN (
+                    'NOT_SUBMITTED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN'
+                ));
+        END IF;
+    END IF;
+END
+$$;
+
+-- 2026-08 — workflow_plan_revisions cho database đã tồn tại.
+-- Thân bảng + trigger append-only nằm ở `schema.sql`; khối này chỉ tạo lại cho
+-- database cũ chưa có bảng, và gắn lại trigger nếu bảng có mà trigger thì không.
+DO $$
+BEGIN
+    IF to_regclass('workflows') IS NOT NULL AND to_regclass('workflow_plan_revisions') IS NULL THEN
+        CREATE TABLE workflow_plan_revisions (
+            revision_id         BIGSERIAL   PRIMARY KEY,
+            workflow_id         UUID        NOT NULL REFERENCES workflows(workflow_id),
+            revision_number     INTEGER     NOT NULL CHECK (revision_number > 0),
+            requester_user_id   UUID,
+            plan_version_before VARCHAR(32) NOT NULL,
+            plan_version_after  VARCHAR(32) NOT NULL,
+            accepted_patch      JSONB       NOT NULL,
+            targets             JSONB       NOT NULL,
+            consequence         VARCHAR(40) NOT NULL,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_plan_revisions_order UNIQUE (workflow_id, revision_number)
+        );
+        CREATE INDEX idx_plan_revisions_by_workflow
+            ON workflow_plan_revisions(workflow_id, revision_number);
+    END IF;
+END
+$$;
+
+-- Ràng buộc thứ tự cho database ĐÃ CÓ bảng.
+--
+-- Khối `CREATE TABLE` ở trên chỉ chạy khi bảng chưa tồn tại, nên một database
+-- có bảng mà thiếu ràng buộc sẽ không bao giờ được vá. Phát hiện khi chạy
+-- mutation "bỏ unique revision order": test đỏ đúng như mong đợi, nhưng sau khi
+-- khôi phục file thì migration KHÔNG dựng lại được ràng buộc — chính là lỗ hổng
+-- mà migration sinh ra để bịt.
+DO $$
+BEGIN
+    IF to_regclass('workflow_plan_revisions') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_plan_revisions_order')
+    THEN
+        ALTER TABLE workflow_plan_revisions
+            ADD CONSTRAINT uq_plan_revisions_order UNIQUE (workflow_id, revision_number);
+    END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION workflow_plan_revisions_append_only() RETURNS trigger AS $fn$
+BEGIN
+    RAISE EXCEPTION 'workflow_plan_revisions chi duoc GHI THEM; % bi tu choi', TG_OP;
+END;
+$fn$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+    IF to_regclass('workflow_plan_revisions') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS workflow_plan_revisions_no_update ON workflow_plan_revisions;
+        CREATE TRIGGER workflow_plan_revisions_no_update
+            BEFORE UPDATE OR DELETE ON workflow_plan_revisions
+            FOR EACH ROW EXECUTE FUNCTION workflow_plan_revisions_append_only();
+    END IF;
+END
+$$;
+
+-- =============================================================
+-- 2026-08 — verification_materializations
+--
+-- Idempotent: `IF NOT EXISTS` + `ADD CONSTRAINT` bọc trong DO block, nên chạy
+-- lại trên database đã có bảng là no-op. KHÔNG DROP, KHÔNG TRUNCATE — bảng này
+-- mang trạng thái phục hồi, xoá nó nghĩa là mất đúng thứ nó sinh ra để giữ.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS verification_materializations (
+    record_id                 UUID PRIMARY KEY,
+    -- NULL cho tới khi đọc được provider. Xem ghi chú ở
+    -- `verification_recovery.py`: đoán 'apartment' là ghi một sự kiện
+    -- CHƯA BIẾT vào audit dưới dạng ĐÃ BIẾT.
+    record_type               VARCHAR(20),
+    requested_decision        VARCHAR(10)  NOT NULL,
+    provider_decision_status  VARCHAR(20)  NOT NULL DEFAULT 'UNKNOWN',
+    materialization_status    VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+    -- Khoá ổn định theo record_id. Cùng một hồ sơ, dù retry bao nhiêu lần và
+    -- từ tiến trình nào, luôn ra cùng một khoá.
+    idempotency_key           VARCHAR(120) NOT NULL,
+    -- Chỉ MÃ lỗi, không bao giờ message. Message của provider và của database
+    -- đều từng mang nguyên payload, và bảng này là thứ bị dump vào issue.
+    safe_error_code           VARCHAR(50),
+    attempt_count             INTEGER      NOT NULL DEFAULT 0,
+    created_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_verif_mat_idempotency UNIQUE (idempotency_key),
+    CONSTRAINT verif_mat_type_check
+        CHECK (record_type IS NULL OR record_type IN ('apartment', 'vehicle')),
+    CONSTRAINT verif_mat_decision_check
+        CHECK (requested_decision IN ('approve', 'reject')),
+    CONSTRAINT verif_mat_provider_check
+        CHECK (provider_decision_status IN ('UNKNOWN', 'PENDING', 'APPROVED', 'REJECTED')),
+    CONSTRAINT verif_mat_status_check
+        CHECK (materialization_status IN ('NOT_REQUIRED', 'PENDING', 'SUCCESS', 'FAILED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_verif_mat_unfinished
+    ON verification_materializations(materialization_status)
+    WHERE materialization_status IN ('PENDING', 'FAILED');
+
+-- `record_type` được phép NULL cho tới khi đọc được provider.
+--
+-- Bảng ra đời với `NOT NULL`, và hệ quả là caller phải điền một giá trị lúc
+-- CHƯA biết loại hồ sơ — thực tế nó điền 'apartment'. Một biên lai của hồ sơ
+-- XE bị ghi là căn hộ nếu tiến trình chết giữa lúc mở biên lai và lúc đọc
+-- provider. Đó là dữ liệu audit sai, và nó sai một cách im lặng.
+--
+-- Idempotent: chạy lại trên cột đã nullable là no-op.
+DO $$
+BEGIN
+    IF to_regclass('verification_materializations') IS NOT NULL THEN
+        ALTER TABLE verification_materializations ALTER COLUMN record_type DROP NOT NULL;
+        ALTER TABLE verification_materializations DROP CONSTRAINT IF EXISTS verif_mat_type_check;
+        ALTER TABLE verification_materializations
+            ADD CONSTRAINT verif_mat_type_check
+            CHECK (record_type IS NULL OR record_type IN ('apartment', 'vehicle'));
+    END IF;
+END $$;
+
+-- OTP đăng ký và OTP đặt lại mật khẩu là hai chứng từ khác nhau. Database cũ
+-- chỉ có khoá `email`; mọi dòng legacy là OTP đăng ký.
+DO $$
+DECLARE
+    old_primary_key TEXT;
+BEGIN
+    IF to_regclass('registration_otps') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE registration_otps
+        ADD COLUMN IF NOT EXISTS purpose VARCHAR(32) NOT NULL DEFAULT 'registration';
+
+    SELECT conname INTO old_primary_key
+      FROM pg_constraint
+     WHERE conrelid = 'registration_otps'::regclass
+       AND contype = 'p'
+       AND pg_get_constraintdef(oid) = 'PRIMARY KEY (email)';
+
+    IF old_primary_key IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE registration_otps DROP CONSTRAINT %I', old_primary_key);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'registration_otps'::regclass
+           AND contype = 'p'
+           AND pg_get_constraintdef(oid) = 'PRIMARY KEY (email, purpose)'
+    ) THEN
+        ALTER TABLE registration_otps
+            ADD CONSTRAINT registration_otps_pkey PRIMARY KEY (email, purpose);
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_registration_otps_purpose') THEN
+        ALTER TABLE registration_otps
+            ADD CONSTRAINT ck_registration_otps_purpose
+            CHECK (purpose IN ('registration', 'password_reset'));
+    END IF;
+
+    -- Default chỉ phục vụ backfill legacy. Đường ghi mới phải nói rõ mục đích.
+    ALTER TABLE registration_otps ALTER COLUMN purpose DROP DEFAULT;
+END $$;
+
+-- 2026-08 — LÝ DO TỪ CHỐI phải có MÃ, không chỉ có câu chữ.
+--
+-- Đo được trên yêu cầu thật: đơn vị từ chối `book_parking` với câu "Khu B đã
+-- hết chỗ ngày 22/09/2028. Bạn chọn khu khác hoặc ngày khác giúp mình nhé."
+-- Câu ấy nói đúng thứ khách cần làm, và hệ thống không làm gì với nó: mọi
+-- REJECTED đều bị coi là kết thúc, nên workflow đứng WAITING_APPROVAL với
+-- `pay_fee` treo mãi và khách không có ô nào để sửa.
+--
+-- Không đọc câu chữ để quyết định. Một `LIKE '%hết chỗ%'` sẽ hỏng ngay lần đầu
+-- ai đó viết "không còn slot", và nó biến chính tả của người duyệt thành logic
+-- nghiệp vụ. Mã đóng thì máy đọc mã, người đọc câu.
+--
+-- NULL được phép: dòng có TRƯỚC cột này không có mã nào, và bịa một mã cho
+-- chúng là bịa ra một quyết định đơn vị chưa từng đưa ra.
+ALTER TABLE service_approvals ADD COLUMN IF NOT EXISTS reject_code VARCHAR(32);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'ck_service_approvals_reject_code'
+    ) THEN
+        ALTER TABLE service_approvals ADD CONSTRAINT ck_service_approvals_reject_code
+            CHECK (reject_code IS NULL OR reject_code IN (
+                'NO_AVAILABILITY', 'INVALID_REQUEST', 'SERVICE_UNAVAILABLE', 'OTHER'
+            ));
+    END IF;
+END $$;
+
+
+-- 2026-08 — `service_approvals.kind`: phân biệt BƯỚC với LỜI NHỜ.
+--
+-- Hai nút "Đổi lịch" / "Huỷ lịch" trên thẻ kết quả ghim một hồ sơ vào chính
+-- hàng đợi đơn vị đang dùng. Hồ sơ ấy không phải một bước: không tool, không
+-- dòng `workflow_tasks`. Thiếu cột này thì lượt resume sau khi đơn vị duyệt sẽ
+-- gọi `update_task_status` cho một `task_id` không tồn tại và ném giữa chừng.
+--
+-- Mặc định `TASK`: mọi dòng có trước cột này đều là bước.
+ALTER TABLE service_approvals ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'TASK';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'ck_service_approvals_kind'
+    ) THEN
+        ALTER TABLE service_approvals ADD CONSTRAINT ck_service_approvals_kind
+            CHECK (kind IN ('TASK', 'REQUEST'));
+    END IF;
+END $$;
+
+
+-- 2026-08 — `parking_bookings.status`: chỗ đã huỷ ở lại bảng.
+--
+-- Huỷ MUỘN vẫn huỷ nhưng không hoàn tiền, nên dòng `payments` PAID còn nguyên
+-- và trỏ vào booking. Xoá booking khi ấy để khoản tiền trỏ vào hư không.
+--
+-- `to_regclass` KHÔNG qualify schema: migration bám theo search_path, nên guard
+-- phải giải tên bảng đúng cách `ALTER` bên dưới sẽ giải.
+DO $$
+BEGIN
+    IF to_regclass('parking_bookings') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE parking_bookings ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_parking_bookings_status') THEN
+        ALTER TABLE parking_bookings ADD CONSTRAINT ck_parking_bookings_status
+            CHECK (status IN ('ACTIVE', 'CANCELLED'));
+    END IF;
+
+    -- Ràng buộc "một xe một chỗ mỗi ngày" chỉ tính chỗ CÒN HIỆU LỰC. Giữ bản cũ
+    -- nghĩa là chỗ đã huỷ vẫn chặn lần đặt lại của chính người vừa huỷ — và đặt
+    -- lại là lý do phổ biến nhất người ta bấm huỷ.
+    --
+    -- Đổi từ CONSTRAINT sang partial INDEX: PostgreSQL không có `UNIQUE ... WHERE`
+    -- ở dạng table constraint. Tên giữ nguyên nên `_violated()` vẫn nhận ra nó.
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_bookings_vehicle_date') THEN
+        ALTER TABLE parking_bookings DROP CONSTRAINT uq_bookings_vehicle_date;
+    END IF;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_vehicle_date
+        ON parking_bookings (vehicle_id, booking_date)
+        WHERE status = 'ACTIVE';
+END $$;
+
+
+-- 2026-08 — Đơn vị cung cấp: quan hệ tài khoản ↔ đơn vị, và chủ sở hữu của
+-- mỗi dòng chờ duyệt.
+--
+-- Trước đây `/service-approvals` chỉ kiểm ROLE: mọi tài khoản `provider` thấy
+-- và quyết định được TOÀN BỘ hàng đợi. Điều đó đúng khi hệ thống chỉ có một
+-- đơn vị cung cấp — "toàn bộ hàng đợi" chính là "phần của mình".
+--
+-- Nó hết đúng từ lúc có nhiều đơn vị. Khi P-118 đề xuất một đội cụ thể mà bất
+-- kỳ tài khoản provider nào cũng bấm duyệt được, việc chọn đơn vị chỉ tồn tại
+-- trên dữ liệu chứ không tồn tại trong nghiệp vụ — và lúc đó nó ĐÚNG là IDOR.
+--
+-- BẢNG LIÊN KẾT, không phải một cột trên `users`: một tài khoản quản lý được
+-- nhiều đơn vị, và một đơn vị có nhiều nhân viên. Dùng role làm danh tính đơn
+-- vị thì thêm nhân viên thứ hai là phải đổi schema lần nữa.
+-- Bọc trong `to_regclass`: file migration còn được chạy trên database LEGACY
+-- chỉ có vài bảng (xem `test_schema_migrations_upgrades_legacy_table`), nơi
+-- `users` chưa tồn tại — và `REFERENCES users(id)` ở đó nổ ngay, kéo theo cả
+-- những migration phía sau. Cùng khuôn với khối `payments` bên trên.
+DO $$
+BEGIN
+    IF to_regclass('users') IS NOT NULL THEN
+        CREATE TABLE IF NOT EXISTS service_provider_accounts (
+            user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            service_provider_id VARCHAR(32) NOT NULL,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (user_id, service_provider_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_service_provider_accounts_provider
+            ON service_provider_accounts (service_provider_id);
+    END IF;
+END $$;
+
+-- Cột cho phép NULL để không phá dòng đã có. NULL nghĩa là "dòng có TRƯỚC khi
+-- có khái niệm đơn vị", và luật đọc phải FAIL-CLOSED với nó: KHÔNG AI thấy —
+-- không provider nào, và admin cũng không (admin giám sát qua `/admin/requests`,
+-- không qua hàng đợi của đơn vị).
+--
+-- Dòng NULL vì thế là dòng không ai quyết định được. Dọn chúng là việc NGHIỆP
+-- VỤ, không phải phép biến đổi schema, nên nó KHÔNG nằm ở đây: chạy tay một
+-- lần bằng `scripts/backfill_service_provider.py`, có người đọc con số trước
+-- khi ghi. Một migration đoán hộ nghĩa là mọi môi trường nhận cùng một cái
+-- đoán, kể cả môi trường mà cái đoán ấy sai.
+--
+-- Mặc định ngược lại — "chưa gán thì ai cũng thấy" — biến mọi dòng lịch sử
+-- thành một lỗ hổng ngay tại thời điểm migration chạy, và không ai để ý vì
+-- màn hình trông vẫn đúng.
+DO $$
+BEGIN
+    IF to_regclass('service_approvals') IS NOT NULL THEN
+        ALTER TABLE service_approvals
+            ADD COLUMN IF NOT EXISTS service_provider_id VARCHAR(32);
+
+        CREATE INDEX IF NOT EXISTS idx_service_approvals_provider
+            ON service_approvals (service_provider_id, status, created_at);
+    END IF;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
+-- Bước B — BÁO GIÁ CÓ DANH TÍNH
+-- ---------------------------------------------------------------------------
+-- Bước A khoá quyền sở hữu, nhưng đơn vị vẫn đến từ một bảng cứng trong mã.
+-- Ngay khi P-118 CHỌN đơn vị theo giá, phải trả lời được: lấy gì làm bằng
+-- chứng rằng đơn vị này đã báo giá này cho yêu cầu này? Không có bằng chứng
+-- thì `service_provider_id` chỉ là một chuỗi đi kèm request — và mọi thứ
+-- người dùng gửi được thì người dùng sửa được.
+--
+-- Bảng này là bằng chứng ấy. Nó KHÔNG lưu `goal`, prompt hay văn bản hội
+-- thoại: báo giá là chứng từ thương mại, nó chỉ cần dữ kiện định giá.
+--
+-- `request_fingerprint` là khoá của toàn bộ cơ chế: băm từ input canonical của
+-- dịch vụ. Đổi ngày/xe/thang máy/bốc xếp ra vân tay khác, nên báo giá cũ không
+-- dùng lại được cho yêu cầu đã đổi. `max_price` KHÔNG nằm trong vân tay và
+-- không bao giờ rời khỏi P-118.
+CREATE TABLE IF NOT EXISTS service_quotes (
+    -- ID nội bộ của P-118. Sinh ở đây, không nhận từ provider: một mã do bên
+    -- ngoài đặt là một mã bên ngoài có thể trùng, hoặc đoán.
+    quote_id            UUID         PRIMARY KEY,
+    -- Mã do provider đặt. Giữ nguyên chuỗi họ trả — đây là thứ để đối chiếu
+    -- khi có tranh chấp, nên không chuẩn hoá, không cắt, không viết hoa.
+    external_quote_id   VARCHAR(128) NOT NULL,
+    service_provider_id VARCHAR(32)  NOT NULL,
+    service_type        VARCHAR(64)  NOT NULL,
+    -- INTEGER, không phải NUMERIC/FLOAT. VND không có phần lẻ, và số thực làm
+    -- hai lần cộng cùng một hoá đơn ra hai kết quả.
+    amount              BIGINT       NOT NULL CHECK (amount > 0),
+    currency            VARCHAR(8)   NOT NULL CHECK (currency IN ('VND')),
+    request_fingerprint VARCHAR(64)  NOT NULL,
+    valid_until         TIMESTAMPTZ  NOT NULL,
+    status              VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE'
+                        CHECK (status IN ('ACTIVE', 'CONFIRMED', 'EXPIRED', 'SUPERSEDED')),
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    confirmed_at        TIMESTAMPTZ,
+    -- NEO BẮT BUỘC, không phải tuỳ chọn. Vân tay tính từ input, nên hai
+    -- workflow khác nhau xin cùng một việc có CÙNG vân tay. Không neo thì báo
+    -- giá của người này dùng được cho yêu cầu của người kia — đúng nghĩa IDOR,
+    -- chỉ là trên chứng từ thay vì trên hàng đợi.
+    --
+    -- Bản đầu để hai cột NULLABLE và `kiem_bao_gia()` chỉ kiểm khi caller chịu
+    -- truyền. Nghĩa là luật chỉ tồn tại với những call site nhớ tới nó — tức
+    -- không tồn tại. NOT NULL đẩy nó xuống chỗ không ai quên được.
+    workflow_id         UUID         NOT NULL,
+    task_id             VARCHAR(20)  NOT NULL,
+    -- CONFIRMED thì phải có mốc thời gian, và chưa CONFIRMED thì không được
+    -- có. Ràng buộc ở database chứ không ở tầng ứng dụng: một đường ghi mới
+    -- quên đặt `confirmed_at` sẽ vỡ ngay, chứ không để lại một chứng từ nói
+    -- "đã xác nhận" mà không nói lúc nào.
+    CONSTRAINT chk_service_quotes_confirmed_at
+        CHECK ((status = 'CONFIRMED') = (confirmed_at IS NOT NULL))
+);
+
+-- Khoá ngoại TỔNG HỢP tới đúng BƯỚC, cùng khuôn với `approval_decisions` và
+-- `execution_logs`. Trỏ vào `workflows` thôi là chưa đủ: nó cho phép neo vào
+-- một `task_id` không tồn tại, và một chứng từ neo vào hư vô thì không khác gì
+-- chứng từ không neo.
+--
+-- Tách khỏi `CREATE TABLE` và bọc điều kiện vì file này còn chạy trên database
+-- LEGACY chỉ có vài bảng (xem `test_schema_migrations_upgrades_legacy_table`),
+-- nơi `workflow_tasks` chưa có ràng buộc duy nhất `(workflow_id, task_id)` —
+-- và `REFERENCES` ở đó nổ ngay, kéo theo mọi migration phía sau. Cùng khuôn
+-- với khối `service_provider_accounts` bên trên.
+--
+-- Khối này cũng nâng cấp bảng đã tồn tại với hai cột nullable (bản đầu của
+-- bước B). XOÁ dòng chưa neo thay vì cố vá: một chứng từ không biết mình thuộc
+-- yêu cầu nào thì không tiêu thụ được — `kiem_bao_gia()` chặn nó ở mọi đường —
+-- nên nó không phải dữ liệu, nó là rác. Bảng này trẻ hơn chính ràng buộc đang
+-- thêm, nên không có dòng nào như vậy ngoài môi trường dev của tuần này.
+DO $$
+BEGIN
+    IF to_regclass('service_quotes') IS NULL THEN
+        RETURN;
+    END IF;
+
+    DELETE FROM service_quotes WHERE workflow_id IS NULL OR task_id IS NULL;
+    ALTER TABLE service_quotes ALTER COLUMN workflow_id SET NOT NULL;
+    ALTER TABLE service_quotes ALTER COLUMN task_id SET NOT NULL;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_service_quotes_task')
+       AND EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'uq_workflow_tasks_wf_task' AND contype IN ('u', 'p')
+       )
+    THEN
+        ALTER TABLE service_quotes
+            ADD CONSTRAINT fk_service_quotes_task
+            FOREIGN KEY (workflow_id, task_id) REFERENCES workflow_tasks (workflow_id, task_id);
+    END IF;
+END $$;
+
+-- Tra theo BƯỚC: "báo giá nào đang sống cho bước này". Đây là truy vấn nóng —
+-- mọi lượt hiển thị và mọi lượt tiêu thụ đều đi qua nó.
+CREATE INDEX IF NOT EXISTS idx_service_quotes_task
+    ON service_quotes (workflow_id, task_id, status);
+
+-- Tra theo VÂN TAY: "yêu cầu này đã có báo giá nào rồi". Dùng khi một lượt sửa
+-- làm các báo giá của vân tay CŨ thành SUPERSEDED.
+CREATE INDEX IF NOT EXISTS idx_service_quotes_fingerprint
+    ON service_quotes (request_fingerprint, status);
+
+-- Một provider không được báo hai giá cho CÙNG một bước và CÙNG một yêu cầu.
+--
+-- Không có ràng buộc này thì một lượt xin báo giá chạy hai lần (retry sau
+-- timeout, hai tab, hai lượt poll) để lại hai dòng ACTIVE cùng đơn vị khác giá,
+-- và luật chọn sẽ lấy dòng rẻ hơn — tức hệ thống tự thưởng cho mình mỗi lần
+-- mạng chập chờn. `WHERE status = 'ACTIVE'` để lịch sử vẫn giữ được các báo
+-- giá đã hết hạn hay bị thay thế.
+--
+-- Kèm theo nó là một NGHĨA VỤ: dòng hết hạn phải được chuyển sang EXPIRED
+-- trước khi xin báo giá mới. Nếu không, một dòng quá hạn vẫn mang `ACTIVE` và
+-- chặn vĩnh viễn mọi lượt hỏi lại của cùng đơn vị cho cùng yêu cầu — ràng buộc
+-- an toàn biến thành ngõ cụt. Xem `don_bao_gia_va_de_xuat()` — cùng một
+-- transaction dọn cả chứng từ lẫn đề xuất đang trỏ vào chúng.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_active
+    ON service_quotes (workflow_id, task_id, service_provider_id, request_fingerprint)
+ WHERE status = 'ACTIVE';
+
+-- Cùng một đơn vị không được dùng MỘT mã báo giá cho hai chứng từ khác nhau.
+--
+-- Không unique toàn cục: hai đơn vị khác nhau hoàn toàn có thể cùng đánh số
+-- `Q-001`, và ép chúng phải khác nhau là áp một luật của P-118 lên hệ thống
+-- đánh mã nội bộ của người khác.
+--
+-- Nhưng TRONG một đơn vị thì mã phải là danh tính. Trùng mã nghĩa là lúc tranh
+-- chấp, câu "chúng tôi đã xác nhận Q-001" trỏ tới hai con số khác nhau và
+-- không ai phân xử được.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_quotes_external
+    ON service_quotes (service_provider_id, external_quote_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Bước D — ĐỀ XUẤT ĐƠN VỊ, và lượt xác nhận của người dùng
+-- ---------------------------------------------------------------------------
+-- Bước C chọn được một đơn vị nhưng không ghi gì: nó chỉ ĐỌC. Giữa lúc P-118
+-- nói "mình đề xuất Đại Tín, 470.000" và lúc khách bấm đồng ý có một khoảng
+-- thời gian thật — họ đọc, họ hỏi người nhà, họ đóng tab rồi mở lại. Khoảng ấy
+-- phải sống qua restart, qua worker thứ hai, qua một lượt deploy.
+--
+-- Nên đề xuất là một BẢN GHI, không phải một biến trong bộ nhớ.
+--
+-- KHÔNG chép provider/amount/currency vào đây
+-- ------------------------------------------
+-- Chúng đã nằm trên chứng từ báo giá. Chép sang là tạo nguồn sự thật thứ hai,
+-- và hai nguồn thì lệch — lệch đúng vào lúc báo giá bị thay thế hoặc hết hạn,
+-- tức đúng lúc con số cũ trông vẫn hợp lệ. `quote_id` là khoá ngoại; muốn biết
+-- giá thì đọc chứng từ.
+--
+-- `approval_actor` KHÔNG có mặt ở đây, và đó là cố ý. Nó là thứ SUY RA lúc
+-- dựng câu trả lời (`USER` trước xác nhận, `PROVIDER` sau), không phải một
+-- trạng thái được lưu. Lưu nó nghĩa là có hai chỗ nói "đang chờ ai", và chỗ
+-- thứ hai sẽ đứng im khi việc đổi tay.
+CREATE TABLE IF NOT EXISTS service_provider_proposals (
+    proposal_id UUID        PRIMARY KEY,
+    workflow_id UUID        NOT NULL,
+    task_id     VARCHAR(20) NOT NULL,
+    -- Chứng từ được đề xuất. Nguồn DUY NHẤT cho đơn vị, giá và tiền tệ.
+    quote_id    UUID        NOT NULL REFERENCES service_quotes (quote_id),
+    status      VARCHAR(16) NOT NULL DEFAULT 'PROPOSED'
+                CHECK (status IN ('PROPOSED', 'CONFIRMED', 'EXPIRED', 'SUPERSEDED')),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,
+    -- Cùng khuôn với `service_quotes`: đã xác nhận thì phải có mốc thời gian,
+    -- chưa xác nhận thì không được có.
+    CONSTRAINT chk_proposals_confirmed_at
+        CHECK ((status = 'CONFIRMED') = (confirmed_at IS NOT NULL))
+);
+
+-- Khoá ngoại tổng hợp tới đúng BƯỚC, và điều kiện `uq_workflow_tasks_wf_task`
+-- vì file này còn chạy trên database legacy chỉ có vài bảng.
+DO $$
+BEGIN
+    IF to_regclass('service_provider_proposals') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_proposals_task')
+       AND EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'uq_workflow_tasks_wf_task' AND contype IN ('u', 'p')
+       )
+    THEN
+        ALTER TABLE service_provider_proposals
+            ADD CONSTRAINT fk_proposals_task
+            FOREIGN KEY (workflow_id, task_id) REFERENCES workflow_tasks (workflow_id, task_id);
+    END IF;
+END $$;
+
+-- ĐÚNG MỘT đề xuất đang sống trên mỗi bước.
+--
+-- Không có ràng buộc này thì hai lượt đề xuất đồng thời (khách bấm hỏi lại,
+-- hai tab, một lượt retry) để lại hai dòng PROPOSED — và khách xác nhận một
+-- cái trong khi màn hình đang hiển thị cái kia. Đề xuất mới phải làm cái cũ
+-- SUPERSEDED trước, chứ không nằm cạnh nó.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_proposals_live
+    ON service_provider_proposals (workflow_id, task_id)
+ WHERE status = 'PROPOSED';
+
+-- Tra theo bước, gồm cả lịch sử — dùng cho màn giám sát và cho lượt đọc lại.
+CREATE INDEX IF NOT EXISTS idx_proposals_task
+    ON service_provider_proposals (workflow_id, task_id, status, created_at);
+
+-- Tra ngược từ chứng từ: "báo giá này đã được đề xuất chưa".
+CREATE INDEX IF NOT EXISTS idx_proposals_quote
+    ON service_provider_proposals (quote_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Bước D (đóng) — KHOÁ NEO Ở DATABASE
+-- ---------------------------------------------------------------------------
+-- Tầng ứng dụng đã kiểm "chứng từ phải thuộc đúng workflow/task này" ở cả hai
+-- đường (lúc ghim đề xuất và lúc xác nhận). Nhưng schema vẫn cho chèn thẳng
+-- một đề xuất trỏ vào chứng từ của bước khác — và một luật chỉ tồn tại ở tầng
+-- ứng dụng là một luật mà mọi đường ghi MỚI phải nhớ lại từ đầu.
+--
+-- `quote_id` đã là khoá chính nên ràng buộc dưới đây không thêm tính duy nhất
+-- nào. Nó tồn tại vì PostgreSQL đòi một ràng buộc duy nhất trên ĐÚNG bộ cột mà
+-- khoá ngoại tổng hợp trỏ tới.
+DO $$
+BEGIN
+    IF to_regclass('service_quotes') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_service_quotes_anchor')
+    THEN
+        ALTER TABLE service_quotes
+            ADD CONSTRAINT uq_service_quotes_anchor UNIQUE (quote_id, workflow_id, task_id);
+    END IF;
+END $$;
+
+-- Khoá ngoại TỔNG HỢP: đề xuất và chứng từ phải nói cùng một bước.
+--
+-- Nếu không có nó thì `INSERT INTO service_provider_proposals` với `quote_id`
+-- của bước khác vẫn qua — khoá ngoại đơn `quote_id` chỉ nói "chứng từ này có
+-- thật", không nói "nó thuộc bước này".
+DO $$
+BEGIN
+    IF to_regclass('service_provider_proposals') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_proposals_quote_anchor')
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_service_quotes_anchor')
+    THEN
+        -- Dọn dòng lệch trước khi siết: không có dòng nào như vậy ngoài môi
+        -- trường dev của tuần này (bảng trẻ hơn chính ràng buộc đang thêm), và
+        -- một đề xuất trỏ sai bước thì `xac_nhan_de_xuat` đã chặn ở mọi đường
+        -- — nó không phải dữ liệu, nó là rác.
+        DELETE FROM service_provider_proposals p
+         USING service_quotes q
+         WHERE p.quote_id = q.quote_id
+           AND (p.workflow_id <> q.workflow_id OR p.task_id <> q.task_id);
+
+        ALTER TABLE service_provider_proposals
+            ADD CONSTRAINT fk_proposals_quote_anchor
+            FOREIGN KEY (quote_id, workflow_id, task_id)
+            REFERENCES service_quotes (quote_id, workflow_id, task_id);
+    END IF;
+END $$;
+
+
+
+
+-- 2026-08 — VNPay gateway trên `payments`
+--
+-- `PAYMENT_PROVIDER=vnpay` biến một dòng payments thành MỘT PHIÊN thanh toán:
+-- sinh ra ở trạng thái PENDING với số tiền ĐÓNG BĂNG lúc mở phiên (IPN đối
+-- chiếu với số trong dòng này, KHÔNG bao giờ đọc lại giá live từ booking —
+-- đơn vị có thể đổi khu giữa chừng user đang đứng ở trang VNPay).
+--
+--   provider          'mock' | 'vnpay' — mock giữ nguyên hành vi đồng bộ cũ.
+--   provider_txn_ref  vnp_TxnRef/vnp_TransactionNo phía gateway, để đối chiếu
+--                     khiếu nại và để IPN tìm đúng giao dịch nội bộ.
+--   workflow_id       phiên thuộc workflow nào — IPN cần đường này để resume,
+--                     bảng payments vốn chỉ biết booking_id.
+--
+-- NULL được phép cho cả hai cột mới để row mock/legacy không phải đụng tới;
+-- index thường (không UNIQUE) vì cùng một txn_ref có thể xuất hiện ở nhiều
+-- môi trường sandbox khác nhau nhưng tra cứu luôn trả ít hơn một trang kết quả.
+DO $$
+BEGIN
+    IF to_regclass('payments') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider VARCHAR(20) NOT NULL DEFAULT 'mock';
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_txn_ref VARCHAR(100);
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_payments_provider') THEN
+        ALTER TABLE payments ADD CONSTRAINT ck_payments_provider
+            CHECK (provider IN ('mock', 'vnpay')) NOT VALID;
+    END IF;
+
+    CREATE INDEX IF NOT EXISTS idx_payments_provider_txn ON payments(provider_txn_ref);
+END $$;
+
+-- workflow_id tách riêng vì FK cần bảng workflows tồn tại (legacy test DB có
+-- thể chỉ có vài bảng — xem guard payment_approvals phía trên).
+DO $$
+BEGIN
+    IF to_regclass('payments') IS NULL OR to_regclass('workflows') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS workflow_id UUID REFERENCES workflows(workflow_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_workflow ON payments(workflow_id);
+END $$;
+
+
+-- 2026-08 — schedule_conflict_checks
+--
+-- Ghi lại xung đột lịch được phát hiện giữa hai task cùng người dùng. Boundary
+-- kiểm POTENTIAL_CONFLICT trước mọi side effect; người dùng xác nhận → cờ
+-- `acknowledged` bật lên, workflow tiếp tục.
+--
+-- `fingerprint` = SHA-256 (32 hex) của cặp task + lịch theo thứ tự chuẩn hoá;
+-- thay đổi task_id, attempt hoặc giờ thì fingerprint đổi → xác nhận cũ mất
+-- hiệu lực.
+DO $$
+BEGIN
+    IF to_regclass('schedule_conflict_checks') IS NOT NULL THEN
+        RETURN;
+    END IF;
+    -- Legacy schema không có workflows → FK constraint sẽ fail; bỏ qua an toàn.
+    IF to_regclass('workflows') IS NULL THEN
+        RETURN;
+    END IF;
+
+    CREATE TABLE schedule_conflict_checks (
+        id              UUID        NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+        fingerprint     VARCHAR(64) NOT NULL UNIQUE,
+        owner           TEXT        NOT NULL,
+        workflow_id     UUID        NOT NULL REFERENCES workflows(workflow_id),
+        task_id         VARCHAR(20) NOT NULL,
+        service_a       VARCHAR(60) NOT NULL,
+        date_a          TEXT        NOT NULL,
+        time_a          TEXT        NOT NULL,
+        workflow_id_b   UUID        NOT NULL,
+        task_id_b       VARCHAR(20) NOT NULL,
+        service_b       VARCHAR(60) NOT NULL,
+        date_b          TEXT        NOT NULL,
+        time_b          TEXT        NOT NULL,
+        acknowledged    BOOLEAN     NOT NULL DEFAULT FALSE,
+        acknowledged_at TIMESTAMPTZ,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX idx_conflict_checks_workflow ON schedule_conflict_checks(workflow_id);
+    CREATE INDEX idx_conflict_checks_owner ON schedule_conflict_checks(owner);
+END $$;

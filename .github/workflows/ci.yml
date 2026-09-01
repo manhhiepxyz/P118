@@ -8,12 +8,28 @@ on:
 
 jobs:
   lint-and-test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
+    # 45, không phải 20. Con số 20 đặt lúc đầu dựa trên một ước lượng SAI về
+    # thời gian chạy, và nó đã cắt job giữa lượt pytest (huỷ ở 50%). Ngân sách
+    # này phải bao được: cài dependency, `npm ci` + build frontend, chờ
+    # Postgres, ruff, và một lượt pytest 4.5k test trên runner DÙNG CHUNG của
+    # BTC — nơi máy có thể đang chạy job của team khác cùng lúc.
+    #
+    # Nó là hàng rào chống TREO, không phải chỉ tiêu tốc độ: mục đích duy nhất
+    # là không để một job hỏng chiếm runner 6 tiếng (mặc định của GitHub).
+    # Đặt sát quá thì chính hàng rào ấy thành nguyên nhân làm CI đỏ.
+    timeout-minutes: 45
 
     # PostgreSQL ephemeral cho job này. Không có credential thật ở đây:
     # container chỉ sống trong thời gian job chạy, chỉ nghe trên localhost của
     # runner, và chứa dữ liệu test dùng một lần. Không dùng lại giá trị này ở
     # bất kỳ môi trường nào khác.
+    #
+    # Cổng host KHÔNG cố định (`- 5432`, không phải `- 5432:5432`): runner
+    # self-hosted của BTC dùng CHUNG cho mọi team, nên 5432 rất dễ đang bị một
+    # job khác chiếm — đo được: "failed to bind host port 0.0.0.0:5432/tcp:
+    # address already in use". Để Docker tự chọn cổng trống, đọc lại cổng thật
+    # ở step "Đọc cổng Postgres thật" thay vì đoán 5432.
     services:
       postgres:
         image: postgres:16-alpine
@@ -22,7 +38,7 @@ jobs:
           POSTGRES_PASSWORD: p118_ci_ephemeral
           POSTGRES_DB: p118_test_db
         ports:
-          - 5432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U p118_ci -d p118_test_db"
           --health-interval 5s
@@ -32,11 +48,20 @@ jobs:
     env:
       APP_ENV: test
       OPENAI_API_KEY: test-key
-      # Bắt buộc phải có: thiếu biến này thì test PostgreSQL sẽ tự skip và
-      # suite báo xanh giả. Xem step "Guard" bên dưới.
-      TEST_DATABASE_URL: postgresql://p118_ci:p118_ci_ephemeral@localhost:5432/p118_test_db
       # Báo cho conftest biết đang chạy trong CI → thiếu DB phải FAIL, không skip.
       CI: "true"
+      # Ghi đè tường minh hai biến mà `.env.example` (copy ở step "Dựng .env")
+      # đặt khác default trong code — process env LUÔN thắng file `.env` theo
+      # pydantic-settings, nên hai dòng này phục hồi đúng giá trị test kỳ
+      # vọng mà không cần sửa .env.example (file đó dành cho người dev tự điền
+      # key thật, không phải cấu hình test):
+      #   llm_provider mặc định "openai" (khớp OPENAI_API_KEY ở trên);
+      #   .env.example đặt "deepseek" — không có DEEPSEEK_API_KEY nên
+      #   readiness check báo not_ready.
+      LLM_PROVIDER: openai
+      #   daily_workflow_quota mặc định 200; .env.example đặt 50 (trần dùng
+      #   thật cho một buổi demo), thấp hơn ngưỡng test đòi cho một buổi thử.
+      DAILY_WORKFLOW_QUOTA: "200"
 
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +75,49 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        # tests/test_db/test_admin_cannot_rerun_anything.py kiểm bundle THẬT
+        # (frontend/dist) không còn chứa endpoint admin đã gỡ — nhưng tự skip
+        # khi chưa build, và CI trước giờ chỉ test backend nên điều kiện skip
+        # đó luôn đúng. Build ở đây để bài test đó chạy thật thay vì skip vĩnh
+        # viễn — không dựng build TRONG test, đúng như docstring của nó đòi.
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Dựng .env cho docker compose config
+        # `docker-compose.yml` khai `env_file: .env` ở nhiều service — không
+        # phải auto-load tuỳ chọn, mà là bắt buộc PHẢI tồn tại, nếu không
+        # `docker compose config` (tests/test_migration_deployment.py dùng nó
+        # để đọc cấu hình ĐÃ RENDER) lỗi "env file ... not found" trước cả khi
+        # chạm tới nội dung biến. `.env` bị gitignore nên checkout không có
+        # sẵn — README cũng dạy đúng bước `cp .env.example .env` này cho local.
+        # `.env.example` chỉ chứa placeholder, không có secret thật.
+        run: cp .env.example .env
+
+      - name: Đọc cổng Postgres thật
+        # `job.services.postgres.ports['5432']` là cổng HOST thật Docker vừa
+        # gán — chỉ biết được sau khi service đã khởi động, nên không đặt được
+        # ở khối `env:` cấp job (khối đó dựng TRƯỚC khi service tồn tại).
+        #
+        # DATABASE_URL trỏ CÙNG một Postgres ephemeral với TEST_DATABASE_URL.
+        # Hai biến này tách biệt có chủ đích trong code (xem `tests/_dbcheck.py`
+        # — một cái test được TRUNCATE, cái kia là "stack thật" cho test gọi
+        # lifespan() trực tiếp), nhưng `require_running_app_database()` chỉ mở
+        # rồi đóng kết nối, không bao giờ ghi — nên dùng chung DB ephemeral này
+        # là an toàn, không cần dựng thêm một Postgres thứ hai trong CI.
+        run: |
+          echo "TEST_DATABASE_URL=postgresql://p118_ci:p118_ci_ephemeral@localhost:${{ job.services.postgres.ports['5432'] }}/p118_test_db" >> "$GITHUB_ENV"
+          echo "DATABASE_URL=postgresql://p118_ci:p118_ci_ephemeral@localhost:${{ job.services.postgres.ports['5432'] }}/p118_test_db" >> "$GITHUB_ENV"
+
       - name: Guard — TEST_DATABASE_URL phải được set
         run: |
           if [ -z "${TEST_DATABASE_URL}" ]; then
@@ -61,7 +129,7 @@ jobs:
       - name: Chờ PostgreSQL sẵn sàng
         run: |
           for i in $(seq 1 30); do
-            if pg_isready -h localhost -p 5432 -U p118_ci -d p118_test_db; then
+            if pg_isready -d "$TEST_DATABASE_URL"; then
               echo "PostgreSQL sẵn sàng."
               exit 0
             fi
@@ -78,17 +146,32 @@ jobs:
         run: ruff format --check src/ tests/
 
       - name: Run tests
-        run: pytest tests/ -v --tb=short
+        # MỘT lượt chạy, giữ lại output cho step guard phía dưới.
+        #
+        # Trước đây step này và step guard mỗi cái chạy lại TOÀN BỘ suite —
+        # 4.5k test hai lần, chỉ để lần thứ hai đếm chữ "skipped" trong dòng
+        # tổng kết. Một lượt mất ~4 phút trên máy dev và lâu hơn nhiều trên
+        # runner dùng chung của BTC; nhân đôi là đủ để job bị `timeout-minutes`
+        # cắt giữa chừng (đo được: huỷ ở 50% của lượt ĐẦU).
+        #
+        # `set -o pipefail`: không có nó thì `tee` nuốt mã thoát của pytest và
+        # một suite đỏ vẫn cho step này xanh — đúng loại lỗi mà cả file này tồn
+        # tại để chặn.
+        run: |
+          set -o pipefail
+          pytest tests/ -v --tb=short | tee /tmp/pytest_output.txt
 
       - name: Guard — không được có test bị skip
         # Skip âm thầm là rủi ro lớn nhất của suite này: thiếu DB thì toàn bộ
         # tầng PostgreSQL không được kiểm mà CI vẫn xanh.
+        #
+        # Đọc lại output của step trên, KHÔNG chạy lại. Một lượt chạy thứ hai
+        # không kiểm thêm được gì: cùng suite, cùng môi trường, cùng kết quả.
         run: |
-          pytest tests/ -q --tb=no -p no:cacheprovider > /tmp/pytest_summary.txt 2>&1 || true
-          tail -5 /tmp/pytest_summary.txt
-          if grep -qE "[0-9]+ skipped" /tmp/pytest_summary.txt; then
+          tail -5 /tmp/pytest_output.txt
+          if grep -qE "[0-9]+ skipped" /tmp/pytest_output.txt; then
             echo "::error::Có test bị skip trong CI. Mọi test phải chạy thật."
-            grep -E "[0-9]+ skipped" /tmp/pytest_summary.txt
+            grep -E "[0-9]+ skipped" /tmp/pytest_output.txt
             exit 1
           fi
           echo "Không có test nào bị skip."

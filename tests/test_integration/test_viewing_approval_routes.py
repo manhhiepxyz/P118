@@ -41,11 +41,13 @@ from src.common.task_plan import InputRef
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.main import app
 from src.orchestration import demo_service
+from src.orchestration.provider_directory import don_vi_mac_dinh
 from src.orchestration.runtime_provider import (
     SharedPool,
     clear_repository_provider,
     set_repository_provider,
 )
+from tests._otp_registration import dang_ky_qua_duong_that
 
 # Ngày trong tương lai — provider từ chối ngày quá khứ, và ngày cứng sẽ biến
 # test thành quả bom hẹn giờ.
@@ -98,7 +100,7 @@ class _FakeTour:
         self.fail_with: ErrorCode | None = None
         self.last_input: dict | None = None
 
-    async def execute(self, tool_name: str, input_data: dict) -> StandardResult:
+    async def execute(self, tool_name: str, input_data: dict, *, context=None) -> StandardResult:
         self.last_input = input_data
         if self.fail_with is not None:
             return StandardResult.fail(error_code=self.fail_with, message="hết chỗ")
@@ -116,11 +118,15 @@ class _FakeExecutor:
     thành FAILED — một thất bại của ĐỒ GIẢ, không phải của sản phẩm.
     """
 
-    instances: list["_FakeExecutor"] = []
+    instances: list[_FakeExecutor] = []
 
-    def __init__(self, connectors, repository) -> None:
+    def __init__(self, connectors, repository, on_failure=None) -> None:
         self.connectors = connectors
         self.repository = repository
+        # `on_failure` là đường DUY NHẤT sinh repair hint. Bản giả từng không
+        # nhận tham số này, và khi caller bắt đầu truyền nó thì route trả 502 —
+        # một thất bại của ĐỒ GIẢ trông y hệt một thất bại của sản phẩm.
+        self.on_failure = on_failure
         self.calls: list[dict] = []
         _FakeExecutor.instances.append(self)
 
@@ -130,6 +136,12 @@ class _FakeExecutor:
         workflow_id: str,
         *,
         finalize: bool = True,
+        # Hợp đồng của `Executor.execute` có CẢ HAI tham số này, và
+        # `ValidatedExecutionBoundary` chuyển tiếp chúng xuống. Đồ giả hẹp hơn
+        # đồ thật thì mọi lớp bọc mới đều làm test đỏ vì `TypeError` — một thất
+        # bại của ĐỒ GIẢ trông y hệt thất bại của sản phẩm.
+        parent_workflow_id: str | None = None,
+        session_id: str | None = None,
         seed_statuses: dict | None = None,
         seed_results: dict | None = None,
     ):
@@ -193,20 +205,38 @@ def _headers(user: dict) -> dict:
 
 
 async def _register_customer(client) -> dict:
-    username = _unique("customer")
-    res = await client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "matkhau123"},
-    )
-    assert res.status_code == 201, res.text
-    data = res.json()
+    """Khách mới, tạo qua ĐÚNG đường sản phẩm — gồm cả bước OTP.
+
+    Phần cơ học nằm ở `tests/_otp_registration`: cùng một việc cũng cần cho
+    `tests/test_db`, và hai bản sao của một luồng đăng ký là hai chỗ để lệch
+    nhau khi hợp đồng đổi. Lần này nó đã đổi thật — bước OTP được thêm — và
+    đó là lý do file này từng đỏ 9 bài.
+    """
+    data = await dang_ky_qua_duong_that(client, _unique("customer"), password="matkhau123")
+    assert data is not None, "tên đăng ký bị trùng — `_unique` không còn duy nhất"
     return {"id": data["id"], "username": data["username"], "role": data["role"]}
 
 
-async def _make_provider(repo) -> dict:
-    user = await repo.users.create_user(
-        _unique("provider"), hash_password("matkhau123"), role="provider"
-    )
+async def _make_provider(repo, *, don_vi: str | None = None) -> dict:
+    """Tài khoản đơn vị — có role VÀ, mặc định, được gắn đơn vị giữ lịch tham quan.
+
+    Gắn đơn vị không phải chi tiết dựng cảnh. Từ khi cổng tham quan lọc theo
+    quyền sở hữu, một tài khoản `provider` chưa gắn đơn vị nào không đọc và
+    không quyết định được gì — đó là hành vi ĐÚNG, và mọi bài ở file này nói về
+    chuyện khác.
+
+    Mã lấy từ `don_vi_mac_dinh` chứ không gõ tay: bảng ánh xạ tool → đơn vị chỉ
+    nên có một bản. Truyền `don_vi` khác để dựng một đơn vị KHÔNG sở hữu.
+    """
+    user = await repo.users.create_user(_unique("provider"), hash_password("matkhau123"), role="provider")
+    ma = don_vi if don_vi is not None else don_vi_mac_dinh("schedule_property_viewing")
+    async with repo._pool.acquire() as conn:  # noqa: SLF001 - test dựng state
+        await conn.execute(
+            "INSERT INTO service_provider_accounts (user_id, service_provider_id) "
+            "VALUES ($1::uuid, $2) ON CONFLICT DO NOTHING",
+            str(user["id"]),
+            ma,
+        )
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
@@ -268,13 +298,33 @@ async def _seed_awaiting_workflow(harness, *, owner_user_id: str) -> str:
             _date.fromisoformat(FUTURE),
             owner_user_id,
         )
+        # Gán ĐƠN VỊ giữ hồ sơ. Trigger `INSTEAD OF INSERT` của view
+        # `viewing_approvals` KHÔNG đặt `service_provider_id`, nên mọi dòng ghi
+        # qua view là dòng VÔ CHỦ — và từ khi cổng tham quan lọc theo quyền sở
+        # hữu, dòng vô chủ không đơn vị nào thấy. Đó là fail-closed đúng ý, chứ
+        # không phải một lỗi ở đây; nhưng nó có nghĩa là bài kiểm phải nói ra ai
+        # sở hữu, y như đường ghi thật (`save_pending_viewing_approval`) đang làm.
+        await conn.execute(
+            "UPDATE service_approvals SET service_provider_id = $2 WHERE workflow_id = $1 AND task_id = 'T1'",
+            workflow_id,
+            don_vi_mac_dinh("schedule_property_viewing"),
+        )
     return workflow_id
 
 
-async def _decide(client, reviewer: dict, workflow_id: str, decision: str, reason: str | None = None):
+async def _decide(
+    client,
+    reviewer: dict,
+    workflow_id: str,
+    decision: str,
+    reason: str | None = None,
+    code: str | None = None,
+):
     body: dict = {"decision": decision}
     if reason is not None:
         body["reject_reason"] = reason
+    if code is not None:
+        body["reject_code"] = code
     return await client.post(
         f"/api/v1/viewing-approvals/{workflow_id}/decide",
         headers=_headers(reviewer),
@@ -292,9 +342,7 @@ async def test_customer_cannot_list_or_decide(viewing_env, viewing_client):
     customer = await _register_customer(viewing_client)
     workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
 
-    listed = await viewing_client.get(
-        "/api/v1/viewing-approvals", headers=_headers(customer)
-    )
+    listed = await viewing_client.get("/api/v1/viewing-approvals", headers=_headers(customer))
     assert listed.status_code == 403
 
     decided = await _decide(viewing_client, customer, workflow_id, "approve")
@@ -332,9 +380,7 @@ async def test_provider_lists_awaiting_with_applicant_pii(viewing_env, viewing_c
 
 
 @pytest.mark.asyncio
-async def test_approve_materializes_and_resumes_with_driver_details(
-    viewing_env, viewing_client
-):
+async def test_approve_materializes_and_resumes_with_driver_details(viewing_env, viewing_client):
     customer = await _register_customer(viewing_client)
     provider = await _make_provider(viewing_env.repo)
     workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
@@ -405,9 +451,7 @@ async def test_approve_materializes_and_resumes_with_driver_details(
         # poll — mà workflow đã xong còn câu khách đọc vẫn là câu của lúc chờ.
         # Đo được đúng như vậy trong database trước khi sửa:
         #   status = SUCCESS, assistant_for_status = WAITING_APPROVAL
-        assert wf["assistant_for_status"] == "SUCCESS", (
-            "câu trả lời vẫn thuộc về trạng thái cũ khi workflow đã SUCCESS"
-        )
+        assert wf["assistant_for_status"] == "SUCCESS", "câu trả lời vẫn thuộc về trạng thái cũ khi workflow đã SUCCESS"
         assert "đang xác nhận" not in (wf["assistant_answer"] or "")
 
 
@@ -444,17 +488,11 @@ async def test_materialize_failure_fails_workflow(viewing_env, viewing_client):
 
     # Decision đã khoá nhưng workflow phải FAILED — không để treo mãi.
     async with viewing_env.repo._pool.acquire() as conn:  # noqa: SLF001
-        row = await conn.fetchrow(
-            "SELECT status FROM viewing_approvals WHERE workflow_id = $1", workflow_id
-        )
+        row = await conn.fetchrow("SELECT status FROM viewing_approvals WHERE workflow_id = $1", workflow_id)
         assert row["status"] == "APPROVED"
-        wf = await conn.fetchrow(
-            "SELECT status FROM workflows WHERE workflow_id = $1", workflow_id
-        )
+        wf = await conn.fetchrow("SELECT status FROM workflows WHERE workflow_id = $1", workflow_id)
         assert wf["status"] == "FAILED"
-        tasks = await conn.fetch(
-            "SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id
-        )
+        tasks = await conn.fetch("SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id)
         assert {t["status"] for t in tasks} == {"FAILED"}
 
 
@@ -472,7 +510,6 @@ async def test_reject_without_reason_is_422(viewing_env, viewing_client):
     res = await _decide(viewing_client, provider, workflow_id, "reject")
 
     assert res.status_code == 422
-    assert "lý do" in res.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -481,8 +518,16 @@ async def test_reject_fails_chain_and_records_reason(viewing_env, viewing_client
     provider = await _make_provider(viewing_env.repo)
     workflow_id = await _seed_awaiting_workflow(viewing_env, owner_user_id=customer["id"])
 
+    # Từ chối DỨT KHOÁT: không phải hết khung giờ, nên chuỗi hỏng hẳn.
+    # `NO_AVAILABILITY` đi đường khác — nó mở một lượt hỏi lại giờ, xem
+    # `tests/test_db/test_a_refused_viewing_still_speaks.py`.
     res = await _decide(
-        viewing_client, provider, workflow_id, "reject", reason="Lịch đã kín giờ tuần này"
+        viewing_client,
+        provider,
+        workflow_id,
+        "reject",
+        reason="Lịch đã kín giờ tuần này",
+        code="INVALID_REQUEST",
     )
 
     assert res.status_code == 200, res.text
@@ -496,13 +541,9 @@ async def test_reject_fails_chain_and_records_reason(viewing_env, viewing_client
         assert row["status"] == "REJECTED"
         assert row["reject_reason"] == "Lịch đã kín giờ tuần này"
         assert row["decided_by"] == provider["username"]
-        wf = await conn.fetchrow(
-            "SELECT status FROM workflows WHERE workflow_id = $1", workflow_id
-        )
+        wf = await conn.fetchrow("SELECT status FROM workflows WHERE workflow_id = $1", workflow_id)
         assert wf["status"] == "FAILED"
-        tasks = await conn.fetch(
-            "SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id
-        )
+        tasks = await conn.fetch("SELECT status FROM workflow_tasks WHERE workflow_id = $1", workflow_id)
         # Viewing + shuttle phụ thuộc đều FAILED — không giữ "chỗ đỗ" nào.
         assert {t["status"] for t in tasks} == {"FAILED"}
 

@@ -12,7 +12,7 @@ from datetime import date, time, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Trần tương lai — provider tự bảo vệ mình, không phải request nào cũng đi qua
 # Validator. Không có trần thì "2199-12-31" hợp lệ ở mọi lớp và chỗ đỗ năm 2199
@@ -106,6 +106,23 @@ class BookParkingRequest(BaseModel):
     _booking_not_past = field_validator("booking_date")(_reject_past)
 
 
+class ChangeParkingZoneRequest(BaseModel):
+    """Đổi khu cho một chỗ đã giữ.
+
+    Chỉ có `parking_zone`: `booking_id` nằm ở đường dẫn, và `amount` do server
+    tính lại theo khu — client gửi giá là client tự định giá dịch vụ.
+
+    `extra="forbid"` chứ không bỏ qua field thừa. Bỏ qua im lặng nghĩa là một
+    caller gửi kèm `amount` vẫn được nhận, và ngày nào đó ai đó thêm `amount`
+    vào schema này thì giá của client lặng lẽ thắng giá của server — không có
+    diff nào lộ ra. Từ chối ồn ào thì lỗi ấy chết ngay ở request đầu tiên.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    parking_zone: ParkingZone
+
+
 # ---- pay_fee ----
 class PayFeeRequest(BaseModel):
     booking_id: str = Field(..., min_length=1)
@@ -182,6 +199,9 @@ class CreateMaintenanceRequest(BaseModel):
 class ScheduleMoveRequest(BaseModel):
     move_date: date
     move_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    move_origin_id: str = Field(..., min_length=1)
+    move_destination_id: str = Field(..., min_length=1)
+    move_size: Literal["small", "medium", "large"]
     needs_elevator: bool
     needs_loading_support: bool
     move_vehicle: Literal["none", "van", "truck"]
@@ -192,6 +212,36 @@ class ScheduleMoveRequest(BaseModel):
     @classmethod
     def move_during_business_hours(cls, value: str) -> str:
         return _check_business_time(value, time(7, 0), time(20, 0))
+
+
+# ---- xin báo giá chuyển nhà ----
+class QuoteMoveRequest(BaseModel):
+    """Yêu cầu báo giá gửi tới MỘT đơn vị.
+
+    `extra="forbid"` không phải để bắt lỗi chính tả. Nó là hàng rào cho một
+    luật nghiệp vụ: NGÂN SÁCH CỦA KHÁCH KHÔNG ĐƯỢC RỜI KHỎI P-118. Gửi
+    `max_price` đi rồi nhận về một con số sát ngân sách là mời đơn vị định giá
+    theo túi tiền người hỏi thay vì theo công việc — và khi ấy "chọn đơn vị rẻ
+    nhất" đo một thứ do chính mình tạo ra.
+
+    P-118 đã có allowlist ở phía gửi (`quote.payload_gui_provider`). Hàng rào ở
+    đây là hàng rào THỨ HAI, phía nhận: nếu một ngày nào đó phía gửi rò ngân
+    sách, provider TỪ CHỐI cả yêu cầu thay vì lặng lẽ dùng nó. Một luật quan
+    trọng đến mức này thì một hàng rào là chưa đủ.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    move_date: date
+    move_time: str = Field(..., pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    move_origin_id: str = Field(..., min_length=1)
+    move_destination_id: str = Field(..., min_length=1)
+    move_size: Literal["small", "medium", "large"]
+    needs_elevator: bool
+    needs_loading_support: bool
+    move_vehicle: Literal["none", "van", "truck"]
+
+    _quote_not_past = field_validator("move_date")(_reject_past)
 
 
 # ---- verify_ownership ----

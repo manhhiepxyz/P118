@@ -2,12 +2,14 @@ import { useState, type FormEvent } from 'react'
 import { AlertCircle } from 'lucide-react'
 
 import type { PendingAction } from '../../lib/pendingAction'
+import { maxDate, minDate } from '../../lib/dateBounds'
 
 interface Props {
   action: PendingAction
   onApprove: () => void
   onReject: () => void
-  onValue: (value: string) => void
+  /** Toàn bộ ô đã điền, theo khoá backend đang chờ. */
+  onValue: (values: Record<string, string>) => void
 }
 
 /**
@@ -21,18 +23,34 @@ interface Props {
  * Nút ở đây và câu gõ dưới kia đi qua ĐÚNG MỘT `resolve()`. Chúng không phải
  * hai đường; chúng là hai cách chạm vào cùng một action.
  */
+/** Một kiểu dáng duy nhất cho mọi control — hai chuỗi class là hai chỗ lệch. */
+const CONTROL =
+  'mt-2 h-11 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)]'
+
 export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
-  const [draft, setDraft] = useState('')
+  // Một ô nhập cho MỖI field backend đang chờ.
+  //
+  // Backend áp luật all-or-none cho câu trả lời dạng form: thiếu một ô là từ
+  // chối cả lượt. Bản trước chỉ vẽ ô đầu tiên, nên người dùng điền đúng dự án,
+  // bấm Tiếp tục, rồi bị trả lời về NGÀY THAM QUAN — một ô họ chưa hề được
+  // hỏi, và không có chỗ nào để điền nó.
+  const pendingFields = action.fields ?? (action.field ? [action.field] : [])
+  const [draft, setDraft] = useState<Record<string, string>>({})
+
+  const ready = pendingFields.length > 0 && pendingFields.every((f) => (draft[f.key] ?? '').trim())
 
   function submit(event: FormEvent) {
     event.preventDefault()
-    if (!draft.trim()) return
-    onValue(draft.trim())
-    setDraft('')
+    if (!ready) return
+    const values: Record<string, string> = {}
+    for (const field of pendingFields) values[field.key] = (draft[field.key] ?? '').trim()
+    onValue(values)
+    setDraft({})
   }
 
   return (
     <section
+      data-pending-card={action.kind}
       className="rise border-b border-[var(--border-subtle)] px-6 py-6"
       style={{
         backgroundColor: `color-mix(in srgb, var(--${
@@ -56,9 +74,12 @@ export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
         {action.title}
       </h3>
 
-      <dl className="mt-4 space-y-3">
+      {/* `data-detail` mang chính NHÃN của dòng, nên kiểm thử hỏi được "số
+          tiền là bao nhiêu" thay vì đếm vị trí hay bám vào cỡ chữ
+          (`p.text-2xl` — selector cũ, đã chết). */}
+      <dl className="mt-4 space-y-3" data-pending-details>
         {action.details.map((detail) => (
-          <div key={detail.label}>
+          <div key={detail.label} data-detail={detail.label}>
             <dt className="text-[11.5px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
               {detail.label}
             </dt>
@@ -67,25 +88,57 @@ export function PendingCard({ action, onApprove, onReject, onValue }: Props) {
         ))}
       </dl>
 
-      {action.kind === 'missing_info' && action.field ? (
-        <form onSubmit={submit} className="mt-5">
-          <label
-            htmlFor="pending-field"
-            className="block text-[13px] font-medium text-[var(--text-secondary)]"
-          >
-            {action.field.label}
-          </label>
-          <input
-            id="pending-field"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={action.field.placeholder}
-            className="mt-2 h-11 w-full rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-3.5 text-[15px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--selection)]"
-          />
+      {action.kind === 'missing_info' && pendingFields.length > 0 ? (
+        <form onSubmit={submit} className="mt-5 space-y-4">
+          {pendingFields.map((field, index) => (
+            <div key={field.key}>
+              <label
+                /* Ô ĐẦU giữ id `pending-field`: nó là điểm neo của kiểm thử và
+                   của phím tắt focus. Các ô sau lấy id theo khoá field. */
+                htmlFor={index === 0 ? 'pending-field' : `pending-field-${field.key}`}
+                className="block text-[13px] font-medium text-[var(--text-secondary)]"
+              >
+                {field.label}
+              </label>
+              {/* Control theo ĐÚNG kiểu của ô, không phải ô text cho mọi thứ.
+                  Khu đỗ xe là enum hai giá trị, ngày là ngày — để người dùng gõ
+                  tự do rồi từ chối ở lượt sau là bắt họ đi một vòng gọi model
+                  chỉ để biết mình gõ sai. */}
+              {field.kind === 'select' && field.options?.length ? (
+                <select
+                  id={index === 0 ? 'pending-field' : `pending-field-${field.key}`}
+                  value={draft[field.key] ?? ''}
+                  onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}
+                  className={CONTROL}
+                >
+                  <option value="">Chọn {field.label.toLowerCase()}…</option>
+                  {field.options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id={index === 0 ? 'pending-field' : `pending-field-${field.key}`}
+                  type={field.kind === 'date' ? 'date' : field.kind === 'time' ? 'time' : field.kind === 'number' ? 'number' : 'text'}
+                  min={field.kind === 'date' ? (field.minDate ?? minDate()) : field.min}
+                  max={field.kind === 'date' ? maxDate() : field.max}
+                  value={draft[field.key] ?? ''}
+                  onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}
+                  placeholder={field.placeholder}
+                  className={CONTROL}
+                />
+              )}
+              {field.hint && (
+                <p className="mt-1.5 text-[12.5px] text-[var(--text-muted)]">{field.hint}</p>
+              )}
+            </div>
+          ))}
           <button
             type="submit"
-            disabled={!draft.trim()}
-            className="press mt-3 inline-flex h-11 w-full cursor-pointer items-center justify-center rounded-[var(--r-sm)] text-[14.5px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!ready}
+            className="press inline-flex h-11 w-full cursor-pointer items-center justify-center rounded-[var(--r-sm)] text-[14.5px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
             style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
           >
             Tiếp tục

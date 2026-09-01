@@ -11,6 +11,8 @@ che mất 401 (dependency-order gotcha).
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from fastapi import Depends
 
@@ -25,7 +27,8 @@ def auth_env():
     """Override get_user_repository bằng fake; trả FakeUserRepository."""
     users = FakeUserRepository()
     app.dependency_overrides[get_user_repository] = lambda: users
-    yield users
+    with patch("src.api.auth_routes.OtpRepository.verify_otp", return_value=True):
+        yield users
     app.dependency_overrides.clear()
 
 
@@ -45,10 +48,12 @@ def workflow_runtime_env():
     app.dependency_overrides.clear()
 
 
-async def _register(client, username="nguyen.van.a", password="matkhau123"):
+async def _register(client, username="nguyen.van.a", password="matkhau123", email=None):
+    if email is None:
+        email = f"{username.strip().replace(' ', '')}@example.com".lower()
     return await client.post(
         "/api/v1/auth/register",
-        json={"username": username, "password": password},
+        json={"username": username, "password": password, "email": email, "otp_code": "123456"},
     )
 
 
@@ -97,12 +102,20 @@ async def test_register_invalid_payload_422(client, auth_env):
     res = await client.post("/api/v1/auth/register", json={"username": "abc", "password": "short"})
     assert res.status_code == 422
     # Thiếu username.
-    res = await client.post("/api/v1/auth/register", json={"password": "matkhau123"})
+    res = await client.post(
+        "/api/v1/auth/register", json={"password": "matkhau123", "email": "abc@abc.com", "otp_code": "123456"}
+    )
     assert res.status_code == 422
     # Extra field (extra="forbid").
     res = await client.post(
         "/api/v1/auth/register",
-        json={"username": "abc", "password": "matkhau123", "role": "admin"},
+        json={
+            "username": "abc",
+            "password": "matkhau123",
+            "email": "abc@abc.com",
+            "otp_code": "123456",
+            "role": "admin",
+        },
     )
     assert res.status_code == 422
 
@@ -146,6 +159,50 @@ async def test_login_unknown_user_401(client, auth_env):
 async def test_login_missing_fields_422(client, auth_env):
     res = await client.post("/api/v1/auth/login", json={"username": "abc"})
     assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Google OAuth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verified_google_email_logs_into_the_existing_account(client, auth_env):
+    await _register(client, email="google.user@example.com")
+
+    with patch(
+        "src.api.auth_routes._verify_google_token",
+        return_value={"email": "google.user@example.com", "email_verified": True},
+    ):
+        res = await client.post("/api/v1/auth/google/verify", json={"credential": "google-id-token"})
+
+    assert res.status_code == 200
+    assert res.json()["access_token"]
+    assert res.json()["user"]["username"] == "nguyen.van.a"
+
+
+@pytest.mark.asyncio
+async def test_new_verified_google_email_requires_customer_registration(client, auth_env):
+    with patch(
+        "src.api.auth_routes._verify_google_token",
+        return_value={
+            "email": "new.google@example.com",
+            "email_verified": True,
+            "name": "Google User",
+            "picture": "https://images.example/avatar.png",
+        },
+    ):
+        verify = await client.post("/api/v1/auth/google/verify", json={"credential": "google-id-token"})
+        register = await client.post(
+            "/api/v1/auth/google/register",
+            json={"credential": "google-id-token", "username": "google.user"},
+        )
+
+    assert verify.status_code == 202
+    assert verify.json()["email"] == "new.google@example.com"
+    assert register.status_code == 200
+    assert register.json()["user"]["role"] == "customer"
+    assert await auth_env.get_user_by_email("new.google@example.com") is not None
 
 
 # ---------------------------------------------------------------------------

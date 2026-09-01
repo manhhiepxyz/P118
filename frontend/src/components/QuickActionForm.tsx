@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 
-import { listProjects } from '../lib/agentApi'
+import { listProjects, type InitialWorkflowFormFields } from '../lib/agentApi'
 import type { Capability } from '../lib/types'
+import { maxDate, minDate } from '../lib/dateBounds'
 
 interface Props {
   capabilities: Capability[]
   submitting: boolean
-  onSubmit: (goal: string) => Promise<void>
+  onSubmit: (goal: string, formFields: InitialWorkflowFormFields) => Promise<void>
   onCancel: () => void
 }
 
@@ -77,12 +78,17 @@ function InputField({
   placeholder?: string
   onChange: (value: string) => void
 }) {
+  // Ô ngày khoá quá khứ và ngày quá xa ngay tại chỗ nhập. Backend sẽ từ chối
+  // chúng, và từ chối sau một lượt lập kế hoạch là bắt người dùng trả giá cho
+  // thứ trình duyệt nói ngay được.
+  const gioiHan = type === 'date' ? { min: minDate(), max: maxDate() } : {}
   return (
     <label className="block text-sm text-gray-700 dark:text-gray-300">
       {label}
       <input
         required
         type={type}
+        {...gioiHan}
         value={value}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
@@ -153,7 +159,16 @@ export function QuickActionForm({ capabilities, submitting, onSubmit, onCancel }
     setError(null)
     try {
       const segments = capabilities.map(buildSegment)
-      await onSubmit(`Tôi muốn ${segments.join('; đồng thời ')}.`)
+      const formFields: InitialWorkflowFormFields = {}
+      for (const capability of capabilities) {
+        const name = capability.name.toLocaleLowerCase('vi-VN')
+        if (name.includes('quan tâm')) formFields.consent = getValue(capability, 'consent') === 'yes'
+        if (name.includes('chuyển nhà')) {
+          formFields.needs_elevator = getValue(capability, 'elevator') === 'yes'
+          formFields.needs_loading_support = getValue(capability, 'loading') === 'yes'
+        }
+      }
+      await onSubmit(`Tôi muốn ${segments.join('; đồng thời ')}.`, formFields)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Chưa gửi được yêu cầu.')
     }

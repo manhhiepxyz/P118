@@ -95,6 +95,10 @@ class PostgreSQLWorkflowStateRepository:
         """Giành quyền sinh câu trả lời cho một trạng thái. Xem WorkflowRepository."""
         return await self.workflows.claim_assistant_response(workflow_id, for_status=for_status)
 
+    async def invalidate_assistant_response(self, workflow_id: str) -> None:
+        """Buộc lần đọc kế tiếp dựng câu từ dữ kiện nghiệp vụ mới nhất."""
+        await self.workflows.invalidate_assistant_response(workflow_id)
+
     async def save_assistant_response(self, workflow_id: str, **kwargs) -> None:
         await self.workflows.save_assistant_response(workflow_id, **kwargs)
 
@@ -104,6 +108,10 @@ class PostgreSQLWorkflowStateRepository:
     async def get_workflow(self, workflow_id: str) -> dict:
         """Trả dict gồm workflow metadata + danh sách tasks."""
         return await self.workflows.get_workflow(workflow_id)
+
+    async def resolve_clarification(self, workflow_id: str) -> bool:
+        """Đóng câu hỏi đang mở, không tạo workflow con."""
+        return await self.workflows.resolve_clarification(workflow_id)
 
     async def consume_clarification_and_create_child(self, parent_workflow_id: str, **kwargs) -> dict | None:
         """Claim clarification + tạo child atomic. Xem WorkflowRepository."""
@@ -189,6 +197,11 @@ class PostgreSQLWorkflowStateRepository:
                 SELECT task_id, status, reject_reason
                 FROM viewing_approvals
                 WHERE workflow_id = $1 AND status = 'REJECTED'
+                -- Lượt từ chối GẦN NHẤT. Một workflow có thể có nhiều lượt gửi
+                -- (`T1`, `T1R2`…), và không nêu thứ tự thì khách đọc lại lý do
+                -- của lượt họ đã xử lý xong từ lâu.
+                ORDER BY created_at DESC, task_id DESC
+                LIMIT 1
                 """,
                 _uuid(workflow_id),
             )
@@ -261,6 +274,32 @@ class PostgreSQLWorkflowStateRepository:
     async def update_task_status(self, workflow_id: str, task_id: str, status: TaskStatus) -> None:
         await self.workflows.update_task_status(workflow_id, task_id, status.value)
 
+    async def service_approvals_for(self, workflow_id: str) -> list[dict]:
+        """Hàng đợi duyệt của một workflow — nguồn có thẩm quyền cho câu
+        "đơn vị đã quyết định gì".
+
+        Nằm ở repository chứ không gọi thẳng `pending_for_workflow(pool, ...)`:
+        tầng orchestration không được cầm pool, và một hàm có tên là chỗ duy
+        nhất để đổi khi hàng đợi đổi hình dạng.
+        """
+        from src.orchestration.service_approval import pending_for_workflow
+
+        return [dict(row) for row in await pending_for_workflow(self._pool, workflow_id)]
+
+    async def supersede_task_with_new_attempt(self, workflow_id: str, *, old_task_id: str, new_task: dict) -> None:
+        """Thay một bước bằng một lần thử mới — xem `WorkflowRepository`."""
+        return await self.workflows.supersede_task_with_new_attempt(
+            workflow_id, old_task_id=old_task_id, new_task=new_task
+        )
+
+    async def clear_repair_hints(self, workflow_id: str, task_ids: list[str] | None = None) -> int:
+        """Xoá dấu vết hỏng đã xử lý — xem `WorkflowRepository`."""
+        return await self.workflows.clear_repair_hints(workflow_id, task_ids)
+
+    async def reopen_cancelled_tasks(self, workflow_id: str) -> int:
+        """Mở lại các bước đã huỷ/hỏng để chạy lại — xem tầng repository."""
+        return await self.workflows.reopen_cancelled_tasks(workflow_id)
+
     async def save_task_result(self, workflow_id: str, task_id: str, result: StandardResult) -> None:
         """Lưu StandardResult sau khi Connector trả về."""
         await self.workflows.save_task_result(workflow_id, task_id, result)
@@ -278,14 +317,58 @@ class PostgreSQLWorkflowStateRepository:
     async def consume_clarification(self, workflow_id: str) -> dict | None:
         return await self.workflows.consume_clarification(workflow_id)
 
+    async def usage_since(self, **kwargs):
+        return await self.workflows.usage_since(**kwargs)
+
+    async def recent_turns_for_owner(self, **kwargs):
+        return await self.workflows.recent_turns_for_owner(**kwargs)
+
+    async def prepare_submission(self, workflow_id: str, task_id: str, *, candidate_key: str | None):
+        """Giấy phép gửi MỘT lần. `allowed=False` nghĩa là không gọi provider."""
+        return await self.workflows.prepare_submission(workflow_id, task_id, candidate_key=candidate_key)
+
+    async def record_submission_outcome(self, workflow_id: str, task_id: str, tool: str, result: Any) -> None:
+        await self.workflows.record_submission_outcome(workflow_id, task_id, tool, result)
+
+    async def read_submission_evidence(self, workflow_id: str) -> dict[str, dict[str, Any]]:
+        return await self.workflows.read_submission_evidence(workflow_id)
+
+    async def append_plan_revision(self, **kwargs):
+        return await self.workflows.append_plan_revision(**kwargs)
+
+    async def lock_workflow_for_amendment(
+        self,
+        workflow_id: str,
+        *,
+        expected_plan_version: str,
+        record_revision: dict[str, Any] | None = None,
+    ):
+        """Khoá và đọc lại. Chữ ký nêu ĐỦ tham số — không nhận `**kwargs`, vì một
+        túi tuỳ ý là chỗ một callback lẻn vào dưới một cái tên khác."""
+        return await self.workflows.lock_workflow_for_amendment(
+            workflow_id, expected_plan_version=expected_plan_version, record_revision=record_revision
+        )
+
+    async def reopen_cancelled_workflow(self, workflow_id: str) -> bool:
+        return await self.workflows.reopen_cancelled_workflow(workflow_id)
+
+    async def delete_workflow_for_owner(self, workflow_id: str, *, owner_user_id: str):
+        return await self.workflows.delete_workflow_for_owner(workflow_id, owner_user_id=owner_user_id)
+
+    async def trim_history_for_owner(self, *, owner_user_id: str, keep: int) -> list[str]:
+        return await self.workflows.trim_history_for_owner(owner_user_id=owner_user_id, keep=keep)
+
     async def list_workflows(
         self,
         *,
         statuses: tuple[str, ...] | None = None,
         limit: int = 20,
         owner_user_id: str | None = None,
+        upcoming: bool | None = None,
     ) -> list[dict]:
-        return await self.workflows.list_workflows(statuses=statuses, limit=limit, owner_user_id=owner_user_id)
+        return await self.workflows.list_workflows(
+            statuses=statuses, limit=limit, owner_user_id=owner_user_id, upcoming=upcoming
+        )
 
     async def current_step_titles(self, workflow_ids: list[str]) -> dict[str, str]:
         return await self.workflows.current_step_titles(workflow_ids)
@@ -300,6 +383,36 @@ class PostgreSQLWorkflowStateRepository:
 
     async def list_workflows_by_session(self, session_id: str, *, owner_user_id: str | None = None) -> list[dict]:
         return await self.workflows.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+
+    async def list_admin_requests(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 50,
+        search_user: str | None = None,
+        status: str | None = None,
+        date_from: object | None = None,
+        date_to: object | None = None,
+    ) -> dict:
+        return await self.workflows.list_admin_requests(
+            page=page,
+            limit=limit,
+            search_user=search_user,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+    async def get_admin_request(self, workflow_id: str) -> dict | None:
+        return await self.workflows.get_admin_request(workflow_id)
+
+    async def append_events(self, workflow_id: str, events: list[dict]) -> None:
+        """Ghim dòng thời gian giai đoạn."""
+        await self.workflows.append_events(workflow_id, events)
+
+    async def get_events(self, workflow_id: str) -> list[dict]:
+        """Đọc dòng thời gian đã ghim."""
+        return await self.workflows.get_events(workflow_id)
 
     async def save_repair_hints(self, workflow_id: str, hints: dict[str, dict]) -> None:
         """Persist repair hints cho workflow FAILED repairable."""

@@ -45,7 +45,10 @@ export function StepList({
   if (tasks.length === 0) return null
 
   return (
-    <ol className="border-t border-[var(--border-subtle)]">
+    /* `data-step-list` / `data-step`: neo cho kiểm thử của TRANG CHI TIẾT
+       `/workflow/:id` — component này chỉ ở đó. Workspace vẽ các bước bằng
+       `JourneyNode` trên canvas, xem `data-journey-step`. */
+    <ol className="border-t border-[var(--border-subtle)]" data-step-list>
       {tasks.map((task) => {
         const view = STEP_STATE[MAP[task.status] ?? 'proposed']
         const details = task.details ?? []
@@ -55,6 +58,7 @@ export function StepList({
         return (
           <li
             key={task.task_id}
+            data-step
             className="relative border-b border-[var(--border-subtle)] py-4 pl-5 pr-4"
             style={{ color: view.token }}
           >

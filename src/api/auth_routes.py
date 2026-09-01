@@ -17,28 +17,31 @@ Test: override `get_user_repository` bằng FakeUserRepository qua
 
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
 
 from src.api.auth import create_access_token, hash_password, verify_password
-from src.api.deps import get_current_user, get_user_repository
+from src.api.deps import get_current_user, get_otp_email_sender, get_reset_password_email_sender, get_user_repository
 from src.api.schemas import (
-    LinkRequestCreate,
-    LinkRequestView,
+    ForgotPasswordRequest,
+    GoogleRegisterRequest,
+    GoogleVerifyRequest,
     LoginRequest,
     RegisterRequest,
+    ResetPasswordRequest,
+    SendOtpRequest,
     TokenResponse,
     UserResponse,
 )
 from src.config import get_settings
-from src.db.link_request_repository import (
-    LinkRequestConflictError,
-    create_request,
-    latest_request_for_user,
-)
+from src.db.otp_repository import OtpPurpose, OtpRepository
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.user_repository import UserAlreadyExistsError
 from src.orchestration.runtime_provider import acquire_repository
@@ -75,6 +78,47 @@ def _to_user_response(user: dict) -> UserResponse:
     )
 
 
+@router.post("/send-registration-otp", status_code=200)
+async def send_registration_otp(
+    req: SendOtpRequest,
+    background_tasks: BackgroundTasks,
+    users: Any = Depends(get_user_repository),
+    gui_email_otp: Any = Depends(get_otp_email_sender),
+) -> dict:
+    """Gửi OTP xác nhận email trước khi đăng ký.
+
+    Người gửi email đến từ `get_otp_email_sender`, không phải từ import trực
+    tiếp: bài kiểm cần đọc mã OTP ở ĐÚNG chỗ nó rời hệ thống, và đó là email.
+    """
+    username = req.username.strip().lower()
+    user_by_username = await users.get_user_by_username(username)
+    if user_by_username is not None:
+        raise HTTPException(status_code=409, detail="Tên đăng nhập đã tồn tại.")
+
+    email = req.email.strip().lower()
+    user_by_email = await users.get_user_by_email(email)
+    if user_by_email is not None:
+        raise HTTPException(status_code=409, detail="Email này đã được sử dụng.")
+
+    otp_code = str(secrets.choice(range(100000, 999999)))
+
+    repository = await acquire_repository()
+    pool = repository._pool
+    try:
+        from src.db.otp_repository import CooldownError
+
+        otp_repo = OtpRepository(pool)
+        await otp_repo.save_otp(email, otp_code, purpose=OtpPurpose.REGISTRATION)
+    except CooldownError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    finally:
+        await pool.close()
+
+    # Gửi email qua background để không block request
+    background_tasks.add_task(gui_email_otp, email, otp_code)
+    return {"message": "OTP đã được gửi đến email của bạn."}
+
+
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(
     req: RegisterRequest,
@@ -82,17 +126,26 @@ async def register(
 ) -> UserResponse:
     """Đăng ký tài khoản mới — luôn tạo role='customer'. Không trả token.
 
-    KHÔNG tạo liên kết cư dân. Role cũ tên 'resident' khiến đăng ký xong trông
-    như đã là cư dân, và mọi chỗ kiểm "role == resident" để mở dịch vụ cư dân
-    đều mở cho tài khoản vừa tạo xong.
-
-    Trả 409 nếu username đã tồn tại (đồng bộ với nút trùng trong DB).
+    Yêu cầu mã OTP hợp lệ được gửi tới email.
     """
     username = req.username.strip().lower()
     password_hash = hash_password(req.password)
-    email = req.email.strip().lower() if req.email and req.email.strip() else None
+    email = req.email.strip().lower()
+
+    # Kiểm tra OTP trước
+    repository = await acquire_repository()
+    pool = repository._pool
+    try:
+        otp_repo = OtpRepository(pool)
+        is_valid = await otp_repo.verify_otp(email, req.otp_code, purpose=OtpPurpose.REGISTRATION)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail="Mã OTP không hợp lệ hoặc đã hết hạn.")
+    finally:
+        await pool.close()
 
     try:
+        from src.db.user_repository import EmailAlreadyExistsError
+
         user = await users.create_user(
             username=username,
             password_hash=password_hash,
@@ -107,6 +160,8 @@ async def register(
         )
     except UserAlreadyExistsError:
         raise HTTPException(status_code=409, detail="Tên đăng nhập đã tồn tại.") from None
+    except EmailAlreadyExistsError:
+        raise HTTPException(status_code=409, detail="Email này đã được sử dụng.") from None
 
     return _to_user_response(user)
 
@@ -118,8 +173,13 @@ async def login(
 ) -> TokenResponse:
     """Đăng nhập → access token (24h). Message 401 giống nhau cho sai username
     lẫn sai password — tránh lộ username hợp lệ."""
-    username = req.username.strip().lower()
-    user = await users.get_user_by_username(username)
+    username_or_email = req.username.strip().lower()
+
+    if "@" in username_or_email:
+        user = await users.get_user_by_email(username_or_email)
+    else:
+        user = await users.get_user_by_username(username_or_email)
+
     if user is None or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail=_USERNAME_OR_PASSWORD)
 
@@ -130,6 +190,171 @@ async def login(
         expires_in=settings.jwt_expire_minutes * 60,
         user=_to_user_response(user),
     )
+
+
+def _verify_google_token(token: str) -> dict:
+    settings = get_settings()
+    if not settings.google_client_id:
+        raise HTTPException(status_code=500, detail="Google Client ID chưa được cấu hình.")
+    try:
+        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), settings.google_client_id)
+        if idinfo.get("email_verified") is not True:
+            raise HTTPException(status_code=401, detail="Email Google chưa được xác minh.")
+        return idinfo
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Token Google không hợp lệ hoặc đã hết hạn.")
+
+
+@router.post("/google/verify")
+async def google_verify(
+    req: GoogleVerifyRequest,
+    users: Any = Depends(get_user_repository),
+) -> Any:
+    """Xác minh token từ Google. Nếu email đã tồn tại, trả về TokenResponse.
+    Nếu chưa, trả về 202 kèm thông tin cơ bản để frontend đưa sang trang bổ sung thông tin.
+    """
+    idinfo = _verify_google_token(req.credential)
+    email = idinfo.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Không lấy được email từ tài khoản Google.")
+
+    email = email.strip().lower()
+    user = await users.get_user_by_email(email)
+
+    if user is not None:
+        settings = get_settings()
+        return TokenResponse(
+            access_token=create_access_token(user),
+            token_type="bearer",
+            expires_in=settings.jwt_expire_minutes * 60,
+            user=_to_user_response(user),
+        )
+
+    # User chưa tồn tại, yêu cầu thông tin bổ sung
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={
+            "message": "Cần bổ sung thông tin đăng ký.",
+            "email": email,
+            "name": idinfo.get("name"),
+            "picture": idinfo.get("picture"),
+        },
+    )
+
+
+@router.post("/google/register", response_model=TokenResponse)
+async def google_register(
+    req: GoogleRegisterRequest,
+    users: Any = Depends(get_user_repository),
+) -> TokenResponse:
+    """Tạo tài khoản mới bằng Google ID Token + thông tin người dùng nhập thêm."""
+    idinfo = _verify_google_token(req.credential)
+    email = idinfo.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Không lấy được email từ tài khoản Google.")
+
+    email = email.strip().lower()
+
+    # Kiểm tra email trùng lần nữa để đảm bảo
+    existing = await users.get_user_by_email(email)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Email này đã được sử dụng.")
+
+    username = req.username.strip().lower()
+    # Dummy hash để không thể dùng form login thường
+    dummy_password_hash = hash_password(f"!GOOGLE_AUTH!{secrets.token_hex(16)}")
+
+    try:
+        from src.db.user_repository import EmailAlreadyExistsError
+
+        user = await users.create_user(
+            username=username,
+            password_hash=dummy_password_hash,
+            role="customer",
+            email=email,
+            full_name=_clean(idinfo.get("name")),
+            phone=_clean(req.phone),
+            avatar_url=_clean(idinfo.get("picture")),
+        )
+    except UserAlreadyExistsError:
+        raise HTTPException(status_code=409, detail="Tên đăng nhập đã tồn tại.") from None
+    except EmailAlreadyExistsError:
+        raise HTTPException(status_code=409, detail="Email này đã được sử dụng.") from None
+
+    settings = get_settings()
+    return TokenResponse(
+        access_token=create_access_token(user),
+        token_type="bearer",
+        expires_in=settings.jwt_expire_minutes * 60,
+        user=_to_user_response(user),
+    )
+
+
+@router.post("/forgot-password", status_code=200)
+async def forgot_password(
+    req: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    users: Any = Depends(get_user_repository),
+    gui_email_otp: Any = Depends(get_reset_password_email_sender),
+) -> dict:
+    """Yêu cầu mã OTP để lấy lại mật khẩu."""
+    generic_response = {"message": "Nếu email tồn tại trong hệ thống, OTP đã được gửi."}
+    email = req.email.strip().lower()
+    user_by_email = await users.get_user_by_email(email)
+    if user_by_email is None:
+        # Không tiết lộ việc email có tồn tại hay không vì lý do bảo mật
+        return generic_response
+
+    otp_code = str(secrets.choice(range(100000, 999999)))
+
+    repository = await acquire_repository()
+    pool = repository._pool
+    try:
+        from src.db.otp_repository import CooldownError
+
+        otp_repo = OtpRepository(pool)
+        await otp_repo.save_otp(email, otp_code, purpose=OtpPurpose.PASSWORD_RESET)
+    except CooldownError:
+        # 429 chỉ xảy ra với email tồn tại và vì thế trở thành oracle dò tài
+        # khoản. Trả cùng response chung; không gửi thêm thư trong cooldown.
+        return generic_response
+    finally:
+        await pool.close()
+
+    # Gửi email qua background để không block request
+    background_tasks.add_task(gui_email_otp, email, otp_code)
+    return generic_response
+
+
+@router.post("/reset-password", status_code=200)
+async def reset_password(
+    req: ResetPasswordRequest,
+    users: Any = Depends(get_user_repository),
+) -> dict:
+    """Đặt lại mật khẩu mới thông qua OTP."""
+    email = req.email.strip().lower()
+
+    # Kiểm tra OTP trước
+    repository = await acquire_repository()
+    pool = repository._pool
+    try:
+        otp_repo = OtpRepository(pool)
+        is_valid = await otp_repo.verify_otp(email, req.otp_code, purpose=OtpPurpose.PASSWORD_RESET)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail="Mã OTP không hợp lệ hoặc đã hết hạn.")
+    finally:
+        await pool.close()
+
+    user_by_email = await users.get_user_by_email(email)
+    if user_by_email is None:
+        raise HTTPException(status_code=400, detail="Người dùng không tồn tại.")
+
+    password_hash = hash_password(req.new_password)
+    success = await users.update_password(email, password_hash)
+    if not success:
+        raise HTTPException(status_code=500, detail="Không thể cập nhật mật khẩu lúc này.")
+
+    return {"message": "Mật khẩu đã được cập nhật thành công."}
 
 
 @router.get("/me", response_model=UserResponse)
@@ -167,81 +392,17 @@ async def me(user: dict = Depends(get_current_user)) -> UserResponse:
     )
 
 
-@router.post(
-    "/resident-link-requests",
-    status_code=201,
-    response_model=LinkRequestView,
-    summary="Gửi yêu cầu liên kết căn hộ",
-)
-async def create_resident_link_request(
-    request: LinkRequestCreate,
-    user: dict = Depends(get_current_user),
-) -> LinkRequestView:
-    """Khách hàng KHAI căn hộ của mình. Yêu cầu luôn bắt đầu ở PENDING.
-
-    Không có tham số nào cho trạng thái: quyền chỉ mở ở đường duyệt của admin.
-    Đây là ranh giới quan trọng nhất của endpoint này — nếu người dùng tự khẳng
-    định được mình sở hữu một căn hộ thì toàn bộ mô hình quyền cư dân chỉ còn
-    là một biểu mẫu.
-    """
-    repository = await acquire_repository()
-    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
-    try:
-        created = await create_request(
-            pool,
-            user["id"],
-            apartment_code=request.apartment_code.strip(),
-            residential_area=request.residential_area.strip(),
-            full_name=request.full_name.strip(),
-        )
-    except LinkRequestConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    finally:
-        await pool.close()
-
-    return LinkRequestView(
-        request_id=created.request_id,
-        apartment_code=created.apartment_code,
-        residential_area=created.residential_area,
-        status=created.status,
-        created_at=created.created_at.isoformat() if created.created_at else None,
-    )
-
-
-@router.get(
-    "/resident-link-requests/me",
-    response_model=LinkRequestView | None,
-    summary="Trạng thái yêu cầu liên kết căn hộ của chính mình",
-)
-async def my_resident_link_request(user: dict = Depends(get_current_user)) -> LinkRequestView | None:
-    """Chỉ trả yêu cầu của CHÍNH tài khoản đang đăng nhập.
-
-    Không nhận `user_id` trên đường dẫn hay query: nhận nghĩa là mở một endpoint
-    đọc hồ sơ người khác, và mọi cách chặn sau đó chỉ là vá.
-    """
-    repository = await acquire_repository()
-    pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
-    try:
-        found = await latest_request_for_user(pool, user["id"])
-    finally:
-        await pool.close()
-
-    if found is None:
-        return None
-    return LinkRequestView(
-        request_id=found.request_id,
-        apartment_code=found.apartment_code,
-        residential_area=found.residential_area,
-        status=found.status,
-        created_at=found.created_at.isoformat() if found.created_at else None,
-        decided_at=found.decided_at.isoformat() if found.decided_at else None,
-    )
-
-
-# ===========================================================================
-# /users — profile tự khai (Phase D). Router riêng vì PATCH /users/me nằm
-# NGOÀI prefix /auth (UI gọi thẳng /api/v1/users/me).
-# ===========================================================================
+# ĐÃ XOÁ: hai route nộp/xem yêu cầu liên kết căn hộ theo đường cũ.
+#
+#     POST /auth/resident-link-requests
+#     GET  /auth/resident-link-requests/me
+#
+# Đóng một đầu thôi thì không đủ: hồ sơ vẫn nộp được vào một hàng đợi không còn
+# ai duyệt, và người dùng chờ một quyết định không bao giờ tới. Cả hai đầu —
+# chỗ nộp và chỗ duyệt — cùng đóng.
+#
+# Đường canonical: `POST /verification-records` (kèm ảnh chứng minh) và
+# `GET /verification-records/my`. Xem ghi chú dài ở `admin_routes.py`.
 
 users_router = APIRouter(prefix="/users", tags=["users"])
 

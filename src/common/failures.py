@@ -48,6 +48,11 @@ VALIDATION_ERROR = FailureKind(
     "Yêu cầu chưa đủ điều kiện để thực hiện. Bạn kiểm tra lại thông tin vừa nhập giúp mình nhé.",
 )
 EXECUTION_ERROR = FailureKind("EXECUTION_ERROR", True, _TRY_AGAIN_SERVICE)
+SCHEDULE_CONFLICT_PERSISTENCE_ERROR = FailureKind(
+    "SCHEDULE_CONFLICT_PERSISTENCE_ERROR",
+    False,
+    "Hệ thống tạm thời không lưu được kiểm tra xung đột lịch. Yêu cầu chưa được thực hiện, bạn liên hệ bộ phận hỗ trợ giúp mình nhé.",
+)
 
 
 _BY_CODE: dict[str, FailureKind] = {
@@ -60,6 +65,7 @@ _BY_CODE: dict[str, FailureKind] = {
         DATABASE_UNAVAILABLE,
         VALIDATION_ERROR,
         EXECUTION_ERROR,
+        SCHEDULE_CONFLICT_PERSISTENCE_ERROR,
     )
 }
 

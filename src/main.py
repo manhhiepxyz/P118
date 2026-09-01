@@ -14,19 +14,23 @@ from src.api.auth_routes import router as auth_router
 from src.api.auth_routes import users_router
 from src.api.middleware import RateLimitMiddleware
 from src.api.notification_routes import router as notification_router
+from src.api.observability import CorrelationIdMiddleware, setup_observability_logging
+from src.api.proposal_routes import router as proposal_router
 from src.api.readiness import evaluate_readiness
 from src.api.routes import router
+from src.api.service_approval_routes import router as service_approval_router
 from src.api.verification_routes import router as verification_router
 from src.api.viewing_approval_routes import router as viewing_approval_router
+from src.api.webhook_routes import router as webhook_router
 from src.config import get_settings
 from src.monitoring.llm_trace import trace_enabled
+from src.orchestration.auto_approve import auto_approve_due_viewings
 from src.orchestration.deps import build_repository
 from src.orchestration.runtime_provider import (
     SharedPool,
     clear_repository_provider,
     set_repository_provider,
 )
-from src.orchestration.auto_approve import auto_approve_due_viewings
 from src.orchestration.sweeper import sweep_zombie_workflows
 from src.services.llm import LLMConfigurationError, check_llm_configuration
 
@@ -38,8 +42,10 @@ async def _ready(repository):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_observability_logging()
+
     settings = get_settings()
-    print(f"Starting {settings.app_name} in {settings.app_env} mode")
+    logging.getLogger("p118.main").info(f"Starting {settings.app_name} in {settings.app_env} mode")
 
     # Composition root: dựng pool MỘT LẦN và đăng ký provider.
     #
@@ -60,7 +66,7 @@ async def lifespan(app: FastAPI):
     try:
         check_llm_configuration(settings)
     except LLMConfigurationError as exc:
-        print(f"[CẤU HÌNH] LLM chưa dùng được: {exc} — /ready sẽ báo not_ready.")
+        logging.getLogger("p118.main").error(f"[CẤU HÌNH] LLM chưa dùng được: {exc} — /ready sẽ báo not_ready.")
 
     sweep_task = None
     if settings.zombie_sweep_enabled:
@@ -73,11 +79,11 @@ async def lifespan(app: FastAPI):
                 try:
                     await sweep_zombie_workflows()
                 except Exception:  # noqa: BLE001 - vòng sweep không được chết
-                    print("zombie sweep error", exc_info=True)
+                    logging.getLogger("p118.sweeper").exception("zombie sweep error")
                 await asyncio.sleep(settings.zombie_sweep_interval_seconds)
 
         sweep_task = asyncio.create_task(_sweep_forever())
-        print("Zombie sweep loop started")
+        logging.getLogger("p118.main").info("Zombie sweep loop started")
 
     # Tự duyệt lịch tham quan — CHỈ khi được bật tường minh. Xem
     # `src/orchestration/auto_approve.py` để biết vì sao mặc định là tắt.
@@ -90,7 +96,7 @@ async def lifespan(app: FastAPI):
                 try:
                     await auto_approve_due_viewings(delay)
                 except Exception as exc:  # noqa: BLE001 - vòng lặp không được chết
-                    print(f"auto-approve error: {type(exc).__name__}")
+                    logging.getLogger("p118.main").error(f"auto-approve error: {type(exc).__name__}")
                 # Nhịp quét bằng 1/3 độ trễ, tối thiểu 5 giây: chờ đúng bằng
                 # `delay` thì thời gian thực tế có thể gấp đôi khi yêu cầu đến
                 # ngay sau một lượt quét, và người demo sẽ ngồi nhìn màn hình
@@ -98,14 +104,29 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(max(5, delay // 3))
 
         auto_task = asyncio.create_task(_auto_approve_forever())
-        print(f"Auto-approve viewing loop started ({delay}s) — CHẾ ĐỘ DEMO")
+        logging.getLogger("p118.main").info(f"Auto-approve viewing loop started ({delay}s) — CHẾ ĐỘ DEMO")
     yield
 
     clear_repository_provider()
     app.state.runtime = None
-    # Đóng pool THẬT đúng một lần, ở đúng nơi đã tạo ra nó.
-    await repository._pool._inner.close()  # noqa: SLF001 - composition root sở hữu pool
 
+    # Việc đang chạy phải xong TRƯỚC khi pool đóng.
+    #
+    # `request_fresh_answer` và đường chạy workflow đều `create_task` rồi trả về
+    # ngay — đúng, người dùng không nên chờ một câu trả lời họ chưa hỏi. Nhưng
+    # thứ tự cũ đóng pool trước rồi mới dọn, nên một lượt deploy giữa chừng giật
+    # connection khỏi tay chúng: câu chốt không bao giờ được ghi, và workflow
+    # nằm lại đúng trạng thái nó đang dở.
+    #
+    # `drain_demo_tasks` có hạn giờ và huỷ phần quá hạn, nên một tác vụ treo
+    # không giữ được tiến trình khi đang tắt.
+    from src.api.routes import drain_demo_tasks
+
+    da_cho = await drain_demo_tasks()
+    if da_cho:
+        logging.getLogger("p118.main").info(f"Chờ {da_cho} tác vụ nền chạy nốt trước khi tắt")
+
+    # Vòng lặp nền dừng trước pool, cùng lý do: chúng đọc/ghi qua chính pool ấy.
     for task in (sweep_task, auto_task):
         if task is None:
             continue
@@ -114,7 +135,10 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
-    print("Shutting down...")
+
+    # Đóng pool THẬT đúng một lần, ở đúng nơi đã tạo ra nó — và SAU CÙNG.
+    await repository._pool._inner.close()  # noqa: SLF001 - composition root sở hữu pool
+    logging.getLogger("p118.main").info("Shutting down...")
 
 
 if trace_enabled():  # pragma: no cover - phụ thuộc biến môi trường
@@ -148,6 +172,9 @@ async def safe_request_validation_error(_request, _exc: RequestValidationError) 
 
 
 settings = get_settings()
+
+app.add_middleware(CorrelationIdMiddleware)
+
 app.add_middleware(
     RateLimitMiddleware,
     requests_per_minute=settings.rate_limit_per_minute,
@@ -172,11 +199,18 @@ app.include_router(admin_router, prefix="/api/v1")
 # Xác thực căn hộ/xe có ảnh, provider duyệt (Path B song song với Agent).
 app.include_router(verification_router, prefix="/api/v1")
 # Yêu cầu lịch tham quan chờ duyệt — provider/admin quyết định trong /review.
+# Hàng đợi duyệt của đơn vị cho SÁU dịch vụ ngoài lịch tham quan.
+app.include_router(service_approval_router, prefix="/api/v1")
+# Khách xác nhận đề xuất đơn vị. Tách khỏi hàng đợi duyệt vì hai bề mặt phục vụ
+# hai vai: khách bấm ở đây, đơn vị bấm ở `/service-approvals`.
+app.include_router(proposal_router, prefix="/api/v1")
 app.include_router(viewing_approval_router, prefix="/api/v1")
 # Thông báo realtime: GET /api/v1/notifications/summary + /stream (SSE).
 app.include_router(notification_router, prefix="/api/v1")
 # Profile tự khai: PATCH /api/v1/users/me (multipart + avatar).
 app.include_router(users_router, prefix="/api/v1")
+# Webhook cổng thanh toán VNPay (IPN + return) — KHÔNG JWT, bảo vệ bằng HMAC.
+app.include_router(webhook_router, prefix="/api/v1")
 
 
 # Ảnh giấy tờ xác thực. Thư mục phải tồn tại trước khi mount — StaticFiles

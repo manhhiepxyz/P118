@@ -15,6 +15,7 @@ exception / payload / connection detail ra ngoài.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.common.projects import PROJECTS
@@ -109,7 +110,86 @@ def task_failure_message(task: Any, title: str, code: str) -> str:
 
 
 # Nhãn công khai của khu đỗ xe. Người dùng không bao giờ nhìn thấy "ZONE_A".
-_ZONE_LABELS = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}
+ZONE_LABELS = {"ZONE_A": "Khu A", "ZONE_B": "Khu B"}
+
+# Giá trị chuẩn của contract ↔ cách người Việt thật sự nói ra nó.
+#
+# Cần cho phép so "giá trị này có phải lấy từ chuyện cũ không": model viết lại
+# câu nói thành dạng chuẩn (`ZONE_A`), còn ký ức lưu nguyên văn ("khu A"). So
+# thô sẽ bỏ lọt đúng những ca cần bắt — và ca bị bỏ lọt là ca hệ thống lặng lẽ
+# đặt lại chỗ cũ mà không hỏi ai.
+#
+# Danh sách enum lấy từ `TOOL_CONTRACTS`; thêm enum mới mà quên ở đây thì guard
+# yếu đi chứ không sai — nó chỉ hết bắt được dạng tiếng Việt của enum đó.
+SPOKEN_FORMS: dict[str, tuple[str, ...]] = {
+    "ZONE_A": ("khu a", "zone a"),
+    "ZONE_B": ("khu b", "zone b"),
+    "car": ("ô tô", "oto", "xe hơi", "xe con"),
+    "motorcycle": ("xe máy", "xe may", "mô tô"),
+    "buy": ("mua",),
+    "rent": ("thuê", "thue"),
+    "consultation": ("tư vấn", "tu van"),
+    "apartment": ("căn hộ", "can ho"),
+    "room": ("phòng", "phong"),
+    "plumbing": ("nước", "ống nước", "vòi nước"),
+    "electrical": ("điện",),
+    "air_conditioning": ("điều hoà", "máy lạnh"),
+    "truck": ("xe tải",),
+    "van": ("xe van",),
+}
+
+
+# Mã dự án `PRJ-003` và ngày ISO `2026-08-30` là dạng CANONICAL — không ai gõ
+# chúng. Bảng `SPOKEN_FORMS` ở trên là tra tĩnh, không phủ được hai loại này vì
+# chúng sinh ra từ dữ liệu (danh mục dự án) và từ định dạng (ngày).
+_PROJECT_ID = re.compile(r"^PRJ-[A-Z0-9]+$")
+_ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def spoken_forms(value: str) -> tuple[str, ...]:
+    """Mọi cách một giá trị chuẩn có thể đã được NÓI RA, kèm chính nó.
+
+    Đây là cầu nối giữa giá trị canonical và lời người dùng. Nơi dùng nó nhiều
+    nhất là `_fields_taken_from_recall`: guard ấy hỏi *"giá trị này có trong
+    câu người dùng vừa nói không"* — và câu hỏi đó chỉ trả lời đúng khi mọi
+    cách nói đều được liệt kê.
+
+    Thiếu cầu nối thì guard bắt nhầm điều người dùng VỪA GÕ. Đo được: khách gõ
+    "Vinhomes Green Paradise", model điền `PRJ-003`, guard không nối được hai
+    thứ nên kết luận giá trị lấy từ ký ức và hỏi lại đúng tên dự án vừa gõ.
+    Nghịch lý đo được: giữ nguyên field nào thì field đó bị hỏi lại.
+
+    Hai loại dưới đây suy ra từ chính giá trị, không tra bảng tĩnh:
+
+      PRJ-003      → tên dự án trong danh mục
+      2026-08-30   → "30/08", "30/08/2026", "30-08", "30 tháng 8"
+
+    KHÔNG nới độ chặt của guard: một giá trị chỉ có trong ký ức mà không có
+    trong câu người dùng vẫn bị bắt như cũ.
+    """
+    forms: tuple[str, ...] = (value,) + SPOKEN_FORMS.get(value, ())
+
+    if _PROJECT_ID.match(value):
+        from src.common.projects import project_name
+
+        ten = project_name(value)
+        if ten:
+            forms += (ten,)
+        return forms
+
+    ngay = _ISO_DAY.match(value)
+    if ngay:
+        nam, thang, ngay_ = ngay.groups()
+        forms += (
+            f"{ngay_}/{thang}",
+            f"{ngay_}/{thang}/{nam}",
+            f"{ngay_}-{thang}",
+            f"{ngay_} tháng {int(thang)}",
+            f"{int(ngay_)}/{int(thang)}",
+        )
+    return forms
+
+
 _OTHER_ZONE = {"ZONE_A": "Khu B", "ZONE_B": "Khu A"}
 
 
@@ -138,7 +218,7 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
             return f"Xe tham quan đã hết chỗ{when}. Bạn chọn ngày khác giúp mình nhé."
         if task_tool == "book_parking":
             zone = str(inputs.get("parking_zone") or "")
-            label = _ZONE_LABELS.get(zone, "Khu vực bạn chọn")
+            label = ZONE_LABELS.get(zone, "Khu vực bạn chọn")
             date = _text(inputs.get("booking_date"))
             when = f" ngày {date}" if date else ""
             alternative = _OTHER_ZONE.get(zone)
@@ -150,6 +230,44 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
             slot = " ".join(part for part in (time_text, f"ngày {date}" if date else "") if part)
             subject = f"Khung giờ {slot}" if slot else "Khung giờ bạn chọn"
             return f"{subject} đã kín lịch. Bạn chọn giờ hoặc ngày khác giúp mình nhé."
+        # Bảo trì và chuyển nhà trước đây không có câu nào, nên rơi về câu của
+        # nhánh THIẾU THÔNG TIN — "mình cần thêm thông tin" — cho một người đã
+        # cung cấp đầy đủ. Họ gõ lại đúng ngày cũ và hỏng y hệt.
+        if task_tool == "create_maintenance_request":
+            date = _text(inputs.get("preferred_date"))
+            time_text = _text(inputs.get("preferred_time"))
+            slot = " ".join(part for part in (f"ngày {date}" if date else "", time_text) if part)
+            subject = f"Lịch bảo trì {slot}" if slot else "Khung giờ bảo trì bạn chọn"
+            return f"{subject} đã kín. Bạn chọn ngày hoặc giờ khác giúp mình nhé."
+        if task_tool == "create_moving_request":
+            date = _text(inputs.get("move_date"))
+            time_text = _text(inputs.get("move_time"))
+            slot = " ".join(part for part in (f"ngày {date}" if date else "", time_text) if part)
+            subject = f"Lịch chuyển nhà {slot}" if slot else "Khung giờ chuyển nhà bạn chọn"
+            return f"{subject} đã kín. Bạn chọn ngày hoặc giờ khác giúp mình nhé."
+
+    if code == "SCHEDULE_CONFLICT_CHANGE_REQUESTED":
+        # Người dùng chọn đổi lịch này vì xung đột với lịch hẹn khác.
+        # Không đề cập provider, không nói "hết chỗ" — đây là lựa chọn của khách.
+        if task_tool == "schedule_move":
+            date = _text(inputs.get("move_date"))
+            time_text = _text(inputs.get("move_time"))
+            slot = " ".join(p for p in (f"ngày {date}" if date else "", time_text) if p)
+            subject = f"Lịch chuyển nhà {slot}" if slot else "Lịch chuyển nhà"
+            return f"{subject} đang xung đột với một lịch hẹn khác của bạn. Bạn chọn ngày hoặc giờ mới giúp mình nhé."
+        if task_tool == "create_maintenance_request":
+            date = _text(inputs.get("preferred_date"))
+            time_text = _text(inputs.get("preferred_time"))
+            slot = " ".join(p for p in (f"ngày {date}" if date else "", time_text) if p)
+            subject = f"Lịch bảo trì {slot}" if slot else "Lịch bảo trì"
+            return f"{subject} đang xung đột với một lịch hẹn khác của bạn. Bạn chọn ngày hoặc giờ mới giúp mình nhé."
+        if task_tool == "schedule_property_viewing":
+            date = _text(inputs.get("viewing_date"))
+            time_text = _text(inputs.get("viewing_time"))
+            slot = " ".join(p for p in (f"ngày {date}" if date else "", time_text) if p)
+            subject = f"Lịch tham quan {slot}" if slot else "Lịch tham quan"
+            return f"{subject} đang xung đột với một lịch hẹn khác của bạn. Bạn chọn ngày hoặc giờ mới giúp mình nhé."
+        return "Lịch hẹn này đang xung đột với một lịch hẹn khác. Bạn chọn thời gian mới giúp mình nhé."
 
     if code == "VEHICLE_ALREADY_EXISTS":
         plate = _text(inputs.get("plate_number"))
@@ -157,9 +275,27 @@ def repair_question(task_tool: str, code: str, task_input: dict | None) -> str |
         return f"{subject} đã được đăng ký trước đó. Bạn kiểm tra lại hoặc nhập biển số khác giúp mình nhé."
 
     if code == "BOOKING_ALREADY_EXISTS":
+        # Ràng buộc thật là UNIQUE (vehicle_id, booking_date): MỘT XE không thể
+        # có hai chỗ đỗ trong cùng một ngày.
+        #
+        # Câu cũ — "Bạn đã có chỗ đỗ xe ngày X rồi. Bạn chọn ngày khác giúp mình
+        # nhé" — đọc lên thành một nghịch lý: đã có chỗ rồi thì đổi ngày làm gì?
+        # Nó bỏ mất hai thứ quyết định nghĩa của câu:
+        #
+        #   * CHIẾC XE nào. Người dùng có thể có nhiều xe, và câu này nói về
+        #     đúng một chiếc.
+        #   * Rằng chỗ đỗ ấy VẪN CÒN. Không cần làm gì thêm cho ngày đó.
+        #
+        # Nói đủ hai thứ thì "chọn ngày khác" thôi vô lý: nó là lựa chọn dành
+        # cho người muốn thêm một ngày NỮA, không phải một mệnh lệnh sửa sai.
         date = _text(inputs.get("booking_date"))
-        when = f" ngày {date}" if date else ""
-        return f"Bạn đã có chỗ đỗ xe{when} rồi. Bạn chọn ngày khác giúp mình nhé."
+        plate = _text(inputs.get("plate_number"))
+        who = f"Xe {plate}" if plate else "Xe này"
+        when = f" ngày {date}" if date else " trong ngày được chọn"
+        return (
+            f"{who} đã có chỗ đỗ{when} rồi — chỗ đó vẫn được giữ, bạn không cần "
+            "đặt lại. Nếu muốn đặt thêm cho một ngày khác, bạn cho mình biết ngày nhé."
+        )
 
     if code == "RESIDENT_ALREADY_EXISTS":
         return "Căn hộ này đã được đăng ký. Bạn kiểm tra lại mã căn hộ giúp mình nhé."

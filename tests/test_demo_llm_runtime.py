@@ -9,6 +9,7 @@ from scripts import demo_llm_runtime
 from src.common.results import StandardResult
 from src.common.task_plan import Task, TaskPlan
 from src.orchestration import demo_service
+from src.orchestration.service_approval import ServiceApprovalBoundary
 
 
 def _plan(tool: str) -> TaskPlan:
@@ -39,6 +40,7 @@ class _Boundary:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        **_forwarded,
     ) -> tuple[str, dict[str, StandardResult]]:
         # `finalize` thuộc Protocol của execution boundary: double phải nhận,
         # nếu không nó che mất việc boundary thật có chuyển tiếp cờ hay không.
@@ -244,17 +246,34 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
     monkeypatch.setattr(demo_service, "get_llm", lambda **_: llm)
     monkeypatch.setattr(demo_service, "Planner", lambda received, **_kwargs: planner if received is llm else None)
 
-    async def _build_boundary(*urls: str, on_task_progress=None, on_failure=None, shuttle_url=None):
+    async def _build_boundary(
+        *urls: str,
+        on_task_progress=None,
+        on_failure=None,
+        shuttle_url=None,
+        workflow_id=None,
+    ):
         assert on_task_progress is not None
+        # `workflow_id` là thứ cho phép `pay_fee` mang khoá idempotency. Đồ giả
+        # không nhận nó thì lỗi hiện ra ở đây chứ không phải ở chỗ tiền bị trừ
+        # hai lần — nên nhận, và khẳng định nó có thật.
+        assert workflow_id == "workflow-1", "workflow_id không tới được nơi dựng connector"
         events.append(("runtime", urls))
         return runtime_boundary, _Repository()
 
     def _build_graph(received_planner, received_boundary, *, on_stage=None, **kwargs):
         assert received_planner is planner
-        # Boundary ngoài cùng là viewing (chặn schedule_property_viewing TRƯỚC
-        # mọi guard khác); bên trong nó là chuỗi payment → resident → runtime.
-        assert isinstance(received_boundary, demo_service.ViewingApprovalBoundary)
-        inner = received_boundary._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        # Boundary NGOÀI CÙNG là cảnh báo xung đột lịch (ScheduleConflictBoundary),
+        # bao ngoài cổng đơn vị cung cấp (ServiceApprovalBoundary). Thứ tự đúng:
+        # conflict → service → viewing → payment → resident → runtime.
+        from src.orchestration.schedule_conflict import ScheduleConflictBoundary
+
+        assert isinstance(received_boundary, ScheduleConflictBoundary)
+        service = received_boundary._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        assert isinstance(service, ServiceApprovalBoundary)
+        viewing = service._boundary  # noqa: SLF001 - test kiểm cấu trúc
+        assert isinstance(viewing, demo_service.ViewingApprovalBoundary)
+        inner = viewing._boundary  # noqa: SLF001 - test kiểm cấu trúc
         assert isinstance(inner, demo_service.PaymentApprovalBoundary)
         assert on_stage is None
         assert kwargs.get("parent_workflow_id") is None
@@ -270,6 +289,10 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
         resident_url="http://resident",
         transport_url="http://transport",
         payment_url="http://payment",
+        # Production LUÔN truyền id (routes.py dựng nó trước khi chạy job).
+        # Truyền ở đây để khẳng định nó ĐI TỚI được connector — thiếu nó thì
+        # `pay_fee` ra provider không mang khoá idempotency.
+        workflow_id="workflow-1",
     )
 
     assert state["workflow_id"] == "workflow-1"
@@ -284,7 +307,15 @@ async def test_demo_service_composes_real_factories_and_closes_pool(
         ),
     ) in events
     #  rỗng ở lượt đầu: chưa có câu hỏi lại nào để trả lời.
-    assert ("invoke", {"goal": "Đăng ký cư dân", "existing_context": {}, "user_answers": {}}) in events
+    assert (
+        "invoke",
+        {
+            "goal": "Đăng ký cư dân",
+            "existing_context": {},
+            "user_answers": {},
+            "workflow_id": "workflow-1",
+        },
+    ) in events
     assert events[-1] == "pool_closed"
 
 

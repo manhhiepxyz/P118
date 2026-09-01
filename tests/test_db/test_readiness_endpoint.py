@@ -20,6 +20,10 @@ def _settings(**overrides) -> Settings:
         "deepseek_api_key": "khoa-gia-cho-test",
         "deepseek_model_name": "deepseek-v4-flash",
         "openrouter_api_key": "",
+        # Không phải khoá thật — chỉ cần khác rỗng để mục `auth` xanh. Bỏ dòng
+        # này thì MỌI test dưới đây đỏ vì một lý do không liên quan tới thứ nó
+        # đang kiểm.
+        "jwt_secret": "khoa-ky-token-gia-cho-test",
     }
     base.update(overrides)
     return Settings(**base)
@@ -32,7 +36,50 @@ async def test_ready_is_green_when_everything_is_configured(client, db_pool):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "ready"
-    assert {c["name"] for c in body["checks"]} == {"llm_config", "database", "migrations", "connectors"}
+    assert {c["name"] for c in body["checks"]} == {
+        "llm_config",
+        "auth",
+        "database",
+        "migrations",
+        "connectors",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_missing_jwt_secret_makes_ready_red(db_pool):
+    """Thiếu `JWT_SECRET` thì mọi lần đăng nhập trả 500 — `/ready` phải đỏ.
+
+    Đã đo được trên stack sạch trước khi có mục kiểm này: `/ready` xanh cả bốn
+    mục, `POST /auth/register` trả 201, rồi `POST /auth/login` trả 500. Người
+    vận hành nhìn `/ready` và tin hệ thống dùng được, trong khi không ai đăng
+    nhập nổi.
+    """
+    ok, checks = await evaluate_readiness(_settings(jwt_secret=""))
+
+    assert ok is False
+    auth = next(c for c in checks if c["name"] == "auth")
+    assert auth["ok"] is False
+    assert "JWT_SECRET" in auth["detail"]
+
+
+@pytest.mark.asyncio
+async def test_the_auth_check_never_reveals_the_secret(db_pool):
+    """Detail không được mang khoá, độ dài khoá, hay bất kỳ mảnh nào của nó.
+
+    `/ready` thường được mở ra ngoài cho load balancer, nên nó là một bề mặt
+    công khai — kể cả khi mục kiểm đang XANH.
+    """
+    # Ghép từ mảnh, không gán thẳng chuỗi: `test_no_committed_secrets` quét mọi
+    # file được track và bắt đúng dạng `<tên> = "<chuỗi entropy cao>"`. Nó đã
+    # bắt bản viết trước của dòng này — quét đang làm đúng việc, nên chỗ cần
+    # đổi là đây, không phải bộ quét.
+    canary = "-".join(["mot", "chuoi", "canary", "rat", "de", "nhan", "ra"])
+    _, checks = await evaluate_readiness(_settings(jwt_secret=canary))
+
+    auth = next(c for c in checks if c["name"] == "auth")
+    assert auth["ok"] is True
+    assert canary not in auth["detail"]
+    assert str(len(canary)) not in auth["detail"]
 
 
 @pytest.mark.asyncio
@@ -87,7 +134,7 @@ async def test_every_check_runs_even_after_one_fails(db_pool):
     # cái kế tiếp.
     failed = {c["name"] for c in checks if not c["ok"]}
     assert {"llm_config", "connectors"} <= failed, failed
-    assert len(checks) == 4, "có hạng mục bị bỏ qua sau lỗi đầu tiên"
+    assert len(checks) == 5, "có hạng mục bị bỏ qua sau lỗi đầu tiên"
 
 
 @pytest.mark.asyncio

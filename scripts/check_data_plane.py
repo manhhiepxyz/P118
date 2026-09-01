@@ -24,8 +24,35 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-BACKEND = os.environ.get("P118_BACKEND", "http://127.0.0.1:8080")
+
+def _app_port() -> str:
+    """Cổng host của backend, phân giải ĐÚNG như docker compose phân giải.
+
+    Compose đọc `${APP_PORT:-8080}` từ biến môi trường trước, rồi tới `.env` ở
+    gốc repo. Script này trước đây chỉ hardcode 8080, nên với `APP_PORT=8000`
+    trong `.env` nó gọi vào một cổng không ai lắng nghe và báo
+    "provider và backend không dùng chung kho dữ liệu" — một kết luận về dữ
+    liệu, cho một sự cố thuần tuý về cổng. Thông báo đó gửi người đọc đi sai
+    hướng hoàn toàn.
+    """
+    from_env = os.environ.get("APP_PORT")
+    if from_env:
+        return from_env
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            # Chỉ lấy đúng một khoá — `.env` còn chứa API key thật.
+            if sep and key.strip() == "APP_PORT":
+                cleaned = value.strip().strip("\"'")
+                if cleaned:
+                    return cleaned
+    return "8080"
+
+
+BACKEND = os.environ.get("P118_BACKEND", f"http://127.0.0.1:{_app_port()}")
 POSTGRES_CONTAINER = os.environ.get("P118_PG_CONTAINER", "p118_postgres")
 PG_USER = os.environ.get("P118_PG_USER", "p118")
 

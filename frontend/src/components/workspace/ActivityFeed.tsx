@@ -1,7 +1,8 @@
 import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
-import { ACTIVITY, type ActivityEvent } from '../../lib/journeyMock'
+import type { ActivityEvent } from '../../lib/journeyMock'
+import type { AgentWorkflowEvent } from '../../lib/types'
 
 const VIEW: Record<ActivityEvent['state'], { Icon: LucideIcon; token: string; spin?: boolean }> = {
   success: { Icon: CheckCircle2, token: 'var(--success)' },
@@ -18,7 +19,56 @@ const VIEW: Record<ActivityEvent['state'], { Icon: LucideIcon; token: string; sp
  * mép dưới chỉ còn đúng một việc — nhận lệnh — và cột phải gom tất cả những gì
  * thuộc về "hành trình này đang ra sao".
  */
-export function ActivityFeed() {
+/** Giai đoạn backend phát ra → trạng thái hiển thị. */
+const STATE_OF: Record<string, ActivityEvent['state']> = {
+  TASK_SUCCESS: 'success',
+  VALIDATED: 'success',
+  PLANNED: 'success',
+  RESIDENT_VERIFIED: 'success',
+  FINISHED: 'success',
+  TASK_FAILED: 'failed',
+  VALIDATION_FAILED: 'failed',
+  EXECUTION_FAILED: 'failed',
+  WAITING_APPROVAL: 'pending',
+  WAITING_VIEWING_APPROVAL: 'pending',
+  // Chờ đơn vị duyệt một dịch vụ ngoài lịch tham quan. Thiếu dòng này thì giai
+  // đoạn rơi về `undefined` và dòng hoạt động không có trạng thái nào — một
+  // việc đang chờ trông y hệt một việc không rõ ra sao.
+  WAITING_SERVICE_APPROVAL: 'pending',
+  NEEDS_INFORMATION: 'pending',
+}
+
+/** "2026-08-20T06:51:59Z" → "13:51" theo giờ máy người đọc. */
+function clock(at: string | null | undefined): string | null {
+  if (!at) return null
+  const parsed = new Date(at)
+  return Number.isNaN(parsed.getTime())
+    ? null
+    : parsed.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+}
+
+/**
+ * Dòng hoạt động THẬT của yêu cầu đang mở.
+ *
+ * Trước đây component này vẽ `ACTIVITY` — bảy sự kiện bịa cứng trong
+ * `journeyMock`, kèm giờ giả (14:01, 14:02), dự án giả, "Khu A hết chỗ ngày
+ * 20/09". Ai nhìn cũng tưởng là nhật ký thật, kể cả khi họ vừa làm một việc
+ * hoàn toàn khác — và trong một buổi trình bày thì đó là nói dối người xem.
+ *
+ * Nguồn giờ là `events` do backend phát, đã ghim xuống `workflow_events` nên
+ * còn nguyên sau restart. Không có yêu cầu nào đang mở thì KHÔNG vẽ gì: một
+ * danh sách trống nói đúng sự thật, còn dữ liệu mẫu thì không.
+ */
+export function ActivityFeed({ events = [] }: { events?: AgentWorkflowEvent[] }) {
+  const items: ActivityEvent[] = events.map((event) => ({
+    id: `e${event.sequence}`,
+    state: STATE_OF[event.stage] ?? 'running',
+    text: event.message,
+    time: clock(event.at),
+  }))
+
+  if (items.length === 0) return null
+
   return (
     <div className="space-y-8 px-6 py-6">
       <section>
@@ -26,7 +76,7 @@ export function ActivityFeed() {
           Hoạt động
         </h3>
         <ol className="seq mt-3.5 space-y-2.5" aria-live="polite">
-          {ACTIVITY.map((event) => {
+          {items.map((event) => {
             const view = VIEW[event.state]
             return (
               <li key={event.id} className="flex items-start gap-2.5 text-[13.5px] leading-[1.5]">

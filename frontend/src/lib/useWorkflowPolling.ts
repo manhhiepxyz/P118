@@ -63,6 +63,9 @@ export interface WorkflowPolling {
  */
 const ANSWER_TIMEOUT_MS = 30_000
 
+/** Nhịp đọc đầu tiên. Thay đổi hay xảy ra nhất ngay sau một hành động. */
+const FIRST_INTERVAL_MS = 250
+
 export function useWorkflowPolling(
   workflowId: string,
   intervalMs = 1500,
@@ -72,8 +75,18 @@ export function useWorkflowPolling(
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
-  // Chống chồng request: một lần fetch chưa xong thì lần kế tiếp không bắn đi.
-  const inFlight = useRef(false)
+  // Chống chồng request — nhưng CHỈ trong cùng một thế hệ.
+  //
+  // Bản trước là một boolean: "đang có request bay thì đừng bắn thêm". Nó chặn
+  // nhầm đúng lúc quan trọng nhất — khi đổi sang workflow khác. Request của
+  // workflow CŨ còn bay thì lượt fetch của workflow MỚI bị bỏ qua, rồi request
+  // cũ về và bị loại vì sai thế hệ. Không ai fetch nữa, và màn hình đứng đó tới
+  // nhịp poll kế tiếp.
+  //
+  // Giữ THẾ HỆ của request đang bay thay vì một cờ bật/tắt: cùng thế hệ thì bỏ
+  // qua (đúng mục đích ban đầu), khác thế hệ thì phải bắn — dữ liệu đang cần là
+  // của thế hệ mới.
+  const inFlight = useRef<number | null>(null)
 
   /**
    * Trạng thái mới nhất, giữ ngoài state.
@@ -86,6 +99,8 @@ export function useWorkflowPolling(
   /** Câu trả lời đã xong chưa, và mốc bắt đầu chờ nó. */
   const responseStateRef = useRef<string | null>(null)
   const waitingSince = useRef<number | null>(null)
+  /** Nhịp đọc hiện tại; tăng dần từ `FIRST_INTERVAL_MS` lên `intervalMs`. */
+  const nhip = useRef<number>(FIRST_INTERVAL_MS)
   /**
    * Vô hiệu response của request đã bắt đầu trước một mutation hoặc trước khi
    * chuyển sang workflow khác. Nếu không, GET cũ có thể về muộn và ghi đè
@@ -110,17 +125,35 @@ export function useWorkflowPolling(
   )
 
   const load = useCallback(async () => {
-    if (!workflowId || inFlight.current) return
+    if (!workflowId) return
     const generation = generationRef.current
-    inFlight.current = true
+    if (inFlight.current === generation) return
+    inFlight.current = generation
     try {
       const next = await getWorkflow(workflowId)
       if (generation === generationRef.current) applySnapshot(next)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Không tải được yêu cầu.')
+      // Lỗi của một request ĐÃ CŨ không được ghi đè lên trạng thái hiện tại.
+      if (generation === generationRef.current) {
+        setError(e instanceof Error ? e.message : 'Không tải được yêu cầu.')
+      }
     } finally {
-      inFlight.current = false
-      setLoading(false)
+      if (inFlight.current === generation) inFlight.current = null
+      // CHỈ tắt cờ tải khi response này còn thuộc về thế hệ hiện tại.
+      //
+      // Bản trước tắt vô điều kiện, và đó là lý do bấm vào một yêu cầu trong
+      // Lịch sử thì thấy "Không tìm thấy yêu cầu này" hơn một giây rồi mới
+      // load ra.
+      //
+      // Cơ chế: StrictMode chạy effect hai lần. Lượt một gọi `load()` và bắt
+      // đầu fetch; lượt hai tăng `generationRef` rồi gọi `load()`, nhưng
+      // `inFlight` còn true nên nó return sớm. Fetch của lượt một về, bị loại
+      // vì sai thế hệ — `applySnapshot` không chạy, `data` vẫn null — nhưng
+      // `finally` vẫn tắt `loading`.
+      //
+      // Kết quả là `loading=false` cùng `data=null`, tức đúng điều kiện của
+      // nhánh "không tìm thấy". Nó đứng đó tới nhịp poll kế tiếp.
+      if (generation === generationRef.current) setLoading(false)
     }
   }, [workflowId, applySnapshot])
 
@@ -139,6 +172,10 @@ export function useWorkflowPolling(
     statusRef.current = null
     responseStateRef.current = null
     waitingSince.current = null
+
+    // Mỗi lượt bắt đầu lại từ nhịp nhanh nhất: một workflow mới, hoặc một thay
+    // đổi vừa xảy ra, là lúc đáng đọc dày nhất.
+    nhip.current = FIRST_INTERVAL_MS
 
     async function tick() {
       await load()
@@ -166,7 +203,22 @@ export function useWorkflowPolling(
       const stillWaitingForAnswer = waitForAnswer && answerPending && withinTimeout
 
       if (!finished || stillWaitingForAnswer) {
-        timer = setTimeout(tick, intervalMs)
+        // Nhịp poll TĂNG DẦN, không cố định.
+        //
+        // 1500 ms cố định nghĩa là MỌI thay đổi trạng thái đều đến muộn trung
+        // bình 750 ms, tệ nhất 1500 ms — kể cả những thay đổi backend trả về
+        // gần như tức thì (đơn vị vừa duyệt, câu trả lời vừa ghi xong). Với một
+        // lượt chỉ mất vài trăm mili-giây, phần lớn thời gian người dùng nhìn
+        // màn hình đứng im là do NHỊP ĐỌC, không do hệ thống.
+        //
+        // Nhưng đọc dày suốt lượt cũng sai: Planner mất hàng chục giây, và nhồi
+        // request trong lúc ấy chỉ tốn CPU của một máy chủ 0,1 CPU.
+        //
+        // Nên: đọc dày lúc ĐẦU (khi thay đổi hay xảy ra nhất), thưa dần về mức
+        // cũ. Tổng số request trong 30 giây gần như không đổi so với nhịp cố
+        // định, nhưng những giây đầu — nơi người dùng đang nhìn — dày hơn nhiều.
+        nhip.current = Math.min(intervalMs, Math.round(nhip.current * 1.6))
+        timer = setTimeout(tick, nhip.current)
       }
     }
 

@@ -43,6 +43,9 @@ class _RecordingBoundary:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        # Đồ giả phải RỘNG bằng hàng thật. Hẹp hơn thì `TypeError` lúc chạy —
+        # và nó trông y hệt một thất bại của sản phẩm.
+        **_forwarded,
     ):
         self.finalize_flags.append(finalize)
         results: dict[str, StandardResult] = {}
@@ -161,6 +164,7 @@ async def test_failed_prefix_is_returned_without_requesting_viewing_approval() -
             finalize: bool = True,
             parent_workflow_id: str | None = None,
             session_id: str | None = None,
+            **_forwarded,
         ) -> tuple[str, dict[str, StandardResult]]:
             return workflow_id or "wf-failed", {
                 "T1": StandardResult.fail(
@@ -195,7 +199,20 @@ async def test_failed_prefix_is_returned_without_requesting_viewing_approval() -
     assert workflow_id == "wf-failed"
     assert set(results) == {"T1"}
     assert all(not result.success for result in results.values())
-    assert repository.statuses == [], "không được chuyển sang chờ duyệt khi prefix thất bại"
+    waiting = [t for t, st in repository.statuses if st is TaskStatus.WAITING_APPROVAL]
+    assert waiting == [], "không được chuyển sang chờ duyệt khi prefix thất bại"
+
+    # Nhưng cũng KHÔNG được để nguyên `PENDING`.
+    #
+    # Bản trước không đổi gì cả, nên bước tham quan nằm lại PENDING trong khi
+    # `service_approvals` không có dòng nào — và giao diện suy ra "đang chờ đơn
+    # vị xác nhận lịch tham quan". Một lời chờ mà KHÔNG AI được hỏi.
+    #
+    # Đo được trên 957e39e6 và 4289ea67: viewing PENDING, 0 dòng AWAITING, màn
+    # hình vẫn báo chờ duyệt. Người dùng ngồi đợi một quyết định không tồn tại.
+    assert ("T2", TaskStatus.CANCELLED) in repository.statuses, (
+        "bước tham quan bị bỏ lại PENDING — giao diện sẽ báo chờ duyệt cho một yêu cầu chưa từng được gửi đi"
+    )
 
 
 @pytest.mark.asyncio

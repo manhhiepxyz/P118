@@ -41,6 +41,9 @@ class _RecordingBoundary:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        # Đồ giả phải RỘNG bằng hàng thật. Hẹp hơn thì `TypeError` lúc chạy —
+        # và nó trông y hệt một thất bại của sản phẩm.
+        **_forwarded,
     ):
         # `finalize` thuộc Protocol: double phải nhận, nếu không nó che mất
         # việc boundary thật có chuyển tiếp cờ hay không.
@@ -137,6 +140,7 @@ async def test_failed_prefix_is_returned_without_requesting_payment_approval() -
             finalize: bool = True,
             parent_workflow_id: str | None = None,
             session_id: str | None = None,
+            **_forwarded,
         ) -> tuple[str, dict[str, StandardResult]]:
             return workflow_id or "wf-failed", {
                 "T1": StandardResult.fail(
@@ -292,6 +296,14 @@ async def test_full_plan_is_persisted_even_without_a_caller_supplied_workflow_id
 
     Ở Docker, caller luôn truyền workflow_id nên nhánh này không bao giờ được
     chạm tới — một `NameError` ở đây từng nằm im mà suite vẫn xanh.
+
+    Test này CHỈ kiểm việc persist plan/workflow_id. Nó KHÔNG còn khoá hành vi
+    "`pay_fee` chuyển WAITING_APPROVAL ngay trong `PaymentApprovalBoundary`" —
+    lệnh đó đã bị bỏ vì nó ghi ngoài transaction của `save_pending_approval`
+    (`payment_approval.py`), để lại đúng nửa trạng thái bị cấm nếu bước ghi
+    approval phía sau lỗi. Trạng thái `pay_fee` giờ chỉ đổi ở MỘT chỗ:
+    `save_pending_approval`, cùng transaction với dòng `payment_approvals` —
+    xem `tests/test_db/test_payment_waiting_state.py`.
     """
     recorded: dict = {"tasks": []}
 
@@ -303,9 +315,6 @@ async def test_full_plan_is_persisted_even_without_a_caller_supplied_workflow_id
         async def create_task(self, workflow_id, task_data):
             recorded["tasks"].append(task_data["id"])
 
-        async def update_task_status(self, workflow_id, task_id, status):
-            recorded.setdefault("statuses", []).append((task_id, status))
-
     inner = _RecordingBoundary()
     boundary = PaymentApprovalBoundary(inner, payment_approved=False, repository=_Repository())
 
@@ -315,4 +324,3 @@ async def test_full_plan_is_persisted_even_without_a_caller_supplied_workflow_id
     # Mọi task của plan ĐẦY ĐỦ đều có row, kể cả bước thanh toán.
     assert sorted(recorded["tasks"]) == ["T1", "T2", "T3"]
     assert recorded["workflow"]["id"], "phải tự sinh workflow_id"
-    assert ("T3", TaskStatus.WAITING_APPROVAL) in recorded["statuses"]

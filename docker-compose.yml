@@ -63,6 +63,17 @@ services:
     env_file:
       - .env
     environment:
+      # Múi giờ Việt Nam. Container mặc định chạy UTC, nên từ 00:00 tới 07:00
+      # giờ VN `date.today()` trả về NGÀY HÔM TRƯỚC — và `validator.py` cho
+      # phép đặt lịch vào một ngày đã qua.
+      #
+      # Đo được lúc 00:40 ngày 27/08: host +07 thấy 27, container thấy 26.
+      #
+      # ĐÂY LÀ BẢN VÁ TẠM cho môi trường dev. Nó KHÔNG theo lên Render — biến
+      # này chỉ tồn tại trong compose. Bản đúng là một nguồn ngày duy nhất
+      # trong mã (`ZoneInfo("Asia/Ho_Chi_Minh")`) để múi giờ là quyết định của
+      # SẢN PHẨM, không phải thuộc tính của máy chủ.
+      TZ: Asia/Ho_Chi_Minh
       # Key KHÔNG bao giờ nằm trong file này — chỉ tham chiếu môi trường.
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -78,6 +89,12 @@ services:
       TOUR_SERVICE_URL: http://mock-tour:8005
       CONSULTATION_SERVICE_URL: http://mock-consultation:8007
       SHUTTLE_SERVICE_URL: http://mock-shuttle:8009
+      # Thiếu dòng này thì backend giữ mặc định `http://localhost:8004` —
+      # trong container, `localhost` là chính backend, không phải mock. Hậu quả
+      # KHÔNG phải một lỗi nhỏ: toàn bộ luồng xác minh căn hộ trả 503, tức là
+      # việc ĐẦU TIÊN người dùng mới phải làm đã hỏng, và `/ready` vẫn xanh vì
+      # nó chỉ kiểm URL có đúng dạng chứ không kiểm gọi được.
+      OWNERSHIP_SERVICE_URL: http://mock-ownership:8004
       # Bật để xem prompt / chuỗi suy luận / câu trả lời của model ngay trong
       # `docker compose logs -f backend`. Mặc định TẮT: trace in cả nội dung
       # người dùng gõ, không phải thứ nên chạy thường trực.
@@ -97,6 +114,24 @@ services:
       # 0 = tắt (mặc định). Đặt >0 để demo một mình: lịch tham quan tự được
       # duyệt sau chừng ấy giây, không cần ai ngồi ở cổng /review.
       P118_AUTO_APPROVE_VIEWING_SECONDS: ${P118_AUTO_APPROVE_VIEWING_SECONDS:-0}
+      # Chọn đơn vị cung cấp theo ngân sách: báo giá → đề xuất → khách xác
+      # nhận → hàng đợi của đúng đơn vị. Mặc định TẮT vì nó đổi hình dạng màn
+      # hình của khách, và một tính năng đang làm dở không nên tự bật trên máy
+      # người khác.
+      #
+      # Chỉ đúng chuỗi "1" mới bật (xem `src/common/feature_flags.py`) — "true"
+      # hay "yes" đều là TẮT, để không ai bật nhầm bằng một giá trị trông giống
+      # bật.
+      #
+      # Bật để thử: đặt biến này thành chuỗi một trong `.env` rồi
+      # `docker compose up -d backend`.
+      #
+      # Chú thích ở đây cố ý KHÔNG viết ra cặp `TÊN=giá trị bật`:
+      # `tests/test_a_feature_flag_is_off_unless_it_says_one.py` quét từng dòng
+      # của file này theo tên cờ, và nó quét cả chú thích. Sự thô ấy là có
+      # chủ đích — một guard chỉ nhìn dòng cấu hình sẽ bỏ sót một cờ bị bật
+      # trong khối `x-` dùng lại, hay trong một service thứ hai.
+      SERVICE_PROVIDER_MATCHING: ${SERVICE_PROVIDER_MATCHING:-0}
     volumes:
       - ./data:/app/data
     depends_on:
@@ -144,6 +179,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -168,6 +207,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -192,6 +235,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -216,6 +263,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -240,6 +291,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -267,6 +322,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -293,6 +352,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -320,6 +383,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -345,9 +412,26 @@ services:
       ["uvicorn", "src.services.mock.apartment_ownership:apartment_ownership_app", "--host", "0.0.0.0", "--port", "8004"]
     ports:
       - "8004:8004"
+    # Healthcheck RIÊNG, đúng cổng 8004.
+    #
+    # Thiếu khối này thì container kế thừa healthcheck mặc định của Dockerfile —
+    # nó probe `localhost:8000`, tức cổng của backend, không phải của service
+    # này. Hệ quả đo được: service trả 200 OK suốt nhưng `docker ps` báo
+    # `unhealthy` liên tục 12 giờ. Một tín hiệu giám sát đỏ vĩnh viễn cho một
+    # service khoẻ còn tệ hơn không có tín hiệu: nó dạy người đọc bỏ qua màu đỏ,
+    # nên lúc service hỏng thật thì không ai nhìn.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:
@@ -355,8 +439,15 @@ services:
       db-migrate:
         condition: service_completed_successfully
     restart: unless-stopped
-    profiles:
-      - ownership   # docker compose --profile ownership up
+    # KHÔNG đặt sau `profiles:` nữa. Profile khiến `docker compose up -d` bỏ
+    # qua service này, trong khi luồng xác minh căn hộ — bước bắt buộc trước
+    # mọi dịch vụ cư dân — phụ thuộc hoàn toàn vào nó. Người dựng stack theo
+    # đúng hướng dẫn vẫn nhận 503 ở màn hình đầu tiên, không có gì chỉ ra
+    # thiếu một service.
+    #
+    # Comment ở đầu khối nói "Không Connector nào gọi service này" — đúng với
+    # tầng Agent, và có lẽ vì thế nó bị xếp là tuỳ chọn. Nhưng Auth có gọi, và
+    # Auth chạy trước Agent.
 
   # ----------------------------------------------------------------
   # Mock monolith — gộp mọi router vào một app, chỉ dùng cho test.
@@ -373,6 +464,10 @@ services:
     env_file:
       - .env
     environment:
+      # Cùng múi giờ với backend — mock cũng từ chối ngày quá khứ
+      # (`src/mock/schemas.py:_reject_past`). Hai đồng hồ lệch nhau thì
+      # một bên chấp nhận cái bên kia từ chối.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://${POSTGRES_USER:-p118}:${POSTGRES_PASSWORD:-p118pass}@postgres:5432/${POSTGRES_DB:-p118_db}
     depends_on:
       postgres:

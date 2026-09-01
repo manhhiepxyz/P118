@@ -120,16 +120,55 @@ async def get_current_user(
     return user
 
 
-def require_roles(*roles: str):
+def require_roles(*roles: str | list[str] | tuple[str, ...]):
     """Factory trả dependency chặn 403 nếu user.role không trong `roles`.
 
     Ví dụ: `user: dict = Depends(require_roles("admin"))` — dùng cho endpoint
     quản trị sau Demo Day (user management, HITL review).
     """
+    flat_roles: set[str] = set()
+    for r in roles:
+        if isinstance(r, (list, tuple, set)):
+            flat_roles.update(str(item) for item in r)
+        else:
+            flat_roles.add(str(r))
 
     async def _checker(user: dict = Depends(get_current_user)) -> dict:
-        if user.get("role") not in roles:
+        if user.get("role") not in flat_roles:
             raise HTTPException(status_code=403, detail="Bạn không có quyền thực hiện thao tác này.")
         return user
 
     return _checker
+
+
+# ---------------------------------------------------------------------------
+# Người gửi email OTP — MỘT chỗ để thay.
+#
+# Vì sao cần một dependency cho một hàm
+# -------------------------------------
+# `auth_routes` gọi thẳng `send_otp_email` qua import ở đầu file. Với một import
+# module-level, không có đường nào để bài kiểm chen vào mà không vá thuộc tính
+# của module — và một phép vá như vậy rò sang bài kế tiếp khi ai đó quên gỡ.
+#
+# Bài kiểm cần đọc được mã OTP, và nó phải đọc ở ĐÚNG CHỖ mã ấy rời hệ thống:
+# email. Đọc từ database là đọc một chi tiết cài đặt — ngày ai đó đổi cách lưu
+# (băm mã, đổi bảng, đưa sang Redis) thì mọi bài kiểm đỏ trong khi hành vi
+# người dùng thấy không đổi một chút nào.
+#
+# Vì sao KHÔNG có cờ môi trường
+# -----------------------------
+# Không có `if TESTING:` ở đây. Thay thế chỉ xảy ra qua
+# `app.dependency_overrides`, thứ chỉ tồn tại trong tiến trình test. Production
+# không có đường nào bật nó — kể cả khi một biến môi trường bị đặt nhầm.
+def get_otp_email_sender() -> Any:
+    """Hàm gửi email OTP. Production luôn nhận bản thật."""
+    from src.services.email_service import send_otp_email
+
+    return send_otp_email
+
+
+def get_reset_password_email_sender() -> Any:
+    """Hàm gửi email OTP quên mật khẩu. Production luôn nhận bản thật."""
+    from src.services.email_service import send_reset_password_email
+
+    return send_reset_password_email

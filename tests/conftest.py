@@ -185,3 +185,30 @@ def _test_jwt_secret(monkeypatch):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Hộp thư OTP — biên duy nhất bài kiểm đọc mã.
+#
+# Đặt ở conftest GỐC nên `tests/`, `tests/test_db/` và `tests/test_integration/`
+# dùng chung một fixture. Ba bản sao ở ba thư mục là ba chỗ để lệch nhau, và
+# lệch ở đây nghĩa là một tầng test lặng lẽ không kiểm email nữa.
+#
+# `function` scope: mỗi bài một hộp riêng, nên không cần dọn giữa các bài và
+# hai bài chạy song song không đọc thư của nhau.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def hop_thu_otp():
+    """Hộp thư test, đã cắm vào app. Gỡ ra khi bài kiểm xong."""
+    from src.api.deps import get_otp_email_sender, get_reset_password_email_sender
+    from src.main import app
+    from tests._email_outbox import HopThuTest
+
+    hop = HopThuTest()
+    app.dependency_overrides[get_otp_email_sender] = lambda: hop.gui
+    app.dependency_overrides[get_reset_password_email_sender] = lambda: hop.gui
+    try:
+        yield hop
+    finally:
+        app.dependency_overrides.pop(get_otp_email_sender, None)
+        app.dependency_overrides.pop(get_reset_password_email_sender, None)

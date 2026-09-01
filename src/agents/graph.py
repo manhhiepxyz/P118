@@ -24,15 +24,22 @@ from typing import Any, Protocol
 
 from langgraph.graph import END, StateGraph
 
-logger = logging.getLogger(__name__)
-
 from src.agents.nodes.example_node import analyze_node, respond_node
-from src.agents.planner import Planner, PlannerError, build_question
+from src.agents.planner import (
+    PAYMENT_QUOTE_REQUIRED_FIELD,
+    UNSUPPORTED_GOAL_FIELD,
+    ExplicitFact,
+    Planner,
+    PlannerError,
+    build_question,
+)
 from src.agents.state import AgentState
 from src.agents.validator import MissingRequiredInputError, TaskPlanValidator
 from src.common.policy import PolicyInterruptionError
 from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_payment_is_offered(plan: Any) -> None:
@@ -89,6 +96,21 @@ def _ensure_payment_is_offered(plan: Any) -> None:
                 },
             )
         )
+
+
+def _facts_as_context(facts: tuple) -> dict[str, bool]:
+    """`ExplicitFact` đã qua kiểm → dict để merge vào ngữ cảnh.
+
+    Chỉ nhận đúng kiểu `ExplicitFact`. Một dict thô đi tới đây nghĩa là có
+    đường nào đó vòng qua `Planner._accept_explicit_facts`, và chấp nhận nó sẽ
+    biến lớp kiểm kia thành tuỳ chọn.
+
+    Người gọi dùng `getattr(result, "explicit_facts", ())`: Graph là lớp phòng
+    thủ trước một Planner có thể là bản khác hoặc bản refactor sau này, và một
+    result không mang field ấy nghĩa là KHÔNG CÓ fact nào — mặc định an toàn.
+    Đổ vỡ ở đây sẽ biến một thiếu sót vô hại thành lỗi lập kế hoạch.
+    """
+    return {f.field: f.value for f in facts if isinstance(f, ExplicitFact)}
 
 
 def _inject_trusted_identity(plan: Any, existing_context: dict[str, Any]) -> None:
@@ -199,6 +221,17 @@ _USER_PROVIDED_FIELDS: frozenset[str] = frozenset(
         "preferred_time",
         "move_date",
         "move_time",
+        # Ba ô này BẮT BUỘC từ khi giá chuyển nhà tính theo quãng đường và khối
+        # lượng. Bắt buộc mà không hỏi lại được là một ngõ cụt: Validator từ
+        # chối kế hoạch, tầng này không có gì để hỏi, và người dùng nhận "Mình
+        # chưa đủ cơ sở để hỏi thêm" cho một thứ họ hoàn toàn trả lời được.
+        #
+        # Đo được trước khi thêm: `WARNING không hỏi lại được: 'move_size'
+        # không nằm trong danh sách hỏi được` — yêu cầu dừng, không câu hỏi nào
+        # tới khách.
+        "move_origin_id",
+        "move_destination_id",
+        "move_size",
         "needs_elevator",
         "needs_loading_support",
         "move_vehicle",
@@ -257,17 +290,41 @@ def _missing_fields_for_user(
     thiếu là lỗi lập kế hoạch và rơi vào câu hỏi chung. Các ID nội bộ khác và
     dữ liệu thanh toán không được biến thành câu hỏi cho người dùng.
     """
+    # Control value: chúng KHÔNG phải ô dữ liệu người dùng điền, chúng mô tả
+    # tình huống — và `build_question` đã có sẵn câu riêng cho từng cái.
+    #
+    # Trước đây chúng rơi vào nhánh `else: return None` ở dưới, nên câu đúng
+    # không bao giờ tới được người dùng. Đo được: sau khi bấm Dừng rồi gõ "tôi
+    # muốn đổi lịch tham quan sang ngày 30", Planner trả `supported_goal` và
+    # khách nhận "Mình chưa đủ cơ sở để hỏi thêm cho yêu cầu này. Bạn mô tả lại
+    # cụ thể hơn giúp mình nhé." — một lời từ chối không nói được lý do, và
+    # không lời mô tả nào cứu được vì vấn đề không nằm ở cách mô tả.
+    #
+    # Câu đúng đã nằm sẵn trong `_UNSUPPORTED_GOAL_QUESTION`: nó LIỆT KÊ những
+    # dịch vụ có hỗ trợ, tức là cho người đọc một lối đi tiếp.
+    control_values = {UNSUPPORTED_GOAL_FIELD, PAYMENT_QUOTE_REQUIRED_FIELD}
+    if set(missing_fields) & control_values:
+        return tuple(name for name in missing_fields if name in control_values)
+
     public_fields: list[str] = []
     for name in missing_fields:
         if name == "viewing_id":
+            # GHI LẠI, mức `warning`. Trả `None` ở đây dẫn thẳng tới câu "Mình
+            # chưa đủ cơ sở để hỏi thêm" — một lời từ chối không nói được lý
+            # do, và không dòng log nào cho biết field nào đã chặn. Người dùng
+            # được bảo "mô tả cụ thể hơn" cho một thứ không lời mô tả nào cứu
+            # được.
+            logger.warning("không hỏi lại được: cần %r, không có nguồn nào ngoài bước trước", name)
             return None
         if name == "vehicle_id":
             if not existing_context.get("resident_id"):
+                logger.warning("không hỏi lại được: cần %r nhưng tài khoản chưa liên kết cư dân", name)
                 return None
             replacements = ("plate_number", "vehicle_type")
         elif name in _USER_PROVIDED_FIELDS:
             replacements = (name,)
         else:
+            logger.warning("không hỏi lại được: %r không nằm trong danh sách hỏi được", name)
             return None
 
         for replacement in replacements:
@@ -284,10 +341,57 @@ CLARIFICATION_UNAVAILABLE_MESSAGE = (
     "Mình chưa đủ cơ sở để hỏi thêm cho yêu cầu này. Bạn mô tả lại cụ thể hơn giúp mình nhé."
 )
 
+# Thiếu `resident_id` KHÔNG phải "không hỏi được", mà là "chưa đủ điều kiện".
+#
+# `resident_id` không nằm trong `_USER_PROVIDED_FIELDS` — đúng, không ai được
+# hỏi người dùng một ID nội bộ. Nhưng vì thế nó rơi vào nhánh từ chối chung, và
+# một khách chưa liên kết căn hộ hỏi "đăng ký ô tô, đặt chỗ đỗ xe" nhận được
+# "Mình chưa đủ cơ sở để hỏi thêm… Bạn mô tả lại cụ thể hơn" — một câu đổ lỗi
+# cho cách họ diễn đạt, trong khi mô tả của họ hoàn toàn rõ ràng. Họ sẽ viết
+# lại, rõ hơn nữa, và nhận đúng câu đó lần nữa.
+#
+# Thiếu `resident_id` chỉ có MỘT nghĩa: tài khoản chưa có liên kết cư dân đã
+# xác minh. Nói thẳng ra, kèm việc cần làm.
+RESIDENT_LINK_REQUIRED_MESSAGE = (
+    "Các dịch vụ này chỉ dành cho cư dân đã xác minh căn hộ. "
+    "Bạn vào mục Xác minh căn hộ, gửi mã căn hộ kèm ảnh giấy tờ để ban quản lý duyệt, "
+    "rồi quay lại nhé. Trong lúc chờ, mình vẫn giúp bạn đặt lịch tham quan hoặc "
+    "đăng ký nhận tư vấn được."
+)
+
+
+# Vì sao ô này phải hỏi lại, khi lý do KHÔNG phải "người dùng chưa nói".
+#
+# Câu hỏi mặc định ("Bạn bổ sung giúp mình…") đọc như thể người dùng chưa nói
+# gì. Với một ngày họ ĐÃ nói rõ nhưng không dùng được, câu ấy vừa sai vừa tạo
+# vòng lặp: họ gõ lại đúng ngày cũ. Đo được, hôm nay 2026-08-26:
+#
+#     Bạn:   ...tham quan Vinhome Ocean Park ngày 20/8/2026 lúc 12:00
+#     P-118: Mình cần biết ngày bạn muốn tham quan… Bạn cho mình ngày cụ thể nhé!
+#
+# Cùng bệnh với vòng lặp "Khu D" mà `_unknown_zone_message` đã phá: hệ thống
+# BIẾT chính xác vấn đề và không nói ra.
+#
+# Câu ở đây là hằng số, không ghép dữ liệu người dùng vào — cùng luật với
+# `build_question`. Mã (`PAST_DATE`…) không bao giờ ra tới người dùng.
+_LY_DO_HOI_LAI: dict[str, str] = {
+    "PAST_DATE": (
+        "Ngày bạn chọn đã qua rồi nên mình chưa đặt được. Bạn chọn giúp mình một ngày từ hôm nay trở đi nhé."
+    ),
+    "BEYOND_HORIZON": (
+        "Ngày bạn chọn xa quá nên hệ thống chưa nhận đặt trước. Bạn chọn giúp mình một ngày gần hơn nhé."
+    ),
+    "UNSUPPORTED_MOVE_LOCATION": (
+        "Điểm chuyển đi hoặc điểm chuyển đến chưa nằm trong khu vực được hỗ trợ. "
+        "Bạn chọn một địa điểm trong danh mục nội khu; nếu không có, hiện chưa có đơn vị vận chuyển phù hợp."
+    ),
+}
+
 
 def needs_information_update(
     missing_fields: tuple[str, ...] | None,
     existing_context: dict[str, Any],
+    reason: str | None = None,
 ) -> dict:
     """Nguồn sự thật DUY NHẤT biến missing fields thành state hướng ra người dùng.
 
@@ -307,12 +411,57 @@ def needs_information_update(
     public_fields = _missing_fields_for_user(tuple(missing_fields or ()), existing_context)
     if public_fields is None:
         # Không hỏi được thì từ chối an toàn, không render form rỗng cho user.
-        return {"clarification_error": CLARIFICATION_UNAVAILABLE_MESSAGE, "plan_validated": False}
+        #
+        # Nhưng phân biệt HAI lý do khác nhau: "thiếu một thứ không được phép
+        # hỏi" và "tài khoản chưa đủ điều kiện dùng dịch vụ". Gộp chúng vào một
+        # câu khiến trường hợp thứ hai — trường hợp phổ biến hơn hẳn — nhận một
+        # lời khuyên vô dụng.
+        needs_link = "resident_id" in (missing_fields or ()) and not existing_context.get("resident_id")
+        return {
+            "clarification_error": (
+                RESIDENT_LINK_REQUIRED_MESSAGE if needs_link else CLARIFICATION_UNAVAILABLE_MESSAGE
+            ),
+            "plan_validated": False,
+        }
 
+    # NGOÀI PHẠM VI thì NÓI THẲNG, không hỏi lại.
+    #
+    # `supported_goal` mô tả TÌNH HUỐNG, không phải một ô dữ liệu. Để nó ở
+    # NEEDS_INFORMATION nghĩa là giao diện dựng thẻ "Cần thêm thông tin" với
+    # một ô nhập cho thứ không tồn tại — người dùng trả lời, hệ thống hỏi lại
+    # đúng câu ấy.
+    #
+    # Đo được trên stack demo, ba lượt liên tiếp cùng một phiên:
+    #
+    #     "Vinhomes Ocean Park"  → thiếu: supported_goal
+    #     "đổi qua khu B"        → thiếu: supported_goal
+    #     "đặt chỗ đỗ xe"        → thiếu: supported_goal
+    #
+    # Bốn lượt như vậy trong dữ liệu, và 14 lượt người dùng gõ lại y hệt (689
+    # giây) — không có lối thoát.
+    #
+    # Đi vào nhánh `QUESTION` vốn có: nói một câu, không tạo việc, không dựng
+    # thẻ. Câu từ chối KHÔNG viết mới — `build_question` đã liệt kê đúng những
+    # dịch vụ có hỗ trợ, tức đã chỉ được lối đi tiếp.
+    #
+    # Lẫn với ô thật thì vẫn từ chối: hỏi ngày cho một việc không làm được là
+    # bắt người ta điền xong rồi mới nói không.
+    if UNSUPPORTED_GOAL_FIELD in public_fields:
+        return {
+            "planner_status": "QUESTION",
+            "missing_fields": (),
+            "question": None,
+            "refusal": build_question([UNSUPPORTED_GOAL_FIELD]),
+            "plan_validated": False,
+        }
+
+    # Có lý do cụ thể thì NÓI lý do, đừng hỏi lại như thể chưa ai nói gì.
+    # Không có thì giữ NGUYÊN câu cũ — nhánh này không đổi hành vi mặc định.
+    cau_hoi = _LY_DO_HOI_LAI.get(reason or "") or build_question(public_fields)
     return {
         "planner_status": "NEEDS_INFORMATION",
         "missing_fields": public_fields,
-        "question": build_question(public_fields),
+        "question": cau_hoi,
         "plan_validated": False,
     }
 
@@ -379,6 +528,7 @@ def build_planner_graph(
     *,
     parent_workflow_id: str | None = None,
     session_id: str | None = None,
+    fast_lane: Any = None,
 ) -> StateGraph:
     """Dựng graph Planner → Validator → Execution.
 
@@ -398,17 +548,65 @@ def build_planner_graph(
     async def plan_node(state: AgentState) -> dict:
         """Gọi Planner. Không log goal hay existing_context."""
         await emit("PLANNING")
+
+        # Đường nhanh đứng TRƯỚC, nhưng không có đặc quyền nào.
+        #
+        # Đo trên `llm_usage` của stack demo: Planner chiếm 89% toàn bộ thời
+        # gian gọi model (trung vị 32,98s, p90 78,28s, 86 lượt thật), và một
+        # workflow 5 dịch vụ mất 101 giây riêng cho lượt lập kế hoạch. Phần cấu
+        # trúc của kết quả ấy là cơ học — `plan_assembly` dựng lại 38/38 đồ thị
+        # và 149/149 InputRef của các kế hoạch đã ghi.
+        #
+        # Kế hoạch nó trả về đi tiếp qua ĐÚNG những bước mà kế hoạch Planner đi
+        # qua: `_apply_user_answers`, `_inject_trusted_identity`,
+        # `_ensure_payment_is_offered`, rồi `validate_node`. Không đường tắt
+        # nào — đó là điều kiện để đường này an toàn, vì cổng chung là thứ duy
+        # nhất chặn được ca đo được "từ 5/9" → "2023-09-05".
+        #
+        # `None` ở mọi nhánh không chắc chắn, và ta rơi về Planner như hôm nay.
+        if fast_lane is not None:
+            # `user_answers` PHẢI đi cùng: ở lượt `/continue`, `goal` vẫn là
+            # câu gốc còn thiếu đúng ô người dùng vừa điền. Không truyền thì
+            # Fast Lane luôn trượt Validator và mọi lượt hỏi lại đều trả giá
+            # 33s — đo được 0/4 workflow con từng đi được đường nhanh.
+            nhanh = await fast_lane.plan(
+                state.get("goal", ""),
+                state.get("existing_context", {}),
+                state.get("user_answers") or {},
+            )
+            if nhanh is not None:
+                _apply_user_answers(nhanh, state.get("user_answers") or {})
+                _inject_trusted_identity(nhanh, state.get("existing_context", {}))
+                _ensure_payment_is_offered(nhanh)
+                await emit("PLANNED", {"plan": nhanh})
+                return {
+                    "planner_status": "READY",
+                    "plan": nhanh,
+                    "missing_fields": (),
+                    "plan_validated": False,
+                    "explicit_facts": {},
+                }
+
         try:
             result = await planner.plan(
                 state.get("goal", ""),
                 state.get("existing_context", {}),
+                recalled=state.get("recalled") or None,
             )
         except PlannerError as exc:
             # `PlannerError` được thiết kế để message luôn an toàn: chỉ mô tả
             # chung và tên loại exception, không echo goal/context/LLM output.
+            #
+            # GHI LẠI, mức `warning`. Không có dòng này thì mọi lần lập kế hoạch
+            # hỏng đều vô hình: người dùng đọc "Mình chưa thể tạo kế hoạch từ
+            # yêu cầu này", còn log không có gì cả — và một lỗi không tất định
+            # thì không đo được nếu không ghi. Message của `PlannerError` an
+            # toàn theo thiết kế, nên ghi nguyên văn là được.
+            logger.warning("planner thất bại: %s", exc)
             return {"planning_error": str(exc), "plan_validated": False}
         except Exception as exc:  # noqa: BLE001 — lỗi ngoài dự kiến
             # Exception khác chưa chắc an toàn — chỉ giữ tên loại.
+            logger.warning("planner lỗi ngoài dự kiến (%s)", type(exc).__name__)
             return {
                 "planning_error": f"Planner lỗi không mong đợi ({type(exc).__name__}).",
                 "plan_validated": False,
@@ -427,6 +625,26 @@ def build_planner_graph(
                 "plan": result.plan,
                 "missing_fields": (),
                 "plan_validated": False,
+                # Fact đi kèm cả READY. Nó KHÔNG đụng vào plan — plan đã qua
+                # Validator và là thứ duy nhất quyết định điều gì sẽ chạy. Fact
+                # chỉ là ngữ cảnh cho lượt sau của cùng hội thoại.
+                "explicit_facts": _facts_as_context(getattr(result, "explicit_facts", ())),
+            }
+
+        if result.status == "QUESTION":
+            # Câu hỏi, không phải việc cần làm. Dừng ở đây: không plan, không
+            # missing_fields, không thực thi gì.
+            #
+            # KHÔNG đặt `question`: đó là câu HỎI LẠI người dùng, dựng từ
+            # `missing_fields`. Ở đây ta không hỏi lại gì cả — ta trả lời. Câu
+            # trả lời do Response Agent viết ở tầng trên, từ dữ liệu nó đã có
+            # (danh mục quyền theo tài khoản, ngày hôm nay).
+            await emit("QUESTION")
+            return {
+                "planner_status": "QUESTION",
+                "missing_fields": (),
+                "plan_validated": False,
+                "explicit_facts": _facts_as_context(getattr(result, "explicit_facts", ())),
             }
 
         # NEEDS_INFORMATION: không đưa `plan` vào state, tránh mọi khả năng một
@@ -439,6 +657,10 @@ def build_planner_graph(
             result.missing_fields,
             state.get("existing_context", {}),
         )
+        # Đây là nhánh mà fact quan trọng nhất: lượt sau sẽ chạy với ngữ cảnh
+        # được ghim từ đây, và thiếu chúng thì lượt ấy hỏi lại đúng điều người
+        # dùng đã nói trong câu đầu tiên.
+        update["explicit_facts"] = _facts_as_context(getattr(result, "explicit_facts", ()))
         if update.get("clarification_error"):
             await emit("VALIDATION_FAILED")
         else:
@@ -462,9 +684,14 @@ def build_planner_graph(
             TaskPlanValidator.validate(plan)
         except MissingRequiredInputError as exc:
             # Dùng chung policy với `plan_node` — hai nhánh không thể lệch nhau.
+            #
+            # `exc.reason` là đường DUY NHẤT để "ngày đã qua" tới được câu hỏi.
+            # Bỏ nó thì Validator biết chính xác vấn đề mà người dùng chỉ nghe
+            # "cho mình ngày cụ thể nhé" — rồi gõ lại đúng ngày cũ.
             update = needs_information_update(
                 exc.missing_fields,
                 state.get("existing_context", {}),
+                reason=exc.reason,
             )
             if update.get("clarification_error"):
                 await emit("VALIDATION_FAILED")
@@ -514,8 +741,49 @@ def build_planner_graph(
             # trả một khoản tiền mà họ không nhìn thấy.
             # Chờ người dùng duyệt không phải lỗi thực thi. Ghi nó thành lỗi
             # khiến UI vừa hiện báo giá vừa nói workflow đã dừng giữa chừng.
-            if exc.code in {"PAYMENT_APPROVAL_REQUIRED", "VIEWING_APPROVAL_REQUIRED"}:
+            # Hai loại chờ, hai người khác nhau — và câu chữ phải nói đúng ai.
+            #
+            # Gộp cả hai vào `WAITING_APPROVAL` khiến một yêu cầu chỉ có lịch
+            # tham quan phát ra "Đang chờ bạn xác nhận thanh toán": nó chờ ĐƠN
+            # VỊ, không chờ người dùng, và không có khoản tiền nào. Người đọc đi
+            # tìm một nút thanh toán không tồn tại.
+            #
+            # Giai đoạn mới đi kèm hai chỗ nữa: câu công khai trong
+            # `_STAGE_MESSAGES`, và giá trị hợp lệ trong `DemoWorkflowResponse.
+            # stage`. Thiếu chỗ thứ hai thì Pydantic từ chối cả response.
+            if exc.code == "PAYMENT_APPROVAL_REQUIRED":
                 await emit("WAITING_APPROVAL")
+            elif exc.code == "VIEWING_APPROVAL_REQUIRED":
+                await emit("WAITING_VIEWING_APPROVAL")
+            elif exc.code == "PROVIDER_PROPOSAL_REQUIRED":
+                # Giai đoạn RIÊNG, không dùng lại `WAITING_APPROVAL`.
+                #
+                # Câu công khai của `WAITING_APPROVAL` là "Đang chờ bạn xác
+                # nhận thanh toán" — dùng lại nó nghĩa là gọi việc chọn đơn vị
+                # là trả tiền, và khách đi tìm một nút không tồn tại. Đo được
+                # bằng bài kiểm regression: `summary` và `answer` đã đúng, chỉ
+                # `message` còn nói sai, vì nó lấy từ bảng theo giai đoạn.
+                #
+                # Giai đoạn mới đi kèm ba chỗ nữa: `_STAGE_MESSAGES`, và CẢ HAI
+                # Literal `stage` (`DemoWorkflowEvent` lẫn
+                # `DemoWorkflowResponse`). Thiếu chỗ thứ ba thì Pydantic từ
+                # chối cả response — đã xảy ra một lần với lịch tham quan.
+                await emit("WAITING_PROVIDER_PROPOSAL")
+            elif exc.code == "SCHEDULE_CONFLICT_REQUIRED":
+                await emit("WAITING_SCHEDULE_CONFLICT_CHECK")
+            elif exc.code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR":
+                # Lỗi hệ thống khi ghi DB — không phải pause chờ user.
+                # EXECUTION_FAILED đúng: không có action nào user có thể làm.
+                await emit("EXECUTION_FAILED")
+            elif exc.code == "SERVICE_APPROVAL_REQUIRED":
+                # Thiếu nhánh này, `ServiceApprovalBoundary` — cổng NGOÀI CÙNG,
+                # áp cho MỌI dịch vụ — rơi xuống `else` và mọi yêu cầu dịch vụ
+                # đều được ghi là thất bại. Tái hiện được 2/2 lần: hàng đợi
+                # duyệt có đủ hồ sơ AWAITING, các bước nằm WAITING_APPROVAL,
+                # mà `workflows.status = FAILED`, `error_code =
+                # UNKNOWN_EXTERNAL_ERROR`, và khách đọc "Yêu cầu đã dừng lại
+                # giữa chừng."
+                await emit("WAITING_SERVICE_APPROVAL")
             else:
                 await emit("EXECUTION_FAILED")
             update: dict = {"policy_error": exc.code}

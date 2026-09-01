@@ -14,7 +14,7 @@ phần hash/verify. Giống các repository khác:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import datetime
 
 import asyncpg
 
@@ -39,11 +39,19 @@ def _as_date(value: object) -> object:
 
 
 class UserAlreadyExistsError(ValueError):
-    """Username (hoặc email) đã tồn tại — map từ UniqueViolationError."""
+    """Username đã tồn tại — map từ UniqueViolationError."""
 
     def __init__(self, username: str) -> None:
         self.username = username
         super().__init__(f"Username {username} already exists")
+
+
+class EmailAlreadyExistsError(ValueError):
+    """Email đã tồn tại — map từ UniqueViolationError."""
+
+    def __init__(self, email: str) -> None:
+        self.email = email
+        super().__init__(f"Email {email} already exists")
 
 
 class UserRepository:
@@ -85,7 +93,8 @@ class UserRepository:
 
         `profile` nhận thêm full_name/phone/address/date_of_birth/gender/cccd_last4
         — tất cả nullable, tự khai. Raises:
-            UserAlreadyExistsError: username hoặc email đã tồn tại.
+            UserAlreadyExistsError: username đã tồn tại.
+            EmailAlreadyExistsError: email đã tồn tại.
         """
         columns = ["username", "email", "password_hash", "role"]
         values: list[object] = [username, email, password_hash, role]
@@ -101,11 +110,12 @@ class UserRepository:
         try:
             async with self._pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    f"INSERT INTO users ({', '.join(columns)}) "
-                    f"VALUES ({placeholders}) RETURNING {returning}",
+                    f"INSERT INTO users ({', '.join(columns)}) VALUES ({placeholders}) RETURNING {returning}",
                     *values,
                 )
         except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "users_email_key":
+                raise EmailAlreadyExistsError(email) from exc
             raise UserAlreadyExistsError(username) from exc
 
         return dict(row)
@@ -117,6 +127,16 @@ class UserRepository:
                 f"SELECT {', '.join(self._PUBLIC_COLUMNS)}, password_hash FROM users "
                 "WHERE username = $1 AND archived_at IS NULL",
                 username,
+            )
+            return dict(row) if row is not None else None
+
+    async def get_user_by_email(self, email: str) -> dict | None:
+        """Tìm user theo email (lowercase ở tầng gọi). Bao gồm password_hash."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {', '.join(self._PUBLIC_COLUMNS)}, password_hash FROM users "
+                "WHERE email = $1 AND archived_at IS NULL",
+                email,
             )
             return dict(row) if row is not None else None
 
@@ -183,4 +203,41 @@ class UserRepository:
             row = await conn.fetchrow(sql, *params)
         return dict(row) if row is not None else None
 
-    # Alias trả về khớp với kỳ vọng của schema API (đọc qua `repository.users`)
+    async def list_all_users(self) -> list[dict]:
+        """Lấy danh sách tất cả người dùng (bao gồm cả bị khóa) cho Admin."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(f"SELECT {', '.join(self._PUBLIC_COLUMNS)} FROM users ORDER BY created_at DESC")
+            return [dict(row) for row in rows]
+
+    async def update_role(self, user_id: str, role: str) -> dict | None:
+        """Cập nhật quyền (role) của người dùng."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 RETURNING {', '.join(self._PUBLIC_COLUMNS)}",
+                role,
+                user_id,
+            )
+            return dict(row) if row is not None else None
+
+    async def update_status(self, user_id: str, is_archived: bool) -> dict | None:
+        """Khóa/Mở khóa người dùng."""
+        archive_val = "NOW()" if is_archived else "NULL"
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE users SET archived_at = {archive_val}, updated_at = NOW() WHERE id = $1 RETURNING {', '.join(self._PUBLIC_COLUMNS)}",
+                user_id,
+            )
+            return dict(row) if row is not None else None
+
+    async def update_password(self, email: str, new_password_hash: str) -> bool:
+        """Cập nhật mật khẩu cho user (phục vụ quên mật khẩu).
+
+        Sử dụng `email` thay vì `user_id` để tương thích trực tiếp với luồng quên mật khẩu.
+        """
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE email = $2 AND archived_at IS NULL",
+                new_password_hash,
+                email,
+            )
+            return result == "UPDATE 1"

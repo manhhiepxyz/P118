@@ -5,6 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  envDir: '../', // Đọc biến môi trường từ file .env ở thư mục gốc (P-118)
   server: {
     port: 5173,
     proxy: {

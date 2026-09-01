@@ -241,7 +241,13 @@ async def test_after_restart_a_waiting_viewing_still_reports_waiting_with_its_re
     body = response.json()
 
     assert body["status"] == "WAITING_APPROVAL", "workflow chờ duyệt tham quan bị báo là đang chạy"
-    assert body["stage"] == "WAITING_APPROVAL"
+    # `status` chung cho cả hai loại chờ, nhưng `stage` thì KHÔNG.
+    #
+    # Test này từng khẳng định `stage == "WAITING_APPROVAL"` cho một lịch tham
+    # quan — tức là khẳng định chính cái sai: giai đoạn ấy có câu công khai
+    # "Đang chờ bạn xác nhận thanh toán", trong khi lịch tham quan chờ ĐƠN VỊ
+    # và không có khoản tiền nào.
+    assert body["stage"] == "WAITING_VIEWING_APPROVAL", "chờ đơn vị bị gán giai đoạn của nhánh thanh toán"
 
     approval = body.get("viewing_approval") or {}
     assert approval.get("task_id") == "T1"
@@ -270,11 +276,8 @@ async def test_a_decided_viewing_approval_never_drags_back_to_waiting(client, db
     token = await _register_and_login(client, "nn_wa_viewing_done")
     seeded = await _seed_waiting_viewing_workflow(db_pool, "nn_wa_viewing_done")
 
-    from datetime import date as _date
-
     await db_pool.execute(
-        "UPDATE viewing_approvals SET status = 'APPROVED', decided_at = NOW() "
-        "WHERE workflow_id = $1::uuid",
+        "UPDATE viewing_approvals SET status = 'APPROVED', decided_at = NOW() WHERE workflow_id = $1::uuid",
         seeded["workflow_id"],
     )
     await db_pool.execute(
@@ -282,8 +285,7 @@ async def test_a_decided_viewing_approval_never_drags_back_to_waiting(client, db
         seeded["workflow_id"],
     )
     await db_pool.execute(
-        "UPDATE workflow_tasks SET status = 'SUCCESS' "
-        "WHERE workflow_id = $1::uuid AND task_id = 'T1'",
+        "UPDATE workflow_tasks SET status = 'SUCCESS' WHERE workflow_id = $1::uuid AND task_id = 'T1'",
         seeded["workflow_id"],
     )
 

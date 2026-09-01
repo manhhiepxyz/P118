@@ -22,19 +22,24 @@ bị speech lane chặn. Đây là đường an toàn cho mọi prompt tấn cô
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-import httpx
+from src.common.projects import PROJECTS
 
 
 class SpeechType(StrEnum):
     GREETING = "greeting"
     ACKNOWLEDGEMENT = "acknowledgement"
     CAPABILITY = "capability"
+    # Hỏi CÁCH LÀM một việc cụ thể. Phải tách khỏi `CAPABILITY`: route xử lý
+    # `CAPABILITY` bằng cách dựng lại danh mục dịch vụ và GHI ĐÈ `reply`, nên
+    # dùng chung loại sẽ nuốt mất các bước cụ thể — đúng thứ người hỏi cần.
+    HOW_TO = "how_to"
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,33 @@ _ACKNOWLEDGEMENTS = frozenset(
         "ok bạn",
         "ok luôn",
         "ok ok",
+        # Lời xác nhận trống — người dùng đồng ý với điều vừa nói, không yêu cầu
+        # gì thêm. Trước đây chúng rơi thẳng xuống Planner: đo trên `llm_usage`
+        # của stack demo, một chữ "đúng" khiến Planner chạy 64,0 GIÂY và sinh ra
+        # 0 task. Planner chiếm 89% toàn bộ thời gian gọi model, và 40% số lượt
+        # của nó không sinh task nào — đây là một trong số đó.
+        #
+        # An toàn vì `_is_acknowledgement` so khớp TRỌN chuỗi đã chuẩn hoá, chứ
+        # không phải tiền tố hay chuỗi con: "đúng, tôi muốn đổi ngày tham quan
+        # sang ngày 28" không bằng "đúng" nên vẫn xuống Planner nguyên vẹn.
+        # tests/test_a_bare_yes_does_not_wake_the_planner.py giữ cả hai chiều.
+        #
+        # Không đụng tới lượt phê duyệt: `/continue` không gọi `classify`.
+        "đúng",
+        "đúng rồi",
+        "đúng vậy",
+        "chính xác",
+        "chuẩn",
+        "chuẩn rồi",
+        "vâng",
+        "vâng ạ",
+        "dạ",
+        "dạ vâng",
+        "ừ",
+        "ừm",
+        "phải rồi",
+        "yes",
+        "yep",
     }
 )
 
@@ -110,6 +142,47 @@ _CAPABILITY_MARKERS = (
     "danh sach dich vu",
     "dich vu gi",
     "dich vu nao co",
+    # Ba cách hỏi dưới đây đều rơi vào planner trước khi được thêm vào đây, và
+    # planner trả `VALIDATION_ERROR` — người dùng hỏi một câu hoàn toàn hợp lý
+    # rồi bị báo "thông tin bạn vừa gửi chưa hợp lệ".
+    #
+    # Đo được: "Bạn giúp được gì?" → VALIDATION_ERROR. "P-118 có thể làm gì" →
+    # không khớp mẫu nào. "Hướng dẫn mình dùng với" → không khớp mẫu nào.
+    "giup duoc gi",
+    "giup gi duoc",
+    "giup toi duoc gi",
+    "co the lam gi",
+    "co the giup gi",
+    "lam nhung gi",
+    "nhung gi",
+    # Người dùng mới hay hỏi cách dùng chứ không hỏi danh mục. Câu trả lời họ
+    # cần vẫn là danh sách năng lực theo đúng quyền của họ.
+    # "the nao" một mình là rất rộng, nhưng `_asks_for_capabilities` đã trả
+    # False cho mọi câu có ý định dịch vụ TRƯỚC khi tới đây — nên "đặt lịch thế
+    # nào" vẫn về planner, chỉ "mình dùng cái này thế nào" mới thành capability.
+    "the nao",
+    "dung the nao",
+    "dung nhu the nao",
+    "su dung the nao",
+    "huong dan",
+    "bat dau tu dau",
+    "lam sao de",
+    # Hỏi về QUYỀN của chính mình. Cùng một câu trả lời với hỏi năng lực:
+    # `_capability_reply` vốn đã tách "dùng ngay" khỏi "mở sau khi xác minh
+    # căn hộ" dựa trên `account_state`, tức là nó chính là bản kê quyền.
+    #
+    # Trước khi thêm, "tôi có quyền gì" rơi xuống planner và nhận:
+    #
+    #   "Thông tin bạn cung cấp chưa hợp lệ nên mình chưa tra cứu được quyền
+    #    lợi của bạn. Bạn vui lòng gửi lại (họ tên, số điện thoại) nhé."
+    #
+    # Hệ thống biết thừa quyền của họ — nó vừa dùng chính dữ liệu đó để khoá
+    # ba dịch vụ trên màn hình — mà vẫn đi đòi họ khai lại danh tính.
+    "quyen gi",
+    "quyen loi",
+    "duoc dung gi",
+    "dung duoc gi",
+    "duoc lam gi",
 )
 
 # --- Service intent (Phase C) -------------------------------------------------
@@ -155,18 +228,65 @@ _SERVICE_NOUNS = (
 
 _REPETITION_THRESHOLD = 3
 
+# Token lặp phải chiếm ÍT NHẤT phần này của câu mới bị coi là spam.
+#
+# Đếm tuyệt đối một mình không phân biệt được "ok ok ok" với một yêu cầu ghép
+# hai dịch vụ. Đo được, nguyên văn câu do CHÍNH giao diện sinh ra khi người
+# dùng chọn hai dịch vụ từ menu:
+#
+#     "Đặt lịch tham quan … xe đưa đón cho 1 khách … Đăng ký phương tiện và
+#      chỗ đỗ xe … Xe máy biển số 66A-92183 chỗ đỗ Khu B"
+#
+# → "xe" đếm được 3 trên 48 token (6%) và câu bị chặn với "Bạn gõ lặp". Người
+# dùng không gõ một chữ nào — họ bấm chọn từ danh sách — mà vẫn bị mắng là gõ
+# lặp, và không có cách nào sửa vì chính hệ thống viết ra câu ấy.
+#
+# Tiếng Việt khiến chuyện này gần như chắc chắn xảy ra: "xe đưa đón", "chỗ đỗ
+# xe", "Xe máy" là ba việc khác nhau cùng chứa chữ "xe". Càng ghép nhiều dịch
+# vụ càng dễ dính — bộ lọc spam mạnh tay nhất đúng với yêu cầu đáng giá nhất.
+#
+# Spam thật thì token lặp CHIẾM câu: "ok ok ok" 100%, "đặt chỗ đặt chỗ đặt
+# chỗ" 50%, "đặt chỗ xe máy" lặp ba lần 25%.
+_REPETITION_MIN_SHARE = 0.25
+
 
 def _detect_repetition(message: str) -> bool:
     """Câu spam lặp từ (>= 3 lần) → chặn sớm, 0 LLM call.
 
     Chỉ chặn khi MỘT token chiếm >= 3 lần trong câu. Câu hợp lệ có 2 xe khác
     biển ("51A-12345 và 51A-12346") không bị bắt vì không token nào lặp 3 lần.
+
+    Đếm trên chữ CÓ DẤU, không dùng `_normalize`.
+
+    `_normalize` bỏ dấu để khớp mẫu — đúng cho việc khớp mẫu, sai hoàn toàn cho
+    việc đếm lặp: "đó", "đỗ", "đó" đều thành `do`. Ba từ khác nghĩa gộp làm một
+    và câu bị coi là spam.
+
+    Đo được, nguyên văn một yêu cầu hợp lệ:
+
+        "tôi muốn đặt lịch nhưng trước đó hãy đặt chỗ đỗ xe và tôi muốn biết
+         hôm nay là ngày mấy trước khi làm 2 việc đó"
+
+    → `do` đếm được 3 → "Bạn gõ lặp, mình chưa hiểu yêu cầu."
+
+    Câu càng phức tạp thì càng dễ dính, vì tiếng Việt có rất nhiều cặp chỉ khác
+    nhau ở dấu. Nói cách khác: bộ lọc spam mạnh tay nhất đúng với những yêu cầu
+    đáng giá nhất.
     """
-    words = _normalize(message).split()
+    lowered = message.casefold()
+    words = [w.strip(" .,!?;:") for w in lowered.split()]
+    words = [w for w in words if w]
     if len(words) < _REPETITION_THRESHOLD:
         return False
     most_common = Counter(words).most_common(1)
-    return bool(most_common) and most_common[0][1] >= _REPETITION_THRESHOLD
+    if not most_common:
+        return False
+    count = most_common[0][1]
+    if count < _REPETITION_THRESHOLD:
+        return False
+    # Lặp 3 lần trong một câu dài không phải spam — nó là một yêu cầu ghép
+    # nhiều việc. Chỉ chặn khi token ấy CHIẾM câu.
+    return count / len(words) >= _REPETITION_MIN_SHARE
 
 
 def _normalize(message: str) -> str:
@@ -217,6 +337,57 @@ def _is_greeting(message: str) -> bool:
     return False
 
 
+def mentions_a_service(message: str) -> bool:
+    """Câu có nhắc tới một dịch vụ để LÀM. Bản công khai của `_has_service_intent`.
+
+    Có mặt để `routes.py` không phải import một hàm gạch dưới: luật "không còn
+    gì để sửa" cần đúng phép thử này để không nuốt một yêu cầu ĐẶT MỚI.
+    """
+    return _has_service_intent(message)
+
+
+# --- Hỏi DANH MỤC DỰ ÁN --------------------------------------------------------
+#
+# Nguyên văn, workflow a39d6ebc trên stack demo:
+#
+#     Bạn:    có những dự án nào
+#     P-118:  Hiện tại mình có các dự án: Khu A, Khu B, Khu C.
+#
+# "Khu A/B/C" là KHU ĐỖ XE. Không có dự án nào tên như vậy.
+#
+# Câu trả lời ĐÚNG vẫn luôn nằm trong code — `PROJECTS` có đủ bảy tên thật. Chỗ
+# hỏng là đường đi: bản duy nhất trả lời được nằm trong `/continue`, sau cổng
+# `"project_name" in missing_fields`, tức CHỈ khi đã có workflow đang chờ chọn
+# dự án. Hỏi độc lập thì không qua cổng ấy, nên câu rơi xuống Planner → QUESTION
+# → Response Agent viết câu trả lời mà KHÔNG được đưa danh mục, và nó lấy thứ
+# gần nhất trong vốn từ của mình.
+#
+# Không phải model kém. Là ta bảo nó trả lời rồi không đưa dữ liệu.
+_PROJECT_CATALOG_MARKERS = (
+    "co nhung du an nao",
+    "co du an nao",
+    "danh sach du an",
+    "ho tro du an nao",
+    "nhung du an nao",
+    "du an nao duoc ho tro",
+    "cac du an",
+    "du an nao",
+)
+
+
+def _asks_for_the_project_catalogue(message: str) -> str | None:
+    """Danh sách dự án THẬT, hoặc None. Đọc `PROJECTS`, không chép tay.
+
+    Chép tay là cách hỏng đã đo được ở nhánh `_is_about_agent`: một chuỗi cứng
+    quảng cáo hai dịch vụ không tồn tại, và người dùng gõ theo rồi bị từ chối.
+    """
+    normalized = _normalize(message)
+    if not any(marker in normalized for marker in _PROJECT_CATALOG_MARKERS):
+        return None
+    names = "; ".join(str(p["project_name"]) for p in PROJECTS)
+    return f"Hiện mình hỗ trợ các dự án: {names}. Bạn cho mình biết muốn dùng dịch vụ nào ở dự án nào nhé."
+
+
 def _has_service_intent(message: str) -> bool:
     """Câu có ý định thực hiện dịch vụ → phải đi planner, KHÔNG chặn ở speech lane."""
     normalized = _normalize(message)
@@ -225,6 +396,203 @@ def _has_service_intent(message: str) -> bool:
     has_request = any(word in normalized for word in _REQUEST_WORDS)
     has_service_noun = any(noun in normalized for noun in _SERVICE_NOUNS)
     return has_request and has_service_noun
+
+
+# --- Hỏi CÁCH LÀM, khác hẳn yêu cầu LÀM ---------------------------------------
+#
+# "liên kết căn hộ thế nào" và "liên kết căn hộ cho tôi" khác nhau hoàn toàn về
+# ý định, nhưng `_has_service_intent` bắt cả hai (có động từ + danh từ dịch vụ).
+# Vì service-intent được kiểm TRƯỚC mọi nhánh canned, câu hỏi cách làm rơi thẳng
+# xuống planner — và planner không có gì để lập kế hoạch nên trả VALIDATION_ERROR:
+#
+#   người dùng: "liên kết căn hộ thế nào"
+#   P-118:      "Hiện thông tin bạn cung cấp chưa hợp lệ, mình cần bạn kiểm tra
+#                lại và gửi lại giúp mình nhé."
+#
+# Họ hỏi rất rõ ràng và bị nói là gõ sai. Trong thực tế người dùng còn hỏi mơ hồ
+# hơn thế.
+def _has_howto_marker(normalized: str) -> bool:
+    """Marker phải khớp NGUYÊN TỪ, không phải khớp chuỗi con.
+
+    Lỗi đã đo được: `"o dau"` (ở đâu) nằm gọn bên trong `"chỗ đậu"` — chuẩn hoá
+    xong là `"ch|o dau|"`. Nên "đặt chỗ đậu xe", một cách nói hoàn toàn bình
+    thường, bị xếp thành câu HỎI CÁCH LÀM và nhận về một bài hướng dẫn thay vì
+    Agent đi đặt chỗ. "đặt chỗ ĐỖ xe" thì không sao, nên lỗi chỉ hiện ra với
+    một nửa số người dùng — đúng kiểu lọt qua mọi lần thử tay.
+
+    Dùng `(?<![a-z])`/`(?![a-z])` chứ không dùng `\b`: chuỗi đã chuẩn hoá là
+    ASCII thường, và `\b` coi ranh giới ở cả chữ số lẫn gạch dưới. Ở đây chỉ
+    cần chặn một chữ cái dính liền.
+    """
+    return any(_HOWTO_MARKER_RE[marker].search(normalized) for marker in _HOWTO_MARKERS)
+
+
+_HOWTO_MARKERS = (
+    "the nao",
+    "nhu the nao",
+    "lam sao",
+    "lam the nao",
+    "cach ",
+    "huong dan",
+    "bat dau tu dau",
+    "o dau",
+    "can lam gi",
+    "phai lam gi",
+    "lam gi de",
+)
+
+_HOWTO_MARKER_RE = {
+    marker: re.compile(r"(?<![a-z])" + re.escape(marker.strip()) + r"(?![a-z])") for marker in _HOWTO_MARKERS
+}
+
+# Các bước cho từng việc. Khoá là cụm đã chuẩn hoá xuất hiện trong câu hỏi.
+#
+# Thứ tự QUAN TRỌNG: cụm cụ thể đứng trước cụm chung. "đăng ký xe" chứa "xe",
+# nên nếu "xe" đứng trước thì mọi câu hỏi về xe đều nhận hướng dẫn đỗ xe.
+_HOWTO_STEPS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("can ho", "lien ket", "xac minh", "cu dan"),
+        "Để xác minh căn hộ: mở mục “Hồ sơ” ở thanh bên rồi bấm “Xác minh căn hộ”, nhập mã "
+        "căn hộ và khu đô thị, đính kèm ảnh giấy tờ nhà rồi gửi. Ban quản lý duyệt xong là "
+        "các dịch vụ cư dân mở ra ngay.",
+    ),
+    (
+        ("do xe", "dau xe", "phuong tien", "xe"),
+        "Đăng ký xe và chỗ đỗ cần căn hộ đã xác minh trước. Bạn mở mục “Hồ sơ” rồi bấm “Xác minh căn hộ”, "
+        "gửi mã căn hộ kèm ảnh giấy tờ; duyệt xong thì chọn “Đăng ký phương tiện và chỗ đỗ xe” "
+        "ở danh sách năng lực, điền biển số và khu đỗ là xong.",
+    ),
+    (
+        ("tham quan", "xem nha", "xem can ho"),
+        "Để đặt lịch tham quan: chọn “Đặt lịch tham quan dự án” ở danh sách năng lực, "
+        "chọn dự án, ngày và giờ, cho biết có cần xe đưa đón không, rồi bấm Thực hiện. "
+        "Việc này không cần xác minh căn hộ.",
+    ),
+    (
+        (
+            "tu van",
+            "quan tam",
+        ),
+        "Để nhận tư vấn: chọn “Đăng ký quan tâm / nhận tư vấn”, chọn dự án và hình thức "
+        "bạn quan tâm, để lại giờ tiện liên hệ. Bộ phận tư vấn sẽ gọi lại.",
+    ),
+    (
+        ("bao tri", "sua chua", "hong"),
+        "Để báo bảo trì: cần căn hộ đã xác minh trước. Sau đó chọn “Báo bảo trì / sửa chữa”, "
+        "mô tả sự cố và vị trí, chọn thời gian thuận tiện cho kỹ thuật viên.",
+    ),
+    (
+        ("chuyen nha", "chuyen den", "chuyen di"),
+        "Để đặt lịch chuyển nhà: cần căn hộ đã xác minh trước. Sau đó chọn “Đặt lịch chuyển nhà”, "
+        "chọn ngày giờ, cho biết có dùng thang máy và cần hỗ trợ vận chuyển không.",
+    ),
+)
+
+
+# --- Việc NẰM NGOÀI không gian tool của Agent ---------------------------------
+#
+# Agent có đúng 10 tool (`tool_contract.py`). Xác minh căn hộ KHÔNG nằm trong
+# đó — nó là luồng giao diện cộng một lượt duyệt của ban quản lý.
+#
+# Vậy mà "giúp tôi liên kết căn hộ" vẫn xuống planner, vì nó có động từ và danh
+# từ dịch vụ. Planner không có tool nào để lập kế hoạch, nên trả về:
+#
+#   "Mình chưa thể liên kết căn hộ vì thông tin bạn vừa cung cấp chưa hợp lệ.
+#    Bạn vui lòng kiểm tra lại và gửi lại thông tin chính xác hơn."
+#
+# Ba thứ sai cùng lúc: câu của họ hoàn toàn hợp lệ; lý do thật không phải dữ
+# liệu mà là Agent không làm được việc này; và không có một chỉ dẫn nào. Người
+# dùng sẽ gửi lại "chính xác hơn" vài lần rồi bỏ cuộc.
+#
+# `_asks_how_to` không đỡ được vì nó đòi cụm "thế nào"/"làm sao" — câu này là
+# câu sai khiến. Với việc Agent KHÔNG LÀM ĐƯỢC thì cách hỏi không quan trọng:
+# hỏi hay sai khiến đều phải nhận cùng một chỉ dẫn.
+_OUTSIDE_TOOLSPACE: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        (
+            "lien ket can ho",
+            "xac minh can ho",
+            "xac thuc can ho",
+            "dang ky can ho",
+            "them can ho",
+            "lien ket ho so",
+            "xac minh ho so",
+            "lien ket cu dan",
+        ),
+        "Việc xác minh căn hộ do một đơn vị độc lập đối chiếu giấy tờ rồi duyệt, nên mình "
+        "không tự làm thay được. Bạn mở mục “Hồ sơ” ở thanh bên, bấm “Xác minh căn hộ” rồi "
+        "bấm “Xác thực với đơn vị” — sang cổng của họ, nhập mã căn hộ và khu đô thị, đính kèm "
+        "ảnh giấy tờ nhà là xong. Duyệt xong thì các dịch vụ cư dân mở ra ngay.",
+    ),
+)
+
+
+# --- Hỏi hôm nay là ngày mấy --------------------------------------------------
+#
+# Hệ thống biết chính xác (`date.today()`, cùng nguồn với Planner và Validator),
+# nhưng câu hỏi này rơi xuống planner: mất ~12 giây rồi trả về "Mình không thể
+# xem hôm nay là ngày mấy được." Sai, và lượt hỏi lại còn nhận "thông tin bạn
+# gửi chưa hợp lệ".
+#
+# Người dùng hỏi ngày để ĐẶT LỊCH, nên câu trả lời nói luôn cả hai.
+_DATE_QUESTION_MARKERS = (
+    "hom nay la ngay may",
+    "hom nay ngay may",
+    "hom nay la thu may",
+    "hom nay thu may",
+    "ngay bao nhieu",
+    "bay gio la ngay may",
+    "hom nay ngay bao nhieu",
+)
+
+_WEEKDAY_VI = ("thứ Hai", "thứ Ba", "thứ Tư", "thứ Năm", "thứ Sáu", "thứ Bảy", "Chủ nhật")
+
+
+def _asks_todays_date(message: str) -> str | None:
+    """Trả lời ngày hôm nay, hoặc None nếu câu không hỏi ngày."""
+    normalized = _normalize(message)
+    if not any(marker in normalized for marker in _DATE_QUESTION_MARKERS):
+        return None
+    from datetime import date
+
+    today = date.today()
+    return (
+        f"Hôm nay là {_WEEKDAY_VI[today.weekday()]}, ngày {today.day:02d}/{today.month:02d}/{today.year}. "
+        "Bạn cần đặt lịch vào ngày nào thì nói với mình nhé — mình hiểu được cả "
+        "“ngày mai”, “ngày 29” hay “thứ Bảy này”."
+    )
+
+
+def _outside_toolspace(message: str) -> str | None:
+    """Chỉ dẫn cho việc Agent không có tool để làm, hoặc None.
+
+    Kiểm TRƯỚC service-intent và trước cả `_asks_how_to`: với việc nằm ngoài
+    không gian tool thì cách diễn đạt không đổi được kết quả, nên không cần
+    phân biệt câu hỏi với câu sai khiến.
+    """
+    normalized = _normalize(message)
+    for phrases, guidance in _OUTSIDE_TOOLSPACE:
+        if any(phrase in normalized for phrase in phrases):
+            return guidance
+    return None
+
+
+def _asks_how_to(message: str) -> str | None:
+    """Các bước cho câu hỏi "làm thế nào", hoặc None nếu không phải câu hỏi ấy.
+
+    Trả về hướng dẫn CỤ THỂ cho việc được hỏi, không phải danh mục dịch vụ
+    chung. Người hỏi "liên kết căn hộ thế nào" đã biết họ muốn gì rồi — đưa lại
+    danh sách năm dịch vụ là bắt họ tự tìm câu trả lời trong đó một lần nữa.
+    """
+    normalized = _normalize(message)
+    if not _has_howto_marker(normalized):
+        return None
+    for keywords, steps in _HOWTO_STEPS:
+        if any(keyword in normalized for keyword in keywords):
+            return steps
+    # Hỏi cách làm nhưng không rõ việc gì — để `classify` rơi xuống capability,
+    # nơi trả danh mục theo đúng quyền của tài khoản.
+    return None
 
 
 def _asks_for_capabilities(message: str) -> bool:
@@ -281,6 +649,44 @@ def classify(message: str) -> SmallTalk | None:
             reply="Bạn gõ lặp, mình chưa hiểu yêu cầu. Mô tả giúp mình mục tiêu cụ thể nhé.",
         )
 
+    # Hỏi ngày hôm nay — trả lời được ngay, 0 lượt gọi model.
+    #
+    # Kiểm trước service-intent: "hôm nay là ngày mấy cho việc đặt lịch" có danh
+    # từ dịch vụ nên nếu để service-intent thắng thì nó lại xuống planner.
+    date_reply = _asks_todays_date(text)
+    if date_reply is not None:
+        return SmallTalk(speech_type=SpeechType.HOW_TO, reply=date_reply)
+
+    # Danh mục dự án — dữ liệu, không phải thứ để model nghĩ ra.
+    #
+    # Đứng TRƯỚC service-intent, cùng lý do với `_asks_todays_date`: "có những
+    # dự án nào" mang danh từ dịch vụ nên nếu để service-intent thắng thì nó
+    # xuống Planner, và Response Agent bịa ra danh sách.
+    #
+    # Không nuốt yêu cầu thật: marker đòi cụm "dự án nào" / "danh sách dự án".
+    # "đặt lịch tham quan dự án Vinhomes Pearl Bay ngày…" không chứa cụm nào.
+    catalogue = _asks_for_the_project_catalogue(text)
+    if catalogue is not None:
+        return SmallTalk(speech_type=SpeechType.HOW_TO, reply=catalogue)
+
+    # Việc Agent KHÔNG có tool để làm — kiểm trước tất cả.
+    outside = _outside_toolspace(text)
+    if outside is not None:
+        return SmallTalk(speech_type=SpeechType.HOW_TO, reply=outside)
+
+    # Hỏi CÁCH LÀM kiểm trước service-intent.
+    #
+    # Đây là ngoại lệ có chủ ý với quy tắc "service-intent luôn trước": câu hỏi
+    # cách làm mang đủ dấu hiệu của một yêu cầu dịch vụ (động từ + danh từ), nên
+    # nếu để service-intent thắng thì nó rơi xuống planner và người dùng nhận
+    # "thông tin bạn cung cấp chưa hợp lệ" cho một câu hỏi hoàn toàn rõ ràng.
+    #
+    # Không nuốt yêu cầu thật: chỉ khớp khi câu CHỨA cụm hỏi cách làm ("thế
+    # nào", "làm sao", "cách…"). "Đặt chỗ đỗ xe khu A" không có cụm nào trong đó.
+    howto = _asks_how_to(text)
+    if howto is not None:
+        return SmallTalk(speech_type=SpeechType.HOW_TO, reply=howto)
+
     # Service intent kiểm TRƯỚC mọi canned route.
     if _has_service_intent(text):
         return None
@@ -294,17 +700,23 @@ def classify(message: str) -> SmallTalk | None:
     if _is_greeting(text):
         return SmallTalk(
             speech_type=SpeechType.GREETING,
-            reply="Xin chào! Mình là P-118, trợ lý bất động sản và dịch vụ cư dân. Bạn cần hỗ trợ gì hôm nay?",
+            reply="Xin chào! Mình là P-118, trợ lý dịch vụ cư dân. Bạn cần hỗ trợ gì hôm nay?",
         )
 
     if _is_about_agent(text):
+        # Trả về CAPABILITY, không phải GREETING.
+        #
+        # Bản trước liệt kê dịch vụ bằng một chuỗi cứng — và chuỗi đó đã lệch
+        # khỏi sự thật: nó quảng cáo "tìm nhà" và "đăng ký cư dân", hai thứ
+        # KHÔNG có trong `_CAPABILITY_CATALOGUE`. Người dùng đọc xong gõ "tìm
+        # nhà thử xem" và bị Planner hỏi ngân sách cho một dịch vụ không tồn tại.
+        #
+        # Route sẽ dựng danh sách từ chính danh mục, theo đúng quyền của tài
+        # khoản — nên câu giới thiệu không bao giờ hứa thừa được nữa. `reply`
+        # ở đây chỉ là bản dự phòng nếu không dựng được danh mục.
         return SmallTalk(
-            speech_type=SpeechType.GREETING,
-            reply=(
-                "Mình là P-118, trợ lý bất động sản và dịch vụ cư dân. "
-                "Mình giúp tìm nhà, đặt lịch xem, đăng ký cư dân/xe, đặt chỗ đỗ "
-                "và thanh toán phí. Bạn cần mình hỗ trợ gì nhé?"
-            ),
+            speech_type=SpeechType.CAPABILITY,
+            reply="Mình là P-118, trợ lý dịch vụ cư dân. Bạn cần mình hỗ trợ gì nhé?",
         )
 
     if _asks_for_capabilities(text):
@@ -325,28 +737,36 @@ def classify(message: str) -> SmallTalk | None:
 async def answer_capability_question(
     message: str,
     *,
-    base_url: str,
     account_state: str,
+    capabilities: list[dict[str, Any]] | None = None,
 ) -> SmallTalk | None:
-    """Trả lời capability bằng data thật từ `/api/v1/capabilities`.
+    """Trả lời capability bằng danh mục dịch vụ, đọc TRONG TIẾN TRÌNH.
 
     Trả SmallTalk nếu message là capability query, ngược lại None để caller
     xử lý như service goal.
+
+    Trước đây hàm này tự gọi `GET /api/v1/capabilities` qua HTTP vào chính app
+    đang chạy. Endpoint đó BẮT BUỘC token — và lời gọi nội bộ không mang token
+    nào — nên nó luôn nhận 401, `raise_for_status()` ném lỗi, và người dùng
+    luôn nhận đúng một câu: "Hiện chưa lấy được danh sách dịch vụ."
+
+    Đo được trên stack sạch: gõ "Bạn giúp được gì?" trả về câu dự phòng ấy;
+    `httpx` gọi thẳng `localhost:8000/api/v1/capabilities` trong container cũng
+    trả 401. Đường này chưa từng chạy được.
+
+    Một app gọi HTTP vào chính nó để đọc một hằng số của chính nó thì phải trả
+    giá bằng: một vòng mạng, một `base_url` phải đoán, và một bộ credential nó
+    không có. Nhận danh mục qua tham số thì mất cả ba.
     """
-    if not _asks_for_capabilities(message):
+    # Nhận cả câu "giới thiệu về bạn": nó cũng cần danh sách dịch vụ THẬT, và
+    # trước đây nó được trả lời bằng một chuỗi cứng đã lệch khỏi danh mục.
+    if not (_asks_for_capabilities(message) or _is_about_agent(message)):
         return None
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{base_url}/api/v1/capabilities")
-            response.raise_for_status()
-            payload = response.json()
-    except Exception:  # noqa: BLE001 - capability query không được crash chat
+    if not capabilities:
         return SmallTalk(
             speech_type=SpeechType.CAPABILITY,
             reply="Hiện chưa lấy được danh sách dịch vụ. Bạn thử lại sau nhé.",
         )
-
-    capabilities = payload.get("capabilities") or []
     return SmallTalk(
         speech_type=SpeechType.CAPABILITY,
         reply=_capability_reply(capabilities, account_state),

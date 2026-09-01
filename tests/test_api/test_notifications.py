@@ -92,10 +92,20 @@ async def test_summary_trống_cho_customer_không_có_việc_cần_chú_ý(clie
 async def test_summary_maps_workflow_actionable_đúng_shape(client: httpx.AsyncClient) -> None:
     updated = datetime.now(UTC).replace(microsecond=0)
     rows = [
-        _row("11111111-1111-1111-1111-111111111111", "Đặt chỗ đỗ xe cho tôi",
-             "WAITING_APPROVAL", updated, open_clarification=False),
-        _row("22222222-2222-2222-2222-222222222222", "Đăng ký cư dân nhưng thiếu ngày" * 10,
-             "RUNNING", updated, open_clarification=True),
+        _row(
+            "11111111-1111-1111-1111-111111111111",
+            "Đặt chỗ đỗ xe cho tôi",
+            "WAITING_APPROVAL",
+            updated,
+            open_clarification=False,
+        ),
+        _row(
+            "22222222-2222-2222-2222-222222222222",
+            "Đăng ký cư dân nhưng thiếu ngày" * 10,
+            "RUNNING",
+            updated,
+            open_clarification=True,
+        ),
     ]
     set_repository_provider(_fake_provider(rows))
     try:
@@ -164,8 +174,17 @@ async def test_summary_viewing_count_chỉ_cho_reviewer(client: httpx.AsyncClien
 async def test_stream_generator_snapshot_diff_ping_rồi_cancel() -> None:
     """Vòng SSE: snapshot đầu → diff đẩy lại → không đổi thì ping → cancel sạch."""
     updated = datetime.now(UTC).replace(microsecond=0)
-    pool = _CannedPool([_row("33333333-3333-3333-3333-333333333333", "Đặt chỗ đỗ xe cho tôi",
-                             "WAITING_APPROVAL", updated, open_clarification=False)])
+    pool = _CannedPool(
+        [
+            _row(
+                "33333333-3333-3333-3333-333333333333",
+                "Đặt chỗ đỗ xe cho tôi",
+                "WAITING_APPROVAL",
+                updated,
+                open_clarification=False,
+            )
+        ]
+    )
     gen = _notification_event_stream(pool, {"id": "owner-1", "role": "customer"}, interval=0.001)
 
     # 1) Lần đầu luôn là snapshot đầy đủ.
@@ -176,8 +195,11 @@ async def test_stream_generator_snapshot_diff_ping_rồi_cancel() -> None:
     assert payload["workflows"][0]["workflow_id"] == "33333333-3333-3333-3333-333333333333"
 
     # 2) Payload thay đổi (đơn mới chờ duyệt) → đẩy event mới.
-    pool._rows.append(_row("44444444-4444-4444-4444-444444444444", "Cần bổ sung thông tin",
-                           "RUNNING", updated, open_clarification=True))
+    pool._rows.append(
+        _row(
+            "44444444-4444-4444-4444-444444444444", "Cần bổ sung thông tin", "RUNNING", updated, open_clarification=True
+        )
+    )
     second = await anext(gen)
     assert second.startswith("event: notifications\ndata: ")
     second_payload = json.loads(second.split("data: ", 1)[1])
@@ -198,8 +220,17 @@ async def test_stream_generator_snapshot_diff_ping_rồi_cancel() -> None:
 async def test_stream_generator_tách_payload_theo_owner() -> None:
     """Mỗi generator một owner — payload không trộn owner khác."""
     updated = datetime.now(UTC).replace(microsecond=0)
-    pool = _CannedPool([_row("55555555-5555-5555-5555-555555555555", "Đặt chỗ đỗ xe cho tôi",
-                             "WAITING_APPROVAL", updated, open_clarification=False)])
+    pool = _CannedPool(
+        [
+            _row(
+                "55555555-5555-5555-5555-555555555555",
+                "Đặt chỗ đỗ xe cho tôi",
+                "WAITING_APPROVAL",
+                updated,
+                open_clarification=False,
+            )
+        ]
+    )
     gen_a = _notification_event_stream(pool, {"id": "owner-a", "role": "customer"}, interval=0.001)
     gen_b = _notification_event_stream(pool, {"id": "owner-b", "role": "customer"}, interval=0.001)
 

@@ -4,7 +4,13 @@ import { BadgeCheck, Clock, Home, Lock, Loader2, ShieldX } from 'lucide-react'
 import { ChatWorkflowCard } from '../components/ChatWorkflowCard'
 import { Composer } from '../components/Composer'
 import { QuickActionForm } from '../components/QuickActionForm'
-import { cancelWorkflow, continueWorkflow, getCapabilities, startWorkflow } from '../lib/agentApi'
+import {
+  cancelWorkflow,
+  continueWorkflow,
+  getCapabilities,
+  startWorkflow,
+  type InitialWorkflowFormFields,
+} from '../lib/agentApi'
 import { useAuth } from '../lib/auth'
 import type {
   AgentWorkflowResponse,
@@ -192,7 +198,7 @@ export function HomePage() {
   }
 
   /** Tạo workflow từ một goal hoàn chỉnh, bất kể goal đến từ chat hay quick form. */
-  async function launchWorkflow(text: string) {
+  async function launchWorkflow(text: string, formFields?: InitialWorkflowFormFields) {
     setSending(true)
     setError(null)
     const thinkingId = nextId()
@@ -205,7 +211,7 @@ export function HomePage() {
     try {
       // Browser chỉ gửi goal. TaskPlan, dependency, quyền và context đều do
       // backend quyết định; quick form không phải một workflow builder.
-      const response = await startWorkflow(text)
+      const response = await startWorkflow(text, undefined, undefined, formFields)
       const created = response.workflow_id
       if (!created) throw new Error('Không tạo được yêu cầu. Vui lòng thử lại.')
       setMessages((previous) => [
@@ -521,8 +527,8 @@ export function HomePage() {
               capabilities={quickActions}
               submitting={sending}
               onCancel={() => setQuickActions([])}
-              onSubmit={async (preparedGoal) => {
-                await launchWorkflow(preparedGoal)
+              onSubmit={async (preparedGoal, formFields) => {
+                await launchWorkflow(preparedGoal, formFields)
                 setQuickActions([])
               }}
             />

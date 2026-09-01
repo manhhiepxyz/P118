@@ -15,6 +15,7 @@ import pytest
 
 from src.agents.graph import (
     CLARIFICATION_UNAVAILABLE_MESSAGE,
+    RESIDENT_LINK_REQUIRED_MESSAGE,
     build_planner_graph,
     needs_information_update,
 )
@@ -36,7 +37,17 @@ class FakePlanner:
         self._error = error
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def plan(self, goal: str, existing_context: dict[str, Any] | None = None) -> PlannerResult:
+    async def plan(
+        self,
+        goal: str,
+        existing_context: dict[str, Any] | None = None,
+        # Ký ức hội thoại. Fake PHẢI nhận tham số này, kể cả khi không dùng:
+        # graph gọi `plan(..., recalled=...)`, và một fake thiếu tham số sẽ ném
+        # TypeError — vốn bị `except Exception` trong `plan_node` nuốt và biến
+        # thành `planning_error`. Test khi đó đỏ ở một chỗ hoàn toàn khác, với
+        # `KeyError: 'planner_status'`, không nhắc gì tới chữ ký hàm.
+        recalled: list[dict[str, Any]] | None = None,
+    ) -> PlannerResult:
         self.calls.append((goal, existing_context or {}))
         if self._error is not None:
             raise self._error
@@ -208,6 +219,22 @@ def _success_results() -> dict[str, StandardResult]:
 # ---------------------------------------------------------------------------
 
 
+class _RawPlannerResult:
+    """Result duck-typed, cố tình BỎ QUA `PlannerResult.__post_init__`.
+
+    `PlannerResult` đã chặn field lạ và không cho truyền `question` tự do, nên
+    dùng nó thì không kiểm được lớp phòng thủ của Graph. Class này mô phỏng một
+    Planner khác (hoặc bản refactor tương lai) trả về dữ liệu chưa được lọc.
+    """
+
+    def __init__(self, missing_fields: tuple[str, ...], question: str | None = None) -> None:
+        self.status = "NEEDS_INFORMATION"
+        self.plan = None
+        self.missing_fields = missing_fields
+        self.question = question
+        self.is_ready = False
+
+
 @pytest.mark.asyncio
 async def test_ready_plan_flows_through_validate_to_execute() -> None:
     plan = _valid_plan()
@@ -340,8 +367,19 @@ async def test_missing_resident_id_without_context_still_rejected() -> None:
 
     # Không thực thi, không bịa mã cư dân.
     assert boundary.calls == []
-    assert state.get("clarification_error") == CLARIFICATION_UNAVAILABLE_MESSAGE
     assert state.get("plan_validated") is False
+    # Câu từ chối phải NÊU ĐÍCH DANH việc cần làm.
+    #
+    # Bản trước dùng chung `CLARIFICATION_UNAVAILABLE_MESSAGE` ("Bạn mô tả lại
+    # cụ thể hơn giúp mình nhé") cho cả hai lý do rất khác nhau: "thiếu một
+    # thứ không được phép hỏi" và "tài khoản chưa đủ điều kiện". Với trường hợp
+    # thứ hai — phổ biến hơn hẳn — nó đổ lỗi cho cách người dùng diễn đạt,
+    # trong khi mô tả của họ hoàn toàn rõ ràng. Họ viết lại rõ hơn và nhận đúng
+    # câu đó lần nữa.
+    assert state.get("clarification_error") == RESIDENT_LINK_REQUIRED_MESSAGE
+    # Bất biến KHÔNG đổi: không hỏi người dùng một ID nội bộ.
+    assert "resident_id" not in str(state.get("clarification_error"))
+    assert not state.get("missing_fields")
 
 
 @pytest.mark.asyncio
@@ -861,7 +899,7 @@ _INTERNAL_FIELDS = ("resident_id", "vehicle_id", "booking_id", "amount", "curren
 
 @pytest.mark.asyncio
 async def test_planner_branch_translates_vehicle_id_into_user_answerable_fields() -> None:
-    planner = FakePlanner(PlannerResult(status="NEEDS_INFORMATION", missing_fields=("vehicle_id",)))
+    planner = FakePlanner(_RawPlannerResult(missing_fields=("vehicle_id",)))
     boundary = FakeExecutionBoundary()
 
     graph = build_planner_graph(planner, boundary)
@@ -878,7 +916,12 @@ async def test_planner_branch_translates_vehicle_id_into_user_answerable_fields(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ["resident_id", "booking_id", "amount", "currency"])
 async def test_planner_branch_never_asks_user_for_system_owned_field(field: str) -> None:
-    planner = FakePlanner(PlannerResult(status="NEEDS_INFORMATION", missing_fields=(field,)))
+    # `PlannerResult` giờ TỪ CHỐI những field này ngay ở constructor (xem
+    # `PUBLIC_MISSING_FIELDS`), nên một `PlannerResult` không còn mang được
+    # chúng. Lớp phòng thủ của Graph vẫn cần thiết cho thứ ĐI VÒNG qua nó — một
+    # planner khác, hay một bản refactor tương lai — nên test dùng đúng hình
+    # dạng ấy.
+    planner = FakePlanner(_RawPlannerResult(missing_fields=(field,)))
     boundary = FakeExecutionBoundary()
 
     graph = build_planner_graph(planner, boundary)
@@ -886,27 +929,16 @@ async def test_planner_branch_never_asks_user_for_system_owned_field(field: str)
 
     # Không rơi vào NEEDS_INFORMATION → UI không có form rỗng để render.
     assert state.get("planner_status") != "NEEDS_INFORMATION"
-    assert state["clarification_error"] == CLARIFICATION_UNAVAILABLE_MESSAGE
+    # `resident_id` có câu riêng: thiếu nó KHÔNG phải "không hỏi được" mà là
+    # "tài khoản chưa liên kết căn hộ" — một việc người dùng làm được, nên phải
+    # nói ra. Các field còn lại thật sự không có gì để hướng dẫn.
+    expected = RESIDENT_LINK_REQUIRED_MESSAGE if field == "resident_id" else CLARIFICATION_UNAVAILABLE_MESSAGE
+    assert state["clarification_error"] == expected
     assert "question" not in state
     assert tuple(state.get("missing_fields") or ()) == ()
+    # Bất biến chung cho MỌI field: tên field nội bộ không bao giờ lọt ra câu chữ.
     assert field not in state["clarification_error"]
     assert boundary.calls == []
-
-
-class _RawPlannerResult:
-    """Result duck-typed, cố tình BỎ QUA `PlannerResult.__post_init__`.
-
-    `PlannerResult` đã chặn field lạ và không cho truyền `question` tự do, nên
-    dùng nó thì không kiểm được lớp phòng thủ của Graph. Class này mô phỏng một
-    Planner khác (hoặc bản refactor tương lai) trả về dữ liệu chưa được lọc.
-    """
-
-    def __init__(self, missing_fields: tuple[str, ...], question: str | None = None) -> None:
-        self.status = "NEEDS_INFORMATION"
-        self.plan = None
-        self.missing_fields = missing_fields
-        self.question = question
-        self.is_ready = False
 
 
 @pytest.mark.asyncio
@@ -938,7 +970,10 @@ async def test_graph_rebuilds_question_instead_of_forwarding_planner_question() 
     plate_number + vehicle_type, câu hỏi cũ trở thành sai, nên không được
     chuyển tiếp nguyên văn.
     """
-    original = PlannerResult(status="NEEDS_INFORMATION", missing_fields=("vehicle_id",))
+    # `PlannerResult` không mang được `vehicle_id` nữa — `_clean_missing_fields`
+    # hạ cấp nó trước khi tới đây. Dùng result duck-typed để kiểm lớp phòng thủ
+    # của Graph cho thứ đi vòng qua biên ấy.
+    original = _RawPlannerResult(missing_fields=("vehicle_id",), question="Mình cần biết phương tiện muốn dùng.")
     planner = FakePlanner(original)
     boundary = FakeExecutionBoundary()
 
@@ -965,3 +1000,59 @@ def test_both_needs_information_branches_share_one_policy() -> None:
         if field == "vehicle_id":
             continue
         assert "clarification_error" in needs_information_update((field,), {})
+
+
+@pytest.mark.asyncio
+async def test_a_question_stops_before_validation_and_never_executes() -> None:
+    """QUESTION là điểm dừng: không kế hoạch, không kiểm, không thực thi.
+
+    Trạng thái này tồn tại vì suốt trước đó mọi câu HỎI đều bị ép vào khuôn
+    "lập kế hoạch hoặc là thiếu dữ liệu", và cái thứ hai hiện ra với người dùng
+    thành "thông tin bạn cung cấp chưa hợp lệ" — đổ lỗi cho họ vì đã hỏi. Đã vá
+    bằng từ khoá năm lần (hỏi năng lực, hỏi cách làm, xác minh căn hộ, hỏi ngày,
+    hỏi quyền), lần nào cũng chỉ bịt được đúng cách hỏi mình nghĩ ra được.
+    """
+    planner = FakePlanner(PlannerResult(status="QUESTION"))
+    boundary = FakeExecutionBoundary()
+
+    graph = build_planner_graph(planner, boundary)
+    state = await graph.ainvoke({"goal": "tôi có quyền gì", "existing_context": {}})
+
+    assert state["planner_status"] == "QUESTION"
+    assert boundary.calls == [], "câu hỏi mà vẫn chạy tác vụ"
+    assert state.get("plan") is None
+    assert not state.get("plan_validated")
+    # Không hỏi lại người dùng thứ gì — họ đang hỏi mình, không phải ngược lại.
+    assert tuple(state.get("missing_fields") or ()) == ()
+    assert "question" not in state
+    # Và KHÔNG có câu trả lời nào ở đây: planner phân loại, Response Agent viết.
+    assert "clarification_error" not in state
+
+
+def test_the_planner_cannot_smuggle_prose_through_the_question_status() -> None:
+    """Ranh giới cũ được giữ nguyên: planner không soạn chữ cho người dùng.
+
+    `_PlannerResponse` cố ý không có field văn bản tự do. Nếu một ngày ai đó
+    thêm vào để "tiện", LLM sẽ nói thẳng ra ngoài mà không đi qua guard của
+    Response Agent — test này đỏ trước khi điều đó kịp xảy ra.
+
+    `explicit_facts` được thêm vào có chủ ý, và nó CÓ mang một chuỗi do LLM
+    viết (`evidence`). Vì vậy ranh giới được phát biểu lại cho chính xác thay
+    vì nới ra: chuỗi ấy chỉ sống trong tầng kiểm của Planner — nó được đem đi
+    đối chiếu với goal rồi bỏ đi. Kiểu vượt biên giới là `ExplicitFact`, và nó
+    KHÔNG có chỗ nào để chứa văn bản.
+
+    Hai assertion dưới đây phải cùng đúng; giữ mỗi cái đầu thì một `evidence`
+    lọt ra ngoài vẫn xanh.
+    """
+    from src.agents.planner import ExplicitFact, _PlannerResponse
+
+    fields = set(_PlannerResponse.model_fields)
+    assert fields == {"status", "plan", "missing_fields", "explicit_facts"}, fields
+
+    # Thứ RỜI KHỎI Planner chỉ có tên ô và một boolean. Không chuỗi nào.
+    import dataclasses
+
+    ra_ngoai = {f.name: f.type for f in dataclasses.fields(ExplicitFact)}
+    assert set(ra_ngoai) == {"field", "value"}, ra_ngoai
+    assert "evidence" not in ra_ngoai, "nguyên văn lời người dùng rời khỏi tầng kiểm"

@@ -677,6 +677,16 @@ EXPECTED_TOOLS = frozenset(
         "register_resident",
         "register_vehicle",
         "book_parking",
+        # Có trong contract nhưng Planner KHÔNG lập kế hoạch với nó — xem
+        # `AGENT_FORBIDDEN_TOOLS`. Đường sửa lỗi dựng task này từ kết quả đã
+        # chạy, không từ câu người dùng gõ.
+        "change_parking_zone",
+        # Cùng lý do: huỷ một lịch chỉ có nghĩa với `viewing_id` từ bước đã chạy.
+        "cancel_property_viewing",
+        "cancel_parking",
+        "cancel_maintenance",
+        "cancel_move",
+        "cancel_shuttle",
         "pay_fee",
         "book_shuttle",
     }
@@ -759,7 +769,11 @@ def test_schema_rejects_ownership_task_from_raw_json() -> None:
         (
             "book_parking",
             {"vehicle_id": "VEH-001", "booking_date": "2020-01-01", "parking_zone": "ZONE_A"},
-            "booking_date in the past",
+            # Ngày ngoài khung giờ là ngày HỎI LẠI ĐƯỢC, không phải ngõ cụt: nó
+            # ném `MissingRequiredInputError` để `validate_node` mời khách chọn
+            # ngày khác. Trước đây quá-khứ và quá-xa cho hai kết cục khác nhau —
+            # không phải do Validator mà do Planner nhớ luật này và quên luật kia.
+            "missing required input fields: \\['booking_date'\\]",
         ),
         (
             "schedule_property_viewing",

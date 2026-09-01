@@ -14,8 +14,34 @@
  */
 
 import type { JourneyEdge, JourneyStep, StepState } from './journeyMock'
-import type { PendingAction } from './pendingAction'
+import type { PendingAction, PendingField } from './pendingAction'
+import { fieldSpecForMissing, today } from './serviceForms'
 import type { AgentTaskResult, AgentWorkflowResponse } from './types'
+
+/**
+ * Ô "trả lời chung" khi backend nói CẦN THÊM THÔNG TIN mà không kèm ô nào.
+ *
+ * KHÔNG phải một field của contract — backend chưa bao giờ hỏi nó. Nó chỉ là
+ * chỗ để người dùng gõ một câu tự do khi `missing_fields` rỗng (workflow mở
+ * lại từ Lịch sử, hoặc cache RAM chỉ dựng lại một phần).
+ *
+ * Vì thế nó PHẢI được gửi đi dưới dạng `message`, KHÔNG phải `fields`. Gửi như
+ * field là ngõ cụt tuyệt đối, đo được nguyên văn trên máy người dùng:
+ *
+ *     UI gửi   {"fields": {"answer": "2 người"}}
+ *     Backend  `answer` không nằm trong danh sách đang hỏi
+ *              → 422 "Biểu mẫu gửi lên có mục không nằm trong câu hỏi,
+ *                 nên mình chưa nhận được. Bạn tải lại trang rồi trả lời
+ *                 giúp mình nhé."
+ *
+ * Tải lại trang không cứu được, vì lỗi không nằm ở trang: `fields` là hợp đồng
+ * ALL-OR-NONE theo đúng `missing_fields` backend đang chờ, và `answer` không
+ * bao giờ nằm trong đó. Người dùng gõ gì cũng hỏng y hệt.
+ *
+ * `message` thì ngược lại — backend đọc nó bằng `_extract_follow_up_answers`,
+ * đúng đường mà một câu chat tự do vẫn đi.
+ */
+export const FREE_TEXT_ANSWER_KEY = 'answer'
 
 /**
  * Khoá field của backend → nhãn tiếng Việt.
@@ -55,7 +81,8 @@ const FIELD_LABEL: Record<string, string> = {
   max_price: 'Ngân sách',
 }
 
-const label = (key: string) => FIELD_LABEL[key] ?? key
+// `label()` cũ đã được `pendingFieldFor` thay thế — nó tra thêm cả kiểu ô,
+// không chỉ cái tên.
 
 /** Trạng thái task của backend → trạng thái ngữ nghĩa của một chặng. */
 const STATE: Record<AgentTaskResult['status'], StepState> = {
@@ -143,6 +170,9 @@ export function journeyFromWorkflow(res: AgentWorkflowResponse): LiveJourney {
    */
   const waitsOnProvider = res.approval_actor === 'PROVIDER' || res.approval_actor === 'ADMIN'
 
+  // task_id → nhãn người đọc, để nói "chờ bước nào" bằng tên chứ không bằng mã.
+  const titleOf = new Map(res.plan.map((step) => [step.task_id, step.title || step.task_id]))
+
   const steps = res.plan.map((step) => {
     const task = results.get(step.task_id)
     const at = position.get(step.task_id) ?? { x: 60, y: 40 }
@@ -171,6 +201,14 @@ export function journeyFromWorkflow(res: AgentWorkflowResponse): LiveJourney {
             : state === 'running'
               ? 'P-118 đang xử lý.'
               : null,
+      // Chỉ nêu bước CHƯA xong: một bước đã chạy xong thì không còn chặn ai.
+      blockedBy: (step.depends_on ?? [])
+        .filter((parent) => results.get(parent)?.status !== 'SUCCESS')
+        .map((parent) => titleOf.get(parent) ?? parent),
+      log: (res.events ?? [])
+        .filter((event) => event.task_id === step.task_id)
+        .map((event) => event.message ?? '')
+        .filter(Boolean),
       lane: 'flow',
       x: at.x,
       y: at.y,
@@ -186,11 +224,48 @@ export function journeyFromWorkflow(res: AgentWorkflowResponse): LiveJourney {
   )
 
   return {
-    title: res.summary || res.message || 'Yêu cầu của bạn',
+    title: journeyTitle(res, steps),
     steps,
     edges,
     done: res.status !== 'RUNNING' && res.status !== 'PENDING',
   }
+}
+
+/**
+ * Tiêu đề NGẮN cho hành trình — tóm tắt việc đang làm, không phải câu đã gõ.
+ *
+ * Trước đây tiêu đề là nguyên văn tin nhắn người dùng gửi. Với một câu dài
+ * ("tôi mới chuyển vào căn hộ A1201, hãy đăng ký xe biển 51A-12345 và đặt chỗ
+ * ZONE_A ngày 10/12 rồi thanh toán phí") thì thanh tiêu đề và cả cột phải đều
+ * biến thành một đoạn văn — và nó lặp lại đúng thứ đang hiện trong hội thoại
+ * ngay bên dưới.
+ *
+ * Dựng từ TÊN CÁC BƯỚC, do backend đặt (`_TOOL_PRESENTATION`). Chúng mô tả việc
+ * hệ thống thật sự làm, nên tiêu đề không bao giờ hứa nhiều hơn kế hoạch.
+ *
+ * Cố ý KHÔNG gọi model để đặt tên: thêm một lượt gọi cho một dòng chữ trang trí
+ * là đúng thứ vừa được gỡ khỏi tầng viết câu.
+ */
+function journeyTitle(res: AgentWorkflowResponse, steps: JourneyStep[]): string {
+  // Tên riêng của dự án là thứ phân biệt hai hành trình cùng loại. Nó đến từ
+  // canonical plan phía backend, không phải chữ người dùng gõ.
+  const project = res.viewing_approval?.project_name?.trim()
+
+  const names: string[] = []
+  for (const step of steps) {
+    const name = step.title?.trim()
+    if (name && !names.includes(name)) names.push(name)
+  }
+
+  if (names.length === 0) {
+    // Chưa lập xong kế hoạch thì chưa có gì để tóm tắt. Nói thẳng là đang
+    // chuẩn bị, hơn là bịa một cái tên rồi đổi ngay sau vài giây.
+    return 'Đang chuẩn bị…'
+  }
+
+  const head = names.slice(0, 2).join(' · ')
+  const rest = names.length > 2 ? ` +${names.length - 2}` : ''
+  return project ? `${head}${rest} — ${project}` : `${head}${rest}`
 }
 
 /**
@@ -249,9 +324,60 @@ function money(quote: AgentWorkflowResponse['payment_quote']): string {
  *                        đây là mời người dùng bấm một thứ không có thật.
  *   NEEDS_INFORMATION  → người dùng cung cấp thông tin còn thiếu.
  */
+/**
+ * Ô backend đang hỏi → ô nhập CÓ RÀNG BUỘC.
+ *
+ * `fieldSpecForMissing` đã tồn tại và được export từ `serviceForms.ts`, nhưng
+ * chưa ai gọi — nên thẻ "Cần thêm thông tin" vẽ ô text trần cho mọi thứ, kể cả
+ * khu đỗ xe (enum hai giá trị) và ngày. Người dùng gõ tự do rồi mới bị từ chối
+ * ở lượt sau, và câu từ chối ấy đến sau cả một vòng gọi model.
+ *
+ * Ràng buộc ngay lúc NHẬP thì không còn gì để từ chối ở lượt sau.
+ */
+function pendingFieldFor(key: string): PendingField {
+  const label = FIELD_LABEL[key] ?? key
+  const base: PendingField = { key, label, placeholder: `Nhập ${label.toLowerCase()}` }
+
+  const spec = fieldSpecForMissing(key)
+  if (spec === null) return base
+
+  return {
+    ...base,
+    label: spec.label || label,
+    kind: spec.kind,
+    options: spec.options,
+    min: spec.min,
+    max: spec.max,
+    hint: spec.hint,
+    // Ngày trong quá khứ không bao giờ là câu trả lời đúng, và backend sẽ từ
+    // chối nó. Chặn ngay ở ô nhập thì người dùng không phải đi một vòng để
+    // biết điều đó.
+    minDate: spec.kind === 'date' ? today() : undefined,
+    placeholder: spec.placeholder || base.placeholder,
+  }
+}
+
 export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction | null {
   const workflowId = res.workflow_id
   if (!workflowId) return null
+
+  // Yêu cầu ĐÃ DỪNG thì không còn gì đang chờ.
+  //
+  // `NEEDS_INFORMATION`/`WAITING_APPROVAL` được suy ra từ câu hỏi và thẻ duyệt
+  // còn treo trên bản ghi, mà huỷ KHÔNG xoá chúng — nên sau khi dừng, thẻ chờ
+  // vẫn còn đó. Câu tiếp theo người dùng gõ bị đọc là CÂU TRẢ LỜI cho thẻ ấy,
+  // và nó chạy lại đúng yêu cầu vừa bị dừng.
+  //
+  // Đo được nguyên văn:
+  //
+  //   Bạn:   đặt lịch tham quan Vinhomes Green Paradise…
+  //   P-118: Mình đã dừng yêu cầu này.
+  //   Bạn:   a
+  //          → chạy lại chính lịch tham quan vừa dừng
+  //
+  // Người dùng gõ một ký tự vô nghĩa và nhận lại một việc họ vừa chủ động huỷ.
+  // Dừng phải có nghĩa là dừng.
+  if (res.status === 'CANCELLED') return null
 
   if (res.status === 'WAITING_APPROVAL' && res.approval_actor === 'USER' && res.payment_quote) {
     const quote = res.payment_quote
@@ -310,14 +436,56 @@ export function pendingFromWorkflow(res: AgentWorkflowResponse): PendingAction |
       status: 'MISSING_INFORMATION',
       title: 'Cần thêm thông tin',
       message: res.question || res.message || 'Mình còn thiếu vài thông tin để tiếp tục.',
-      // Chỉ liệt kê phần CÒN LẠI: field đầu tiên đã là nhãn của ô nhập ngay
-      // bên dưới, nhắc lại thành ra "Còn thiếu: Biển số xe / Biển số xe".
-      details: res.missing_fields.slice(1).map((field) => ({ label: 'Còn thiếu', value: label(field) })),
+      // Không liệt kê "Còn thiếu" nữa: mọi ô đang chờ đã được vẽ thành ô nhập
+      // ngay bên dưới, nên dòng này chỉ lặp lại đúng thứ người dùng đang nhìn.
+      details: [],
       field: first
-        ? { key: first, label: label(first), placeholder: `Nhập ${label(first).toLowerCase()}` }
-        : { key: 'answer', label: 'Trả lời', placeholder: 'Trả lời P-118' },
+        ? pendingFieldFor(first)
+        : { key: FREE_TEXT_ANSWER_KEY, label: 'Trả lời', placeholder: 'Trả lời P-118' },
+      // Đủ MỌI ô đang chờ — backend từ chối cả lượt nếu thiếu một ô.
+      fields: res.missing_fields.length
+        ? res.missing_fields.map(pendingFieldFor)
+        : [{ key: FREE_TEXT_ANSWER_KEY, label: 'Trả lời', placeholder: 'Trả lời P-118' }],
       fingerprint: res.missing_fields.join(','),
       explain: res.question || 'Mình cần thông tin này để lập kế hoạch tiếp.',
+    }
+  }
+
+  // WAITING_APPROVAL + customer_action.kind = SCHEDULE_CONFLICT → xung đột lịch.
+  if (res.status === 'WAITING_APPROVAL' && res.customer_action?.kind === 'SCHEDULE_CONFLICT') {
+    const conflict = res.customer_action
+    return {
+      actionId: `conflict:${workflowId}`,
+      workflowId,
+      taskId: conflict.task_a.task_id,
+      kind: 'schedule_conflict',
+      status: 'WAITING_APPROVAL',
+      title: 'Lịch có khả năng trùng',
+      message: res.summary || '',
+      details: [],
+      fingerprint: `conflict:${workflowId}`,
+      explain: res.summary || '',
+    }
+  }
+
+  // WAITING_APPROVAL + approval_actor=USER + customer_action (không có payment_quote)
+  // → đang chờ khách chọn đơn vị chuyển nhà.
+  //
+  // Trả về pending để câu hỏi tiếp theo đi qua `respondTo`, không đi qua nhánh
+  // tạo workflow mới (nhánh ấy xoá `said.current` trước khi gửi request, tạo
+  // cửa sổ polling thấy câu cũ và nói lại lần nữa).
+  if (res.status === 'WAITING_APPROVAL' && res.approval_actor === 'USER' && res.customer_action && !res.payment_quote) {
+    return {
+      actionId: `proposal:${workflowId}`,
+      workflowId,
+      taskId: res.tasks.find((t) => t.status === 'WAITING_APPROVAL')?.task_id ?? '',
+      kind: 'provider_proposal',
+      status: 'WAITING_APPROVAL',
+      title: 'Chọn đơn vị',
+      message: res.answer || '',
+      details: [],
+      fingerprint: `proposal:${workflowId}`,
+      explain: res.answer || '',
     }
   }
 

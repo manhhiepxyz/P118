@@ -27,6 +27,7 @@ Quy tắc triển khai (mọi subclass phải tuân thủ):
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from src.common.enums import ErrorCode
@@ -45,6 +46,28 @@ class EnvelopeError(NamedTuple):
     error_code: str
     message: str
     retryable: bool
+
+
+@dataclass(frozen=True)
+class ProviderCallContext:
+    """Dữ liệu CỦA MỘT LẦN GỌI, do orchestration cấp, bất biến.
+
+    Khoá idempotency là thuộc tính của một lần gửi, không phải state của
+    connector. Đặt nó lên connector — thứ được dựng MỘT lần cho cả workflow và
+    dùng chung cho mọi task — thì hai lần gọi song song ghi đè lên nhau, và một
+    khoản tiền đi ra mang khoá của khoản kia.
+
+    Không nhận `SubmissionPermit`: permit là khái niệm PERSISTENCE (được phép
+    gửi hay không, vì sao). Connector không cần biết điều đó; nó chỉ cần biết
+    phải gắn khoá nào. Kiểu đóng ở đây giữ đúng ranh giới ấy.
+    """
+
+    idempotency_key: str | None = None
+    # Định danh nội bộ của chính lần gọi. Mock provider dùng chúng để đối chiếu
+    # một quyết định availability đã được ký; connector không tự suy quyền từ
+    # input và provider không tin một cờ boolean do client gửi.
+    workflow_id: str | None = None
+    task_id: str | None = None
 
 
 class Connector(ABC):
@@ -76,6 +99,20 @@ class Connector(ABC):
         """
         ...
 
+    def idempotency_key_for(
+        self, workflow_id: str, task_id: str, tool_name: str, resolved_input: dict[str, Any]
+    ) -> str | None:
+        """Khoá ĐỀ XUẤT cho lần gọi này, tính deterministic từ tham số.
+
+        Không đọc state nào của connector: cùng bộ tham số phải ra cùng khoá ở
+        mọi process, kể cả sau restart. Đó là điều kiện để khoá đã lưu và khoá
+        vừa tính so được với nhau.
+
+        `None` nghĩa là tool này không có khoá — và khi đó nó không bao giờ được
+        gửi lại sau một lần gửi dở dang.
+        """
+        return None
+
     def is_retry_safe(self, tool_name: str) -> bool:
         """Gọi lại tool này sau timeout có an toàn không?
 
@@ -101,6 +138,8 @@ class Connector(ABC):
         self,
         tool_name: str,
         input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
     ) -> StandardResult:
         """Thực thi tool và trả về StandardResult.
 

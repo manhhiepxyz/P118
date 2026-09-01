@@ -5,7 +5,12 @@ import { ReviewPortalLayout } from './components/ReviewPortalLayout'
 import { AdminRoute, AuthProvider, ProtectedRoute, ProviderRoute, useAuth } from './lib/auth'
 import { NotificationProvider } from './lib/notifications'
 import { AdminDashboardPage } from './pages/AdminDashboardPage'
+import { AdminUsersPage } from './pages/AdminUsersPage'
+import { AdminWorkflowsPage } from './pages/AdminWorkflowsPage'
+import { AdminLayout } from './components/AdminLayout'
 import { ApartmentLinkPage } from './pages/ApartmentLinkPage'
+import { SupportPage } from './pages/SupportPage'
+import { VerifyApartmentPage } from './pages/VerifyApartmentPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { LoginPage } from './pages/LoginPage'
 import { ProfilePage } from './pages/ProfilePage'
@@ -13,8 +18,11 @@ import { ProviderReviewPage } from './pages/ProviderReviewPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { VehicleRegistrationPage } from './pages/VehicleRegistrationPage'
 import { WorkflowPage } from './pages/WorkflowPage'
+import { PaymentResultPage } from './pages/PaymentResultPage'
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
 import { JourneyWorkspacePage } from './pages/JourneyWorkspacePage'
 import { WorkflowsPage } from './pages/WorkflowsPage'
+import { GoogleRegisterPage } from './pages/GoogleRegisterPage'
 
 /**
  * Trang chủ theo role:
@@ -56,6 +64,8 @@ export default function App() {
           {/* Auth — không cần AppLayout (màn hình riêng) */}
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
+          <Route path="/google-register" element={<GoogleRegisterPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
 
           {/* Cổng xác thực của bên thứ 3 — trang TOÀN MÀN HÌNH, không sidebar
               P-118, branding riêng (ReviewPortalLayout). ProviderRoute: chỉ
@@ -91,6 +101,34 @@ export default function App() {
             }
           />
 
+          {/* Cổng của ĐƠN VỊ XÁC THỰC, phía người nộp hồ sơ.
+              Dùng chung vỏ với `/review` — cùng một cổng, hai vai — nên người
+              dùng thấy rõ mình đã rời P-118. `/apartment-link` bên Agent chỉ
+              còn là cửa vào: nó cho biết đang ở bước nào rồi dẫn sang đây.
+              Ranh giới này phản ánh đúng thực tế: xác minh căn hộ KHÔNG nằm
+              trong 10 tool của Agent, một đơn vị độc lập mới quyết định. */}
+          <Route
+            path="/verify"
+            element={
+              <ProtectedRoute>
+                <ReviewPortalLayout audience="applicant" />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<VerifyApartmentPage />} />
+          </Route>
+
+          {/* Hỗ trợ — câu hỏi thường gặp, quyền riêng tư, liên hệ.
+              Cùng vỏ workspace như các trang khách hàng khác. */}
+          <Route
+            path="/support"
+            element={
+              <ProtectedRoute>
+                <SupportPage />
+              </ProtectedRoute>
+            }
+          />
+
           <Route
             path="/vehicle-register"
             element={
@@ -108,6 +146,18 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <WorkflowPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Trang user quay về sau cổng thanh toán gateway (VNPay redirect).
+              TOÀN MÀN HÌNH, ngoài AppLayout: đây là điểm cuối một luồng tài
+              chính, chỉ poll và báo kết quả — không phải nơi điều hướng. */}
+          <Route
+            path="/payment/result"
+            element={
+              <ProtectedRoute>
+                <PaymentResultPage />
               </ProtectedRoute>
             }
           />
@@ -142,6 +192,20 @@ export default function App() {
             }
           />
 
+          {/* Admin — chỉ admin; dashboard chỉ còn số liệu vận hành. Cấu trúc lồng nhau qua AdminLayout. */}
+          <Route
+            path="/admin"
+            element={
+              <AdminRoute>
+                <AdminLayout />
+              </AdminRoute>
+            }
+          >
+            <Route index element={<AdminDashboardPage />} />
+            <Route path="users" element={<AdminUsersPage />} />
+            <Route path="workflows" element={<AdminWorkflowsPage />} />
+          </Route>
+
           {/* App chính — yêu cầu đăng nhập */}
           <Route
             element={
@@ -162,16 +226,6 @@ export default function App() {
 
             <Route path="/approvals" element={<ApprovalsPage />} />
 
-            {/* Admin — chỉ admin; dashboard chỉ còn giám sát workflow. Việc
-                duyệt hồ sơ xác thực đã chuyển hẳn cho cổng bên thứ 3 (`/review`). */}
-            <Route
-              path="/admin"
-              element={
-                <AdminRoute>
-                  <AdminDashboardPage />
-                </AdminRoute>
-              }
-            />
           </Route>
 
           {/* Fallback */}

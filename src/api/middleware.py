@@ -23,6 +23,7 @@ Vượt limit → 429 JSON cố định, không echo request, path, header.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Awaitable, Callable
 
@@ -72,6 +73,32 @@ class TokenBucket:
         return False
 
 
+def _bucket_key(scope: dict) -> str:
+    """Khoá giới hạn: PHIÊN nếu đã đăng nhập, IP nếu chưa.
+
+    Khoá theo mình IP là sai ngay khi có một lớp mạng ở giữa. Sau NAT của
+    Docker, backend thấy MỌI request đến từ cùng một địa chỉ — đo được:
+    289/289 request từ `192.168.65.1`. Nên một bucket "theo IP" thực chất là
+    một bucket TOÀN HỆ THỐNG: một người bấm nhanh vài lần là mọi người còn lại
+    nhận "Bạn thao tác hơi nhanh", cho một thao tác họ chưa hề làm.
+
+    Yêu cầu CHƯA đăng nhập vẫn khoá theo IP, và đó là đúng chỗ của nó: đăng
+    nhập và đăng ký cần chặn dò mật khẩu, mà lúc ấy chưa có tài khoản để khoá.
+
+    Băm token thay vì đọc nội dung: khoá chỉ cần ỔN ĐỊNH và KHÁC NHAU giữa các
+    phiên. Giải mã token ở tầng middleware là dựng một đường xác thực thứ hai
+    cạnh đường thật, và hai đường thì sớm muộn lệch nhau.
+    """
+    for name, value in scope.get("headers") or []:
+        if name == b"authorization":
+            token = value.decode("latin-1", "ignore").removeprefix("Bearer ").strip()
+            if token:
+                return "s:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+            break
+    client = scope.get("client")
+    return "ip:" + (client[0] if isinstance(client, (list, tuple)) and client else "unknown")
+
+
 class RateLimitMiddleware:
     """ASGI token-bucket rate limiter.
 
@@ -107,9 +134,7 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        client = scope.get("client")
-        key = client[0] if isinstance(client, (list, tuple)) and client else "unknown"
-        bucket = self.buckets.setdefault(key, TokenBucket(self.capacity, self.refill_per_second))
+        bucket = self.buckets.setdefault(_bucket_key(scope), TokenBucket(self.capacity, self.refill_per_second))
 
         if not bucket.consume():
             await _send_429(send)

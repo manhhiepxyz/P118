@@ -20,6 +20,7 @@ from src.orchestration.runtime_provider import (
     clear_repository_provider,
     set_repository_provider,
 )
+from tests._dbcheck import require_running_app_database
 
 REPO_ROOT = Path(__file__).parents[1]
 
@@ -138,9 +139,16 @@ async def test_the_application_lifespan_actually_installs_a_working_provider():
 
     from src.main import app, lifespan
 
+    # Kiểm tra decorator chạy TRƯỚC guard database, và không cần database.
+    # Chính bug lịch sử nói ở trên bị bắt bởi đúng dòng này — nên nó phải chạy
+    # cả khi stack tắt, nếu không thì lá chắn duy nhất chống lần lặp lại lại
+    # biến mất đúng lúc dev chưa bật Docker.
     assert inspect.isasyncgenfunction(lifespan.__wrapped__), (  # noqa: SLF001
         "lifespan phải là async generator được bọc bởi @asynccontextmanager"
     )
+
+    # Phần còn lại mở pool thật tới `p118_db`, nên cần stack đang chạy.
+    await require_running_app_database()
 
     original = runtime_provider._provider  # noqa: SLF001
     try:

@@ -4,30 +4,59 @@ import logging
 import re
 import unicodedata
 import uuid
-from datetime import date, time, timedelta
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
+from src.agents.graph import needs_information_update
+from src.agents.pending_intent import PendingIntent, PendingIntentResolver
 from src.agents.planner import MISSING_FIELD_LABELS
 from src.agents.response_agent import ReplyView, ResponseAgent
 from src.agents.validator import TaskPlanValidator
 from src.api.deps import get_current_user
-from src.api.small_talk import SmallTalk, SpeechType, answer_capability_question, classify
+from src.api.intent import AMENDABLE_FROM_TEXT, amend_summary, rewrite_relative_dates, wants_to_amend
+from src.api.small_talk import (
+    SmallTalk,
+    SpeechType,
+    answer_capability_question,
+    classify,
+    mentions_a_service,
+)
 from src.common.enums import ErrorCode, WorkflowStatus
-from src.common.failure_messages import repair_question, task_failure_message
+from src.common.failure_messages import ZONE_LABELS, repair_question, task_failure_message
 from src.common.failures import classify_failure, failure_for_code
-from src.common.tool_contract import TOOL_CONTRACTS
+from src.common.feature_flags import chon_don_vi_theo_bao_gia_bat
+from src.common.field_parsers import (
+    BOOLEAN_FIELDS,
+    DATE_FIELDS,
+    FREE_TEXT_FIELDS,
+    TIME_FIELDS,
+    _extract_parking_zone,
+    _extract_plate_number,
+    _extract_vehicle_type,
+    _unknown_zone,
+    _unknown_zone_message,
+    dat_ngay_hom_nay,
+    extract_all_dates,
+    is_bare_yes_no,
+    parse_field,
+)
 from src.common.projects import PROJECTS, find_project_id, project_name, resolve_project_id
 from src.common.task_plan import InputRef, TaskPlan
+from src.common.tool_contract import TOOL_CONTRACTS
 from src.config import get_settings
+from src.db.capacity_repository import CapacityRepository
+from src.db.proposal_repository import de_xuat_dang_cho
 from src.db.resident_link_repository import get_link_status, get_verified_identity
 from src.db.session_repository import create_session, get_session
 from src.models.schemas import (
     ChatRequest,
     ChatResponse,
+    ConflictRespondRequest,
+    ConflictTaskInfo,
     DemoCapabilityItem,
     DemoCapabilityListResponse,
     DemoDetailItem,
@@ -35,6 +64,7 @@ from src.models.schemas import (
     DemoPlanTask,
     DemoProjectListResponse,
     DemoSessionListResponse,
+    DemoSupportRequest,
     DemoTaskResult,
     DemoViewingApproval,
     DemoWorkflowContinueRequest,
@@ -43,21 +73,48 @@ from src.models.schemas import (
     DemoWorkflowListResponse,
     DemoWorkflowRequest,
     DemoWorkflowResponse,
+    ProviderRejectionView,
+    ScheduleConflictAction,
+    ServiceProposalActionView,
 )
 from src.monitoring.usage_tracker import LlmUsageLogger, reset_usage_context, usage_context
 from src.orchestration.compensation import release_on_failure
 from src.orchestration.demo_service import (
+    AMENDABLE_STATUSES,
+    AMENDABLE_WHILE_WAITING,
+    NotAmendable,
     ResumeError,
+    RetryNotAllowed,
+    amend_and_rerun,
+    expire_pending_viewing_approval,
+    open_vnpay_payment_session,
     persist_pending_approval,
     persist_pending_viewing_approval,
     read_demo_workflow,
     reject_payment,
+    repair_conflict_task,
+    rerun_with_answers,
+    resume_after_conflict_ack,
     resume_payment_after_approval,
+    retry_failed_tasks,
     run_demo_workflow,
 )
 from src.orchestration.payment_approval import quote_from_results
+from src.orchestration.proposal_followup import CauTraLoi, tra_loi_hoi_them
 from src.orchestration.repair import RepairHint, RepairManager, repair_missing_fields
 from src.orchestration.runtime_provider import acquire_repository
+from src.orchestration.schedule_conflict import (
+    claim_conflict_ack,
+    clear_conflict_check,
+    load_conflict_check,
+)
+from src.orchestration.service_approval import (
+    SERVICE_LABELS,
+    gated_tasks,
+    pending_for_workflow,
+    save_support_request,
+)
+from src.orchestration.snapshot import build_snapshot
 from src.orchestration.sweeper import sweep_zombie_workflows
 from src.services.llm import get_llm, structured_output_method
 from src.utils.display import goal_to_title
@@ -69,9 +126,15 @@ _DEMO_JOBS: dict[str, dict[str, Any]] = {}
 _DEMO_TASKS: set[asyncio.Task[None]] = set()
 _DEMO_WORKFLOW_TASKS: dict[str, asyncio.Task[None]] = {}
 
-_DATE_FIELDS = frozenset({"viewing_date", "booking_date", "preferred_date", "move_date", "tour_date"})
-_TIME_FIELDS = frozenset({"viewing_time", "preferred_time", "move_time"})
-_BOOLEAN_FIELDS = frozenset({"consent", "needs_elevator", "needs_loading_support"})
+# Bộ đọc giá trị chuẩn sống ở `src/common/field_parsers.py`.
+#
+# Chúng phải dùng chung với Patch Validator: một đề xuất do model sinh ra và
+# một ô người dùng điền trên biểu mẫu đi qua CÙNG một luật, nếu không thì
+# đường nào lỏng hơn sẽ thành đường thật. Mà `patch.py` không import được
+# `routes.py`, nên luật phải nằm ở một chỗ cả hai với tới được.
+_DATE_FIELDS = DATE_FIELDS
+_TIME_FIELDS = TIME_FIELDS
+_BOOLEAN_FIELDS = BOOLEAN_FIELDS
 _SUPPORTED_PROJECTS_MESSAGE = (
     "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ. Các dự án đang có: "
     + ", ".join(project["project_name"] for project in PROJECTS)
@@ -93,166 +156,268 @@ _FOLLOW_UP_VALIDATION_MESSAGES = {
     "move_time": "Giờ chuyển nhà phải theo định dạng HH:MM và trong khoảng 07:00–20:00.",
     "preferred_contact_time": "Giờ liên hệ phải theo định dạng HH:MM và trong khoảng 08:00–18:00.",
     "parking_zone": "Hãy chọn Khu A hoặc Khu B.",
-    "plate_number": "Vui lòng nhập biển số xe, ví dụ 59A-12345.",
+    # "Vui lòng nhập" nói người dùng BỎ TRỐNG ô. Phần lớn lần rơi vào đây
+    # thì họ đã nhập, chỉ là sai độ dài — "50A-82812312" (8 chữ số) bị từ
+    # chối đúng, nhưng họ đọc câu này rồi nhập lại y hệt, vì theo câu đó
+    # thì họ chưa nhập gì.
+    "plate_number": "Biển số xe chưa đúng định dạng. Ví dụ: 59A-12345 (2 chữ số, 1–2 chữ cái, rồi 3–6 chữ số).",
     "vehicle_type": "Hãy cho biết phương tiện là ô tô hoặc xe máy.",
     "passenger_count": "Số người đi xe phải là một số từ 1 đến 30.",
 }
 
-
-def _extract_date(text: str) -> str | None:
-    match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
-    if match:
-        year, month, day = map(int, match.groups())
-    else:
-        match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text)
-        if not match:
-            return None
-        day, month, year = map(int, match.groups())
-    try:
-        return date(year, month, day).isoformat()
-    except ValueError:
-        return None
-
-
-def _extract_time(text: str) -> str | None:
-    with_minutes = re.search(
-        r"(?<!\d)([01]?\d|2[0-3])\s*[:;hH]\s*([0-5]\d)(?!\d)",
-        text,
-    )
-    if with_minutes:
-        return f"{int(with_minutes.group(1)):02d}:{with_minutes.group(2)}"
-
-    # Trong tiếng Việt, "12h" và "12 giờ" có nghĩa chính xác là 12:00.
-    # Negative lookahead ngăn 12h99 bị cắt thành 12h rồi chấp nhận nhầm.
-    hour_only = re.search(
-        r"(?<!\d)([01]?\d|2[0-3])\s*(?:h|giờ)(?!\s*\d)",
-        text,
-        re.IGNORECASE,
-    )
-    if hour_only:
-        return f"{int(hour_only.group(1)):02d}:00"
-    return None
-
-
-def _extract_parking_zone(text: str) -> str | None:
-    match = re.search(r"\b(?:zone|khu)[ _-]*([ab])\b", text, re.IGNORECASE)
-    return f"ZONE_{match.group(1).upper()}" if match else None
-
-
-def _extract_plate_number(text: str) -> str | None:
-    # Contract chỉ yêu cầu chuỗi biển số; demo chấp nhận 3–6 chữ số phía sau
-    # để không tự áp một chuẩn đăng kiểm cụ thể lên dữ liệu mock.
-    match = re.search(r"\b(\d{2}[a-z]{1,2})[ .-]?(\d{3,6})\b", text, re.IGNORECASE)
-    return f"{match.group(1).upper()}-{match.group(2)}" if match else None
-
-
-def _extract_vehicle_type(text: str) -> str | None:
-    """Chuẩn hoá cách gọi phương tiện phổ biến, không suy diễn từ câu mơ hồ."""
-    lowered = text.casefold()
-    motorcycle = r"\b(?:xe\s*máy|xemay|mô\s*tô|moto|motorcycle)\b"
-    car = r"\b(?:xe\s*hơi|xe\s*ô\s*tô|ô\s*tô|ôto|oto|car)\b"
-    if re.search(motorcycle, lowered):
-        return "motorcycle"
-    if re.search(car, lowered):
-        return "car"
-    return None
-
-
-def _extract_passenger_count(text: str) -> int | None:
-    """Số người đi xe tham quan: số đi kèm 'người'/'khách', hoặc số đứng riêng.
-
-    Sức chứa xe là 1–30 (provider ép). Ngoài khoảng là không giải quyết được —
-    trả None để backend hỏi lại thay vì đẩy giá trị vô lý xuống provider. Số
-    trong ngày tháng (2026-08-20) bị loại bằng yêu cầu số đứng một mình.
-    """
-    with_unit = re.search(r"\b(\d{1,3})\s*(?:người|khách|nguoi|khach)\b", text, re.IGNORECASE)
-    match = with_unit or re.search(r"(?<![-\d])(\d{1,2})(?![-\d])", text)
-    if not match:
-        return None
-    count = int(match.group(1))
-    return count if 1 <= count <= 30 else None
-
-
-# Xa nhất người dùng được đặt trước. Không có trần thì "2199-12-31" là một ngày
-# hợp lệ: nó không nằm trong quá khứ, nên mọi lớp kiểm đều cho qua. Chỗ đỗ xe
-# năm 2199 vẫn được giữ thật trong database và chiếm capacity thật.
+# Câu dành cho lúc người dùng nói một thứ KHÔNG PHẢI câu trả lời.
 #
-# Hai năm là con số của demo, cố ý rộng rãi. Điều quan trọng không phải trị số
-# mà là CÓ một trần: một ngày vô lý phải bị từ chối lúc nhập, không phải lúc ai
-# đó đọc báo cáo.
-MAX_SCHEDULE_HORIZON_DAYS = 1825
-
-
-def _is_allowed_schedule_date(value: str) -> bool:
-    parsed = date.fromisoformat(value)
-    today = date.today()
-    return today <= parsed <= today + timedelta(days=MAX_SCHEDULE_HORIZON_DAYS)
-
-
-# Khung giờ dựng TỪ `TaskPlanValidator.TIME_INPUTS`, không chép tay.
+# Đo được trên stack demo, giữa một cuộc đặt lịch tham quan:
 #
-# Bản chép tay trước đây thiếu `preferred_contact_time`: người dùng trả lời
-# "19:00" thì bộ lọc này cho qua, Validator mới chặn — và người dùng nhận
-# VALIDATION_ERROR chung chung thay vì một câu bảo chọn lại giờ. Hai bảng nói
-# về cùng một luật thì sớm muộn cũng lệch nhau; dựng từ một nguồn thì không.
-_TIME_WINDOWS: dict[str, tuple[time, time]] = {
-    field: (opens, closes) for field, opens, closes in TaskPlanValidator.TIME_INPUTS.values()
+#     Bạn:   hôm nay trời đẹp nhỉ
+#     P-118: Ngày tham quan chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.
+#
+# Họ không đưa ngày nào cả. Câu trên bảo họ chọn sai ngày, nên họ đi sửa một
+# thứ chưa hề nhập, và vẫn không biết hệ thống đang chờ gì. Cùng một sự phân
+# biệt "chưa nói" / "nói một thứ không tồn tại" đã có sẵn cho `parking_zone`;
+# đây chỉ là áp nó cho các ô ngày/giờ — đúng những ô hay bị hỏi giữa chừng nhất.
+_KHONG_NHAN_RA_MESSAGES = {
+    "viewing_date": "Mình chưa thấy ngày nào trong câu vừa rồi. Bạn cho mình ngày muốn tham quan nhé, ví dụ 30/08/2026.",
+    "booking_date": "Mình chưa thấy ngày nào trong câu vừa rồi. Bạn cho mình ngày muốn đặt chỗ nhé, ví dụ 30/08/2026.",
+    "preferred_date": "Mình chưa thấy ngày nào trong câu vừa rồi. Bạn cho mình ngày muốn bảo trì nhé, ví dụ 30/08/2026.",
+    "move_date": "Mình chưa thấy ngày nào trong câu vừa rồi. Bạn cho mình ngày muốn chuyển nhà nhé, ví dụ 30/08/2026.",
+    "viewing_time": "Mình chưa thấy giờ nào trong câu vừa rồi. Bạn cho mình giờ muốn xem nhé, ví dụ 09:30.",
+    "preferred_time": "Mình chưa thấy giờ nào trong câu vừa rồi. Bạn cho mình giờ muốn bảo trì nhé, ví dụ 14:00.",
+    "move_time": "Mình chưa thấy giờ nào trong câu vừa rồi. Bạn cho mình giờ muốn chuyển nhà nhé, ví dụ 08:00.",
+    "preferred_contact_time": "Mình chưa thấy giờ nào trong câu vừa rồi. Bạn cho mình giờ tiện liên hệ nhé, ví dụ 10:00.",
 }
 
 
-def _is_allowed_schedule_time(field: str, value: str) -> bool:
-    parsed = time.fromisoformat(value)
-    window = _TIME_WINDOWS.get(field)
-    return window is None or window[0] <= parsed <= window[1]
+def _amends_a_previous_request(goal: str | None) -> bool:
+    """Câu này có NÊU một giá trị cụ thể để sửa yêu cầu trước không.
+
+    Bấm Dừng khi chưa gửi đi đâu cả thì yêu cầu đó phải sửa được — đổi khu, đổi
+    ngày — rồi chạy lại. Nhưng Planner cố ý KHÔNG thấy lượt đã huỷ, vì thấy nó
+    nghĩa là một câu cụt ("ok", "ừ") cũng dựng lại được việc người dùng vừa chủ
+    động dừng. Bấm Dừng mà không dừng được gì là lỗi nặng hơn.
+
+    Cổng này giải quyết cả hai: chỉ mở ký ức đã huỷ khi câu mới mang một giá
+    trị RÚT RA ĐƯỢC bằng chính các parser deterministic đang dùng cho form.
+    "ok" không có giá trị nào nên không mở được cửa; "đổi sang khu B" thì có.
+
+    Đo được trên chuỗi thật của người dùng: sau khi Dừng, "tôi muốn đỗi chỗ đỗ
+    xe sang khu B" → "mình cần biết thêm mục tiêu cụ thể của bạn", lặp lại y
+    nguyên qua ba lượt trả lời. Họ đã nói rõ khu B ngay từ câu đầu.
+    """
+    text = (goal or "").strip()
+    if not text:
+        return False
+    if _extract_parking_zone(text) or _unknown_zone(text):
+        return True
+    if _extract_plate_number(text) or _extract_vehicle_type(text):
+        return True
+    if find_project_id(text) or resolve_project_id(text):
+        return True
+    # Ngày/giờ viết theo mọi kiểu người Việt hay dùng.
+    return bool(re.search(r"\b\d{1,2}\s*[/-]\s*\d{1,2}|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b", text))
 
 
-def _extract_follow_up_answers(message: str, missing_fields: list[str]) -> tuple[dict[str, Any], list[str]]:
-    """Map câu trả lời vào field backend đang chờ, không nhờ LLM suy đoán."""
+def _recall_for_planner(recalled: list[dict[str, Any]] | None, goal: str | None) -> list[dict[str, Any]] | None:
+    """Ký ức Planner được phép thấy.
+
+    Lượt đã huỷ CHỈ đi kèm khi câu mới thật sự sửa một giá trị — xem
+    `_amends_a_previous_request`. Khi đi kèm, nó mang nhãn nói rõ là việc đó đã
+    dừng và CHƯA chạy, để Planner lập lại kế hoạch thay vì tưởng đã xong.
+    """
+    turns = recalled or []
+    if not _amends_a_previous_request(goal):
+        return [turn for turn in turns if not turn.get("_da_huy")] or None
+    ket_qua: list[dict[str, Any]] = []
+    for turn in turns:
+        if turn.get("_da_huy"):
+            turn = {**turn, "da_huy_chua_thuc_hien": True}
+        ket_qua.append(turn)
+    return ket_qua or None
+
+
+# Ô không đọc được từ văn bản tự do vì chúng không phải giá trị người dùng nhập.
+#
+# `supported_goal` và `payment_quote` là CỜ ĐIỀU KHIỂN do Planner sinh ra để nói
+# "mục tiêu này ngoài phạm vi" / "cần báo giá trước". Chúng không bao giờ được
+# điền bằng một câu người dùng gõ.
+_CONTROL_FIELDS = frozenset({"supported_goal", "payment_quote"})
+
+
+def _extract_follow_up_answers(
+    message: str,
+    missing_fields: list[str],
+    *,
+    anchor: str | None = None,
+    today: date | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Đọc câu trả lời, với `today` chi phối TOÀN BỘ lượt đọc.
+
+    Vỏ mỏng quanh `_doc_cau_tra_loi`. Nó tồn tại vì `today` phải tới được cả hai
+    chỗ quyết định về thời gian:
+
+      1. bộ viết lại ngày nói tắt (`rewrite_relative_dates`) — đã nhận từ trước;
+      2. phép kiểm "ngày này đã qua chưa" bên trong `parse_field` — trước đây
+         đọc thẳng `date.today()`.
+
+    Thiếu chỗ thứ hai, `today` chỉ đúng một nửa: "ngày 25" được viết lại thành
+    `2026-08-25` rồi bị chính hệ thống ấy loại vì đồng hồ thật đã sang 28/08.
+    Người gọi tin rằng mình đã cố định thời gian, mà chưa.
+    """
+    with dat_ngay_hom_nay(today):
+        return _doc_cau_tra_loi(message, missing_fields, anchor=anchor, today=today)
+
+
+def _doc_cau_tra_loi(
+    message: str,
+    missing_fields: list[str],
+    *,
+    anchor: str | None = None,
+    today: date | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Rút câu trả lời cho các ô đang hỏi, từ MỘT câu người dùng nói.
+
+    Hợp đồng ở đây KHÁC `parse_field`, và trộn hai cái là nguồn của hai lỗi đã
+    đo được:
+
+        parse_field(field, candidate)
+            `candidate` ĐÃ được tách riêng cho đúng ô đó — biểu mẫu gửi lên,
+            hoặc model đã bóc ra. "Cả chuỗi này là giá trị của ô này" là tiên đề.
+
+        _extract_follow_up_answers(utterance, missing_fields)
+            MỘT câu chứa nhiều thứ. Tiên đề trên KHÔNG còn đúng.
+
+    Bản cũ đưa NGUYÊN câu vào mọi bộ đọc, tức áp tiên đề của hàm thứ nhất cho
+    hàm thứ hai. Đo được, cả hai đều là câu thật:
+
+        ("không gian phòng khách, cần thang máy", [location, needs_elevator])
+          → needs_elevator = False        ← ghi NGƯỢC điều người dùng vừa xin
+        ("điều hòa hỏng ở phòng khách", [description, location])
+          → description = location = cả câu
+
+    Luật thay thế, gồm đúng hai điều:
+
+      1. Ô có DẤU HIỆU MẠNH — ngày, giờ, khu, biển số, tên dự án, enum, có/không
+         — vẫn rút từ câu ghép, vì giá trị của chúng có hình dạng riêng và
+         không nuốt phần còn lại của câu.
+      2. Ô VĂN BẢN TỰ DO chỉ nhận cả câu khi nó là ô DUY NHẤT đang hỏi.
+         Còn ô nào khác đang hỏi thì câu ấy có thể mang cả câu trả lời cho ô
+         kia, và gán cả câu cho ô tự do sẽ nuốt luôn phần đó — "không gian
+         phòng khách, cần thang máy" ghi vào `location` thì `location` mang
+         theo mệnh đề về thang máy. Thà hỏi thêm một câu còn hơn gửi xuống
+         provider một giá trị lẫn lộn.
+
+    Đây là luật theo allowlist (`FREE_TEXT_FIELDS`), không phải nhánh dự phòng
+    cho mọi ô: ô không có tên trong `FIELD_PARSERS` vẫn không đọc được.
+    """
+    # NGÀY NÓI TẮT được neo vào giá trị CŨ trước khi đọc.
+    #
+    # Đo được nguyên văn, ngay sau khi câu hỏi đổi ngày hiện ra được:
+    #
+    #     P-118: Khung giờ 10:30 ngày 2026-08-24 đã kín lịch…
+    #     Bạn:   đổi qua ngày 25
+    #     P-118: Ngày tham quan chưa phù hợp. Hãy chọn một ngày từ hôm nay trở đi.
+    #
+    # Người dùng nói tắt vì tháng và năm nằm ngay trong câu hỏi họ vừa đọc.
+    # `rewrite_relative_dates` đã làm đúng việc này ở lane sửa yêu cầu; đường
+    # `/continue` thì không gọi, nên cùng một câu được hiểu ở chỗ này và bị từ
+    # chối ở chỗ kia.
+    #
+    # Neo vào GIÁ TRỊ CŨ, không vào hôm nay: câu hỏi nói về 24/08 nên "ngày 25"
+    # thuộc tháng ấy. Neo vào hôm nay thì một lịch đặt cho tháng sau bị kéo
+    # ngược về tháng này — và với lịch đặt xa, đó là một ngày trong quá khứ.
     text = message.strip()
+    if anchor:
+        text = rewrite_relative_dates(text, anchor=anchor, today=today or date.today())
+    # Cả câu chỉ được dùng khi KHÔNG còn ô nào khác đang hỏi.
+    lone_field = missing_fields[0] if len(missing_fields) == 1 else None
+
+    # MỘT tiếng "có" trả lời MỘT câu hỏi.
+    #
+    # Đo được trên stack demo, dịch vụ chuyển nhà. Câu hỏi gộp ba ô, người dùng
+    # đáp đúng một tiếng, và kế hoạch ghi vào database:
+    #
+    #     Bạn:   có
+    #     →      "needs_elevator": true,
+    #            "needs_loading_support": true   ← chưa bao giờ được nói ra
+    #
+    # Họ bị đăng ký một dịch vụ không xin, và màn hình không nói gì về việc đó.
+    #
+    # Luật "cả câu chỉ dùng khi là ô duy nhất" ở trên đã có cho ô VĂN BẢN TỰ DO.
+    # Ô boolean thiếu nó vì giá trị của chúng không nuốt phần còn lại của câu —
+    # nhưng dấu hiệu mạnh chỉ nói được GIÁ TRỊ, không nói được nó thuộc về Ô
+    # NÀO, và khi có hai ô cùng loại thì đó mới là câu hỏi cần trả lời.
+    #
+    # Chỉ ô boolean ĐẦU TIÊN nhận; các ô boolean sau để nguyên chưa trả lời.
+    # Lượt kế tiếp chỉ còn một ô boolean nên "có" lúc đó hết mơ hồ — không đoán
+    # hộ ô nào, mà vẫn tiến được thay vì hỏi lại y nguyên câu vừa hỏi.
+    da_nhan_mot_boolean = False
+
+    # Cùng lý lẽ đó nhưng rộng hơn kiểu dữ liệu: khi cả câu KHÔNG CÓ GÌ ngoài
+    # một tiếng có/không, nó là câu trả lời cho ĐÚNG MỘT ô.
+    #
+    # Đo được ngay sau khi vá luật boolean ở trên, cũng ở chuyển nhà:
+    #
+    #     Bạn:   không
+    #     →      "needs_loading_support": false,
+    #            "move_vehicle": "none"     ← "chuyển nhà không cần xe"
+    #
+    # `move_vehicle` là enum có một giá trị đánh vần đúng bằng từ ấy, nên nó
+    # nhận cùng tiếng đáp mà không hề được nhắc tới.
+    mot_tieng_dap = is_bare_yes_no(text)
+    da_nhan_mot_o = False
+
+    # Ô NGÀY nhận ngày theo ĐÚNG THỨ TỰ xuất hiện: ngày thứ i về ô ngày thứ i.
+    #
+    # Cùng loại lỗi với luật boolean ngay trên — một dấu hiệu mạnh nói được
+    # GIÁ TRỊ nhưng không nói được nó thuộc ô NÀO — nhưng ngày còn tệ hơn vì
+    # `_extract_date` dùng `re.search`: mọi ô ngày đều nhận ngày ĐẦU TIÊN, và
+    # ngày thứ hai người dùng gõ không bao giờ được đọc tới.
+    #
+    # Đo được, câu hỏi gộp `viewing_date` + `booking_date`, cả hai ngày hợp lệ:
+    #
+    #     "…ngày 27/8/2026 … ngày 29/8/2026, khu A"
+    #       → viewing_date = 2026-08-27
+    #         booking_date = 2026-08-27    ← giữ chỗ đỗ SAI NGÀY, im lặng
+    #
+    # Đây là lỗi ĐÚNG DỮ LIỆU: chỗ đỗ được giữ thật vào ngày người dùng chưa
+    # từng nói, phí vẫn tính, không màn hình nào nói ra.
+    #
+    # Thứ tự là cách đọc tự nhiên VÀ là thứ tự chính câu hỏi vừa liệt kê. Ít
+    # ngày hơn số ô thì ô sau để trống — KHÔNG nhân bản ngày đầu, vì nhân bản
+    # chính là bug đang sửa.
+    #
+    # Chỉ đổi khi có TỪ HAI ô ngày trở lên: một ô ngày thì hành vi cũ (đọc cả
+    # câu) đã đúng và đang được nhiều test khoá lại.
+    o_ngay = [f for f in missing_fields if f in DATE_FIELDS]
+    ngay_theo_thu_tu = extract_all_dates(text) if len(o_ngay) > 1 else []
+    hang_doi_ngay = list(ngay_theo_thu_tu)
+
     answers: dict[str, Any] = {}
     unresolved: list[str] = []
     for field in missing_fields:
-        if field in _DATE_FIELDS:
-            value: Any = _extract_date(text)
-            if value is not None and not _is_allowed_schedule_date(value):
-                value = None
-        elif field in _TIME_FIELDS:
-            value = _extract_time(text)
-            if value is not None and not _is_allowed_schedule_time(field, value):
-                value = None
-        elif field in {"project_id", "project_name"}:
-            # Câu trả lời thường gộp tên dự án + ngày + giờ. resolve chỉ nhận
-            # đúng toàn bộ tên; find tìm tên đóng nằm bên trong câu tự nhiên.
-            #
-            # Với `project_name` (tên CÔNG KHAI), vẫn phải khớp danh mục — nhưng
-            # giữ lại TÊN, không phải mã: việc đổi sang `project_id` do adapter
-            # ở biên làm, và làm ở đúng một chỗ.
-            project_id = find_project_id(text) or resolve_project_id(text)
-            if field == "project_id":
-                value = project_id
-            else:
-                value = project_name(project_id) if project_id else None
-        elif field == "parking_zone":
-            value = _extract_parking_zone(text)
-        elif field == "plate_number":
-            value = _extract_plate_number(text)
-        elif field == "vehicle_type":
-            value = _extract_vehicle_type(text)
-        elif field == "passenger_count":
-            value = _extract_passenger_count(text)
-        elif field in _BOOLEAN_FIELDS:
-            lowered = text.casefold()
-            value = True if any(word in lowered for word in ("có", "đồng ý", "yes")) else None
-            if any(word in lowered for word in ("không", "no")):
-                value = False
-        elif len(missing_fields) == 1 and field not in {"supported_goal", "payment_quote"}:
-            value = text
-        else:
+        if mot_tieng_dap and da_nhan_mot_o:
+            unresolved.append(field)
+            continue
+        if field in _CONTROL_FIELDS:
             value = None
+        elif field in FREE_TEXT_FIELDS:
+            value = parse_field(field, text) if field == lone_field else None
+        elif field in BOOLEAN_FIELDS:
+            value = None if da_nhan_mot_boolean else parse_field(field, text)
+            if value is not None:
+                da_nhan_mot_boolean = True
+        elif ngay_theo_thu_tu and field in DATE_FIELDS:
+            # Mỗi ô nhận ĐÚNG một ngày, rồi vẫn đi qua bộ đọc của chính ô đó —
+            # chính sách lịch không bị nới chỗ nào.
+            rieng = hang_doi_ngay.pop(0) if hang_doi_ngay else None
+            value = parse_field(field, rieng) if rieng else None
+        else:
+            value = parse_field(field, text)
         if value is None:
             unresolved.append(field)
         else:
             answers[field] = value
+            da_nhan_mot_o = True
     return answers, unresolved
 
 
@@ -277,6 +442,32 @@ _UNSUPPORTED_PROJECT_MESSAGE = _SUPPORTED_PROJECTS_MESSAGE
 def _to_public_missing_fields(fields: list[str]) -> list[str]:
     """Đổi tên field nội bộ sang tên người dùng hiểu được, giữ nguyên thứ tự."""
     return [_PUBLIC_FIELD_ALIASES.get(name, name) for name in fields]
+
+
+def _canonical_field(name: str) -> str:
+    """Gộp tên CÔNG KHAI và tên NỘI BỘ của cùng một field về một mối.
+
+    `project_id` và `project_name` là hai tên cho đúng một câu hỏi. Biên API
+    dịch chúng, nhưng phép dịch chỉ chạy trên đường RA — nên nếu hai nguồn ghi
+    hai tên khác nhau thì đường VÀO từ chối chính cái tên nó vừa hỏi.
+
+    Đã đo được, và người dùng thật gặp phải:
+
+        DB lưu       ["project_name", "viewing_date", "viewing_time"]
+        API trả về   ["project_id",   "viewing_date", "viewing_time"]
+        UI gửi lại   {"project_id": "Vinhomes Ocean Park"}   ← đúng thứ API bảo
+        Backend      `project_id` không nằm trong danh sách đang chờ
+                     → coi TOÀN BỘ câu trả lời là sai
+                     → "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ"
+
+    Người dùng nhập đúng tên dự án và bị bảo rằng dự án đó không tồn tại — về
+    đúng cái field duy nhất họ trả lời chính xác. Không có cách nào thoát: gõ
+    lại đúng như cũ vẫn hỏng y hệt.
+
+    Chuẩn hoá ở đây thay vì đi sửa nguồn nào ghi sai: một API phải chấp nhận
+    được chính cái tên nó vừa hỏi, bất kể tầng nào bên trong dùng tên gì.
+    """
+    return _PUBLIC_FIELD_ALIASES.get(name, name)
 
 
 def _resolve_public_answers(answers: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
@@ -319,17 +510,23 @@ def _extract_structured_follow_up_answers(
     missing_fields: list[str],
 ) -> tuple[dict[str, Any], list[str]]:
     """Validate từng field form bằng cùng luật với câu trả lời chat."""
-    allowed = set(missing_fields)
-    if any(name not in allowed for name in fields):
+    # So sánh theo tên CHUẨN HOÁ: `project_id` và `project_name` là một field.
+    allowed = {_canonical_field(name) for name in missing_fields}
+    if any(_canonical_field(name) not in allowed for name in fields):
         return {}, list(missing_fields)
+
+    by_canonical = {_canonical_field(key): value for key, value in fields.items()}
 
     answers: dict[str, Any] = {}
     unresolved: list[str] = []
     for name in missing_fields:
-        if name not in fields:
+        canonical = _canonical_field(name)
+        if canonical not in by_canonical:
             unresolved.append(name)
             continue
-        raw = fields[name]
+        # Phân tích theo tên MÀ BACKEND ĐANG CHỜ, không theo tên client gửi:
+        # `project_id` cần mã `PRJ-007`, `project_name` cần tên công khai.
+        raw = by_canonical[canonical]
         if isinstance(raw, str) and _is_canonical_enum(name, raw):
             # Giá trị ĐÃ ở dạng chuẩn của contract (`ZONE_B`, `car`, `buy`).
             #
@@ -362,9 +559,25 @@ def _extract_structured_follow_up_answers(
     return answers, unresolved
 
 
-def _follow_up_validation_message(unresolved: list[str]) -> str:
-    """Trả hướng dẫn deterministic, không echo câu trả lời không hợp lệ."""
+def _follow_up_validation_message(unresolved: list[str], said: str | None = None) -> str:
+    """Trả hướng dẫn deterministic, không echo câu trả lời không hợp lệ.
+
+    `said` là những gì người dùng VỪA gõ. Nó không bao giờ được ghép nguyên vào
+    câu trả lời — chỉ dùng để phân biệt "chưa nói" với "nói một thứ không tồn
+    tại", hai tình huống cần hai câu khác nhau.
+    """
     if unresolved:
+        if unresolved[0] == "parking_zone":
+            zone = _unknown_zone(said)
+            if zone is not None:
+                return _unknown_zone_message(zone)
+        # Ngày và giờ chỉ nhập được bằng CHỮ SỐ. Không có chữ số nào thì câu vừa
+        # rồi không phải một lần thử nhập sai — nó nói chuyện khác. (Ngày tương
+        # đối kiểu "ngày mai" do Planner hiểu, không đi qua đường này.)
+        if said is not None and not any(char.isdigit() for char in said):
+            chua_nhan_ra = _KHONG_NHAN_RA_MESSAGES.get(unresolved[0])
+            if chua_nhan_ra is not None:
+                return chua_nhan_ra
         message = _FOLLOW_UP_VALIDATION_MESSAGES.get(unresolved[0])
         if message is not None:
             return message
@@ -413,12 +626,20 @@ RESIDENT_ACCESS_REQUIRED_MESSAGE = (
 
 RESIDENT_DIRECTORY_UNAVAILABLE_MESSAGE = "Hiện chưa thể kiểm tra hồ sơ cư dân. Bạn vui lòng thử lại sau ít phút."
 
+# Tên mục phải KHỚP menu thật. Sidebar ghi "Xác minh căn hộ"
+# (`AppLayout.tsx`), còn câu này bảo người dùng tìm "Liên kết căn hộ" — một mục
+# không tồn tại. Chỉ sai một cái tên là toàn bộ phần hướng dẫn trở nên vô dụng:
+# người dùng đi tìm đúng thứ mình bảo họ tìm, không thấy, rồi dừng lại.
+LINK_REQUIRED_ACTION = (
+    "Mở mục “Hồ sơ” ở thanh bên, bấm “Xác minh căn hộ”, rồi bấm “Xác thực với đơn vị”; "
+    "ở cổng của họ, nhập mã căn hộ và khu đô thị, đính kèm ảnh giấy tờ nhà rồi gửi. "
+    "Duyệt xong là dùng được ngay."
+)
+
 # Đăng ký/liên kết hồ sơ cư dân nằm NGOÀI workflow của Agent. Câu này hướng
 # người dùng đi đúng đường, không gợi ý rằng trợ lý làm hộ được.
 RESIDENT_LINKING_OUTSIDE_AGENT_MESSAGE = (
-    "Việc đăng ký và xác minh hồ sơ cư dân được thực hiện ngoài trợ lý. "
-    "Bạn vui lòng hoàn tất liên kết căn hộ trong phần tài khoản, "
-    "sau đó quay lại để dùng các dịch vụ dành cho cư dân."
+    "Việc xác minh căn hộ do một đơn vị độc lập duyệt nên mình không tự làm thay được. " + LINK_REQUIRED_ACTION
 )
 
 _DEMO_ACCOUNT_CONTEXTS: dict[str, dict[str, Any]] = {
@@ -590,11 +811,25 @@ _STAGE_MESSAGES = {
     "RESIDENT_CHECKING": "Đang kiểm tra liên kết cư dân với ban quản lý.",
     "RESIDENT_VERIFIED": "Đã xác nhận tài khoản cư dân.",
     "WAITING_APPROVAL": "Đang chờ bạn xác nhận thanh toán.",
+    "WAITING_VIEWING_APPROVAL": "Đang chờ đơn vị xác nhận lịch tham quan.",
+    "WAITING_SERVICE_APPROVAL": "Đang chờ đơn vị cung cấp dịch vụ xác nhận.",
+    # Chờ CHÍNH KHÁCH chọn đơn vị. Dùng lại câu của `WAITING_APPROVAL` — "Đang
+    # chờ bạn xác nhận thanh toán" — là gọi việc chọn đơn vị là trả tiền, và
+    # khách đi tìm một nút không tồn tại. Đo được bằng bài kiểm regression:
+    # `summary` và `answer` đã đúng, chỉ `message` còn nói sai.
+    "WAITING_PROVIDER_PROPOSAL": "Đang chờ bạn xác nhận đơn vị và báo giá.",
+    # KHÔNG có chữ "đang chờ": ở trạng thái này không ai đang chờ ai. Đơn vị đã
+    # trả lời, việc đã dừng, và khách là người duy nhất còn phải quyết định.
+    "WAITING_PROVIDER_RESELECTION": "Đơn vị đã từ chối. Bạn chọn giúp mình bước tiếp theo nhé.",
+    "WAITING_SCHEDULE_CONFLICT_CHECK": "Mình thấy lịch có khả năng bị trùng.",
     "EXECUTING": "Đang thực hiện yêu cầu.",
     "TASK_RUNNING": "Đang thực hiện một bước trong yêu cầu.",
     "TASK_SUCCESS": "Đã hoàn thành một bước trong yêu cầu.",
     "TASK_FAILED": "Một bước không thể hoàn thành.",
     "NEEDS_INFORMATION": "Cần bạn bổ sung thêm thông tin.",
+    # `QUESTION` được phát nhưng chưa từng có câu, nên rơi về câu mặc định
+    # "Đang xử lý yêu cầu" — đúng mà vô nghĩa với người vừa HỎI một điều.
+    "QUESTION": "Đang trả lời câu hỏi của bạn.",
     "VALIDATION_FAILED": "Thông tin chưa đủ điều kiện để thực hiện.",
     "EXECUTION_FAILED": "Yêu cầu đã dừng lại giữa chừng.",
     "FINISHED": "Yêu cầu đã hoàn tất.",
@@ -628,6 +863,10 @@ def _append_job_event(job: dict[str, Any], stage: str, payload: dict[str, Any] |
             "sequence": len(events) + 1,
             "stage": stage,
             "message": message,
+            # Đóng dấu NGAY lúc xảy ra, không để database tự stamp: sự kiện
+            # được ghim theo lô ở điểm dừng, nên `NOW()` lúc ghim có thể muộn
+            # hơn lúc xảy ra cả phút.
+            "at": datetime.now(UTC).isoformat(),
             "task_id": payload.get("task_id"),
             "task_status": payload.get("task_status"),
             "signature": signature,
@@ -675,6 +914,10 @@ _TOOL_PRESENTATION = {
         "Đăng ký phương tiện",
         "Liên kết phương tiện với hồ sơ cư dân.",
     ),
+    "change_parking_zone": (
+        "Đổi khu đỗ xe",
+        "Chuyển chỗ đã giữ sang khu khác, giữ nguyên mã đặt chỗ.",
+    ),
     "book_parking": (
         "Đặt chỗ đỗ xe",
         "Đặt chỗ theo ngày và khu vực đã yêu cầu.",
@@ -699,6 +942,31 @@ def _text(value: Any) -> str | None:
     return None
 
 
+# `interest_type` là enum kỹ thuật; màn hình của người dùng đọc bằng tiếng
+# Việt. Giá trị lạ trả về None để `_detail` bỏ hẳn dòng — hiện một mã thô
+# nói ít hơn không hiện gì.
+_INTEREST_TYPE_LABELS: dict[str, str] = {
+    "buy": "Mua",
+    "rent": "Thuê",
+    "consultation": "Nhận tư vấn",
+}
+
+
+# MỘT tên cho mốc thời gian của mọi dịch vụ: `Thời gian`.
+#
+# Giao diện quyết định bố cục theo DỮ KIỆN, không theo tên tool: có `Thời gian`
+# thì dựng thẻ hẹn đầy đủ (ngày lớn, giờ, nút thao tác), không có thì rơi về
+# danh sách dữ kiện trơn. Xem `ResultSummary`.
+#
+# Trước đây cùng một khái niệm mang bốn tên — `Ngày đặt` (chỗ đỗ), `Lịch hẹn`
+# (bảo trì), `Ngày đón` + `Giờ đón` (xe đưa đón) — nên ba dịch vụ ấy có mốc
+# thời gian thật mà giao diện không nhận ra: khách chỉ thấy một danh sách trơn
+# trong khi lịch tham quan có đủ thẻ. Không phải thiếu dữ liệu; là bốn cách gọi
+# tên cho một thứ.
+#
+# Đây KHÔNG phải chỗ thêm tên thứ năm. Dịch vụ mới có hẹn thì dùng lại nhãn này.
+
+
 def _detail(label: str, value: Any) -> DemoDetailItem | None:
     safe_value = _text(value)
     return DemoDetailItem(label=label, value=safe_value) if safe_value is not None else None
@@ -712,7 +980,39 @@ def _money(amount: Any, currency: Any) -> str | None:
     return f"{formatted} {currency_text}" if currency_text else formatted
 
 
-def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetailItem]]:
+def _resolve_input(value: Any, results_by_task: dict[str, Any] | None) -> Any:
+    """Giá trị thật của một input, kể cả khi nó là con trỏ sang task khác.
+
+    Plan lưu input dạng InputRef — `{"field": "amount", "from_task": "T3"}` —
+    và bản ghi trong `workflow_tasks.input_data` giữ nguyên con trỏ đó. Đọc
+    thẳng nó ra màn hình thì không có gì để hiện, nên chi tiết bước thanh toán
+    chỉ còn mã và trạng thái: "PAY-015 / PAID". Không số tiền, không mã đặt
+    chỗ — đúng hai thứ người ta mở lịch sử ra để xem.
+
+    Số tiền là dữ liệu có thẩm quyền của provider, nằm trong KẾT QUẢ của task
+    được trỏ tới. Lấy từ đó, không lấy từ nơi nào khác.
+    """
+    if isinstance(value, InputRef):
+        from_task = value.from_task
+        field = value.field
+    elif isinstance(value, dict):
+        from_task = value.get("from_task")
+        field = value.get("field")
+    else:
+        return value
+    if not from_task or not field or not results_by_task:
+        return None
+    source = results_by_task.get(str(from_task))
+    if not isinstance(source, dict):
+        return None
+    return source.get(str(field))
+
+
+def _task_presentation(
+    task: Any,
+    result: Any,
+    results_by_task: dict[str, Any] | None = None,
+) -> tuple[str, str, list[DemoDetailItem]]:
     """Tạo nội dung tiếng Việt từ allowlist field của các tool MVP."""
     title, _ = _TOOL_PRESENTATION[task.tool]
     inputs = task.input
@@ -754,10 +1054,7 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
             if value
         )
         subject = f" dự án {project}" if project else " dự án đã chọn"
-        message = (
-            f"Đã xác nhận lịch tham quan{subject}."
-            + (f" {reception_details}." if reception_details else "")
-        )
+        message = f"Đã xác nhận lịch tham quan{subject}." + (f" {reception_details}." if reception_details else "")
         candidates = [
             _detail("Mã lịch xem", data.get("viewing_id")),
             _detail("Dự án", project),
@@ -770,10 +1067,23 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
     elif task.tool == "register_property_interest":
         project_name = _text(data.get("project_name"))
         project = project_name
+        # GIỜ HẸN và NHU CẦU là hai điều người dùng tự chọn, và chúng chỉ nằm ở
+        # `inputs`: provider không trả chúng về trong `data` (xem outputs của
+        # `register_property_interest` trong Tool Contract).
+        #
+        # Thiếu chúng thì Lịch sử chỉ còn mã yêu cầu, tên dự án và trạng thái —
+        # ba thứ hệ thống tự sinh. Người dùng mở Lịch sử ra đúng để kiểm "mình
+        # hẹn mấy giờ", và đó là thứ duy nhất không có ở đó. Tool Contract đã
+        # nói rõ vì sao ô này là giờ cụ thể chứ không phải buổi; thu đúng giờ
+        # rồi không hiện lại thì công sức ấy mất trắng.
+        contact_time = _text(inputs.get("preferred_contact_time"))
+        interest_type = _INTEREST_TYPE_LABELS.get(str(inputs.get("interest_type") or ""))
         message = f"Đã đăng ký nhận tư vấn{f' cho dự án {project}' if project else ' cho dự án đã chọn'}."
         candidates = [
             _detail("Mã yêu cầu", data.get("interest_id")),
             _detail("Dự án", project),
+            _detail("Nhu cầu", interest_type),
+            _detail("Giờ liên hệ", contact_time),
             _detail("Trạng thái", data.get("interest_status")),
         ]
     elif task.tool == "register_resident":
@@ -807,13 +1117,23 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
         candidates = [
             _detail("Mã đặt chỗ", data.get("booking_id")),
             _detail("Khu vực", zone_label),
-            _detail("Ngày đặt", booking_date),
+            _detail("Thời gian", booking_date),
             _detail("Phí đặt chỗ", booking_fee),
         ]
     elif task.tool == "pay_fee":
         payment_status = _text(data.get("payment_status"))
         message = "Đã thanh toán phí đặt chỗ thành công."
+        # Số tiền và mã đặt chỗ đi vào task này dưới dạng InputRef, nên phải
+        # giải ra từ kết quả của task được trỏ tới. Không có chúng thì màn hình
+        # lịch sử nói "đã thanh toán" mà không nói thanh toán bao nhiêu, cho
+        # việc gì — với một giao dịch tiền thì đó là thiếu thứ quan trọng nhất.
+        amount = _resolve_input(inputs.get("amount"), results_by_task)
+        currency = _resolve_input(inputs.get("currency"), results_by_task)
+        booking_id = _resolve_input(inputs.get("booking_id"), results_by_task)
         candidates = [
+            _detail("Số tiền", _money(amount, currency)),
+            _detail("Nội dung", "Phí đặt chỗ đỗ xe" if booking_id else None),
+            _detail("Mã đặt chỗ", booking_id),
             _detail("Mã thanh toán", data.get("payment_id")),
             _detail("Trạng thái", payment_status),
         ]
@@ -825,7 +1145,7 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
             _detail("Mã yêu cầu", data.get("maintenance_id")),
             _detail("Hạng mục", inputs.get("issue_type")),
             _detail("Vị trí", inputs.get("location")),
-            _detail("Lịch hẹn", " ".join(value for value in (appointment_date, appointment_time) if value)),
+            _detail("Thời gian", " ".join(value for value in (appointment_date, appointment_time) if value)),
             _detail("Trạng thái", data.get("maintenance_status")),
         ]
     elif task.tool == "schedule_move":
@@ -837,6 +1157,9 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
             _detail("Thời gian", " ".join(value for value in (move_date, move_time) if value)),
             _detail("Khung thang máy", data.get("elevator_slot")),
             _detail("Phương tiện", inputs.get("move_vehicle")),
+            _detail("Điểm chuyển đi", inputs.get("move_origin_id")),
+            _detail("Điểm chuyển đến", inputs.get("move_destination_id")),
+            _detail("Quy mô đồ", inputs.get("move_size")),
             _detail("Trạng thái", data.get("move_status")),
         ]
     elif task.tool == "book_shuttle":
@@ -850,9 +1173,11 @@ def _task_presentation(task: Any, result: Any) -> tuple[str, str, list[DemoDetai
             _detail("Tài xế", data.get("driver_name")),
             _detail("Biển số xe", data.get("license_plate")),
             _detail("Loại xe", data.get("vehicle_type")),
-            _detail("Giờ đón", data.get("pickup_time")),
+            _detail(
+                "Thời gian",
+                " ".join(value for value in (shuttle_date, _text(data.get("pickup_time"))) if value),
+            ),
             _detail("Lịch tham quan", data.get("viewing_id")),
-            _detail("Ngày đón", shuttle_date),
             _detail("Số khách", passengers),
         ]
     else:  # pragma: no cover - Task.tool đã bị schema allowlist chặn
@@ -911,6 +1236,22 @@ def _plan_view(plan: TaskPlan | None) -> list[DemoPlanTask]:
 
 
 def _plan_from_job_or_record(job: dict[str, Any] | None, record: dict[str, Any] | None) -> TaskPlan | None:
+    # Một repair tạo task mới (`T5R2`) và giữ `T5` CANCELLED trong database để
+    # làm dấu vết kiểm toán. `workflows.task_plan` là snapshot ghi-một-lần nên
+    # chỉ biết T5; dùng nó cho trang Lịch sử sẽ hiện "Đặt chỗ đã huỷ" cạnh một
+    # payment PAID, dù T5R2 đã SUCCESS.
+    #
+    # Khi có attempt mới, view công khai dựng kế hoạch từ các dòng task SỐNG và
+    # thay vị trí logic của task gốc bằng attempt mới nhất. Dòng cũ KHÔNG bị xoá
+    # hay sửa — chỉ không được dùng làm kết quả hiện hành trên giao diện.
+    if record is not None:
+        rows = list(record.get("tasks") or [])
+        current_rows = _current_attempt_rows(rows)
+        if len(current_rows) != len(rows):
+            from src.orchestration.demo_service import _plan_from_task_rows
+
+            goal = (record.get("workflow") or {}).get("goal") or ""
+            return _plan_from_task_rows(goal, current_rows)
     if job is not None and isinstance(job.get("plan"), TaskPlan):
         return job["plan"]
     if record is None:
@@ -924,6 +1265,44 @@ def _plan_from_job_or_record(job: dict[str, Any] | None, record: dict[str, Any] 
         return TaskPlan.model_validate(raw)
     except ValueError:
         return None
+
+
+_REPAIR_ATTEMPT_ID = re.compile(r"^(?P<base>.+)R(?P<number>[2-9][0-9]*)$")
+
+
+def _current_attempt_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Giữ đúng một attempt hiện hành cho mỗi bước logic trong public view.
+
+    Chỉ coi ``T5R2`` là attempt của ``T5`` khi dòng gốc ``T5`` thực sự tồn tại.
+    Nhờ vậy một task id hợp lệ tình cờ chứa chữ ``R`` không bị gộp theo regex.
+    Vị trí của bước gốc được giữ nguyên để thứ tự hành trình không đổi; chỉ row
+    dùng để trình bày trạng thái/kết quả được thay bằng attempt mới nhất.
+    """
+    ids = {str(row.get("task_id")) for row in rows}
+    latest: dict[str, tuple[int, dict[str, Any]]] = {}
+    attempt_to_base: dict[str, str] = {}
+    for row in rows:
+        task_id = str(row.get("task_id"))
+        match = _REPAIR_ATTEMPT_ID.fullmatch(task_id)
+        if match is None or match.group("base") not in ids:
+            continue
+        base = match.group("base")
+        number = int(match.group("number"))
+        attempt_to_base[task_id] = base
+        if base not in latest or number > latest[base][0]:
+            latest[base] = (number, row)
+
+    if not latest:
+        return rows
+
+    current: list[dict[str, Any]] = []
+    for row in rows:
+        task_id = str(row.get("task_id"))
+        if task_id in latest:
+            current.append(latest[task_id][1])
+        elif task_id not in attempt_to_base:
+            current.append(row)
+    return current
 
 
 def _task_view_time(row: dict[str, Any]) -> str | None:
@@ -946,6 +1325,45 @@ def _polling_task_views(
     if plan is None:
         return []
     rows = {row["task_id"]: row for row in (record or {}).get("tasks", [])}
+
+    # `change_parking_zone` là một lệnh nghiệp vụ mới, còn `book_parking` là
+    # dấu vết của lần giữ chỗ ban đầu. Vì vậy database CỐ Ý giữ cả hai:
+    #
+    #   T2    book_parking        SUCCESS  ZONE_A / 150.000
+    #   T2Z2  change_parking_zone SUCCESS  ZONE_B / 100.000
+    #
+    # Public view trước đây chỉ có T2 trong snapshot kế hoạch, nên sau khi đơn
+    # vị đã đổi booking thật sang Khu B, trang chi tiết và Response Agent vẫn
+    # kể lại Khu A. Không được vá ngược T2 trong database — làm vậy phá audit.
+    # Thay vào đó, chiếu kết quả đổi khu SUCCESS mới nhất lên đúng booking khi
+    # dựng READ MODEL cho người dùng. Thứ tự rows là thứ tự id tăng dần từ
+    # repository, nên lần đổi sau cùng thắng nếu khách đổi nhiều lần.
+    effective_booking_results: dict[str, dict[str, Any]] = {}
+    for row in (record or {}).get("tasks", []):
+        if row.get("tool") != "change_parking_zone" or row.get("status") != "SUCCESS":
+            continue
+        changed = row.get("result_data")
+        booking_id = changed.get("booking_id") if isinstance(changed, dict) else None
+        if booking_id:
+            effective_booking_results[str(booking_id)] = dict(changed)
+
+    effective_results_by_task: dict[str, dict[str, Any]] = {}
+    for task_id, row in rows.items():
+        raw = row.get("result_data")
+        if not isinstance(raw, dict):
+            continue
+        effective = dict(raw)
+        if row.get("tool") == "book_parking":
+            booking_id = effective.get("booking_id")
+            changed = effective_booking_results.get(str(booking_id)) if booking_id else None
+            if changed is not None:
+                effective.update(changed)
+        effective_results_by_task[task_id] = effective
+
+    # Kết quả của MỌI task, để giải InputRef của bước thanh toán.
+    # Dùng projection hiện hành để `pay_fee` trỏ T2 vẫn hiện đúng giá sau đổi
+    # khu, thay vì đọc amount cũ trong dấu vết giữ chỗ ban đầu.
+    results_by_task = effective_results_by_task
     views = []
     for task in plan.tasks:
         row = rows.get(task.task_id)
@@ -966,7 +1384,8 @@ def _polling_task_views(
         if status == "SUCCESS":
             _, message, details = _task_presentation(
                 task,
-                SimpleNamespace(data=row.get("result_data") or {}),
+                SimpleNamespace(data=effective_results_by_task.get(task.task_id, row.get("result_data") or {})),
+                results_by_task,
             )
             views.append(
                 DemoTaskResult(
@@ -1083,7 +1502,10 @@ async def _run_demo_job(
     # không tạo workflow nghiệp vụ cho lời chào.
     job["shell_persisted"] = await _ensure_workflow_shell(
         workflow_id,
-        goal=goal,
+        # `goal` có thể là prompt NỘI BỘ đã nối yêu cầu cũ để Planner không
+        # hỏi lại dữ kiện sau một lần dừng sớm. Nó không phải câu người dùng
+        # vừa gõ và không được ghi đè lên lịch sử công khai.
+        goal=job.get("goal") or goal,
         session_id=session_id or job.get("session_id"),
         parent_workflow_id=parent_workflow_id or job.get("parent_workflow_id"),
         owner_user_id=job.get("owner_user_id"),
@@ -1114,6 +1536,13 @@ async def _run_demo_job(
             workflow_id=workflow_id,
             on_stage=on_stage,
             existing_context=job["existing_context"],
+            # Planner CHỈ nhận lượt chưa bị huỷ.
+            #
+            # Nó dùng ký ức để đoán NÊN LÀM GÌ, nên một yêu cầu đã dừng nằm
+            # trong đó là lời mời dựng lại nó từ bất kỳ câu nói cụt nào — tức
+            # bấm Dừng không dừng được gì. Tầng trả lời thì nhận đủ, vì nó cần
+            # biết ĐANG NÓI CHUYỆN GÌ.
+            recalled=_recall_for_planner(job.get("recalled"), goal),
             user_answers=job.get("user_answers") or {},
             approve_mock_payment=approve_mock_payment,
             resident_url=service_urls["resident"],
@@ -1126,6 +1555,7 @@ async def _run_demo_job(
             session_id=session_id,
             parent_workflow_id=parent_workflow_id,
             on_failure=repair_manager,
+            owner_user_id=job.get("owner_user_id"),
         )
         # Chờ duyệt thanh toán: ghi ngữ cảnh xuống PostgreSQL TRƯỚC khi trả
         # response. Từ đây trở đi resume không còn phụ thuộc `_DEMO_JOBS`.
@@ -1140,7 +1570,21 @@ async def _run_demo_job(
         # PostgreSQL. `state["plan"]` vẫn là plan ĐẦY ĐỦ (plan node set, boundary
         # chỉ thêm policy_error) — không được lấy `job["plan"]` làm nguồn, vì
         # on_stage ghi đè nó bằng plan prefix đã bỏ bước tham quan.
-        if state.get("policy_error") == "VIEWING_APPROVAL_REQUIRED":
+        # Hồ sơ chờ duyệt tham quan phải được ghi kể cả khi lỗi NỔI LÊN là
+        # thanh toán.
+        #
+        # Một plan có cả hai thì boundary thanh toán dừng trước, và
+        # `policy_error` mang mã của NÓ — nhưng lịch tham quan vẫn đang chờ đơn
+        # vị tour. Chỉ ghi khi `policy_error` là VIEWING_APPROVAL_REQUIRED nghĩa
+        # là bỏ rơi đúng trường hợp này: bước tham quan nằm WAITING_APPROVAL mà
+        # không có hàng nào trong `viewing_approvals`, nên không ai được yêu cầu
+        # duyệt và người dùng không có cách nào biết.
+        #
+        # `viewing_pending` do `ViewingApprovalBoundary` gắn vào context của lỗi
+        # bên trong trước khi ném lại.
+        if state.get("policy_error") == "VIEWING_APPROVAL_REQUIRED" or (state.get("policy_context") or {}).get(
+            "viewing_pending"
+        ):
             applicant = await _applicant_snapshot(job.get("owner_user_id"))
             await persist_pending_viewing_approval(
                 workflow_id,
@@ -1158,17 +1602,24 @@ async def _run_demo_job(
             state["repair_hints"] = repair_hints
             await _persist_repair_hints(workflow_id, repair_hints)
 
+        # Điều người dùng đã NÓI RÕ trong goal, do Planner hiểu và code kiểm.
+        #
+        # `setdefault`: một câu trả lời người dùng đã gõ ở lượt trước LUÔN thắng
+        # điều họ nói lúc đầu. Ngược lại thì họ không đổi ý được — goal cũ sẽ
+        # ghi đè câu mới ở mọi lượt, mãi mãi.
+        explicit_facts = state.get("explicit_facts") or {}
+        if explicit_facts:
+            ngu_canh = job.setdefault("existing_context", {})
+            for name, value in explicit_facts.items():
+                ngu_canh.setdefault(name, value)
+
         response = _demo_response(state, approve_mock_payment)
-        terminal_stage = "FINISHED"
-        if response.status == "NEEDS_INFORMATION":
-            terminal_stage = "NEEDS_INFORMATION"
-        elif response.status == "WAITING_APPROVAL":
-            terminal_stage = "WAITING_APPROVAL"
-        elif response.status == "VALIDATION_ERROR":
-            terminal_stage = "VALIDATION_FAILED"
-        elif response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
-            terminal_stage = "EXECUTION_FAILED"
-        _append_job_event(job, terminal_stage)
+        # Ghim workflow FAILED với mã riêng khi lỗi hệ thống conflict persistence.
+        # Làm ở đây (async caller) vì _demo_response là sync và không thể await.
+        if response.error_code == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR" and workflow_id:
+            await _mark_workflow_failed_safely(workflow_id, "SCHEDULE_CONFLICT_PERSISTENCE_ERROR")
+        _append_job_event(job, _terminal_stage_for(response))
+        await _persist_events(workflow_id, job)
         job["message"] = response.summary or response.question or job["message"]
         # `_demo_response()` dựng view model từ AgentState nên không biết
         # workflow_id. Gắn lại ngay khi cache, đừng để nhánh đọc phải tự đoán.
@@ -1213,12 +1664,70 @@ async def _run_demo_job(
         # Công bố kết quả trước, nói sau.
         _keep_demo_task(asyncio.create_task(_attach_answer(job, workflow_id, goal=job.get("goal") or goal)))
 
+        # Yêu cầu KHÔNG THUỘC dịch vụ nào → ẩn khỏi lịch sử.
+        #
+        # Điều kiện là BA thứ cùng lúc, không phải một mã lỗi cụ thể:
+        #
+        #   - kết thúc ở VALIDATION_ERROR/PLANNING_ERROR — không dựng nổi kế hoạch
+        #   - KHÔNG bước nào chạy — nên không có gì đã xảy ra để kể lại
+        #   - KHÔNG repair hint — nên không có gì để người dùng tiếp tục
+        #
+        # Ba điều đó cộng lại nghĩa là: hệ thống chưa làm gì, và cũng không đợi
+        # ai làm gì. Đó không phải một mục việc.
+        #
+        # Bản đầu tôi bắt theo `missing_fields == ["supported_goal"]`. Đo trên
+        # stack thật thì gõ "qwezxcvbnm" đi ra VALIDATION_ERROR chứ không phải
+        # nhánh ấy — bắt theo một mã lỗi là bắt theo đường đi, mà đường đi thì
+        # nhiều hơn ta tưởng.
+        #
+        # Trước đây chúng để lại một dòng FAILED vĩnh viễn trong Lịch sử. Đo
+        # được trên dữ liệu thật: "jhjs", "jasdkj", "whatsup" nằm đó với nhãn
+        # "Chưa xong", như thể hệ thống đã cố làm gì đó cho người dùng rồi hỏng.
+        # Nó không cố gì cả — không có bước nào chạy, không có gì để tiếp tục.
+        #
+        # Người dùng vẫn NHẬN được câu trả lời (Response Agent đã nói "mình chưa
+        # hiểu rõ yêu cầu"); chỉ là cuộc trao đổi đó không phải một mục việc.
+        #
+        # Xoá MỀM bằng `archived_at`, dùng lại đúng cơ chế của `delete_workflow_
+        # for_owner` và phép cắt lịch sử: hàng vẫn còn để truy vết, chỉ không
+        # hiện ra. Nếu sau này cần biết người dùng gõ gì mà hệ thống không hiểu,
+        # dữ liệu vẫn nguyên.
+        if response.status in {"VALIDATION_ERROR", "PLANNING_ERROR"} and not response.tasks and not repair_hints:
+            await _archive_unsupported_workflow(workflow_id)
+
         # Release-on-failure (Phase B): workflow FAILED do máy, không repairable
         # (không có repair hint) → dọn side-effect giữ chỗ/thanh toán. FAILED có
         # repair hint là repairable — user sẽ /continue sửa input, release sẽ phá
         # thứ repair định tiếp tục nên KHÔNG chạy. Guard `not repair_hints`.
         if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"} and not repair_hints:
             await release_on_failure(workflow_id)
+
+        # Ghim trạng thái kết thúc, y như nhánh `except` bên dưới đã làm.
+        #
+        # Nhánh `except` bắt trường hợp job NÉM lỗi. Nhưng `run_demo_workflow`
+        # cũng có thể TRẢ VỀ một response lỗi mà không ném gì — và đường đó
+        # trước đây không ghi gì xuống database. Cùng một mối nguy mà comment
+        # ở nhánh `except` mô tả, chỉ khác là không có lá chắn nào.
+        #
+        # Đo được, lặp lại 100%: goal liên hoàn thất bại ở khâu lập kế hoạch.
+        #
+        #   t+40s   API: EXECUTION_ERROR / EXECUTION_FAILED
+        #           DB : PENDING, 0 task
+        #   t+60s   y nguyên như vậy, và mãi mãi
+        #
+        # Hậu quả không dừng ở một cột sai: trang Lịch sử đọc database nên hiển
+        # thị "Đang diễn ra" vĩnh viễn, và zombie sweeper đếm nó như việc đang
+        # chạy. Khi execution đã chạy thì graph tự ghi status; chỗ này chỉ đỡ
+        # đúng những workflow chết TRƯỚC lúc đó, nên `workflow_tasks` rỗng và
+        # không có gì để mâu thuẫn.
+        #
+        # `mark_workflow_failed` chỉ đụng `status IN ('PENDING','RUNNING')` nên
+        # nó không thể ghi đè SUCCESS hay WAITING_APPROVAL.
+        if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR", "VALIDATION_ERROR"}:
+            await _mark_workflow_failed_safely(
+                workflow_id,
+                response.error_code or ErrorCode.UNKNOWN_EXTERNAL_ERROR.value,
+            )
     except Exception as exc:  # noqa: BLE001 - không để raw exception vào job public
         # Phân loại TRƯỚC khi làm gì khác: mã lỗi quyết định cả câu nói với
         # người dùng lẫn việc có mời họ thử lại hay không.
@@ -1233,6 +1742,12 @@ async def _run_demo_job(
             type(exc).__name__,
             request_id,
         )
+        # Traceback CHỈ ở mức debug. Message của exception hay kèm URL, tên
+        # biến môi trường, đôi khi cả một phần credential — nên nó không được
+        # nằm ở mức warning trong log production. Nhưng không có traceback nào
+        # thì một `NameError` trong tác vụ nền là bất khả truy: log chỉ nói
+        # "NameError" và không chỉ vào dòng nào.
+        logger.debug("demo background workflow traceback request_id=%s", request_id, exc_info=True)
         _append_job_event(job, "EXECUTION_FAILED")
         job["message"] = failure.message
 
@@ -1259,6 +1774,39 @@ async def _run_demo_job(
         await release_on_failure(workflow_id)
 
 
+async def drain_demo_tasks(timeout: float = 15.0) -> int:
+    """Chờ mọi tác vụ nền chạy nốt. Trả số tác vụ đã chờ.
+
+    `request_fresh_answer` và đường chạy workflow đều `create_task` rồi trả về
+    NGAY — đúng, vì người dùng không nên chờ một câu trả lời họ chưa hỏi. Nhưng
+    "không chặn" nghĩa là chúng còn sống sau khi request đã xong, và chúng đang
+    cầm connection cùng khoá dòng.
+
+    Đo được ở tầng test, và đây là một deadlock thật chứ không phải chậm:
+
+        asyncpg.exceptions.DeadlockDetectedError: deadlock detected
+        Process A waits for AccessExclusiveLock on relation ...; blocked by B.
+        Process B waits for RowShareLock on relation ...; blocked by A.
+
+    A là lệnh dọn bảng của teardown, B là một tác vụ nền của test TRƯỚC. Hai bên
+    lấy khoá theo thứ tự ngược nhau, và PostgreSQL giết một bên — bên thua đổi
+    theo tải máy, nên nó hiện ra như một test khác nhau mỗi lượt.
+
+    Hết giờ thì HUỶ và đi tiếp: một tác vụ nền treo không được phép giữ cả tiến
+    trình, và người gọi hàm này đang dọn dẹp chứ không đang phục vụ ai.
+    """
+    cho = [task for task in list(_DEMO_TASKS) if not task.done()]
+    if not cho:
+        return 0
+    _xong, con_lai = await asyncio.wait(cho, timeout=timeout)
+    for task in con_lai:
+        task.cancel()
+    if con_lai:
+        await asyncio.gather(*con_lai, return_exceptions=True)
+        logger.warning("huỷ %d tác vụ nền quá hạn khi dọn dẹp", len(con_lai))
+    return len(cho)
+
+
 def _keep_demo_task(task: asyncio.Task[None], *, workflow_id: str | None = None) -> None:
     _DEMO_TASKS.add(task)
     if workflow_id is not None:
@@ -1268,6 +1816,25 @@ def _keep_demo_task(task: asyncio.Task[None], *, workflow_id: str | None = None)
         _DEMO_TASKS.discard(done)
         if workflow_id is not None and _DEMO_WORKFLOW_TASKS.get(workflow_id) is done:
             _DEMO_WORKFLOW_TASKS.pop(workflow_id, None)
+
+        # Đọc exception của task đã xong. Không đọc thì asyncio chỉ cảnh báo
+        # "exception was never retrieved" lúc GC — nếu có — còn workflow thì
+        # nằm lại `PENDING` mãi mãi: không log, không `error_code`, không gì
+        # để lần theo.
+        #
+        # Đo được: prompt tự do dựng workflow, trả 202, rồi đứng im. Giao diện
+        # poll hàng trăm lượt GET và cuối cùng nói "đang bị dừng lại vì lỗi" —
+        # câu duy nhất người dùng nhận được, và nó không nói lỗi gì.
+        if done.cancelled():
+            return
+        error = done.exception()
+        if error is not None:
+            logger.exception(
+                "job nền của workflow %s chết: %s",
+                (workflow_id or "?")[:8],
+                type(error).__name__,
+                exc_info=error,
+            )
 
     task.add_done_callback(_forget)
 
@@ -1396,8 +1963,369 @@ _DEFAULT_BASELINE: dict[str, str] = {
     "CHAT": "Mình đã trả lời bạn ở trên.",
 }
 
+# Câu nền RIÊNG cho nhánh khách vừa HỎI (`stage == "QUESTION"`).
+#
+# `_DEFAULT_BASELINE["CHAT"]` được viết cho small-talk, nơi câu trả lời ĐÃ nằm
+# sẵn phía trên. Nhánh câu hỏi cũng mang `status="CHAT"` nhưng câu trả lời chưa
+# được viết — nên khi Response Agent bị guard loại, người dùng nhận đúng một
+# lời khẳng định sai: "Mình đã trả lời bạn ở trên." cho một câu chưa ai đáp.
+#
+# Đo được trên stack thật, tài khoản đã xác minh căn hộ, hỏi "ngày nào còn
+# trống chỗ đỗ xe": `response_state = FALLBACK`, và log ghi
+# "response agent bị loại (nêu một con số không có trong dữ liệu)".
+#
+# Câu mới thừa nhận là chưa trả lời được, và nói một việc làm được ngay.
+_QUESTION_BASELINE = (
+    "Mình chưa tra được thông tin này. Bạn hỏi lại cụ thể hơn giúp mình nhé — ví dụ khu vực và ngày bạn cần."
+)
 
-def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list[str]) -> ReplyView:
+
+# Từ khoá nhận ra khách đang hỏi về CHỖ ĐỖ XE, và đang hỏi về TÌNH TRẠNG TRỐNG.
+#
+# Phải khớp CẢ HAI nhóm. Chỉ "đỗ xe" thì "phí gửi xe bao nhiêu" cũng kích hoạt
+# tra cứu, và câu trả lời về giá bị nhét thêm một bảng chỗ trống không ai hỏi.
+# Chỉ "còn trống" thì câu hỏi về lịch tham quan cũng dính.
+# Tên khu nằm trong nhóm này vì trong hệ thống chỉ BÃI ĐỖ XE mới chia Khu A /
+# Khu B. Thiếu chúng thì đúng câu đã bịa ra dữ liệu — "khu B còn trống ngày
+# nào?" — lại không kích hoạt tra cứu, vì nó không chứa chữ "xe" nào cả.
+_PARKING_TERMS = (
+    "đỗ xe",
+    "đậu xe",
+    "gửi xe",
+    "bãi xe",
+    "chỗ đỗ",
+    "chỗ đậu",
+    "chỗ để xe",
+    "khu a",
+    "khu b",
+    "zone_a",
+    "zone_b",
+)
+_AVAILABILITY_TERMS = (
+    "còn trống",
+    "còn chỗ",
+    "trống",
+    "hết chỗ",
+    "kín chỗ",
+    "còn không",
+    "ngày nào",
+    "hôm nào",
+    "khi nào",
+    "còn slot",
+)
+
+# Cửa sổ tra cứu. Hai tuần đủ để trả lời "ngày nào còn trống" mà không biến câu
+# trả lời thành một bảng lịch — và đủ ngắn để danh sách ngày còn đọc được.
+_AVAILABILITY_DAYS = 14
+
+
+def _asks_parking_availability(goal: str) -> bool:
+    """Khách có đang hỏi chỗ đỗ xe còn trống hay không. Thuần TẤT ĐỊNH.
+
+    Cố ý không để model tự quyết: đây là thứ mở một truy vấn database, và một
+    lượt gọi mô hình nữa để phân loại vừa tốn tiền vừa thêm một chỗ có thể sai.
+    """
+    lowered = (goal or "").casefold()
+    return any(term in lowered for term in _PARKING_TERMS) and any(term in lowered for term in _AVAILABILITY_TERMS)
+
+
+async def _facts_for(
+    workflow_id: str,
+    *,
+    goal: str,
+    response: DemoWorkflowResponse,
+    owner_user_id: Any = None,
+) -> dict[str, Any] | None:
+    """Mọi dữ kiện backend tra được cho tình huống này. MỘT chỗ gom.
+
+    Có hai nguồn hôm nay, và cả hai đều tồn tại vì cùng một lý do: `steps` chỉ
+    kể được những gì ĐÃ CHẠY. Khách hỏi chỗ trống thì chưa có bước nào; khách
+    chờ đơn vị duyệt thì các bước đều đang đứng yên và câu duy nhất chúng nói
+    là "đang chờ". Cả hai lần, model được giao một tình huống mà không có dữ
+    liệu về chính tình huống ấy.
+
+    Gom vào một hàm để nguồn thứ ba không mọc thành một đường riêng nữa.
+    """
+    facts: dict[str, Any] = {}
+
+    # Snapshot: sự thật code dựng được, cho MỌI tình huống — không chỉ khi câu
+    # hỏi trúng một nhánh tra cứu.
+    #
+    # Ba lỗi cùng một gốc đã đo được, và cả ba đều là "model được giao việc trả
+    # lời mà không được đưa dữ liệu":
+    #
+    #   "có những dự án nào"  → bịa ra "Khu A, Khu B, Khu C" (tên khu ĐỖ XE)
+    #   "xong chưa"           → xuống Planner rồi trả về vô nghĩa
+    #   đơn vị từ chối bảo trì → lý do chết trong `service_approvals`
+    #
+    # `account_state` quyết định dịch vụ nào MỞ. Dịch vụ khoá vẫn được nêu tên
+    # kèm cờ khoá — giấu đi thì người dùng không biết để đi xác minh căn hộ.
+    # QUYỀN suy từ nguồn có thẩm quyền, KHÔNG nhận theo tham số.
+    #
+    # Mã nguồn đã ghi bài học: "một dòng JSON `account_state: resident` từng đủ
+    # để mở toàn bộ dịch vụ cư dân". Nhận `account_state` ở đây nghĩa là một
+    # caller cầm bản chép ghim từ lúc /start có thể nói ngược sự thật — và bản
+    # chép ấy chính là thứ đã sai trước đây.
+    #
+    # Đọc không được thì coi như CHƯA xác minh. Hướng ngược lại sẽ mời người
+    # dùng vào một dịch vụ rồi để tầng dưới từ chối họ.
+    snapshot = build_snapshot(
+        account_state=await _trusted_state_safely(owner_user_id),
+        capabilities=[item.model_dump() for item in _CAPABILITY_CATALOGUE],
+        view=response,
+        refusals=await _refused_services(workflow_id),
+    )
+    facts["su_that_hien_co"] = snapshot.as_text()
+
+    availability = await _parking_availability_facts(goal)
+    if availability:
+        facts.update(availability)
+
+    if response.service_proposals:
+        # Đề xuất đơn vị đang chờ KHÁCH bấm. Không có những dữ kiện này thì
+        # model được giao đúng tình huống mà không có dữ liệu về nó — và nó
+        # đoán. Đo được trên canary, nguyên văn:
+        #
+        #     "Mình cần bạn xác nhận khoản THANH TOÁN để chốt lịch chuyển nhà"
+        #
+        # Không có khoản thanh toán nào. Việc cần làm là chọn đơn vị, và khách
+        # đọc câu ấy sẽ đi tìm một nút trả tiền không tồn tại. Cùng một gốc với
+        # ba lỗi đã ghi ở trên: model phải trả lời mà không được đưa dữ liệu.
+        facts["dang_cho_ban_chon_don_vi"] = {
+            "cac_de_xuat": [
+                {
+                    "buoc": d.task_id,
+                    "don_vi": d.provider.name,
+                    "gia": d.amount,
+                    "tien_te": d.currency,
+                    "ly_do": d.reason,
+                    "han_bao_gia": d.valid_until,
+                }
+                for d in response.service_proposals
+            ],
+            "viec_can_lam": "Khách bấm đồng ý với từng đơn vị. KHÔNG phải thanh toán.",
+        }
+
+    if response.approval_actor == "PROVIDER":
+        # Đúng những dữ kiện ĐƠN VỊ đang nhìn để quyết định — `approval_details`
+        # đã bỏ định danh nội bộ trước khi ghim hàng đợi, nên đây không phải
+        # thông tin mới lộ ra.
+        #
+        # Thiếu chúng, biển số và ngày mà khách vừa gõ trở thành "con số không
+        # có trong dữ liệu": `view.goal` cố ý không phải nguồn có thẩm quyền, và
+        # các bước đang chờ thì không mang giá trị nào. Đo được 4/4 lượt bị loại
+        # đúng vì lý do này, cho một câu chỉ nhắc lại biển số khách vừa khai.
+        pending = await _load_pending_services(workflow_id)
+        if pending:
+            facts["dang_cho_don_vi_duyet"] = [
+                {"dich_vu": row.get("service_label") or row.get("tool"), **_as_facts(row.get("details"))}
+                for row in pending
+            ]
+
+    return facts or None
+
+
+def _as_facts(details: Any) -> dict[str, Any]:
+    """`details` của một hồ sơ duyệt, ở dạng dict. Chuỗi JSON cũng nhận."""
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            return {}
+    return dict(details) if isinstance(details, dict) else {}
+
+
+async def _parking_availability_facts(goal: str) -> dict[str, Any] | None:
+    """Chỗ đỗ xe còn trống, đọc thẳng từ database. None nếu không áp dụng/lỗi.
+
+    Trả None khi hỏng thay vì raise: đây là dữ liệu làm câu trả lời tốt hơn,
+    không phải điều kiện để workflow chạy. Hỏng thì model thiếu dữ liệu, guard
+    loại câu đoán, và người dùng nhận `_QUESTION_BASELINE` — vẫn thành thật.
+    """
+    if not _asks_parking_availability(goal):
+        return None
+
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await CapacityRepository(pool).availability(date.today(), _AVAILABILITY_DAYS)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("tra cứu chỗ đỗ xe thất bại (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+    by_zone: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        # Nhãn khách đọc được, KHÔNG phải `ZONE_A` — `_SNAKE_CASE` trong guard
+        # sẽ loại thẳng câu nào chép lại mã khu, và nó loại đúng.
+        label = ZONE_LABELS.get(row["parking_zone"], row["parking_zone"])
+        if row["remaining"] > 0:
+            by_zone.setdefault(label, []).append({"ngay": row["booking_date"], "so_cho_con_lai": row["remaining"]})
+        else:
+            by_zone.setdefault(label, [])
+
+    return {
+        "cho_do_xe_con_trong": {
+            "tu_ngay": date.today().isoformat(),
+            "trong_vong_ngay": _AVAILABILITY_DAYS,
+            # Khu đã kín đi kèm danh sách RỖNG, không bị bỏ khỏi payload: một
+            # khu vắng mặt đọc là "không biết", còn danh sách rỗng đọc là "hết
+            # chỗ" — và đó chính là điều cần nói với khách.
+            "theo_khu": [{"khu": khu, "cac_ngay_con_cho": ngay} for khu, ngay in sorted(by_zone.items())],
+        }
+    }
+
+
+def _terminal_stage_for(response: DemoWorkflowResponse) -> str:
+    """Sự kiện CUỐI của một lượt chạy — một luật, mọi đường dùng chung.
+
+    Đây là dòng cuối cùng trên dải hoạt động, nên nó chính là câu người dùng
+    đọc để biết việc của mình đang ra sao.
+
+    `WAITING_APPROVAL` mang BA tình huống và chúng phải nói ba câu khác nhau:
+    chờ đơn vị tour, chờ đơn vị dịch vụ, chờ chính khách trả tiền. Suy từ
+    `status` thôi thì người đặt lịch xem nhà được bảo đi xác nhận thanh toán,
+    và họ đi tìm một nút không tồn tại.
+
+    Viết bản thứ hai của luật này là cách chắc chắn để một đường nói sai: đường
+    sửa-rồi-chạy-lại từng KHÔNG phát sự kiện nào cả, nên dải hoạt động đứng im
+    ở "chờ đơn vị xác nhận lịch tham quan" trong khi bước đỗ xe đã được mở lại
+    với ngày mới.
+    """
+    if response.status == "NEEDS_INFORMATION":
+        return "NEEDS_INFORMATION"
+    if response.status == "WAITING_APPROVAL":
+        # `viewing_approval` chỉ có mặt ở nhánh chờ đơn vị tour, nên nó phân
+        # biệt được mà không cần thêm trạng thái mới.
+        if response.viewing_approval:
+            return "WAITING_VIEWING_APPROVAL"
+        # Chờ khách CHỌN ĐƠN VỊ, không phải chờ khách TRẢ TIỀN. Hai tình huống
+        # cùng `approval_actor="USER"` và nối tiếp nhau trong một workflow, nên
+        # thứ phân biệt chúng là có đề xuất hay không.
+        if response.service_proposals:
+            return "WAITING_PROVIDER_PROPOSAL"
+        if response.provider_rejection:
+            return "WAITING_PROVIDER_RESELECTION"
+        if response.approval_actor == "PROVIDER":
+            return "WAITING_SERVICE_APPROVAL"
+        return "WAITING_APPROVAL"
+    if response.status == "VALIDATION_ERROR":
+        return "VALIDATION_FAILED"
+    if response.status in {"EXECUTION_ERROR", "PLANNING_ERROR"}:
+        return "EXECUTION_FAILED"
+    return "FINISHED"
+
+
+def answer_key(
+    status: str,
+    approval_actor: str | None = None,
+    *,
+    de_xuat_don_vi: bool = False,
+    tu_choi_don_vi: bool = False,
+) -> str:
+    """Câu trả lời đang mô tả TÌNH HUỐNG nào — một luật, dùng ở mọi nơi.
+
+    `status` một mình là chưa đủ. `WAITING_APPROVAL` mang HAI tình huống khác
+    hẳn nhau, và chúng nối tiếp nhau trong CÙNG một workflow:
+
+        đơn vị duyệt dịch vụ   → approval_actor = PROVIDER
+        khách xác nhận tiền    → approval_actor = USER
+
+    Khoá theo `status` thôi thì khi việc chờ đổi tay, `claim_assistant_response`
+    thấy khoá không đổi nên KHÔNG giành quyền sinh — câu cũ ở lại nguyên vẹn.
+    Đo được: duyệt xong cả hai bước, `pay_fee` đã sang WAITING_APPROVAL với
+    báo giá 100.000 VND, mà khách vẫn đọc "đang chờ đơn vị cung cấp dịch vụ
+    xác nhận" — một câu đã hết đúng từ lúc họ được duyệt.
+
+    Định dạng `"TRẠNG_THÁI"` hoặc `"TRẠNG_THÁI:AI_ĐANG_ĐỢI"`. Phần trước dấu
+    hai chấm luôn là trạng thái, nên `_key_status` tách lại được — xem chỗ
+    dùng nó trong `_assistant_fields`.
+    """
+    if status == "WAITING_APPROVAL" and approval_actor:
+        # `USER` mang HAI tình huống nữa, và chúng cũng nối tiếp nhau trong
+        # cùng một workflow: khách CHỌN ĐƠN VỊ, rồi (sau khi đơn vị duyệt)
+        # khách XÁC NHẬN TIỀN. Cả hai đều `WAITING_APPROVAL:USER`, nên khoá hai
+        # chữ để câu của tình huống trước sống tiếp qua tình huống sau — đúng
+        # lỗi mà `approval_actor` đã được thêm vào đây để chữa, chỉ ở một tầng
+        # sâu hơn.
+        if de_xuat_don_vi:
+            return f"{status}:{approval_actor}:PROPOSAL"
+        if tu_choi_don_vi:
+            return f"{status}:{approval_actor}:REJECTION"
+        return f"{status}:{approval_actor}"
+    return status
+
+
+def _key_status(key: str | None) -> str | None:
+    """Phần TRẠNG THÁI của một khoá câu trả lời."""
+    return key.split(":", 1)[0] if key else key
+
+
+def request_fresh_answer(workflow_id: str, *, job: dict[str, Any] | None = None) -> None:
+    """Tình huống vừa đổi — xin một câu mới cho tình huống MỚI. Không chặn.
+
+    Mọi đường QUYẾT ĐỊNH đều phải gọi hàm này: duyệt thanh toán, duyệt dịch vụ,
+    duyệt lịch tham quan, huỷ. Trước đây chỉ đường thanh toán làm, và nó làm
+    inline — nên hai đường duyệt kia lặng lẽ không có, và khách đọc lại câu của
+    tình huống trước. Một hàm để chỗ thiếu hiện ra trong diff.
+
+    KHÔNG bọc trong `if job is not None`: sau một lần restart `_DEMO_JOBS`
+    trống, nên đúng những workflow sống sót qua restart lại là những workflow
+    không bao giờ có câu cho trạng thái cuối. `_attach_answer` tự dựng lại
+    trạng thái công khai từ database khi không có cache.
+    """
+    _keep_demo_task(
+        asyncio.create_task(
+            _attach_answer(job if job is not None else {}, workflow_id, goal=(job or {}).get("goal") or "")
+        )
+    )
+
+
+def _viewing_facts(approval: DemoViewingApproval | None) -> dict[str, Any] | None:
+    """Dữ kiện lịch tham quan cho Response Agent — CHỈ trường thật sự áp dụng.
+
+    Bỏ mọi trường `None`. Một `null` trong payload không đọc là "không áp dụng";
+    model đọc nó là "còn thiếu, phải hỏi".
+
+    Đo được: `passenger_count` là `None` khi khách chọn tự đi (nó thuộc về đặt
+    xe đưa đón, không phải input của `schedule_property_viewing` — xem
+    `tool_contract.py`). Gửi `so_khach: null` kèm theo, và model kết thúc câu
+    trả lời bằng "bạn vui lòng cho biết số lượng khách tham gia nhé" — xin một
+    thông tin không ai cần, cho một lịch đã gửi đi rồi.
+
+    `co_xe_dua_don` LUÔN được gửi kể cả khi `False`: đó là một sự thật đã quyết,
+    không phải một ô còn trống.
+    """
+    if approval is None:
+        return None
+    facts: dict[str, Any] = {
+        "du_an": approval.project_name,
+        "ngay": approval.viewing_date,
+        "gio": approval.viewing_time,
+        "co_xe_dua_don": approval.wants_shuttle,
+    }
+    # Số khách chỉ có nghĩa khi thật sự đặt xe đón.
+    if approval.wants_shuttle and approval.passenger_count is not None:
+        facts["so_khach"] = approval.passenger_count
+    return {k: v for k, v in facts.items() if v is not None}
+
+
+def _reply_view(
+    response: DemoWorkflowResponse,
+    *,
+    goal: str,
+    capabilities: list[str],
+    recalled: list[dict[str, Any]] | None = None,
+    # Cuộc trò chuyện ĐANG diễn ra. Thiếu nó thì phần ngữ cảnh hội thoại bỏ
+    # trống — an toàn hơn là ghép nhầm một việc người dùng làm hôm khác.
+    session_id: str | None = None,
+    # Dữ liệu backend vừa tra để đáp đúng câu khách hỏi. Xem
+    # `_parking_availability_facts`.
+    facts: dict[str, Any] | None = None,
+) -> ReplyView:
     """View model cho Response Agent, dựng TỪ response công khai.
 
     Đây là toàn bộ trust boundary của lớp đó, và nó gọn được vì response công
@@ -1420,10 +2348,18 @@ def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list
         # người dùng bổ sung thông tin nhận câu "Yêu cầu đã hoàn tất.". Vừa sai,
         # vừa đúng loại sai nguy hiểm nhất: khẳng định đã xong khi chưa xong.
         baseline_message=(
-            response.summary or response.question or response.message or _DEFAULT_BASELINE[response.status]
+            response.summary
+            or response.question
+            or response.message
+            or (_QUESTION_BASELINE if response.stage == "QUESTION" else _DEFAULT_BASELINE[response.status])
         ),
         steps=[{"title": task.title, "status": task.status, "message": task.message} for task in response.tasks],
         missing_fields=[MISSING_FIELD_LABELS.get(f, f) for f in response.missing_fields],
+        # Gợi ý lấy từ giá trị ĐÃ CHẠY THẬT ở lượt trước — chỉ cho những field
+        # đang hỏi, và chỉ để hỏi cho gọn. Field vẫn thiếu; người dùng vẫn xác
+        # nhận. Tra bằng tên field NỘI BỘ, không phải nhãn hiển thị.
+        recalled_hints=_recalled_hints(recalled or [], list(response.missing_fields)),
+        recent_turns=_recent_turns_view(recalled or [], session_id),
         payment_quote=(
             {"amount": response.payment_quote.get("amount"), "currency": response.payment_quote.get("currency")}
             if response.payment_quote
@@ -1437,6 +2373,18 @@ def _reply_view(response: DemoWorkflowResponse, *, goal: str, capabilities: list
         error_code=response.error_code,
         retryable=response.retryable,
         capabilities=capabilities,
+        approval_actor=response.approval_actor,
+        # Cùng nguồn `date.today()` với Planner và `TaskPlanValidator`.
+        today=date.today().isoformat(),
+        answering_question=response.stage == "QUESTION",
+        # Chỉ đặt khi thật sự có việc người dùng làm được. Đặt bừa sẽ bật guard
+        # `next_step` cho những tình huống không có hướng dẫn nào để nêu, và
+        # mọi câu trả lời ở đó đều rơi về bản dự phòng.
+        next_step=(LINK_REQUIRED_ACTION if response.error_code == ErrorCode.ACTION_DENIED.value else None),
+        # Chỉ những trường KHÁCH ĐÃ THẤY trên thẻ chờ. Không có task_id, không
+        # có project_id — model không cần chúng và chúng là định danh nội bộ.
+        viewing=_viewing_facts(response.viewing_approval),
+        facts=facts,
     )
 
 
@@ -1463,7 +2411,13 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             current = await _public_view_from_db(workflow_id)
             if current is None:
                 return
-        for_status = current.status
+        # Khoá gồm cả NGƯỜI đang được chờ: xem `answer_key`.
+        for_status = answer_key(
+            current.status,
+            current.approval_actor,
+            de_xuat_don_vi=bool(current.service_proposals),
+            tu_choi_don_vi=current.provider_rejection is not None,
+        )
 
         if not await _claim_answer_safely(workflow_id, for_status):
             # Trạng thái này đã có câu trả lời, hoặc một tiến trình khác đang
@@ -1472,7 +2426,16 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             return
 
         capabilities = await _capability_names_safely(job.get("owner_user_id"))
-        spoken = await _speak(current, goal=goal, capabilities=capabilities)
+        # Tra dữ liệu TRƯỚC khi gọi model — MỘT chỗ gom mọi nguồn dữ kiện.
+        facts = await _facts_for(workflow_id, goal=goal, response=current, owner_user_id=job.get("owner_user_id"))
+        spoken = await _speak(
+            current,
+            goal=goal,
+            capabilities=capabilities,
+            recalled=job.get("recalled"),
+            session_id=job.get("session_id"),
+            facts=facts,
+        )
         if spoken.answer is None:
             # `_speak` không dựng được client (thiếu key chẳng hạn). Dùng CHÍNH
             # câu deterministic mà Response Agent vốn lấy làm bản dự phòng, để
@@ -1491,12 +2454,45 @@ async def _attach_answer(job: dict[str, Any], workflow_id: str, *, goal: str) ->
             state=state,
             for_status=for_status,
         )
+        if for_status == "CHAT":
+            # Một CÂU HỎI đã được trả lời là đã xong việc.
+            #
+            # Đường planner chỉ ghi câu trả lời rồi thôi, nên bản ghi nằm lại
+            # `PENDING` vĩnh viễn: Lịch sử đọc nó thành "Đang thực hiện" cho
+            # một câu hỏi đã đáp từ lâu, và trước khi sweeper được vá thì đúng
+            # một chu kỳ quét sau nó thành FAILED. Đo được trên `cảm ơn bạn
+            # nhé`: `CHAT` + có câu trả lời + 0 bước, mà vẫn `PENDING`.
+            #
+            # Lane small-talk đã chốt SUCCESS ngay lúc ghi; đường này phải chốt
+            # ở đây, vì câu trả lời tới sau một lượt gọi mô hình.
+            await _finish_chat_workflow(workflow_id)
         spoken = spoken.model_copy(update={"response_state": state})
         # Chỉ ghi đè nếu chưa có ai thay response trong lúc chờ mô hình.
         if job.get("response") is current:
             job["response"] = spoken
     except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
         logger.info("không gắn được câu trả lời cho %s (%s)", workflow_id[:8], type(exc).__name__)
+
+
+async def _finish_chat_workflow(workflow_id: str) -> None:
+    """Chốt SUCCESS cho một workflow chỉ-hỏi, nếu nó thật sự không có bước nào.
+
+    Điều kiện "không có bước nào" là thứ giữ cho lệnh này an toàn: có bước
+    nghĩa là đã có việc chạy thật, và trạng thái của nó thuộc về Executor chứ
+    không phải về tầng sinh câu trả lời.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        if await repository.list_tasks(workflow_id):
+            return
+        await repository.update_workflow_status(workflow_id, WorkflowStatus.SUCCESS)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("không chốt được lượt hỏi %s (%s)", workflow_id[:8], type(exc).__name__)
+    finally:
+        if pool is not None:
+            await pool.close()
 
 
 async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) -> DemoWorkflowResponse:
@@ -1509,8 +2505,22 @@ async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) 
     WAITING_APPROVAL trở thành sai ngay khi người dùng bấm duyệt — hiển thị lại
     nó nghĩa là nói với họ rằng vẫn đang chờ, trong khi tiền đã thu xong.
     """
+    # Đề xuất đơn vị GIỮ NGUYÊN câu hằng số, không nhận câu đã ghi.
+    #
+    # Câu ấy mang một tên công ty và một con số tiền; `_waiting_proposal_view`
+    # dựng nó bằng mã đúng lý do đó. Nhận bản đã ghi ở đây sẽ vô hiệu hoá chính
+    # điều vừa làm — đo được trên canary: một lượt sinh nền ghi đè lại, và
+    # `response_state` trả về `FALLBACK` cho một câu lẽ ra là tất định.
+    if response.service_proposals or response.provider_rejection is not None:
+        return response
+
     stored = await _load_answer_safely(workflow_id)
-    if stored.get("for_status") != response.status:
+    if stored.get("for_status") != answer_key(
+        response.status,
+        response.approval_actor,
+        de_xuat_don_vi=bool(response.service_proposals),
+        tu_choi_don_vi=response.provider_rejection is not None,
+    ):
         return response
     return response.model_copy(
         update={
@@ -1521,13 +2531,54 @@ async def _with_stored_answer(response: DemoWorkflowResponse, workflow_id: str) 
     )
 
 
-async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
-    """Dựng một view công khai TỐI THIỂU từ database, đủ cho lớp trả lời.
+def _root_failure_code(record: dict[str, Any]) -> str | None:
+    """Mã lỗi GỐC của một workflow — kể cả khi nó hỏng giữa lúc chạy task.
 
-    Dùng khi `_DEMO_JOBS` không có gì — sau restart chẳng hạn. Không dựng lại
-    toàn bộ (event, plan): Response Agent chỉ cần trạng thái, các bước và câu
-    deterministic, và mỗi field thừa là một field nữa phải kiểm xem có rò gì
-    không.
+    `workflows.error_code` chỉ được ghi khi hỏng TRƯỚC lúc thực thi (lập kế
+    hoạch, kiểm tra đầu vào). Hỏng trong lúc chạy thì mã nằm ở
+    `workflow_tasks.error_code`, còn cột của workflow để trống.
+
+    Đo trên dữ liệu thật, 107 workflow FAILED chia đôi tuyệt đối:
+
+        wf có mã, task không có mã   102   ← hỏng lúc lập kế hoạch
+        wf THIẾU mã, task có mã        5   ← hỏng lúc THỰC THI
+
+    5/5, không phải ngẫu nhiên. Nghĩa là đúng loại hỏng có lý do cụ thể nhất —
+    "phương tiện này đã có chỗ đỗ trong ngày được chọn" — lại là loại người
+    dùng không bao giờ được nghe lý do. Họ nhận "Yêu cầu này dừng giữa chừng",
+    và vì `retryable` cũng None nên nhận thêm "gửi lại cũng sẽ hỏng như cũ" —
+    sai, vì đổi ngày là chạy được.
+
+    `DEPENDENCY_ERROR` bị đẩy xuống cuối: nó là HỆ QUẢ của một bước khác hỏng,
+    không phải nguyên nhân. Nói với người dùng "bước trước không thành công"
+    trong khi biết rõ bước nào và vì sao là giấu đi đúng thứ họ cần.
+    """
+    code = record["workflow"].get("error_code")
+    if code:
+        return code
+    rows = [row for row in (record.get("tasks") or []) if row.get("status") == "FAILED" and row.get("error_code")]
+    if not rows:
+        return None
+    rows.sort(key=lambda row: str(row.get("task_id") or ""))
+    causes = [row for row in rows if row["error_code"] != "DEPENDENCY_ERROR"]
+    return (causes or rows)[0]["error_code"]
+
+
+async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
+    """Dựng view công khai từ database, cho lớp trả lời khi `_DEMO_JOBS` trống.
+
+    Đây là đường mọi workflow đi sau restart, sau F5, và sau MỌI lần duyệt —
+    các route quyết định xoá cache rồi xin câu mới, nên chúng đến đây.
+
+    "Tối giản" từng là chủ ý ở đây, và nó sai: một view thiếu không làm câu trả
+    lời ngắn đi, nó làm câu trả lời SAI. Bỏ báo giá và `approval_actor` đi thì
+    tầng viết câu nhìn thấy các bước đều SUCCESS và kết luận việc đã xong — đo
+    được ngay sau khi đơn vị duyệt xong, guard phải loại câu với lý do "khẳng
+    định đã hoàn tất trong khi chưa hoàn tất".
+
+    Vì vậy nhánh chờ-quyết-định gọi CHÍNH hai builder mà đường polling gọi.
+    Hai đường dựng lại cùng một sự thật thì phải dùng chung một hàm; nếu không
+    chúng sẽ kể hai câu chuyện khác nhau về cùng một workflow.
     """
     try:
         record = await read_demo_workflow(workflow_id)
@@ -1537,23 +2588,204 @@ async def _public_view_from_db(workflow_id: str) -> DemoWorkflowResponse | None:
     if record is None:
         return None
 
-    database_status = record["workflow"]["status"]
-    status = (
-        "SUCCESS"
-        if database_status == "SUCCESS"
-        else (
-            "CANCELLED" if database_status == "CANCELLED" else ("FAILED" if database_status == "FAILED" else "RUNNING")
-        )
-    )
+    # `read_demo_workflow` KHÔNG trả `repair_hints` — nó chỉ đọc `workflows` và
+    # `workflow_tasks`. Đường polling tự nạp thêm (xem `_read_repair_hints`);
+    # đường này thì không, nên mọi phép kiểm "có câu hỏi nào đang treo không"
+    # ở dưới đều đọc phải một `record` rỗng và luôn trả False.
+    #
+    # Hậu quả đo được: `_has_open_repair` đã được đặt ở nhánh chờ-đơn-vị-duyệt
+    # từ trước, và nó im lặng không làm gì trên chính đường này. Poll và F5 kể
+    # hai câu chuyện khác nhau về cùng một yêu cầu.
+    #
+    # Hint là dữ liệu PHỤ TRỢ nên có error boundary riêng: đọc hỏng thì coi như
+    # không có, không được kéo theo phần dữ liệu chính.
+    try:
+        record["repair_hints"] = await _read_repair_hints(workflow_id)
+    except Exception:  # noqa: BLE001 - hint hỏng không được làm mất record
+        record["repair_hints"] = []
+
+    status = public_status_from_db(record["workflow"]["status"])
     plan = _plan_from_job_or_record(None, record)
+
+    # Đang chờ ai đó quyết → dùng CHÍNH hai builder mà đường polling dùng.
+    #
+    # Trước đây nhánh này tự dựng một view tối giản, và cái thiếu không vô hại:
+    # không có báo giá, không có `approval_actor`, nên tầng viết câu trả lời
+    # nhìn thấy hai bước SUCCESS và kết luận việc đã xong. Đo được sau khi đơn
+    # vị duyệt: "response agent bị loại (khẳng định đã hoàn tất trong khi chưa
+    # hoàn tất)" — model không bịa, nó được cho xem một bức tranh thiếu.
+    #
+    # Thứ tự khớp đường polling: thanh toán, rồi tham quan, rồi dịch vụ.
+    events = await _read_events(workflow_id)
+    # CÂU HỎI thắng thẻ thanh toán. Tiền là bước CUỐI, không phải cái cổng.
+    #
+    # Một yêu cầu nhiều dịch vụ có thể vừa có câu hỏi đang treo vừa có khoản
+    # chờ trả. Đo được nguyên văn — tham quan bị từ chối vì hết khung giờ, chỗ
+    # đỗ thì đã giữ được:
+    #
+    #     Bạn:    ok vậy đổi qua ngày 25
+    #     P-118:  Khoản này cần bạn xác nhận rõ ràng. Bạn bấm "Xác nhận…"
+    #     Bạn:    tôi muốn đổi ngày trước rồi sẽ thanh toán sau
+    #     P-118:  Mình chưa rõ ý bạn. Bạn muốn mình tiếp tục hay dừng lại?
+    #
+    # Không ô nào để nhập ngày mới, và mọi câu đều rơi vào cổng thanh toán.
+    # Khách gõ một câu hoàn toàn hợp lệ và hệ thống không có đường nào nhận nó.
+    #
+    # Nhường chỗ KHÔNG phải biến mất: `payment_quote` vẫn đi kèm response, nên
+    # khoản tiền vẫn đọc được và vẫn trả được. Đây là thứ tự HIỂN THỊ, không
+    # phải cổng duyệt — `pay_fee` vẫn nằm `WAITING_APPROVAL` và khoản duyệt vẫn
+    # `AWAITING` cho tới khi có một hành động không thể hiểu nhầm.
+    # Xung đột lịch → hiển thị trước thanh toán và đề xuất (đứng đầu).
+    # Đọc từ schedule_conflict_checks như đường polling.
+    if status == "WAITING_APPROVAL":
+        try:
+            _sc_repo = await acquire_repository()
+            _sc_pool = _sc_repo._pool  # noqa: SLF001
+            try:
+                _conflict = await load_conflict_check(_sc_pool, workflow_id)
+            finally:
+                await _sc_pool.close()
+            if _conflict is not None:
+                _svc_labels_cold = {
+                    "schedule_move": "Đăng ký chuyển nhà",
+                    "create_maintenance_request": "Yêu cầu bảo trì",
+                    "schedule_property_viewing": "Đặt lịch tham quan",
+                }
+                _svc_a = _conflict.get("service_a", "")
+                _svc_b = _conflict.get("service_b", "")
+                _task_a = ConflictTaskInfo(
+                    workflow_id=str(_conflict.get("workflow_id") or workflow_id),
+                    task_id=str(_conflict.get("task_id") or ""),
+                    service=_svc_a,
+                    service_label=_svc_labels_cold.get(_svc_a, _svc_a),
+                    datetime_display=f"{_conflict.get('date_a', '')} {_conflict.get('time_a', '')}".strip(),
+                )
+                _task_b = ConflictTaskInfo(
+                    workflow_id=str(_conflict.get("workflow_id_b") or workflow_id),
+                    task_id=str(_conflict.get("task_id_b") or ""),
+                    service=_svc_b,
+                    service_label=_svc_labels_cold.get(_svc_b, _svc_b),
+                    datetime_display=f"{_conflict.get('date_b', '')} {_conflict.get('time_b', '')}".strip(),
+                )
+                _conflict_action = ScheduleConflictAction(task_a=_task_a, task_b=_task_b, can_act=True)
+                _gap_cold = None
+                try:
+                    from src.orchestration.schedule_conflict import _minutes_between
+
+                    _gap_cold = _minutes_between(_conflict.get("time_a", ""), _conflict.get("time_b", ""))
+                except Exception:  # noqa: BLE001
+                    pass
+                _gap_str_cold = (
+                    f", cách nhau {_gap_cold} phút"
+                    if _gap_cold is not None and _gap_cold > 0
+                    else " cùng giờ"
+                    if _gap_cold == 0
+                    else ""
+                )
+                return DemoWorkflowResponse(
+                    workflow_id=workflow_id,
+                    status="WAITING_APPROVAL",
+                    stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+                    message=_STAGE_MESSAGES.get("WAITING_SCHEDULE_CONFLICT_CHECK"),
+                    summary=(
+                        f"Bạn đang có hai lịch trong cùng ngày{_gap_str_cold}: "
+                        f"{_task_a.service_label} lúc {_task_a.datetime_display} "
+                        f"và {_task_b.service_label} lúc {_task_b.datetime_display}. "
+                        "Bạn đã kiểm tra kỹ chưa? Mình có thể giúp bạn đổi một lịch, "
+                        "hoặc giữ nguyên nếu đây đúng là điều bạn muốn."
+                    ),
+                    customer_action=_conflict_action,
+                    plan=_plan_view(plan),
+                    tasks=_polling_task_views(plan, record),
+                    events=events,
+                    persisted=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("_public_view_from_db: khong doc duoc conflict (%s)", type(exc).__name__)
+
+    pending_payment = None if _has_open_repair(record) else await _load_pending_payment(workflow_id)
+    if pending_payment is not None:
+        return _waiting_approval_view(workflow_id, plan=plan, record=record, pending=pending_payment, events=events)
+    # Cùng luật với đường polling: câu hỏi dành cho khách thắng "đang chờ đơn
+    # vị". Hai đường dựng lại cùng một sự thật thì phải xếp hạng giống nhau;
+    # lệch nhau nghĩa là poll và F5 kể hai câu chuyện khác nhau.
+    # Loại chờ THỨ TƯ: khách còn phải CHỌN đơn vị. Đặt TRƯỚC hàng đợi duyệt vì
+    # cùng một luật đã viết ở nhánh dưới — việc cần KHÁCH làm luôn được nói
+    # trước việc cần ĐƠN VỊ làm. Ở đây luật ấy còn chặt hơn: khi đề xuất còn
+    # chờ thì hàng đợi đơn vị CHƯA có gì, nên hai nhánh không thể cùng đúng.
+    pending_proposals = await _load_pending_proposals(workflow_id)
+    if pending_proposals:
+        return _waiting_proposal_view(workflow_id, plan=plan, record=record, pending=pending_proposals, events=events)
+
+    # Loại chờ THỨ NĂM — cùng thứ hạng với đường `GET`. Hai đường dựng lại cùng
+    # một sự thật thì phải xếp hạng giống nhau.
+    rejection = None if _has_open_repair(record) else await _load_provider_rejection(workflow_id)
+    if rejection is not None:
+        return _waiting_reselection_view(workflow_id, plan=plan, record=record, rejection=rejection, events=events)
+
+    if not _has_open_repair(record):
+        pending_services = await _load_pending_services(workflow_id)
+        if pending_services:
+            return _waiting_service_view(workflow_id, plan=plan, record=record, pending=pending_services, events=events)
     tasks = _polling_task_views(plan, record)
+    # `error_code` phải đi cùng status.
+    #
+    # Nhánh này dựng response TỪ DATABASE — đúng đường mà mọi workflow đi sau
+    # khi backend restart, hoặc khi người dùng mở lại một yêu cầu cũ. Bỏ
+    # `error_code` ở đây nghĩa là trang chi tiết biết việc đã hỏng mà không biết
+    # vì sao, và câu duy nhất nó nói được là "Chưa xong".
+    # Phân loại qua `failure_for_code`, KHÔNG dựng bảng thứ hai. "Lỗi này có
+    # thử lại được không" đã có đúng một câu trả lời trong `common/failures.py`;
+    # thêm một bảng nữa ở tầng API là thêm một chỗ để hai bên nói khác nhau, và
+    # cái sai sẽ im lặng — nó chỉ đổi một câu chữ trên màn hình.
+    #
+    # Mã lạ (ghi bởi phiên bản cũ hơn) trả None thay vì đoán: đoán sai
+    # `retryable` sẽ mời người dùng thử lại một việc không bao giờ chạy được.
+    root_code = _root_failure_code(record)
+    failure = failure_for_code(root_code)
+
+    # Câu tóm tắt của một workflow hỏng phải nói VÌ SAO, lấy từ chính bước hỏng.
+    #
+    # `failure_for_code` chỉ biết mã HẠ TẦNG (database, provider, LLM). Mã
+    # nghiệp vụ do connector trả về — `BOOKING_ALREADY_EXISTS`,
+    # `VEHICLE_ALREADY_EXISTS`, `SLOT_UNAVAILABLE` — không nằm trong sổ ấy, nên
+    # `failure` là None và tóm tắt rơi về câu mặc định. Người dùng đọc được
+    # "Yêu cầu này dừng giữa chừng" cho một sự việc mà hệ thống biết chính xác:
+    # phương tiện này đã có chỗ đỗ trong ngày được chọn.
+    #
+    # Không dựng bảng câu chữ thứ hai ở đây. Câu đúng ĐÃ được `_polling_task_views`
+    # tính cho bước hỏng, từ `failure_messages.py` — nguồn duy nhất. Lấy lại
+    # đúng câu ấy.
+    summary = _DEFAULT_BASELINE.get(status) if status in {"SUCCESS", "FAILED", "CANCELLED"} else None
+    if status == "FAILED" and root_code:
+        cause = next(
+            (view for view in tasks if view.status == "FAILED" and view.error_code == root_code),
+            None,
+        )
+        if cause is not None and cause.message:
+            summary = cause.message
+
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status=status,
         message=_DEFAULT_BASELINE.get(status),
-        summary=_DEFAULT_BASELINE.get(status) if status in {"SUCCESS", "FAILED", "CANCELLED"} else None,
+        summary=summary,
+        # Workspace dựng tiêu đề và bộ đếm từ plan. Nhánh đọc DB là đường sau
+        # payment decision, F5 và mở từ Lịch sử; bỏ plan ở đây khiến workflow
+        # SUCCESS vẫn hiện "Đang chuẩn bị… · 0/0" dù tasks đã đầy đủ.
+        plan=_plan_view(plan),
         tasks=tasks,
         persisted=True,
+        # Dòng thời gian đọc từ `workflow_events`, không phải từ RAM — đây là
+        # đường mọi yêu cầu cũ trong Lịch sử đi qua.
+        events=events,
+        # Gửi mã GỐC kể cả khi sổ hạ tầng không biết nó — giấu mã đi thì giao
+        # diện không còn gì để phân biệt hai kiểu hỏng khác hẳn nhau.
+        error_code=failure.code if failure else root_code,
+        # `retryable` thì KHÔNG đoán. Đoán sai theo hướng "thử lại được" mời
+        # người dùng lặp lại một việc không bao giờ chạy; đoán sai theo hướng
+        # ngược lại bảo họ bỏ cuộc trong khi chỉ cần đổi ngày.
+        retryable=failure.retryable if failure else None,
     )
 
 
@@ -1567,6 +2799,67 @@ async def _claim_answer_safely(workflow_id: str, for_status: str) -> bool:
     except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
         logger.info("không chốt được quyền sinh câu trả lời (%s)", type(exc).__name__)
         return False
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _persist_chat_turn(
+    workflow_id: str,
+    *,
+    goal: str,
+    reply: str,
+    owner_user_id: str | None,
+    session_id: str | None,
+    parent_workflow_id: str | None,
+) -> None:
+    """Ghi một lượt trò chuyện xuống PostgreSQL như mọi lượt khác.
+
+    Lane small-talk trước đây chỉ sống trong `_DEMO_JOBS`. Nó vẫn trả về một
+    `workflow_id`, và giao diện điều hướng sang id đó — nơi `GET` trả 404, nên
+    màn hình trắng và cả cuộc hội thoại biến mất. Đo được: gõ một câu ở khung
+    chat rồi nhấn Enter, trang nhảy sang `/workflow/19a713c4…` và 2 lượt trước
+    đó không còn dòng nào.
+
+    Ghi ở đây cũng là thứ duy nhất giữ được "toàn bộ lịch sử từ đầu đến cuối":
+    một lượt chỉ nằm trong RAM thì mất khi restart, và không bao giờ xuất hiện
+    trong danh sách phiên.
+
+    Best-effort: ghi hỏng thì câu trả lời VẪN được trả về. Lưu lại là để đọc
+    lại sau, không phải điều kiện để nói chuyện.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.create_workflow(
+            {
+                "id": workflow_id,
+                "goal": goal,
+                # Câu hỏi đã được trả lời — không còn gì để chạy. Để PENDING thì
+                # sweeper coi là tiến trình mồ côi và biến nó thành FAILED.
+                "status": WorkflowStatus.SUCCESS.value,
+                "owner_user_id": owner_user_id,
+                "session_id": session_id,
+                "parent_workflow_id": parent_workflow_id,
+            }
+        )
+        await repository.save_assistant_response(
+            workflow_id,
+            answer=reply,
+            suggestions=[],
+            # Tên tham số là `state`, KHÔNG phải `response_state`. Bản đầu gọi
+            # sai tên, `TypeError` rơi vào chính khối `except` bên dưới và chỉ
+            # để lại một dòng `info` — nên bản ghi được tạo, câu trả lời thì
+            # không, và không có gì báo hiệu. Đo được: `assistant_answer IS
+            # NULL` trên đúng lượt vừa hiện ra màn hình.
+            state="READY",
+            for_status="CHAT",
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        # `warning`, không phải `info`: khối này bắt cả sự cố database lẫn lỗi
+        # lập trình (gọi sai tên tham số). Cái sau im lặng thì hỏng lặng lẽ.
+        logger.warning("không ghi được lượt trò chuyện (%s)", type(exc).__name__)
     finally:
         if pool is not None:
             await pool.close()
@@ -1602,7 +2895,12 @@ async def _load_answer_safely(workflow_id: str) -> dict[str, Any]:
 async def _refresh_answer_from_db(job: dict[str, Any], workflow_id: str, current: DemoWorkflowResponse) -> None:
     """Lấy câu đã ghi cho ĐÚNG trạng thái hiện tại vào cache."""
     stored = await _load_answer_safely(workflow_id)
-    if stored.get("for_status") != current.status or not stored.get("answer"):
+    if stored.get("for_status") != answer_key(
+        current.status,
+        current.approval_actor,
+        de_xuat_don_vi=bool(current.service_proposals),
+        tu_choi_don_vi=current.provider_rejection is not None,
+    ) or not stored.get("answer"):
         return
     if job.get("response") is current:
         job["response"] = current.model_copy(
@@ -1612,6 +2910,25 @@ async def _refresh_answer_from_db(job: dict[str, Any], workflow_id: str, current
                 "response_state": stored.get("state"),
             }
         )
+
+
+async def _trusted_state_safely(owner_user_id: Any) -> str:
+    """ "resident" hay "prospect", đọc từ `user_resident_links` VERIFIED.
+
+    Dùng chung nguồn với `_capability_names_safely` — hai đường trả lời câu
+    "tài khoản này được dùng gì" mà đọc hai nguồn khác nhau là hai cách để
+    lệch. Lỗi đọc trả về "prospect": câu trả lời hẹp hơn sự thật thì người dùng
+    hỏi lại, câu rộng hơn thì họ bị từ chối sau khi đã gõ xong.
+    """
+    if not owner_user_id:
+        return "prospect"
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        return "resident" if await get_verified_identity(pool, owner_user_id) else "prospect"
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không đọc được quyền cho snapshot (%s)", type(exc).__name__)
+        return "prospect"
 
 
 async def _capability_names_safely(owner_user_id: Any) -> list[str]:
@@ -1639,13 +2956,59 @@ async def _capability_names_safely(owner_user_id: Any) -> list[str]:
     return [item.name for item in _CAPABILITY_CATALOGUE if is_resident or not item.requires_resident]
 
 
-async def _speak(response: DemoWorkflowResponse, *, goal: str, capabilities: list[str]) -> DemoWorkflowResponse:
+# Dấu hiệu một câu hỏi lại được dựng bởi `repair_question`, không phải bởi
+# nhánh thiếu thông tin.
+#
+# Nhận diện bằng NỘI DUNG chứ không bằng một cờ trong response: cờ phải đi qua
+# `DemoWorkflowResponse`, qua database, qua cả đường dựng lại sau restart — bốn
+# chỗ để quên đồng bộ. Điểm chung của mọi câu sửa lỗi là chúng nêu LÝ DO,
+# và tập lý do đó là đóng (`failure_messages.repair_question`).
+_REPAIR_QUESTION_MARKERS = ("hết chỗ", "kín lịch", "đã có chỗ đỗ", "đã được đăng ký", "đã được đăng ký trước đó")
+
+
+def _is_repair_question(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.casefold()
+    return any(marker in lowered for marker in _REPAIR_QUESTION_MARKERS)
+
+
+async def _speak(
+    response: DemoWorkflowResponse,
+    *,
+    goal: str,
+    capabilities: list[str],
+    recalled: list[dict[str, Any]] | None = None,
+    session_id: str | None = None,
+    facts: dict[str, Any] | None = None,
+) -> DemoWorkflowResponse:
     """Gắn câu trả lời tự nhiên vào response. Không bao giờ raise.
 
     Chỉ gọi ở ĐIỂM DỪNG — lúc workflow đã kết thúc hoặc đang chờ người dùng.
     Gọi ở mỗi lượt poll sẽ tốn một request LLM mỗi 1.5 giây cho một trạng thái
     không đổi.
     """
+    # Câu SỬA LỖI không được diễn đạt lại.
+    #
+    # `repair_question` mang những dữ kiện mà Response Agent không có cách nào
+    # biết: khu nào kín, ngày nào, khu nào còn trống. Đo được nguyên văn trên
+    # stack thật, cùng một workflow, hai câu cùng tồn tại:
+    #
+    #   question         "Khu A đã hết chỗ ngày 2026-08-19. Bạn thử Khu B
+    #                     hoặc chọn ngày khác giúp mình nhé."
+    #   assistant_answer "Bạn ơi, mình cần biết thêm khu vực đỗ xe bạn muốn là
+    #                     Khu A hay Khu B để hoàn tất đăng ký nhé."
+    #
+    # Giao diện ưu tiên `answer`, nên người dùng chỉ đọc câu thứ hai — và họ đã
+    # nói Khu A rồi, nên họ trả lời Khu A lần nữa, rồi hỏng y hệt. Đúng vòng
+    # lặp mà `repair_question` được viết ra để phá, tái xuất hiện ở một tầng
+    # khác: lần này không phải dùng nhầm câu, mà là để model viết lại câu đúng.
+    #
+    # Bỏ qua luôn lượt gọi model ở đây cũng tiết kiệm một request — tầng trả
+    # lời trung bình 1.469 ms, không nhiều, nhưng nó không mua được gì cả.
+    if response.status == "NEEDS_INFORMATION" and _is_repair_question(response.question):
+        return response.model_copy(update={"answer": response.question})
+
     usage_logger = LlmUsageLogger()
     # Theo dõi token/cost riêng cho lớp trả lời. Không tách stage thì mọi chi
     # phí dồn vào "plan", và không ai biết lớp diễn đạt đang tốn bao nhiêu —
@@ -1653,10 +3016,27 @@ async def _speak(response: DemoWorkflowResponse, *, goal: str, capabilities: lis
     usage_token = usage_context(workflow_id=response.workflow_id, stage="respond")
     try:
         agent = ResponseAgent(
-            get_llm(callbacks=[usage_logger]),
+            # `fast=True`: TẮT suy luận nội bộ. Tầng này chỉ kể lại dữ liệu đã
+            # được Validator và Executor xác minh — nó không quyết định gì, nên
+            # không cần nghĩ.
+            #
+            # Đo được: trung vị 3.6s → 1.3s, p90 11.8s → 1.6s, chất lượng không
+            # đổi (0/10 rơi về câu nền, 10/10 câu khác nhau, ở cả hai chế độ).
+            # `llm_usage` cho thấy vì sao: tầng này đang sinh 1.535 token cho
+            # một câu ~50 token.
+            #
+            # Planner KHÔNG được đặt cờ này — xem `get_llm()`.
+            get_llm(callbacks=[usage_logger], fast=True),
             structured_output_method=structured_output_method(),
         )
-        view = _reply_view(response, goal=goal, capabilities=capabilities)
+        view = _reply_view(
+            response,
+            goal=goal,
+            capabilities=capabilities,
+            recalled=recalled,
+            session_id=session_id,
+            facts=facts,
+        )
         reply = await agent.reply(view)
         # `ResponseAgent.reply()` fail-closed về baseline khi provider lỗi hoặc
         # output bị guard loại. Thử đúng MỘT lần nữa: model không tất định và
@@ -1674,6 +3054,76 @@ async def _speak(response: DemoWorkflowResponse, *, goal: str, capabilities: lis
         reset_usage_context(usage_token)
         await usage_logger.flush()
     return response.model_copy(update={"answer": reply.answer, "suggestions": list(reply.suggestions)})
+
+
+async def _enforce_daily_quota(user: dict) -> None:
+    """Chặn khi người dùng đã tạo quá nhiều workflow trong cửa sổ ngày.
+
+    Khoá theo `owner_user_id`, KHÔNG theo IP. `RateLimitMiddleware` đã khoá theo
+    IP và nó chặn đúng thứ khác: bùng phát tức thời. IP đổi được — tài khoản thì
+    không, và hoá đơn LLM thuộc về tài khoản.
+
+    Chỉ áp cho lane DỊCH VỤ. Lời chào và câu hỏi năng lực không tạo workflow và
+    gần như không tốn gì; chặn "xin chào" bằng một câu về hạn mức là vô lý.
+
+    Fail-OPEN khi database lỗi: hạn ngạch là biện pháp giữ chi phí, không phải
+    biện pháp an toàn. Từ chối một người dùng hợp lệ vì một truy vấn đếm hỏng là
+    đổi một vấn đề nhỏ lấy một vấn đề lớn hơn.
+    """
+    settings = get_settings()
+    quota = settings.daily_workflow_quota
+    if quota <= 0:
+        return
+
+    hours = settings.daily_quota_window_hours
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            usage = await repository.usage_since(owner_user_id=str(user["id"]), hours=hours)
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - xem docstring: fail-open
+        logger.warning("không đếm được hạn ngạch ngày; cho request đi tiếp")
+        return
+
+    if usage["da_dung"] < quota:
+        return
+
+    # Nói RÕ khi nào dùng lại được. "Thử lại sau" mà không nói khi nào thì người
+    # dùng chỉ còn cách bấm lại liên tục để dò — đúng thứ hạn ngạch định chặn.
+    noi_luc = usage.get("noi_luc")
+    khi_nao = f" Bạn dùng tiếp được sau {noi_luc.strftime('%H:%M ngày %d/%m')}." if noi_luc else ""
+    logger.info("chặn theo hạn ngạch ngày user=%s da_dung=%d", user["username"], usage["da_dung"])
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            f"Bạn đã tạo {usage['da_dung']} yêu cầu trong {hours} giờ qua, chạm giới hạn "
+            f"{quota} yêu cầu mỗi ngày.{khi_nao}"
+        ),
+    )
+
+
+async def _archive_unsupported_workflow(workflow_id: str) -> None:
+    """Ẩn workflow của một yêu cầu ngoài phạm vi. Best-effort, không bao giờ raise.
+
+    Ẩn thất bại thì tệ nhất là còn một dòng thừa trong Lịch sử — không đáng để
+    làm hỏng một lượt trả lời vốn đã thành công.
+    """
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE workflows SET archived_at = NOW(), updated_at = NOW() "
+                    "WHERE workflow_id = $1::uuid AND archived_at IS NULL",
+                    workflow_id,
+                )
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - chỉ là dọn màn hình
+        logger.warning("không ẩn được workflow ngoài phạm vi khỏi lịch sử")
 
 
 async def _mark_workflow_failed_safely(workflow_id: str, error_code: str) -> None:
@@ -1729,6 +3179,34 @@ async def _load_failure_code(workflow_id: str) -> str | None:
     finally:
         if pool is not None:
             await pool.close()
+
+
+async def _save_clarification_safely(
+    workflow_id: str,
+    *,
+    session_id: str | None,
+    goal: str,
+    missing_fields: list[str],
+    existing_context: dict[str, Any],
+) -> None:
+    """Ghi lại hồ sơ câu hỏi với phần CÒN THIẾU. Lỗi ghi không làm hỏng lượt.
+
+    Ghi hỏng thì người dùng phải nói lại ô vừa nói — khó chịu, nhưng không mất
+    gì. Ném lỗi lên thì họ mất cả câu trả lời lẫn lượt hỏi.
+    """
+    try:
+        repository = await acquire_repository()
+        await repository.save_clarification(
+            workflow_id,
+            session_id=session_id,
+            parent_workflow_id=None,
+            goal=goal,
+            missing_fields=list(missing_fields),
+            question=None,
+            existing_context=dict(existing_context),
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("không ghi lại được câu hỏi còn dở (%s)", type(exc).__name__)
 
 
 async def _consume_clarification(workflow_id: str) -> dict[str, Any] | None:
@@ -1822,6 +3300,74 @@ async def _read_repair_hints(workflow_id: str) -> list[dict]:
             await pool.close()
 
 
+async def _read_events(workflow_id: str) -> list[DemoWorkflowEvent]:
+    """Dòng thời gian đã ghim, đọc lại từ database.
+
+    Đường này là thứ duy nhất còn dữ liệu sau khi backend khởi động lại —
+    `_DEMO_JOBS` trống, nên `_public_events(job)` trả rỗng.
+
+    Đọc hỏng thì trả rỗng: dòng thời gian là dữ liệu phụ trợ, không được kéo
+    theo phần dữ liệu chính.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await repository.get_events(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.info("không đọc được dòng thời gian (%s)", type(exc).__name__)
+        return []
+    finally:
+        if pool is not None:
+            await pool.close()
+    out: list[DemoWorkflowEvent] = []
+    for row in rows:
+        try:
+            out.append(DemoWorkflowEvent.model_validate(dict(row)))
+        except Exception:  # noqa: BLE001 - một dòng hỏng không làm mất cả danh sách
+            continue
+    return out
+
+
+async def _persist_events(workflow_id: str, job: dict[str, Any] | None) -> None:
+    """Ghim dòng thời gian giai đoạn xuống database.
+
+    `_append_job_event` là hàm SYNC (nó chạy trong callback không có async
+    context), nên nó chỉ gom vào `job["events"]` — bộ nhớ tiến trình. Mỗi lần
+    backend khởi động lại là mất sạch, và mọi yêu cầu cũ mở lại từ Lịch sử đều
+    có mục "Chi tiết xử lý" trống.
+
+    Gọi ở ĐIỂM DỪNG, không phải mỗi lần đổi giai đoạn: một workflow phát 6–10
+    sự kiện, ghim từng cái là 6–10 lượt mở pool. Ở điểm dừng thì ghim cả danh
+    sách một lượt, và `ON CONFLICT DO NOTHING` khiến lần ghim sau chỉ thêm phần
+    mới.
+
+    KHÔNG bao giờ raise: dòng thời gian là dữ liệu phụ trợ. Ghim hỏng thì mất
+    một mục hiển thị, còn ném lỗi ra caller thì hỏng cả workflow.
+    """
+    events = (job or {}).get("events") or []
+    if not events:
+        # Không có gì để ghim cũng là một tin: nghĩa là không giai đoạn nào
+        # được phát ra cho workflow này.
+        logger.warning("không có sự kiện nào để ghim cho %s", workflow_id[:8])
+        return
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        await repository.append_events(workflow_id, [{k: v for k, v in e.items() if k != "signature"} for e in events])
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        # `warning`: dòng thời gian mất là mất luôn mọi dấu vết của giai
+        # đoạn — không "Chi tiết xử lý", không câu báo tiến trình, và sau
+        # restart thì yêu cầu cũ trông như chưa từng chạy bước nào. Ghi ở
+        # mức `info` nghĩa là log ứng dụng (chạy trên INFO) nuốt sạch, và
+        # cả lớp này hỏng ngầm — đo được 0 sự kiện suốt 6 giờ.
+        logger.warning("không ghim được dòng thời gian (%s)", type(exc).__name__)
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
 async def _persist_repair_hints(workflow_id: str, repair_hints: dict[str, RepairHint]) -> None:
     """Persist hint generic {error_code, message} — KHÔNG có field/input echo."""
     repository = await acquire_repository()
@@ -1871,10 +3417,27 @@ async def _load_parent_success_context(workflow_id: str) -> dict[str, Any]:
 def _build_repair_state_from_record(record: dict[str, Any]) -> dict[str, Any]:
     """Dựng state cần thiết cho `_demo_response` khi poll/continue từ DB.
 
-    Trả state với repair_hints generic + plan từ workflow.task_plan để
-    `_demo_response` có thể map error_code + task.tool → missing_fields.
+    Trả state với repair_hints generic + plan để `_demo_response` map
+    error_code + task.tool → missing_fields.
+
+    Kế hoạch dựng từ CÁC DÒNG TASK, không từ `workflows.task_plan`.
+    `task_plan` là snapshot GHI-MỘT-LẦN của lượt lập kế hoạch đầu tiên, nên nó
+    không bao giờ chứa những lần thử sinh ra sau đó. Đo được: đơn vị từ chối
+    Khu B (một lần thử mới, `T2R2`), hint ghi đúng, và `_demo_response` không
+    tìm thấy `T2R2` trong snapshot nên trả `missing_fields` RỖNG — màn hình mất
+    hẳn ô nhập khu ở đúng lần từ chối thứ hai.
+
+    Các dòng task là sự thật SỐNG: chúng có mọi lần thử, kèm input thật của
+    từng lần. Rơi về snapshot khi chưa có dòng nào để giữ đường cũ hoạt động.
     """
-    plan = _plan_from_job_or_record(None, record)
+    from src.orchestration.demo_service import _plan_from_task_rows
+
+    rows_for_plan = record.get("tasks") or []
+    plan = (
+        _plan_from_task_rows((record.get("workflow") or {}).get("goal") or "", rows_for_plan)
+        if rows_for_plan
+        else _plan_from_job_or_record(None, record)
+    )
     tasks = {row["task_id"]: row for row in record.get("tasks", [])}
     task_results: dict[str, Any] = {}
     for task_id, row in tasks.items():
@@ -1910,12 +3473,12 @@ async def chat(http_request: Request, request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=422, detail="Tin nhắn không được để trống.")
 
     small_talk = classify(message)
+
     if isinstance(small_talk, SmallTalk):
         if small_talk.speech_type == SpeechType.CAPABILITY:
-            base_url = str(http_request.base_url).rstrip("/")
             capability = await answer_capability_question(
                 message,
-                base_url=base_url,
+                capabilities=_capability_dicts(),
                 account_state="prospect",
             )
             reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
@@ -1962,8 +3525,7 @@ _RESIDENT_SERVICE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _LINK_REQUIRED_TEMPLATE = (
-    "{service} chỉ dành cho cư dân đã liên kết căn hộ, nên mình chưa thực hiện được. "
-    "Bạn vào mục Liên kết căn hộ để gửi yêu cầu; ban quản lý duyệt xong là mình hỗ trợ ngay."
+    "{service} chỉ dành cho cư dân đã xác minh căn hộ, nên mình chưa thực hiện được. " + LINK_REQUIRED_ACTION
 )
 
 
@@ -2064,18 +3626,70 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                 # biết khu nào — họ sẽ trả lời "Khu A" lần nữa và lại hỏng.
                 code = getattr(first_hint.error_code, "value", first_hint.error_code)
                 question = repair_question(task.tool, str(code), dict(task.input))
+
+                # LÝ DO đứng trước, HƯỚNG DẪN đứng sau.
+                #
+                # Khi đơn vị từ chối vì hết chỗ, `hint.message` chính là câu họ
+                # viết cho khách — thứ duy nhất giải thích được "vì sao". Nó
+                # phải đi qua `question`, không phải qua `assistant_answer`:
+                # câu chốt kia do Response Agent sinh và được ghi đè ở lượt sinh
+                # tiếp theo. Đo được trên stack thật — lý do của đơn vị nằm đúng
+                # trong database, câu chốt bị thay bằng một bản tóm tắt của mô
+                # hình, và khách không bao giờ đọc được nó.
+                #
+                # `question` thì dựng lại từ hint ở MỌI lượt GET, nên nó sống
+                # sót qua poll, qua F5 và qua restart.
+                ly_do = (getattr(first_hint, "message", "") or "").strip()
+                huong_dan = question or _follow_up_validation_message(missing_fields)
+                if ly_do and ly_do not in huong_dan:
+                    huong_dan = f"{ly_do} {huong_dan}".strip()
                 return DemoWorkflowResponse(
                     status="NEEDS_INFORMATION",
-                    question=question or _follow_up_validation_message(missing_fields),
+                    question=huong_dan,
                     missing_fields=missing_fields,
                     plan=plan_view,
                 )
+
+    # Câu HỎI được xét TRƯỚC mọi nhánh chính sách.
+    #
+    # Đo được: "phí gửi xe ô tô một tháng khoảng bao nhiêu" có chữ "gửi xe" nên
+    # `_resident_link_required_message` nhận là dịch vụ cư dân và trả về
+    # "Bạn cần xác minh căn hộ trước mới xem được phí gửi xe."
+    #
+    # Nhưng họ có yêu cầu gửi xe đâu — họ hỏi giá. Chặn quyền là đúng khi ai đó
+    # muốn LÀM một việc; chặn một câu hỏi thì chỉ là từ chối nói chuyện. Planner
+    # đã phân loại xong, và phân loại đó phải thắng.
+    if state.get("planner_status") == "QUESTION":
+        # `status="CHAT"` để frontend coi là điểm dừng và ngừng poll; `stage`
+        # mới là thứ phân biệt với small-talk. Hai thứ này KHÔNG thay nhau
+        # được: small-talk đã có sẵn câu trả lời, còn ở đây câu trả lời chưa
+        # được viết — và `_human_status("CHAT")` dịch thành "đã trả lời", nên
+        # model được bảo là xong việc rồi và nó nói đúng như thế:
+        # "mình đã gửi thông tin cho bạn rồi nhé", "bạn kéo lên xem lại".
+        return DemoWorkflowResponse(status="CHAT", stage="QUESTION", plan=plan_view)
 
     # Chưa liên kết căn hộ mà hỏi dịch vụ cư dân: nói đúng lý do, bất kể lỗi
     # xuất hiện ở nhánh nào phía dưới — nguyên nhân vẫn là một.
     link_required = _resident_link_required_message(state)
     if link_required is not None and not state.get("plan_validated"):
-        return DemoWorkflowResponse(status="EXECUTION_ERROR", summary=link_required, plan=plan_view)
+        # `ACTION_DENIED`, KHÔNG phải một mã lỗi hệ thống.
+        #
+        # Đây là từ chối vì thiếu quyền, không phải hỏng hóc. Không có mã riêng
+        # thì hai thứ khác hẳn nhau bị gộp làm một:
+        #
+        #   - database ghi `UNKNOWN_EXTERNAL_ERROR` cho một quyết định hoàn
+        #     toàn bình thường của hệ thống;
+        #   - prompt dịch `EXECUTION_ERROR` thành "đã dừng lại vì lỗi", nên
+        #     model viết "Quy trình đang tạm dừng vì lỗi ở một số bước" cho một
+        #     tài khoản chỉ đơn giản là chưa xác minh căn hộ. Người dùng đi tìm
+        #     một sự cố không tồn tại thay vì đi xác minh căn hộ.
+        return DemoWorkflowResponse(
+            status="EXECUTION_ERROR",
+            summary=link_required,
+            error_code=ErrorCode.ACTION_DENIED.value,
+            retryable=False,
+            plan=plan_view,
+        )
 
     if state.get("planning_error"):
         return DemoWorkflowResponse(
@@ -2084,10 +3698,19 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             plan=plan_view,
         )
     if state.get("planner_status") == "NEEDS_INFORMATION":
+        missing = list(state.get("missing_fields") or [])
+        question = state.get("question")
+        # Khách ĐÃ nêu một khu, chỉ là khu đó không có. Câu hỏi mặc định của
+        # Planner nói "mình cần thêm thông tin" — đọc lên thành "bạn chưa nói
+        # gì cả", nên họ gõ lại đúng câu vừa gõ và vòng lặp khép lại.
+        if "parking_zone" in missing:
+            zone = _unknown_zone(state.get("goal"))
+            if zone is not None:
+                question = _unknown_zone_message(zone)
         return DemoWorkflowResponse(
             status="NEEDS_INFORMATION",
-            question=state.get("question"),
-            missing_fields=list(state.get("missing_fields") or []),
+            question=question,
+            missing_fields=missing,
             plan=plan_view,
         )
     if state.get("clarification_error"):
@@ -2164,6 +3787,112 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
             approval_actor="PROVIDER",
             plan=plan_view,
         )
+    if policy_error == "PROVIDER_PROPOSAL_REQUIRED":
+        # Chờ CHÍNH KHÁCH chọn đơn vị. Không phải chờ đơn vị duyệt, và câu chữ
+        # phải nói đúng ai: bảo "đơn vị đang xác nhận" lúc này là nói sai hai
+        # lần — không ai bên kia nhận được việc, và khách thì đang được bảo là
+        # không phải làm gì trong khi họ là người duy nhất còn phải làm.
+        de_xuat = list((state.get("policy_context") or {}).get("provider_proposals") or [])
+        cau = cau_de_xuat_don_vi(de_xuat)
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            workflow_id=state.get("workflow_id"),
+            summary=cau,
+            # Hằng số, không do model soạn — xem `_waiting_proposal_view`.
+            answer=cau,
+            response_state="READY",
+            **_khoi_de_xuat(de_xuat),
+            # KHÁCH quyết định. Giao diện đọc trường này để dựng nút xác nhận —
+            # và để KHÔNG dựng màn hình chờ đơn vị.
+            approval_actor="USER",
+            plan=plan_view,
+        )
+    if policy_error == "SCHEDULE_CONFLICT_REQUIRED":
+        ctx = state.get("policy_context") or {}
+        svc_labels = {
+            "schedule_move": "Đăng ký chuyển nhà",
+            "create_maintenance_request": "Yêu cầu bảo trì",
+            "schedule_property_viewing": "Đặt lịch tham quan",
+        }
+        svc_a = ctx.get("conflict_service_a", "")
+        svc_b = ctx.get("conflict_service_b", "")
+        date_a, time_a = ctx.get("conflict_date_a", ""), ctx.get("conflict_time_a", "")
+        date_b, time_b = ctx.get("conflict_date_b", ""), ctx.get("conflict_time_b", "")
+        task_a = ConflictTaskInfo(
+            workflow_id=state.get("workflow_id") or "",
+            task_id=ctx.get("conflict_task_id", ""),
+            service=svc_a,
+            service_label=svc_labels.get(svc_a, svc_a),
+            datetime_display=f"{date_a} {time_a}".strip(),
+        )
+        task_b = ConflictTaskInfo(
+            workflow_id=ctx.get("conflict_workflow_b", ""),
+            task_id=ctx.get("conflict_task_b", ""),
+            service=svc_b,
+            service_label=svc_labels.get(svc_b, svc_b),
+            datetime_display=f"{date_b} {time_b}".strip(),
+        )
+        conflict_action = ScheduleConflictAction(task_a=task_a, task_b=task_b, can_act=True)
+        _gap_inline = None
+        try:
+            from src.orchestration.schedule_conflict import _minutes_between
+
+            _gap_inline = _minutes_between(time_a, time_b)
+        except Exception:  # noqa: BLE001
+            pass
+        _gap_str_inline = (
+            f", cách nhau {_gap_inline} phút"
+            if _gap_inline is not None and _gap_inline > 0
+            else " cùng giờ"
+            if _gap_inline == 0
+            else ""
+        )
+        summary = (
+            f"Bạn đang có hai lịch trong cùng ngày{_gap_str_inline}: "
+            f"{task_a.service_label} lúc {task_a.datetime_display} "
+            f"và {task_b.service_label} lúc {task_b.datetime_display}. "
+            "Bạn đã kiểm tra kỹ chưa? Mình có thể giúp bạn đổi một lịch, "
+            "hoặc giữ nguyên nếu đây đúng là điều bạn muốn."
+        )
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+            workflow_id=state.get("workflow_id"),
+            summary=summary,
+            customer_action=conflict_action,
+            plan=plan_view,
+        )
+    if policy_error == "SERVICE_APPROVAL_REQUIRED":
+        # Chờ ĐƠN VỊ nhận việc — không phải lỗi, và không có khoản tiền nào để
+        # khách bấm xác nhận. Không có nhánh này thì mọi yêu cầu dịch vụ rơi
+        # xuống `EXECUTION_ERROR` bên dưới: hàng đợi duyệt đầy hồ sơ AWAITING
+        # trong khi khách được báo là yêu cầu đã hỏng.
+        labels = [SERVICE_LABELS.get(tool, tool) for tool in gated_tasks(plan).values()] if plan else []
+        return DemoWorkflowResponse(
+            status="WAITING_APPROVAL",
+            workflow_id=state.get("workflow_id"),
+            summary=(
+                "Mình đã gửi yêu cầu tới đơn vị cung cấp dịch vụ ("
+                + ", ".join(labels)
+                + "). Đơn vị đang xác nhận, bạn chờ chút nhé."
+                if labels
+                else "Mình đã gửi yêu cầu tới đơn vị cung cấp dịch vụ. Đơn vị đang xác nhận, bạn chờ chút nhé."
+            ),
+            # ĐƠN VỊ quyết, không phải khách. Giao diện đọc trường này để KHÔNG
+            # dựng nút xác nhận thanh toán.
+            approval_actor="PROVIDER",
+            plan=plan_view,
+        )
+    if policy_error == "SCHEDULE_CONFLICT_PERSISTENCE_ERROR":
+        # Lỗi hệ thống khi lưu conflict check — không phải pause chờ user.
+        # Trả error_code tường minh trong response; caller async sẽ ghim FAILED vào DB.
+        return DemoWorkflowResponse(
+            status="EXECUTION_ERROR",
+            workflow_id=state.get("workflow_id"),
+            error_code="SCHEDULE_CONFLICT_PERSISTENCE_ERROR",
+            summary="Có lỗi hệ thống khi lưu kiểm tra xung đột lịch. Yêu cầu chưa được thực hiện.",
+            plan=plan_view,
+        )
     if policy_error is not None:
         return DemoWorkflowResponse(status="EXECUTION_ERROR", plan=plan_view)
     if state.get("execution_error"):
@@ -2174,6 +3903,12 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
         return DemoWorkflowResponse(status="EXECUTION_ERROR", plan=plan_view)
 
     task_results = state.get("task_results", {})
+    # Kết quả của MỌI task, để giải InputRef của bước thanh toán.
+    live_results = {
+        task_id: value.data
+        for task_id, value in task_results.items()
+        if getattr(value, "success", False) and isinstance(getattr(value, "data", None), dict)
+    }
     task_views = []
     for task in plan.tasks if plan is not None else []:
         result = task_results.get(task.task_id)
@@ -2189,7 +3924,7 @@ def _demo_response(state: dict[str, Any], payment_approved: bool) -> DemoWorkflo
                 )
             )
         elif result.success:
-            title, message, details = _task_presentation(task, result)
+            title, message, details = _task_presentation(task, result, live_results)
             task_views.append(
                 DemoTaskResult(
                     task_id=task.task_id,
@@ -2301,6 +4036,67 @@ async def start_demo_workflow(
     `_run_demo_job` ghim persona xuống bảng `sessions`. Mọi lần sau (`/continue`,
     list) đọc từ session, không từ body — chặn leo thang đặc quyền giữa chuỗi.
     """
+    # Cuộc trò chuyện được giải MỘT LẦN, dùng cho CẢ HAI lane.
+    #
+    # Trước đây mỗi lane tự `str(uuid4())`, nên "xin chào" rồi "bạn làm được gì"
+    # là hai cuộc khác nhau — người dùng không hỏi tiếp được, và Lịch sử thành
+    # nhật ký từng tin nhắn.
+    #
+    # `_load_session` giới hạn theo `user_id` NGAY TRONG SQL, nên một session_id
+    # đoán được cũng không mở được cuộc của người khác. Không hợp lệ thì tạo
+    # cuộc mới, IM LẶNG: người dùng không sửa được gì, và câu họ gõ vẫn hợp lệ.
+    #
+    # `account_state` VẪN đọc từ bảng `sessions`, không từ body — đó mới là thứ
+    # chặn leo thang đặc quyền, và nó không đổi.
+    session_id: str | None = None
+    if request.session_id:
+        if await _load_session(request.session_id, user_id=str(user["id"])) is not None:
+            session_id = request.session_id
+    if session_id is None:
+        session_id = str(uuid4())
+
+    # Ghim session NGAY, trước cả hai lane.
+    #
+    # Trước đây chỉ `_run_demo_job` ghim, mà lane small-talk return sớm nên
+    # không bao giờ tới đó. Hệ quả: "xin chào" trả về một `session_id` KHÔNG
+    # tồn tại trong bảng `sessions`, nên câu tiếp theo gửi kèm nó cũng không nối
+    # được — và cuộc trò chuyện đứt ngay ở lượt thứ hai.
+    #
+    # `create_session` dùng `ON CONFLICT DO NOTHING`: gọi lại trên session đã có
+    # không đổi persona đã ghim. Nên gọi ở đây an toàn cho cả lượt nối tiếp.
+    pinned_state, pinned_context = await _trusted_account_context(user)
+    await _persist_session(
+        session_id,
+        pinned_state,
+        resident_id=pinned_context.get("resident_id"),
+        user_id=str(user["id"]),
+    )
+
+    # Làn HỎI THÊM VỀ ĐỀ XUẤT — đứng TRƯỚC mọi làn khác.
+    #
+    # Vì sao trước cả small talk: một tiếng "ok" giữa lúc đang được đề xuất một
+    # đơn vị và một khoản tiền KHÔNG phải tiếng đệm. Small talk trả lời nó bằng
+    # một lời đáp lễ, và khách tưởng mình đã đồng ý trong khi không có gì được
+    # ghim. Cổng ở đây hẹp — chỉ mở khi phiên này thật sự có một đề xuất
+    # `schedule_move` đang chờ chính người đang gõ — nên nó không đụng tới bất
+    # kỳ cuộc trò chuyện nào khác.
+    #
+    # Đọc từ PostgreSQL, KHÔNG từ `_DEMO_JOBS`: sau restart câu hỏi tiếp vẫn
+    # phải được trả lời bằng chứng từ, không rơi về làn lập kế hoạch.
+    hoi_them = await _tra_loi_ve_de_xuat(request.goal, session_id=session_id, user=user)
+    if hoi_them is not None:
+        return hoi_them
+
+    # Làn XUNG ĐỘT LỊCH — đứng TRƯỚC small talk và Planner.
+    #
+    # Khi người dùng có một conflict đang chờ trong phiên này, mọi câu đều được
+    # phân loại bằng LLM nhỏ (KEEP_BOTH/CHANGE_A/CHANGE_B/UNKNOWN). UNKNOWN →
+    # hỏi lại chứ không tạo workflow mới. Không bao giờ rơi xuống Planner khi
+    # conflict đang chờ.
+    conflict_reply = await _xu_ly_conflict_ngon_ngu_tu_nhien(request.goal, session_id, user)
+    if conflict_reply is not None:
+        return conflict_reply
+
     # Speech lane: greeting/acknowledgement/capability → trả CHAT ngay, 0 LLM.
     small_talk = classify(request.goal)
     if isinstance(small_talk, SmallTalk):
@@ -2308,12 +4104,10 @@ async def start_demo_workflow(
         # vụ cư dân cho người chưa liên kết là hứa một việc sẽ bị từ chối ngay sau đó.
         small_talk_state, small_talk_context = await _trusted_account_context(user)
         workflow_id = str(uuid4())
-        session_id = str(uuid4())
         if small_talk.speech_type == SpeechType.CAPABILITY:
-            base_url = str(http_request.base_url).rstrip("/")
             capability = await answer_capability_question(
                 request.goal,
-                base_url=base_url,
+                capabilities=_capability_dicts(),
                 account_state=small_talk_state,
             )
             reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
@@ -2328,6 +4122,10 @@ async def start_demo_workflow(
                 status="CHAT",
                 stage="CHAT",
                 message=reply,
+                # `answer` mới là trường client đọc để nói ra. Xem ghi chú ở
+                # `_chat_response_carries_the_reply_as_answer` trong
+                # tests/test_api/test_small_talk_routes.py.
+                answer=reply,
                 session_id=session_id,
             ),
             "events": [],
@@ -2340,16 +4138,101 @@ async def start_demo_workflow(
             "parent_workflow_id": None,
         }
         _append_job_event(_DEMO_JOBS[workflow_id], "CHAT")
+        await _persist_chat_turn(
+            workflow_id,
+            goal=request.goal,
+            reply=reply,
+            owner_user_id=user["id"],
+            session_id=session_id,
+            parent_workflow_id=None,
+        )
         return DemoWorkflowResponse(
             workflow_id=workflow_id,
             status="CHAT",
             stage="CHAT",
             message=reply,
+            answer=reply,
             session_id=session_id,
         )
 
+    # Intent lane: câu này SỬA yêu cầu vừa dừng, không phải một yêu cầu mới.
+    #
+    # Đứng SAU speech lane (một lời chào không sửa gì) và TRƯỚC hạn ngạch: sửa
+    # một yêu cầu đã có không phải là tạo thêm một yêu cầu, nên tính nó vào hạn
+    # ngạch nghĩa là phạt người dùng vì hệ thống hiểu sai họ ở lượt trước.
+    amended = await _amend_from_conversation(request.goal, session_id=session_id, user=user)
+    if amended is not None:
+        return amended
+
+    # Đòi sửa, nhưng không còn gì để sửa → nói ngay, KHÔNG đánh thức Planner.
+    #
+    # Đứng ngay SAU lane sửa: lane đó đã thử và không tìm được gì, nên tới đây
+    # kết luận "không có mục tiêu" là chắc chắn, không phải phỏng đoán. Nếu đặt
+    # trước thì nó sẽ cướp cả những câu lane sửa xử lý được.
+    #
+    # Đo được: 125,0 giây cho "đổi chỗ đỗ xe qua khu B" trong một phiên chưa
+    # từng đặt được gì. Xem `_nothing_left_to_amend` cho toàn bộ số liệu.
+    if await _nothing_left_to_amend(request.goal, session_id=session_id, user=user):
+        chua_co_gi = (
+            "Mình chưa thấy yêu cầu nào đang dừng để sửa trong cuộc trò chuyện này. "
+            "Bạn cho mình biết bạn muốn đặt dịch vụ gì nhé — ví dụ "
+            '"đặt lịch tham quan Vinhomes Hải Vân Bay ngày 30/8 lúc 10:00".'
+        )
+        trang_thai, ngu_canh = await _trusted_account_context(user)
+        workflow_id = str(uuid4())
+        _DEMO_JOBS[workflow_id] = {
+            "stage": "CHAT",
+            "message": chua_co_gi,
+            "plan": None,
+            "response": DemoWorkflowResponse(
+                workflow_id=workflow_id,
+                status="CHAT",
+                stage="CHAT",
+                message=chua_co_gi,
+                answer=chua_co_gi,
+                session_id=session_id,
+            ),
+            "events": [],
+            "goal": request.goal,
+            "account_state": trang_thai,
+            "approve_mock_payment": False,
+            "existing_context": ngu_canh,
+            "contact_profile": {},
+            "session_id": session_id,
+            "parent_workflow_id": None,
+        }
+        _append_job_event(_DEMO_JOBS[workflow_id], "CHAT")
+        await _persist_chat_turn(
+            workflow_id,
+            goal=request.goal,
+            reply=chua_co_gi,
+            owner_user_id=user["id"],
+            session_id=session_id,
+            parent_workflow_id=None,
+        )
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="CHAT",
+            stage="CHAT",
+            message=chua_co_gi,
+            answer=chua_co_gi,
+            session_id=session_id,
+        )
+
+    # Nếu người dùng Dừng khi Planner chưa kịp lưu task, nhánh vá kế hoạch ở
+    # trên chưa có dữ liệu có cấu trúc để làm việc. Giữ nguyên câu public trong
+    # shell, nhưng đưa cả yêu cầu vừa dừng vào input Planner để phần còn lại
+    # (biển số, loại xe, ngày...) không bị hỏi lại từ đầu.
+    planning_goal = await _planning_goal_after_an_early_cancel(
+        request.goal,
+        session_id=session_id,
+        user=user,
+    )
+
+    # Hạn ngạch chỉ áp cho lane DỊCH VỤ — small-talk đã return ở trên.
+    await _enforce_daily_quota(user)
+
     workflow_id = str(uuid4())
-    session_id = str(uuid4())
     settings = get_settings()
     # Quyền suy ra từ token + PostgreSQL, KHÔNG từ body. Đây là điểm mà một
     # dòng JSON `"account_state": "resident"` từng đủ để mở toàn bộ dịch vụ cư dân.
@@ -2362,6 +4245,12 @@ async def start_demo_workflow(
         selected_project_id = find_project_id(request.goal)
     if selected_project_id is not None:
         context["project_id"] = selected_project_id
+    if request.form_fields is not None:
+        # Chỉ ba boolean công khai đã được schema đóng ở biên request. Chúng là
+        # lựa chọn của người dùng, không phải danh tính/quyền. Đưa thẳng vào
+        # context để Planner không thể hỏi lại một ô form đã điền chỉ vì model
+        # quên đưa nó vào `explicit_facts`.
+        context.update(request.form_fields.model_dump(exclude_none=True))
 
     # Shell + session ĐƯỢC GHIM TRƯỚC khi trả 202.
     #
@@ -2409,6 +4298,10 @@ async def start_demo_workflow(
         # mà bước duyệt tồn tại chính vì nó không được phép là tuỳ chọn.
         "approve_mock_payment": False,
         "existing_context": context,
+        # Ký ức hội thoại: các lượt TRƯỚC của chính người này, mỗi lượt kèm nhãn
+        # dịch vụ. Loại trừ workflow đang tạo — nó chưa có gì để nhớ, và đưa
+        # chính nó vào là để model đọc lại đề bài như thể đó là tiền lệ.
+        "recalled": await _recall_recent_turns(user["id"], exclude_workflow_id=workflow_id),
         # Thông tin liên hệ lấy từ tài khoản/provider, không từ browser.
         "contact_profile": {},
         "session_id": session_id,
@@ -2418,7 +4311,7 @@ async def start_demo_workflow(
     task = asyncio.create_task(
         _run_demo_job(
             workflow_id,
-            request.goal,
+            planning_goal,
             # Không pre-approve. Mọi thanh toán đi qua /payment-decision.
             False,
             {
@@ -2502,8 +4395,52 @@ async def continue_demo_workflow(
     # lúc ghim) → fail-closed về prospect cho quyết định quyền.
     session_id = pending_session_id or workflow_id
     session = await _load_session(session_id, user_id=user["id"])
-    account_state = (session or {}).get("account_state", "prospect")
-    context = dict(pending_context)
+    # QUYỀN đọc lại từ TOKEN + database ở MỌI lượt, không thừa hưởng bản chép.
+    #
+    # `ResidentAccessBoundary` quyết định bằng `resident_verification_status`
+    # trong ngữ cảnh. `/start` dựng nó bằng `_trusted_account_context` — đọc
+    # thẳng `user_resident_links`, nguồn có thẩm quyền. `/continue` thì dựng lại
+    # từ `workflow_clarifications.existing_context`, và dòng ấy trong database
+    # là `{}`.
+    #
+    # Đo được trên tài khoản thật, đã VERIFIED từ năm ngày trước:
+    #
+    #   workflow CHA   register_vehicle SUCCESS, book_parking SUCCESS
+    #   workflow CON   FAILED / ACTION_DENIED / 0 bước
+    #                  "Bạn chưa đủ điều kiện… vì chưa xác minh căn hộ."
+    #
+    # Cùng người, cùng phiên, một phút sau. Bản chép đã ghim có thể rỗng, có thể
+    # cũ, và không bao giờ là nguồn sự thật cho một câu hỏi về quyền.
+    #
+    # KHÔNG lấy `account_state` của phiên nữa, kể cả khi nó hẹp hơn.
+    #
+    # Persona ghim vào `sessions` tồn tại để chặn một dòng JSON trong body tự
+    # nhận quyền cư dân — nó chặn INPUT CỦA CLIENT. `_trusted_account_context`
+    # thì đọc thẳng `user_resident_links`; không có đường nào cho prompt hay
+    # TaskPlan chảy vào đó, nên nó không cần bị phiên kìm lại.
+    #
+    # Và kìm lại thì sai theo hướng khác: người bắt đầu phiên lúc chưa xác
+    # minh, xác minh xong ngay sau đó, vẫn bị coi là khách cho tới khi họ tự
+    # đoán ra là phải mở một cuộc mới.
+    trusted_state, trusted_context = await _trusted_account_context(user)
+    account_state = trusted_state
+    del session
+    # Ngữ cảnh đến TỪ POSTGRESQL, không từ việc đọc lại goal.
+    #
+    # Fact người dùng nói rõ đã được Planner hiểu và code kiểm ở lượt trước,
+    # rồi ghim vào chính dòng clarification này. Đọc lại goal ở đây sẽ dựng
+    # nguồn sự thật THỨ HAI cho cùng ba ô, và hai nguồn sẽ lệch nhau đúng vào
+    # lúc người dùng đổi ý.
+    # Ngữ cảnh TIN CẬY đứng SAU, tức nó THẮNG khi trùng khoá.
+    #
+    # Hai bên nói về hai chuyện khác nhau: bản ghim mang câu trả lời của khách
+    # (`parking_zone`, `viewing_date`…), bản tin cậy mang DANH TÍNH do server
+    # tra được (`resident_id`, `apartment_code`, `residential_area`).
+    #
+    # Trùng khoá chỉ xảy ra ở nhóm danh tính, và ở đó bản tin cậy phải thắng:
+    # một `resident_id` cũ nằm trong bản ghim là mã của lượt trước, có thể đã
+    # đổi — và nó quyết định chỗ đỗ xe được đặt cho ai.
+    context = {**dict(pending_context), **trusted_context}
     # Bơm kết quả SUCCESS của parent từ DB (nếu parent đã persist). Giúp child
     # không chạy lại các bước đã xong.
     context.update(await _load_parent_success_context(workflow_id))
@@ -2519,10 +4456,9 @@ async def continue_demo_workflow(
         if isinstance(small_talk, SmallTalk):
             new_workflow_id = str(uuid4())
             if small_talk.speech_type == SpeechType.CAPABILITY:
-                base_url = str(http_request.base_url).rstrip("/")
                 capability = await answer_capability_question(
                     goal,
-                    base_url=base_url,
+                    capabilities=_capability_dicts(),
                     account_state=account_state,
                 )
                 reply = capability.reply if capability else "Bạn cần hỗ trợ gì?"
@@ -2538,6 +4474,7 @@ async def continue_demo_workflow(
                     status="CHAT",
                     stage="CHAT",
                     message=reply,
+                    answer=reply,
                     session_id=session_id,
                 ),
                 "events": [],
@@ -2550,11 +4487,23 @@ async def continue_demo_workflow(
                 "parent_workflow_id": parent_workflow_id,
             }
             _append_job_event(_DEMO_JOBS[new_workflow_id], "CHAT")
+            await _persist_chat_turn(
+                new_workflow_id,
+                goal=goal,
+                reply=reply,
+                owner_user_id=user["id"],
+                session_id=session_id,
+                parent_workflow_id=parent_workflow_id,
+            )
             return DemoWorkflowResponse(
                 workflow_id=new_workflow_id,
                 status="CHAT",
                 stage="CHAT",
                 message=reply,
+                # `answer` mới là trường client đọc để nói ra. Xem ghi chú ở
+                # `_chat_response_carries_the_reply_as_answer` trong
+                # tests/test_api/test_small_talk_routes.py.
+                answer=reply,
                 session_id=session_id,
                 parent_workflow_id=parent_workflow_id,
             )
@@ -2591,10 +4540,136 @@ async def continue_demo_workflow(
             )
             return conversational
 
+        # Câu HỎI hay câu xã giao giữa chừng — trả lời, và GIỮ nguyên câu hỏi
+        # đang chờ.
+        #
+        # Trước đây `classify()` chỉ được gọi ở nhánh `supported_goal`, nên với
+        # một `NEEDS_INFORMATION` bình thường, mọi thứ người dùng gõ đều bị ép
+        # thành câu trả lời cho field. Đo được:
+        #
+        #   P-118: "Bạn cho mình biết tên dự án, ngày và giờ nhé"
+        #   Bạn:   "hôm nay là ngày mấy"
+        #   P-118: 422 — "Dự án bạn chọn chưa nằm trong danh sách được hỗ trợ."
+        #
+        # Người dùng bị kẹt: đang trong một việc thì không hỏi được gì nữa, và
+        # câu trả lời còn đổ lỗi cho họ đã chọn sai dự án.
+        #
+        # KHÔNG nhận ACKNOWLEDGEMENT vào đây: "ok", "được" có thể chính là câu
+        # trả lời cho một field. Chỉ nhận câu HỎI và câu chào.
+        if request.message is not None and not request.fields:
+            aside = classify(request.message)
+            if isinstance(aside, SmallTalk) and aside.speech_type in {
+                SpeechType.GREETING,
+                SpeechType.CAPABILITY,
+                SpeechType.HOW_TO,
+            }:
+                if aside.speech_type == SpeechType.CAPABILITY:
+                    capability = await answer_capability_question(
+                        request.message,
+                        capabilities=_capability_dicts(),
+                        account_state=account_state,
+                    )
+                    aside_reply = capability.reply if capability else aside.reply
+                else:
+                    aside_reply = aside.reply
+
+                current = (
+                    response if isinstance(response, DemoWorkflowResponse) else await _public_view_from_db(workflow_id)
+                )
+                if current is None:
+                    raise HTTPException(status_code=409, detail="Workflow chưa sẵn sàng để tiếp tục.")
+                conversational = current.model_copy(
+                    update={
+                        "workflow_id": workflow_id,
+                        "answer": aside_reply,
+                        "missing_fields": list(missing_fields),
+                        "response_state": "READY",
+                    }
+                )
+                if previous is not None:
+                    previous["response"] = conversational
+                await _save_answer_safely(
+                    workflow_id,
+                    answer=aside_reply,
+                    suggestions=[],
+                    state="READY",
+                    for_status="NEEDS_INFORMATION",
+                )
+                return conversational
+
         if request.fields:
             answers, unresolved = _extract_structured_follow_up_answers(request.fields, missing_fields)
         elif request.message is not None:
-            answers, unresolved = _extract_follow_up_answers(request.message, missing_fields)
+            # Giá trị NGÀY đang lưu, để neo một câu nói tắt như "ngày 25".
+            #
+            # Đọc từ `workflow_tasks` — cùng nguồn mà biểu mẫu sửa đọc, không
+            # dựng bảng thứ hai. Đọc hỏng thì bỏ neo và giữ nguyên hành vi cũ:
+            # thiếu neo chỉ khiến một cách nói không hiểu được, còn một neo sai
+            # thì ghi xuống provider một ngày người dùng chưa từng chọn.
+            neo = None
+            try:
+                ho_so = await read_demo_workflow(workflow_id)
+                if ho_so is not None:
+                    dang_co = _amendable_values(ho_so)
+                    neo = next(
+                        (
+                            str(gia_tri)
+                            for ten, gia_tri in dang_co.items()
+                            if ten in _DATE_FIELDS and isinstance(gia_tri, str)
+                        ),
+                        None,
+                    )
+            except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+                logger.info("không đọc được ngày cũ để neo câu nói tắt (%s)", type(exc).__name__)
+            # KHÔNG có bước nào để neo → neo vào HÔM NAY.
+            #
+            # Đo được, workflow aa53d5aa:
+            #
+            #     P-118:  Ngày chuyển nhà chưa phù hợp. Hãy chọn một ngày từ
+            #             hôm nay trở đi.
+            #     Bạn:    ngày 28
+            #     P-118:  (đúng câu trên, lặp lại)
+            #     Bạn:    ngày 28/8/2026
+            #
+            # Neo đọc từ `workflow_tasks`, nhưng Planner trả NEEDS_INFORMATION
+            # nên workflow chưa có bước nào — 0 task, 0 neo. Người dùng phải gõ
+            # lại cùng một ngày ở dạng đầy đủ, và mỗi lượt thừa tốn một lần lập
+            # kế hoạch: `plan 65,49s` cho chính workflow này. Họ bỏ đi giữa chừng.
+            #
+            # `test_a_short_date_is_anchored_to_the_old_one` đã chốt "neo vào
+            # giá trị cũ, KHÔNG neo vào hôm nay" — vì một lịch đặt cho tháng sau
+            # sẽ bị kéo ngược về tháng này. Đúng, KHI CÓ giá trị cũ. Dòng này
+            # chỉ chạy khi không có giá trị nào, nên nó không đụng vào ca ấy.
+            #
+            # Và ở đúng tình huống này, hôm nay là khung quy chiếu mà hệ thống
+            # vừa nêu: câu hỏi là "chọn một ngày TỪ HÔM NAY trở đi".
+            # `rewrite_relative_dates` cuộn tới, không lùi: "ngày 20" với hôm
+            # nay 24/08 cho 2026-09-20.
+            answers, unresolved = _extract_follow_up_answers(
+                request.message, missing_fields, anchor=neo or date.today().isoformat()
+            )
+            # KHÔNG phân biệt được thì HỎI TỪNG Ô MỘT.
+            #
+            # Ô văn bản tự do chỉ đọc được khi nó là ô DUY NHẤT còn lại: "P-101"
+            # có thể là `location`, có thể là `description`, và gán bừa còn tệ
+            # hơn hỏi lại. Bộ đọc từ chối cả lượt — đúng, nhưng hệ quả là ngõ
+            # cụt: `create_maintenance_request` cần cả `description` lẫn
+            # `location`, nên MỌI câu đều 422 cho tới khi chỉ còn một ô, mà điều
+            # đó không bao giờ tới. Đo được: hội thoại bảo trì không đi tiếp
+            # được bằng chat, lượt nào cũng "Thông tin bổ sung chưa đúng định
+            # dạng" — câu đổ lỗi cho người dùng về một chuyện họ không sai.
+            #
+            # Đọc lại với ĐÚNG ô đang hỏi đầu tiên. An toàn vì chỉ chạy khi
+            # lượt đọc rộng không lấy được gì, và ô ấy chính là ô câu hỏi vừa
+            # nêu ra — người dùng đang trả lời nó.
+            if not answers and missing_fields:
+                answers, unresolved = _extract_follow_up_answers(
+                    request.message,
+                    [missing_fields[0]],
+                    anchor=neo or date.today().isoformat(),
+                )
+                if not answers:
+                    unresolved = list(missing_fields)
         else:
             answers, unresolved = {}, missing_fields
         # Form có đủ tất cả ô đang hiển thị. Chấp nhận một phần ở đây sẽ tạo
@@ -2610,14 +4685,38 @@ async def continue_demo_workflow(
                 sorted(request.fields),
                 sorted(unresolved),
             )
-            raise HTTPException(status_code=422, detail=_follow_up_validation_message(unresolved))
+            # Field lạ và giá trị sai là HAI chuyện, đừng nói chung một câu.
+            #
+            # `_extract_structured_follow_up_answers` từ chối cả lượt khi client
+            # gửi một field không được hỏi — đúng, đó là all-or-none có chủ ý.
+            # Nhưng nó trả về toàn bộ `missing_fields` làm "chưa hiểu", nên câu
+            # báo ra đổ lỗi cho GIÁ TRỊ người dùng nhập: họ chọn đúng Khu B và
+            # vẫn nghe "Hãy chọn Khu A hoặc Khu B".
+            #
+            # Người dùng không sửa được lỗi này — nó nằm ở hợp đồng giữa giao
+            # diện và API. Nói đúng chuyện thì ít nhất người đọc log biết tìm ở
+            # đâu, thay vì đi kiểm lại giá trị vốn đã đúng.
+            expected = {_canonical_field(name) for name in missing_fields}
+            unexpected = sorted({name for name in request.fields if _canonical_field(name) not in expected})
+            detail = (
+                "Biểu mẫu gửi lên có mục không nằm trong câu hỏi, nên mình chưa nhận được. "
+                "Bạn tải lại trang rồi trả lời giúp mình nhé."
+                if unexpected
+                else _follow_up_validation_message(
+                    unresolved, " ".join(str(v) for v in (request.fields or {}).values())
+                )
+            )
+            raise HTTPException(status_code=422, detail=detail)
         if not answers:
             logger.info(
                 "clarification contained no usable answer (expected=%s received=%s)",
                 sorted(missing_fields),
                 sorted((request.fields or {}).keys()),
             )
-            raise HTTPException(status_code=422, detail=_follow_up_validation_message(unresolved))
+            raise HTTPException(
+                status_code=422,
+                detail=_follow_up_validation_message(unresolved, request.message),
+            )
 
         # Người dùng ĐÃ gửi tên dự án nhưng nó không khớp danh mục → phải nói
         # ra. Bỏ qua im lặng còn tệ hơn 422: workflow đi tiếp thiếu dự án, rồi
@@ -2631,6 +4730,221 @@ async def continue_demo_workflow(
         if bad_field is not None:
             raise HTTPException(status_code=422, detail=_UNSUPPORTED_PROJECT_MESSAGE)
         context.update(answers)
+
+        # TRẢ LỜI MỘT PHẦN: cập nhật câu hỏi, KHÔNG tiêu thụ nó.
+        #
+        # `/continue` vốn là một-phát-ăn-ngay: nó consume clarification rồi tạo
+        # workflow con. Đúng cho BIỂU MẪU — nộp một lần là đủ mọi ô. Vỡ khi
+        # người ta trả lời bằng lời, vì người ta nói từng phần.
+        #
+        # Đo được trên stack demo, phiên e88a96e1, và tái hiện được ở CẢ BẢY
+        # dịch vụ: câu trả lời thứ nhất được nhận, câu thứ hai nhận 409 vì hồ
+        # sơ câu hỏi đã bị tiêu thụ. Người dùng thấy nó "quên" — thật ra không
+        # còn chỗ nào để nhớ.
+        #
+        # Nhánh này giữ hồ sơ mở, gộp thêm ô vừa nhận, và chỉ hỏi phần CÒN
+        # THIẾU. Không tạo workflow con, không gọi Planner — nên một lượt trả
+        # lời tốn 0 giây model thay vì 30–90 giây.
+        da_tra_loi = {_canonical_field(name) for name in answers}
+        con_thieu = [name for name in pending_missing_fields if _canonical_field(name) not in da_tra_loi]
+        # LƯỢT SỬA: trả lời một phần KHÔNG phải là trả lời thiếu.
+        #
+        # Nhánh trên được viết cho lượt hỏi ĐẦU, lúc chưa có kế hoạch nào:
+        # thiếu ô nào thì phải hỏi ô đó, vì không có chỗ nào khác lấy giá trị.
+        # Lượt sửa thì kế hoạch cũ còn nguyên và đã qua Validator, nên ô người
+        # dùng KHÔNG đụng tới tự giữ giá trị cũ — `rerun_with_answers` ngay bên
+        # dưới vá đúng phần đổi và không động vào phần còn lại.
+        #
+        # Đo được trên workflow 7b79bfa2 của người dùng thật:
+        #
+        #     P-118: Khung giờ 10:00 ngày 2026-08-27 đã kín lịch.
+        #            Bạn chọn giờ HOẶC ngày khác giúp mình nhé.
+        #     Bạn:   đổi qua ngày 28
+        #     P-118: Mình cần thêm thông tin: giờ muốn tham quan.
+        #
+        # `_NO_AVAILABILITY_FIELDS` coi khung giờ là một CẶP — đúng, một khung
+        # là (ngày, giờ). Nhưng nhánh này chặn trước khi tới đường vá, nên nó
+        # đòi cả hai vế trong khi câu vừa nói với khách hứa MỘT vế là đủ. Giá
+        # trị cũ `10:00` vẫn nằm trong bước đã huỷ và không ai rút lại nó.
+        #
+        # Điều kiện là CÓ REPAIR HINT — tức đây là sửa sau khi một bước hỏng,
+        # không phải lần hỏi đầu. Cùng điều kiện mà đường vá bên dưới dùng, nên
+        # hai chỗ không thể lệch nhau về việc "lượt này là lượt sửa".
+        #
+        # Không kiểm `answers` ở đây: nhánh trên đã trả 422 cho lượt không rút
+        # được câu trả lời nào, nên nó luôn đúng — và một điều kiện luôn đúng là
+        # một điều kiện không bài kiểm nào cắn được.
+        if con_thieu and await _read_repair_hints(workflow_id):
+            logger.info(
+                "lượt sửa trả lời một phần, giữ nguyên %s từ kế hoạch cũ",
+                sorted(con_thieu),
+            )
+            con_thieu = []
+        if con_thieu:
+            await _save_clarification_safely(
+                workflow_id,
+                session_id=pending_session_id,
+                goal=pending_goal,
+                missing_fields=con_thieu,
+                existing_context=context,
+            )
+            # Đi qua `needs_information_update` — "nguồn sự thật DUY NHẤT biến
+            # missing fields thành state hướng ra người dùng". Dựng câu hỏi
+            # riêng ở đây là tạo nhánh thứ ba nói khác hai nhánh kia.
+            hoi = needs_information_update(tuple(con_thieu), context)
+            cau_hoi = hoi.get("question") or "Mình còn thiếu vài thông tin để tiếp tục."
+            # Cập nhật CẢ bản cache trong RAM, không chỉ database.
+            #
+            # Route đọc `missing_fields` từ `_DEMO_JOBS[...]["response"]` khi
+            # cache còn nóng, và chỉ đọc hồ sơ đã ghim khi cache trống. Bản sửa
+            # đầu chỉ ghi database, nên mọi lượt sau vẫn đọc DANH SÁCH GỐC từ
+            # RAM và hỏi lại những ô đã trả lời xong.
+            #
+            # Đo được trên stack demo — hồ sơ trong database đã có đủ
+            # `project_id` và `viewing_date`, mà câu hỏi vẫn nói thiếu cả hai:
+            #
+            #     'Vinhomes Pearl Bay' → thiếu [viewing_date, viewing_time]
+            #     '2026-08-30'         → thiếu [project_name, viewing_time]  ← mất project
+            #     '09:30'              → thiếu [project_name, viewing_date]  ← mất ngày
+            #
+            # Bài kiểm liệt kê bảy dịch vụ KHÔNG bắt được: nó gieo thẳng vào
+            # database và không bao giờ làm nóng `_DEMO_JOBS`, nên nó chỉ đi
+            # đường đọc-từ-database — đúng đường duy nhất vốn đã chạy đúng.
+            # `GET` ghi đè `message` bằng `job["message"]`, KHÔNG dùng
+            # `response.message`. Cập nhật mỗi `response` là để lệch hai nguồn:
+            # `missing_fields` co lại đúng mà câu chữ vẫn là câu gốc, nên tải
+            # lại trang giữa chừng là nghe hỏi lại ô vừa trả lời.
+            #
+            #   POST     "Mình cần thêm: mô tả sự cố, vị trí, ngày, giờ"
+            #   TẢI LẠI  "Mình cần thêm: HẠNG MỤC, mô tả sự cố, vị trí, ..."
+            #
+            # Người dùng đọc câu chữ, không đọc mảng `missing_fields` — nên bài
+            # kiểm nào chỉ soi mảng cũng xanh trong khi màn hình vẫn sai.
+            job = _DEMO_JOBS.get(workflow_id)
+            if job is not None:
+                job["existing_context"] = dict(context)
+                job["message"] = cau_hoi
+                job["stage"] = "NEEDS_INFORMATION"
+                cu = job.get("response")
+                if isinstance(cu, DemoWorkflowResponse):
+                    job["response"] = cu.model_copy(
+                        update={
+                            "missing_fields": _to_public_missing_fields(con_thieu),
+                            "message": cau_hoi,
+                            "answer": cau_hoi,
+                            "question": cau_hoi,
+                        }
+                    )
+            return DemoWorkflowResponse(
+                workflow_id=workflow_id,
+                status="NEEDS_INFORMATION",
+                stage="NEEDS_INFORMATION",
+                message=cau_hoi,
+                answer=cau_hoi,
+                question=cau_hoi,
+                missing_fields=_to_public_missing_fields(con_thieu),
+                session_id=pending_session_id,
+            )
+
+    # ĐƯỜNG NHANH: vá kế hoạch cũ thay vì hỏi Planner lại từ đầu.
+    #
+    # Đo được trên một lần sửa đúng MỘT ô: 175 giây trong Planner trên tổng 200
+    # giây, hai lượt gọi model. Kế hoạch đã có và đã qua Validator; hỏi lại là
+    # đặt cược lại một ván đã thắng — và ván ấy thua thật, cùng một câu ba lượt
+    # chạy cho ba kết quả khác nhau.
+    #
+    # Ba điều kiện, thiếu một là đi đường cũ:
+    #
+    #   1. Câu trả lời là DỮ LIỆU CÓ CẤU TRÚC (`fields`). Ô có cấu trúc chỉ
+    #      nhận giá trị trong allowlist đóng nên nó không thể mang ý định đổi
+    #      hình dạng kế hoạch; câu chữ tự do thì có.
+    #   2. Workflow cha CÓ repair hint — tức đây là sửa sau khi một bước hỏng,
+    #      không phải lần hỏi đầu lúc chưa có kế hoạch nào.
+    #   3. Cha còn task đã chạy để seed lại.
+    #
+    # Đo được: 83/90 lượt hỏi lại là lần hỏi ĐẦU (chưa có plan để tái dùng),
+    # nên đường nhanh này chạm 7 lượt — nhưng đúng 7 lượt đó là toàn bộ trải
+    # nghiệm "chờ ba phút".
+    # Điều kiện là CÂU TRẢ LỜI ĐÃ ĐƯỢC PHÂN TÍCH, không phải cách nó được gửi.
+    #
+    # Bản cũ đòi `request.fields`, tức chỉ biểu mẫu. Lý lẽ khi ấy: "câu chữ tự
+    # do có thể mang ý định đổi hình dạng kế hoạch". Đúng với CHUỖI THÔ — nhưng
+    # thứ đi tiếp không phải chuỗi thô. `_extract_follow_up_answers` chỉ rút giá
+    # trị cho ĐÚNG những ô đang được hỏi và trả về dạng canonical; một
+    # `{"viewing_date": "2026-08-25"}` rút từ chat có cấu trúc y hệt cái rút từ
+    # biểu mẫu, và nó không thêm được dịch vụ nào, không bỏ được dịch vụ nào.
+    #
+    # Hậu quả của việc đòi `fields`, đo được nguyên văn:
+    #
+    #   CHA   tham quan CANCELLED · register_vehicle SUCCESS · book_parking SUCCESS
+    #   Bạn:  đổi qua ngày 25
+    #   CON   tham quan SUCCESS · register_vehicle CHẠY LẠI
+    #         book_parking CHẠY LẠI → BOOKING_ALREADY_EXISTS (ngày 23/08)
+    #
+    # Khách đổi ngày THAM QUAN, hệ thống gửi lại cả ba yêu cầu, rồi hỏng ở chính
+    # chỗ đỗ nó vừa giữ được — cho một ngày khách không hề nhắc tới.
+    if answers and await _read_repair_hints(workflow_id):
+        settings = get_settings()
+        try:
+            await rerun_with_answers(
+                workflow_id,
+                answers,
+                resident_url=settings.resident_service_url,
+                transport_url=settings.transport_service_url,
+                payment_url=settings.payment_service_url,
+                property_url=settings.property_service_url,
+                resident_services_url=settings.resident_services_service_url,
+                tour_url=settings.tour_service_url,
+                consultation_url=settings.consultation_service_url,
+                shuttle_url=settings.shuttle_service_url,
+            )
+        except RetryNotAllowed as exc:
+            # Không dùng được đường nhanh thì RƠI VỀ đường cũ, không báo lỗi:
+            # người dùng vừa trả lời đúng, họ không có lỗi gì để nghe.
+            logger.info("không vá được kế hoạch cũ (%s), lập lại từ đầu", exc.code)
+        else:
+            # Cache RAM dựng lúc còn chờ là ảnh cũ; giữ lại thì mọi lượt poll
+            # sau vẫn trả trạng thái hỏng.
+            job = _DEMO_JOBS.get(workflow_id)
+            if job is not None:
+                job["response"] = None
+            # Đóng câu hỏi lại: đường này chạy tiếp trên CHÍNH workflow đó
+            # nên không có child nào để claim, nhưng để ngỏ thì nó nằm mãi ở
+            # "chờ bổ sung" — chiếm hạn ngạch và là một dòng đang-chờ vĩnh viễn.
+            pool = None
+            try:
+                repository = await acquire_repository()
+                pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+                await repository.resolve_clarification(workflow_id)
+            except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+                logger.info("không đóng được câu hỏi sau khi vá plan (%s)", type(exc).__name__)
+            finally:
+                if pool is not None:
+                    await pool.close()
+            view = await _public_view_from_db(workflow_id)
+            if view is not None:
+                # Sửa xong mà KHÔNG nói gì thì với người dùng là "chẳng có gì
+                # đổi cả" — và họ đúng, vì màn hình đúng là không đổi.
+                #
+                # Đo được trên yêu cầu thật của người dùng (workflow 75a5ccc9):
+                # họ đổi ngày lúc 04:13:08, bước đỗ xe được mở lại đúng với ngày
+                # mới, VÀ:
+                #
+                #   sự kiện cuối     WAITING_VIEWING_APPROVAL lúc 04:11:44
+                #   câu trả lời      đóng dấu FAILED, viết lúc 04:12:19
+                #
+                # Câu cũ đóng dấu `FAILED` trong khi workflow đã sang
+                # `WAITING_APPROVAL`, nên bộ lọc chống-câu-cũ giấu nó đi và
+                # response trả `answer = None`. Giao diện giữ nguyên bong bóng
+                # cuối nó từng nhận — đúng câu báo lỗi vừa được sửa xong.
+                #
+                # Đây là CÙNG một thiếu sót đã vá cho các đường duyệt, ở đường
+                # thứ năm mà bộ kiểm cấu trúc lúc đó không đụng tới.
+                if job is not None:
+                    _append_job_event(job, _terminal_stage_for(view))
+                    await _persist_events(workflow_id, job)
+                request_fresh_answer(workflow_id, job=job)
+                return await _with_stored_answer(view, workflow_id)
 
     # CONSUME atomic ngay trước khi tạo child. Đây là điểm duy nhất quyết định
     # ai được đi tiếp: `UPDATE ... WHERE resolved_at IS NULL ... RETURNING *`
@@ -2701,6 +5015,10 @@ async def continue_demo_workflow(
         "owner_user_id": user["id"],
         "approve_mock_payment": pending_approve_payment,
         "existing_context": context,
+        # Workflow con thừa hưởng ký ức như workflow gốc: người dùng đang trong
+        # cùng một cuộc trò chuyện, và câu "như lần trước" của họ không đổi
+        # nghĩa chỉ vì backend tách ra một workflow mới.
+        "recalled": await _recall_recent_turns(user["id"], exclude_workflow_id=new_workflow_id),
         # Tách riêng khỏi `existing_context`: đây là điều người dùng vừa nói
         # SAU KHI biết lựa chọn đầu không dùng được, nên nó phải thắng câu chữ
         # trong goal cũ — goal của workflow con vẫn mang nguyên "lúc 12:30".
@@ -2729,6 +5047,433 @@ async def continue_demo_workflow(
         message=_STAGE_MESSAGES["PLANNING"],
         session_id=session_id,
         parent_workflow_id=parent_workflow_id,
+    )
+
+
+def public_status_from_db(database_status: str | None) -> str:
+    """Trạng thái công khai suy từ cột `workflows.status`. MỘT luật, hai đường dùng.
+
+    Trước đây luật này được viết HAI lần — trong `_public_view_from_db` và trong
+    đường polling — bằng cùng một chuỗi if/elif, và cả hai bản đều đánh rơi
+    `WAITING_APPROVAL`: mọi thứ không phải SUCCESS/FAILED/CANCELLED đều thành
+    `RUNNING`. Hệ quả là một yêu cầu đang chờ đơn vị duyệt, sau khi
+    `_DEMO_JOBS` mất (restart, hoặc mở lại từ Lịch sử), được báo là "đang chạy"
+    và giao diện poll vô hạn.
+
+    Hai bản sao của một luật thì không bao giờ hỏng cùng lúc — chúng hỏng LỆCH
+    nhau, và cái lệch đó chỉ hiện ra ở đúng những đường ít ai đi.
+    """
+    if database_status in {"SUCCESS", "CANCELLED", "FAILED", "WAITING_APPROVAL"}:
+        return database_status
+    return "RUNNING"
+
+
+def _has_open_repair(record: dict[str, Any] | None) -> bool:
+    """Workflow này có câu hỏi nào đang chờ CHÍNH KHÁCH trả lời không?
+
+    Đọc từ `repair_hints` của bản ghi đã tải — không truy vấn thêm, và không
+    đoán theo `workflows.status`: một yêu cầu nhiều dịch vụ có thể còn dòng
+    AWAITING của dịch vụ khác nên trạng thái tổng vẫn là WAITING_APPROVAL
+    trong khi vẫn có câu hỏi treo.
+    """
+    return bool((record or {}).get("repair_hints"))
+
+
+async def _load_pending_services(workflow_id: str) -> list[dict[str, Any]]:
+    """Các bước đang chờ ĐƠN VỊ duyệt, đọc từ PostgreSQL.
+
+    Song song `_load_pending_payment` và `_load_pending_viewing`. Thiếu hàm thứ
+    ba này, đường dựng lại từ database có nhánh cho hai loại chờ và không có
+    nhánh cho loại thứ ba — nên yêu cầu chờ đơn vị duyệt là loại DUY NHẤT
+    không sống sót qua restart.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await pending_for_workflow(pool, workflow_id)
+        return [row for row in rows if row.get("status") == "AWAITING"]
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load pending services failed (%s)", type(exc).__name__)
+        return []
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+async def _refused_services(workflow_id: str) -> list[dict[str, Any]]:
+    """Các bước đơn vị đã TỪ CHỐI, kèm lý do họ đưa ra.
+
+    Song song `_load_pending_services`, đọc cùng bảng và cùng hàm — chỉ khác
+    trạng thái lọc. Thiếu nó, `service_approvals` giữ nguyên câu "Không có nhân
+    viên rảnh vào giờ này" mà màn hình chỉ nói "Bước này đã được huỷ trước khi
+    hoàn tất", và người dùng không biết làm gì tiếp.
+    """
+    # KHÔNG đóng pool ở đây.
+    #
+    # `acquire_repository()` trả về "repository dùng chung của tiến trình" —
+    # `set_repository_provider(lambda: _ready(repository))` đưa lại CÙNG một
+    # đối tượng mỗi lượt. Nên `pool.close()` đóng chính pool của ứng dụng, chứ
+    # không phải một pool riêng.
+    #
+    # Vài hàm lân cận vẫn đóng (`_load_pending_services`,
+    # `_capability_names_safely`). Chúng hiếm khi chạy nên chưa lộ ra. Hàm này
+    # chạy ở MỌI câu trả lời, và khi tôi sao chép khuôn ấy thì
+    # `test_answering_by_chat_does_not_redo_finished_work` đỏ ngay: đường sửa
+    # kế hoạch mất database nên rơi về lập lại từ đầu.
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await pending_for_workflow(pool, workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load refused services failed (%s)", type(exc).__name__)
+        return []
+    return [
+        {
+            "title": row.get("service_label") or row.get("tool") or "",
+            "code": row.get("reject_code") or "",
+            "reason": row.get("reject_reason") or "",
+        }
+        for row in rows
+        if row.get("status") == "REJECTED"
+    ]
+
+
+def _waiting_service_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    pending: list[dict[str, Any]],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow đang chờ ĐƠN VỊ duyệt dịch vụ.
+
+    Cùng khuôn với `_waiting_approval_view`: một chỗ duy nhất dựng view này để
+    đường RAM và đường restart không lệch nhau.
+
+    `approval_actor="PROVIDER"` là thứ giao diện đọc để KHÔNG dựng nút xác nhận
+    thanh toán — khách không quyết được gì ở đây, và một cái nút không bấm được
+    còn tệ hơn không có nút.
+    """
+    waiting = {row["task_id"] for row in pending}
+    tasks = _polling_task_views(plan, record, show_waiting=True)
+    for task in tasks:
+        if task.task_id in waiting:
+            task.status = "WAITING_APPROVAL"
+            task.message = "Đang chờ đơn vị cung cấp dịch vụ xác nhận."
+
+    labels = [row.get("service_label") or row.get("tool") for row in pending]
+    summary = (
+        "Mình đã gửi yêu cầu tới đơn vị cung cấp dịch vụ ("
+        + ", ".join(str(label) for label in labels)
+        + "). Đơn vị đang xác nhận, bạn chờ chút nhé."
+    )
+    # Đổi khu là việc DUY NHẤT trong hàng đợi này mà khách đang có sẵn một thứ
+    # để mất. Câu chung ở trên nói "đã gửi yêu cầu" và dừng ở đó, nên người đọc
+    # hiểu là chỗ mới đã thuộc về mình — trong khi đơn vị hoàn toàn có thể từ
+    # chối, và lúc ấy họ vẫn đang giữ chỗ cũ mà không biết.
+    #
+    # Câu này là một HẰNG SỐ, không do model soạn: nó hứa và không-hứa những
+    # điều rất cụ thể, và một bản diễn giải có thể hứa nhiều hơn sự thật.
+    if any(row.get("tool") == "change_parking_zone" for row in pending):
+        summary += (
+            " Chỗ bạn đang giữ vẫn nguyên cho tới khi đơn vị đồng ý đổi. "
+            "Nếu đơn vị không đồng ý, bạn có thể chọn khu khác hoặc liên hệ bộ phận hỗ trợ."
+        )
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_SERVICE_APPROVAL",
+        message=_STAGE_MESSAGES["WAITING_SERVICE_APPROVAL"],
+        summary=summary,
+        approval_actor="PROVIDER",
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
+    )
+
+
+def _tien_viet(so_tien: int) -> str:
+    """Số tiền theo cách viết Việt Nam: `420000` → `420.000`.
+
+    Chuẩn hoá ĐÚNG chuỗi số, không phải cả câu. `f"…của bạn, {gia:,.0f}…"
+    .replace(",", ".")` thay dấu phẩy trên toàn câu và nuốt luôn dấu phẩy tiếng
+    Việt — đo được trên canary: "…của bạn. báo giá 420.000 VND." Một phép thay
+    thế mù trên cả câu sẽ luôn tìm thấy nhiều hơn thứ nó định tìm.
+    """
+    return f"{so_tien:,.0f}".replace(",", ".")
+
+
+def cau_de_xuat_don_vi(danh_sach: list[dict[str, Any]]) -> str:
+    """Câu nói với khách khi đang chờ họ chọn đơn vị. MỘT chỗ dựng.
+
+    Hai đường dựng response — chạy trong RAM, và dựng lại từ database — phải
+    nói ĐÚNG một câu. Viết inline ở cả hai là cách chắc chắn để chúng lệch
+    nhau, và lệch ở đây nghĩa là F5 đổi nội dung một lời chào giá.
+
+    Nhiều đề xuất thì NÓI RA là nhiều. Một câu nói về một đơn vị trong khi
+    khách còn hai việc phải bấm là nói dối về khối lượng công việc còn lại.
+
+    Câu này KHÔNG nhắc tới thanh toán, phí hay tiền phải trả — việc cần làm là
+    chọn đơn vị. Đo được trên canary khi câu còn do model viết: "Mình cần bạn
+    xác nhận khoản thanh toán…", và khách đi tìm một nút trả tiền không tồn tại.
+    """
+    if not danh_sach:
+        return "Mình đang tìm đơn vị phù hợp cho bạn."
+    if len(danh_sach) == 1:
+        de_xuat = danh_sach[0]
+        don_vi = (de_xuat.get("provider") or {}).get("name") or "đơn vị phù hợp"
+        so_tien = de_xuat.get("amount")
+        if not isinstance(so_tien, int):
+            return f"Mình đề xuất {don_vi}. Bạn xác nhận để mình gửi yêu cầu nhé."
+        return f"Mình tìm được {don_vi} với giá {_tien_viet(so_tien)} VND. Bạn xác nhận để mình gửi yêu cầu nhé."
+    phan = [
+        f"{(d.get('provider') or {}).get('name') or 'đơn vị phù hợp'}"
+        + (f" ({_tien_viet(d['amount'])} VND)" if isinstance(d.get("amount"), int) else "")
+        for d in danh_sach
+    ]
+    return (
+        f"Mình tìm được đơn vị cho {len(danh_sach)} việc: "
+        + "; ".join(phan)
+        + ". Bạn xác nhận từng việc để mình gửi yêu cầu nhé."
+    )
+
+
+# Nhãn của TỪNG LOẠI việc khách còn phải làm. Hằng số, không do model soạn —
+# đây là tên một loại hành động, không phải một câu tường thuật, và nó phải
+# giống hệt nhau qua mọi lượt đọc để người dùng nhận ra cùng một thứ.
+TIEU_DE_THANH_TOAN = "Xác nhận thanh toán"
+TIEU_DE_CHON_DON_VI = "Xác nhận đơn vị cung cấp"
+TIEU_DE_BO_SUNG = "Bổ sung thông tin"
+
+
+def _khoi_de_xuat(danh_sach: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hai trường response cho đề xuất, dựng cùng nhau ở MỘT chỗ.
+
+    MỘT mapper duy nhất: alias và phần tử trong danh sách là CÙNG một object,
+    không phải hai lần dựng từ cùng dữ liệu. Hai mapper nghĩa là hai chỗ để
+    lệch nhau, và chúng sẽ lệch đúng ở trường ai đó thêm sau này.
+
+    `provider_proposal` là ALIAS, và chỉ có giá trị khi danh sách có ĐÚNG một
+    phần tử. Nhiều hơn một thì nó là `None`: chọn cái đầu là một quyết định
+    giao diện không ai chủ ý đưa ra, và nó biến "khách còn hai việc" thành
+    "khách còn một việc" mà không có gì báo.
+
+    Dựng thành `ServiceProposalActionView` NGAY tại đây, không để dict đi tiếp.
+    Pydantic bắt thiếu trường và thừa trường ở chỗ này — muộn hơn thì một thẻ
+    không có hạn hoặc một `quote_id` lọt ra màn hình sẽ im lặng cho tới khi có
+    người nhìn thấy.
+    """
+    # Tiêu đề soạn ở BACKEND, ngay tại mapper duy nhất này.
+    #
+    # Không để giao diện tự đặt: nó đã từng làm vậy và đặt nhầm — mọi trạng
+    # thái `WAITING_APPROVAL` không phải tham quan đều nhận tiêu đề của thẻ
+    # thanh toán, kể cả một yêu cầu chuyển nhà không có khoản tiền nào.
+    #
+    # Hằng số, không do model soạn: đây là nhãn của một loại việc, không phải
+    # một câu tường thuật.
+    items = [ServiceProposalActionView.model_validate({"title": TIEU_DE_CHON_DON_VI, **row}) for row in danh_sach]
+    return {
+        "service_proposals": items,
+        "provider_proposal": items[0] if len(items) == 1 else None,
+    }
+
+
+async def _load_provider_rejection(workflow_id: str) -> dict[str, Any] | None:
+    """Lời từ chối khách còn phải xử lý, đọc từ PostgreSQL.
+
+    Loại chờ THỨ NĂM, và nó khác bốn loại kia ở một điểm: KHÔNG ai đang chờ.
+    Đơn vị đã trả lời, việc đã dừng, và khách là người duy nhất còn phải quyết
+    định. Không có nhánh này thì workflow nằm lại với một dòng `REJECTED` mà
+    màn hình vẫn nói "đang chờ đơn vị cung cấp dịch vụ xác nhận" — một câu đã
+    hết đúng từ lúc đơn vị bấm từ chối.
+
+    Trả `None` khi việc ấy đã được mở lần thử mới: lúc đó thứ khách cần thấy là
+    ĐỀ XUẤT MỚI, không phải lời từ chối cũ.
+    """
+    pool = None
+    try:
+        from src.orchestration.provider_reselection import (
+            loi_tu_choi_cong_khai,
+            loi_tu_choi_dang_cho_khach,
+        )
+
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        from src.orchestration.provider_directory import ten_don_vi as _ten_don_vi
+
+        loi = await loi_tu_choi_dang_cho_khach(pool, workflow_id=workflow_id)
+        if loi is None:
+            return None
+        return {
+            "workflow_id": workflow_id,
+            **loi_tu_choi_cong_khai(loi, _ten_don_vi(loi.provider_id)),
+        }
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load provider rejection failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+def _waiting_reselection_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    rejection: dict[str, Any],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow vừa bị đơn vị từ chối.
+
+    `approval_actor="USER"`: khách là người phải quyết định. Đặt `PROVIDER` ở
+    đây sẽ dựng màn chờ cho một việc không còn ai làm — đúng lỗi mà giai đoạn
+    riêng này ra đời để chặn.
+
+    Câu nói ra LÝ DO của đơn vị, nguyên văn họ gõ (đã làm sạch ký tự điều
+    khiển). Nó có thể đổi quyết định của khách: "hết xe ngày ấy" mời họ đổi
+    ngày, chứ không phải đổi đơn vị.
+    """
+    tasks = _polling_task_views(plan, record, show_waiting=True)
+    ten = (rejection.get("rejected_provider") or {}).get("name") or "Đơn vị"
+    ly_do = rejection.get("sanitized_reason")
+    co_the_doi = bool(rejection.get("can_request_another_provider"))
+    dau = f"{ten} đã từ chối yêu cầu này. Lý do họ đưa ra: {ly_do}" if ly_do else f"{ten} đã từ chối yêu cầu này."
+    # Hai câu cho hai đường, và câu thứ hai KHÔNG hứa gì.
+    #
+    # `TERMINAL_REVIEW` nghĩa là hệ thống chưa biết đi tiếp thế nào. Nói "bạn
+    # muốn mình tìm đơn vị khác không?" ở đó là mời khách bấm một nút không tồn
+    # tại. Và không dựng lời hứa "bộ phận hỗ trợ sẽ liên hệ" khi chưa có chức
+    # năng hỗ trợ nào đứng sau nó.
+    summary = dau + (
+        " Bạn muốn mình tìm đơn vị khác không?"
+        if co_the_doi
+        else " Mình chưa tự xử lý tiếp được yêu cầu này. Bạn nhắn cho mình nếu muốn đổi thông tin nhé."
+    )
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_PROVIDER_RESELECTION",
+        message=_STAGE_MESSAGES["WAITING_PROVIDER_RESELECTION"],
+        summary=summary,
+        # HẰNG SỐ, không do model soạn — cùng lý do với câu đề xuất: nó mang
+        # tên một công ty và một lời từ chối, và một bản diễn giải có thể nói
+        # sai cả hai. Ở đây nặng hơn: diễn giải sai một LÝ DO nghĩa là khách
+        # quyết định sai việc tiếp theo.
+        answer=summary,
+        response_state="READY",
+        provider_rejection=ProviderRejectionView.model_validate(rejection),
+        approval_actor="USER",
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
+    )
+
+
+async def _load_pending_proposals(workflow_id: str) -> list[dict[str, Any]]:
+    """MỌI đề xuất đơn vị đang chờ KHÁCH bấm, đọc từ PostgreSQL.
+
+    Loại chờ THỨ TƯ, và nó ra đời sau ba loại kia — nên nó có đúng cùng một lỗ
+    hổng mà `_load_pending_services` đã phải vá: đường dựng response từ
+    database không có nhánh cho nó, và nó là loại DUY NHẤT không sống sót qua
+    restart.
+
+    Đo được trên canary `p118_e2e_db`: sau khi restart backend, `GET
+    /workflows/demo/{id}` trả `approval_actor=None` và `provider_proposal=None`
+    trong khi database vẫn giữ nguyên một đề xuất `PROPOSED` còn hạn. Giao diện
+    mất hẳn nút "đồng ý", và khách không có đường nào đi tiếp — trong khi lượt
+    xác nhận qua `/service-proposals` vẫn hoạt động hoàn hảo. Đúng loại lỗi tệ
+    nhất: dữ liệu đúng, hệ thống đúng, chỉ có người dùng là mắc kẹt.
+
+    DANH SÁCH chứ không phải một cái: một kế hoạch được phép có hai bước
+    `schedule_move` độc lập, và khi ấy khách có hai việc phải bấm.
+
+    Chỉ giữ đề xuất CÒN BẤM ĐƯỢC. `status='PROPOSED'` một mình là fail-OPEN —
+    chứng từ có thể vừa hết hạn trong khi lượt dọn chưa chạy tới, và lúc ấy màn
+    hình dựng một cái nút bấm vào là lỗi.
+
+    DB lỗi trả rỗng, cùng khuôn ba hàm kia: mất một khối trên màn hình còn hơn
+    mất cả workflow.
+    """
+    pool = None
+    try:
+        from src.db.proposal_repository import moi_de_xuat_dang_cho
+        from src.orchestration.provider_matching import payload_cho_nguoi_dung
+
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        danh_sach = []
+        for de_xuat in await moi_de_xuat_dang_cho(pool, workflow_id=workflow_id):
+            payload = await payload_cho_nguoi_dung(pool, de_xuat)
+            if payload.get("can_confirm"):
+                danh_sach.append(payload)
+        return danh_sach
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("load pending proposals failed (%s)", type(exc).__name__)
+        return []
+    finally:
+        if pool is not None:
+            await pool.close()
+
+
+def _waiting_proposal_view(
+    workflow_id: str,
+    *,
+    plan: TaskPlan | None,
+    record: dict[str, Any] | None,
+    pending: list[dict[str, Any]],
+    events: list[DemoWorkflowEvent],
+) -> DemoWorkflowResponse:
+    """View công khai cho workflow đang chờ KHÁCH chọn đơn vị.
+
+    Cùng khuôn với ba view chờ kia: MỘT chỗ dựng, để đường RAM và đường restart
+    không lệch nhau. Ba lần trước mỗi lần một loại chờ mới ra đời là một lần
+    quên nhánh restart; đây là lần thứ tư, và nó được viết cùng lúc với nhánh
+    ấy.
+
+    `approval_actor="USER"` là thứ giao diện đọc để DỰNG nút xác nhận — ngược
+    hẳn với `_waiting_service_view`. Và câu chữ phải nói đúng ai: "đơn vị đang
+    xác nhận" lúc này là bảo khách không phải làm gì, trong khi họ là người duy
+    nhất còn phải làm.
+    """
+    cho_bam = {row.get("task_id") for row in pending}
+    tasks = _polling_task_views(plan, record, show_waiting=True)
+    for task in tasks:
+        if task.task_id in cho_bam:
+            task.status = "WAITING_APPROVAL"
+            task.message = "Đang chờ bạn xác nhận đơn vị."
+    summary = cau_de_xuat_don_vi(pending)
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status="WAITING_APPROVAL",
+        stage="WAITING_PROVIDER_PROPOSAL",
+        message=_STAGE_MESSAGES["WAITING_PROVIDER_PROPOSAL"],
+        summary=summary,
+        # Câu chat là HẰNG SỐ, không do model soạn — cùng lý do với câu đổi khu
+        # ở `_waiting_service_view`: nó mang một cái TÊN CÔNG TY và một CON SỐ
+        # TIỀN, và một bản diễn giải có thể nói sai cả hai.
+        #
+        # Đo được trên canary khi câu này còn do model viết, nguyên văn:
+        #
+        #     "Mình cần bạn xác nhận khoản thanh toán để chốt lịch chuyển nhà…"
+        #
+        # Không có khoản thanh toán nào. Việc cần làm là chọn đơn vị, và khách
+        # đọc câu ấy sẽ đi tìm một nút trả tiền không tồn tại.
+        answer=summary,
+        response_state="READY",
+        **_khoi_de_xuat(pending),
+        approval_actor="USER",
+        plan=_plan_view(plan),
+        tasks=tasks,
+        persisted=True,
+        resumable=True,
+        events=events,
     )
 
 
@@ -2867,8 +5612,10 @@ def _waiting_viewing_approval_view(
     return DemoWorkflowResponse(
         workflow_id=workflow_id,
         status="WAITING_APPROVAL",
-        stage="WAITING_APPROVAL",
-        message="Đang chờ đơn vị xác nhận lịch tham quan.",
+        # Câu chữ đã đúng từ trước, nhưng `stage` thì vẫn là mã của nhánh thanh
+        # toán — và `stage` mới là thứ mọi tầng khác đọc để quyết định câu.
+        stage="WAITING_VIEWING_APPROVAL",
+        message=_STAGE_MESSAGES["WAITING_VIEWING_APPROVAL"],
         viewing_approval=DemoViewingApproval(**pending),
         # PHẢI đặt ở cả đường dựng-lại-từ-DB này, không chỉ ở đường đầu tiên.
         #
@@ -2892,6 +5639,241 @@ def _waiting_viewing_approval_view(
 async def get_demo_workflow_status(
     workflow_id: str,
     user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Trạng thái workflow, kèm câu người dùng đã nói.
+
+    `goal` được đóng dấu Ở ĐÂY, sau khi thân hàm chọn xong một trong nhiều
+    nhánh trả về. Thân hàm có sáu đường ra (chờ duyệt lịch, chờ thanh toán,
+    cache RAM, đọc DB, …) và thêm `goal=` vào từng đường là sáu chỗ để quên một
+    chỗ — cái quên đó sẽ im lặng, vì thiếu `goal` chỉ làm trang chi tiết mất
+    một khối, không làm hỏng gì.
+    """
+    response = await _demo_workflow_status(workflow_id, user)
+    if response.goal is not None and response.session_id is not None:
+        return response
+    goal, session_id = await _read_workflow_goal(workflow_id)
+    update: dict[str, Any] = {}
+    if response.goal is None and goal:
+        update["goal"] = goal
+    # `session_id` là thứ cho phép NÓI TIẾP từ trang chi tiết.
+    #
+    # Thiếu nó, màn hình biết yêu cầu cũ là gì nhưng không biết nó thuộc cuộc
+    # trò chuyện nào — nên câu tiếp theo của người dùng lại mở một cuộc mới, và
+    # ngữ cảnh họ vừa đọc trên màn hình không đi theo.
+    if response.session_id is None and session_id:
+        update["session_id"] = session_id
+    return response.model_copy(update=update) if update else response
+
+
+_RECALL_LIMIT = 10
+
+# Field được phép nhớ lại. Danh sách ĐÓNG, và đó là chủ ý.
+#
+# Nhớ mọi thứ nghĩa là ký ức mang theo cả biển số, số tiền, mã đặt chỗ — dữ liệu
+# nhạy cảm hoặc đã hết hạn, đi vào prompt ở mọi lượt sau. Ở đây chỉ giữ những
+# LỰA CHỌN mà người dùng thật sự hay lặp lại, và lặp lại thì tiện.
+#
+# Ngày giờ CỐ Ý không nằm trong danh sách: "ngày 01/07" của lần trước gần như
+# chắc chắn không phải ngày lần này, nên gợi ý nó chỉ dẫn người dùng đi sai.
+_RECALLABLE_FIELDS = frozenset(
+    {"parking_zone", "vehicle_type", "project_id", "property_type", "issue_type", "transaction_type"}
+)
+
+
+def _flatten_task_inputs(inputs: Any) -> dict[str, Any]:
+    """Gộp input của mọi task thành một dict phẳng, chỉ giữ field được phép nhớ.
+
+    Bỏ InputRef (dict): chúng trỏ tới output của task khác trong CÙNG plan cũ,
+    hoàn toàn vô nghĩa ở một yêu cầu mới.
+    """
+    if not isinstance(inputs, dict):
+        return {}
+    flat: dict[str, Any] = {}
+    for task_input in inputs.values():
+        if not isinstance(task_input, dict):
+            continue
+        for field, value in task_input.items():
+            if field in _RECALLABLE_FIELDS and isinstance(value, (str, int, float)):
+                flat[field] = value
+    return flat
+
+
+# Số lượt gửi kèm khi VIẾT CÂU TRẢ LỜI.
+#
+# Ít hơn 10 lượt mà `_recall_recent_turns` đọc về: tầng này chỉ cần đủ để hiểu
+# "đó", "cái kia", "lúc nào" trỏ vào đâu — đó là chuyện của vài lượt gần nhất.
+# Ký ức xa hơn thuộc về Planner, nơi nó dùng để đoán lựa chọn quen thuộc.
+_ANSWER_CONTEXT_TURNS = 4
+
+
+# Trạng thái của một lượt cũ, viết cho model đọc.
+#
+# `CANCELLED` mang thêm lệnh cấm: giữ nó làm ngữ cảnh là đúng, nhưng không nói
+# rõ thì model đọc nó như một việc đang chạy và đi tiếp theo hướng đó — chính
+# thứ việc huỷ vừa phủ định.
+_TURN_NOTE: dict[str, str] = {
+    "CANCELLED": "yêu cầu này đã bị huỷ, KHÔNG tự làm lại",
+    "WAITING_APPROVAL": "việc này ĐANG DỞ, đang chờ xác nhận",
+    "NEEDS_INFORMATION": "việc này ĐANG DỞ, còn thiếu thông tin",
+    "RUNNING": "việc này ĐANG chạy",
+    "PENDING": "việc này ĐANG chạy",
+    "SUCCESS": "việc này đã xong",
+    "FAILED": "việc này đã dừng giữa chừng",
+}
+
+
+def _recent_turns_view(
+    recalled: list[dict[str, Any]],
+    session_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Vài lượt gần nhất, dựng thành hội thoại cho tầng viết câu trả lời.
+
+    `recalled` được sắp MỚI-NHẤT-TRƯỚC. Model đọc một cuộc trò chuyện theo
+    chiều thời gian, nên đảo lại — đưa nguyên thứ tự ngược nghĩa là lượt gần
+    nhất trông như lượt đầu tiên, và "sau đó" trỏ ngược về quá khứ.
+
+    Lượt chưa có câu đáp vẫn giữ: câu người dùng đã nói tự nó là ngữ cảnh.
+    """
+    # CHỈ lượt cùng một cuộc trò chuyện.
+    #
+    # Ký ức đọc 10 lượt gần nhất của cả TÀI KHOẢN, xuyên mọi phiên — đúng cho
+    # việc gợi ý giá trị ô ("vẫn khu A như lần trước?"), sai cho việc hiểu một
+    # câu nói. Một câu mơ hồ gặp lịch sử cũ thì được diễn giải bằng việc người
+    # dùng làm hôm khác. Đo được: sau khi huỷ một lịch tham quan rồi gõ "tôi
+    # muốn thực hiện dịch vụ khác", câu trả lời là "Mình thấy bạn muốn đổi
+    # ngày tham quan sang 29" — con số 29 đến từ một lượt hoàn toàn khác. Cùng
+    # câu ấy trên tài khoản sạch thì trả lời đúng.
+    #
+    # Không biết phiên nào thì KHÔNG lấy gì: đoán bừa ngữ cảnh tệ hơn không có.
+    same_session = [row for row in recalled if session_id is not None and row.get("_session_id") == session_id]
+
+    turns: list[dict[str, str]] = []
+    for row in same_session[:_ANSWER_CONTEXT_TURNS]:
+        said = (row.get("ban_da_noi") or "").strip()
+        if not said:
+            continue
+        turn = {"khach_noi": said}
+        answered = (row.get("p118_da_tra_loi") or row.get("assistant_answer") or "").strip()
+        if answered:
+            turn["p118_dap"] = answered
+        # NÓI RÕ lượt này đã bị huỷ. Giữ mà không nói thì model đọc nó như một
+        # việc đang chạy và tiếp tục theo hướng đó — đúng thứ việc huỷ vừa phủ
+        # định. Nói rõ thì nó vừa biết vừa nói chuyện gì, vừa biết việc ấy đã
+        # dừng.
+        # Việc này ĐANG Ở ĐÂU. Không có nó, prompt chỉ kể lại người dùng đã
+        # nói gì — và model không có cách nào trả lời "dịch vụ hiện tại của
+        # bạn là gì", nên nó hỏi ngược lại chính điều người dùng vừa làm.
+        #
+        # Đo được: hội thoại có đủ 3 lượt cùng phiên, model vẫn hỏi "mình cần
+        # biết dịch vụ hiện tại". Nó không thiếu ngữ cảnh — nó thiếu TRẠNG
+        # THÁI của ngữ cảnh ấy.
+        ghi_chu = _TURN_NOTE.get(row.get("_trang_thai") or "")
+        if ghi_chu:
+            turn["ghi_chu"] = ghi_chu
+        turns.append(turn)
+    turns.reverse()
+    return turns
+
+
+def _recalled_hints(recalled: list[dict[str, Any]], missing_fields: list[str]) -> dict[str, str]:
+    """Lần trước người dùng chọn gì cho ĐÚNG những field đang hỏi.
+
+    Lấy từ lượt GẦN NHẤT có field đó. Gợi ý một giá trị từ ba tháng trước trong
+    khi tháng trước họ đã đổi sang khu B là gợi ý sai — và người dùng gật đầu
+    theo thói quen thì hệ thống vừa đặt lại đúng cái họ đã bỏ.
+    """
+    wanted = set(missing_fields)
+    hints: dict[str, str] = {}
+    for turn in recalled:  # đã sắp mới-nhất-trước
+        for field, value in (turn.get("ban_da_chon") or {}).items():
+            if field in wanted and field not in hints:
+                hints[field] = str(value)
+    return hints
+
+
+async def _recall_recent_turns(user_id: str, exclude_workflow_id: str | None = None) -> list[dict[str, Any]]:
+    """Ký ức hội thoại cho Planner — mỗi lượt kèm NHÃN dịch vụ nó đã dùng.
+
+    Nhãn dựng từ tool ĐÃ CHẠY THẬT, không phải suy đoán từ câu chữ. Model đọc
+    nhãn rồi tự bỏ qua thứ không liên quan — ký ức về chỗ đỗ xe không nên chen
+    vào lúc đang lập lịch tham quan.
+
+    Giới hạn 10 lượt. Đo được: mỗi lượt ~62 token, nên 10 lượt thêm ~1.300
+    token vào một prompt vốn đã 10.700 — khoảng +10% chi phí. Vượt qua đó, giá
+    trị giảm nhanh còn rủi ro tăng: model bắt đầu bám vào thông tin cũ đã hết
+    hạn.
+
+    Best-effort: đọc hỏng thì Planner chạy KHÔNG có ký ức, đúng như trước khi
+    có tính năng này. Trí nhớ là thứ làm câu hỏi hay hơn, không phải thứ để
+    workflow sống chết theo nó.
+    """
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            rows = await repository.recent_turns_for_owner(
+                owner_user_id=str(user_id),
+                exclude_workflow_id=exclude_workflow_id,
+                limit=_RECALL_LIMIT,
+            )
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - ký ức hỏng không được làm hỏng yêu cầu
+        logger.warning("không đọc được ký ức hội thoại; planner chạy không có ngữ cảnh cũ")
+        return []
+
+    turns: list[dict[str, Any]] = []
+    for row in rows:
+        services = [_TOOL_PRESENTATION[tool][0] for tool in (row.get("tools") or []) if tool in _TOOL_PRESENTATION]
+        turn: dict[str, Any] = {"ban_da_noi": row["goal"]}
+        # Không gửi cho model — chỉ để lọc "lượt này có thuộc cuộc trò chuyện
+        # đang diễn ra không". `_recent_turns_view` bóc nó ra trước khi dựng
+        # payload.
+        turn["_session_id"] = str(row["session_id"]) if row.get("session_id") else None
+        # Đã huỷ hay chưa. Tầng trả lời GIỮ để biết vừa nói chuyện gì; Planner
+        # thì BỎ, để không dựng lại một việc người dùng đã chủ động dừng.
+        turn["_da_huy"] = row.get("status") == "CANCELLED"
+        turn["_trang_thai"] = row.get("status")
+        chosen = _flatten_task_inputs(row.get("inputs"))
+        if chosen:
+            turn["ban_da_chon"] = chosen
+        if row.get("assistant_answer"):
+            turn["p118_da_tra_loi"] = row["assistant_answer"]
+        if services:
+            turn["dich_vu"] = sorted(set(services))
+        created = row.get("created_at")
+        if created is not None:
+            turn["khi"] = created.date().isoformat()
+        turns.append(turn)
+    return turns
+
+
+async def _read_workflow_goal(workflow_id: str) -> tuple[str | None, str | None]:
+    """Câu người dùng đã nói, đọc thẳng từ `workflows.goal`.
+
+    Best-effort: đọc hỏng thì trang chi tiết mất khối trao đổi, không phải mất
+    cả trang.
+    """
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT goal, session_id FROM workflows WHERE workflow_id = $1::uuid",
+                    workflow_id,
+                )
+                return (row["goal"], row["session_id"]) if row else (None, None)
+        finally:
+            await pool.close()
+    except Exception:  # noqa: BLE001 - phụ trợ, không được làm vỡ GET
+        logger.warning("không đọc được goal/session của workflow")
+        return None, None
+
+
+async def _demo_workflow_status(
+    workflow_id: str,
+    user: dict,
 ) -> DemoWorkflowResponse:
     """Kết hợp stage của Agent với task status thật đọc từ PostgreSQL."""
     await _require_workflow_owner(workflow_id, user)
@@ -2929,16 +5911,106 @@ async def get_demo_workflow_status(
                 plan=_plan_from_job_or_record(job, record),
                 record=record,
                 pending=pending_viewing,
-                events=_public_events(job),
+                # RAM trước, database sau. `_DEMO_JOBS` có thì nó là bản mới
+                # nhất (gồm cả sự kiện chưa kịp ghim); trống — tức vừa restart —
+                # thì đọc lại từ `workflow_events`. Chỉ đọc RAM thì đúng những
+                # workflow sống sót qua restart lại là những workflow mất sạch
+                # dòng thời gian.
+                events=_public_events(job) or await _read_events(workflow_id),
             ),
             workflow_id,
         )
+
+    # Xung đột lịch survive restart: _DEMO_JOBS trống nhưng DB có conflict row
+    # chưa được ack → phải trả card trước thanh toán (cùng thứ tự _public_view_from_db).
+    if record is not None and record.get("workflow", {}).get("status") == "WAITING_APPROVAL":
+        _conflict_row = None
+        try:
+            _sc_repo2 = await acquire_repository()
+            _sc_pool2 = _sc_repo2._pool  # noqa: SLF001
+            try:
+                _conflict_row = await load_conflict_check(_sc_pool2, workflow_id)
+            finally:
+                await _sc_pool2.close()
+        except Exception as _exc2:  # noqa: BLE001
+            logger.warning("_demo_workflow_status: khong doc duoc conflict (%s)", type(_exc2).__name__)
+        if _conflict_row is not None:
+            _svc_labels2 = {
+                "schedule_move": "Đăng ký chuyển nhà",
+                "create_maintenance_request": "Yêu cầu bảo trì",
+                "schedule_property_viewing": "Đặt lịch tham quan",
+            }
+            _svc_a2 = _conflict_row.get("service_a", "")
+            _svc_b2 = _conflict_row.get("service_b", "")
+            _task_a2 = ConflictTaskInfo(
+                workflow_id=str(_conflict_row.get("workflow_id") or workflow_id),
+                task_id=str(_conflict_row.get("task_id") or ""),
+                service=_svc_a2,
+                service_label=_svc_labels2.get(_svc_a2, _svc_a2),
+                datetime_display=f"{_conflict_row.get('date_a', '')} {_conflict_row.get('time_a', '')}".strip(),
+            )
+            _task_b2 = ConflictTaskInfo(
+                workflow_id=str(_conflict_row.get("workflow_id_b") or workflow_id),
+                task_id=str(_conflict_row.get("task_id_b") or ""),
+                service=_svc_b2,
+                service_label=_svc_labels2.get(_svc_b2, _svc_b2),
+                datetime_display=f"{_conflict_row.get('date_b', '')} {_conflict_row.get('time_b', '')}".strip(),
+            )
+            _gap2 = None
+            try:
+                from src.orchestration.schedule_conflict import _minutes_between
+
+                _gap2 = _minutes_between(_conflict_row.get("time_a", ""), _conflict_row.get("time_b", ""))
+            except Exception:  # noqa: BLE001
+                pass
+            _gap_str2 = (
+                f", cách nhau {_gap2} phút" if _gap2 is not None and _gap2 > 0 else " cùng giờ" if _gap2 == 0 else ""
+            )
+            return await _with_stored_answer(
+                DemoWorkflowResponse(
+                    workflow_id=workflow_id,
+                    status="WAITING_APPROVAL",
+                    stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+                    message=_STAGE_MESSAGES.get("WAITING_SCHEDULE_CONFLICT_CHECK"),
+                    summary=(
+                        f"Bạn đang có hai lịch trong cùng ngày{_gap_str2}: "
+                        f"{_task_a2.service_label} lúc {_task_a2.datetime_display} "
+                        f"và {_task_b2.service_label} lúc {_task_b2.datetime_display}. "
+                        "Bạn đã kiểm tra kỹ chưa? Mình có thể giúp bạn đổi một lịch, "
+                        "hoặc giữ nguyên nếu đây đúng là điều bạn muốn."
+                    ),
+                    customer_action=ScheduleConflictAction(task_a=_task_a2, task_b=_task_b2, can_act=True),
+                    plan=_plan_view(_plan_from_job_or_record(job, record)),
+                    tasks=_polling_task_views(_plan_from_job_or_record(job, record), record),
+                    events=_public_events(job) or await _read_events(workflow_id),
+                    persisted=True,
+                ),
+                workflow_id,
+            )
 
     # Khoản thanh toán đang chờ duyệt quyết định view, bất kể job còn trong RAM
     # hay đã mất sau restart. `workflows.status` vẫn là RUNNING trong lúc chờ,
     # nên đọc cột đó sẽ báo "đang chạy" cho một workflow thực ra đang đợi người
     # dùng bấm nút — và giao diện mất cả báo giá lẫn hai nút quyết định.
-    pending_payment = await _load_pending_payment(workflow_id)
+    # CÂU HỎI thắng thẻ thanh toán. Tiền là bước CUỐI, không phải cái cổng.
+    #
+    # Một yêu cầu nhiều dịch vụ có thể vừa có câu hỏi đang treo vừa có khoản
+    # chờ trả. Đo được nguyên văn — tham quan bị từ chối vì hết khung giờ, chỗ
+    # đỗ thì đã giữ được:
+    #
+    #     Bạn:    ok vậy đổi qua ngày 25
+    #     P-118:  Khoản này cần bạn xác nhận rõ ràng. Bạn bấm "Xác nhận…"
+    #     Bạn:    tôi muốn đổi ngày trước rồi sẽ thanh toán sau
+    #     P-118:  Mình chưa rõ ý bạn. Bạn muốn mình tiếp tục hay dừng lại?
+    #
+    # Không ô nào để nhập ngày mới, và mọi câu đều rơi vào cổng thanh toán.
+    # Khách gõ một câu hoàn toàn hợp lệ và hệ thống không có đường nào nhận nó.
+    #
+    # Nhường chỗ KHÔNG phải biến mất: `payment_quote` vẫn đi kèm response, nên
+    # khoản tiền vẫn đọc được và vẫn trả được. Đây là thứ tự HIỂN THỊ, không
+    # phải cổng duyệt — `pay_fee` vẫn nằm `WAITING_APPROVAL` và khoản duyệt vẫn
+    # `AWAITING` cho tới khi có một hành động không thể hiểu nhầm.
+    pending_payment = None if _has_open_repair(record) else await _load_pending_payment(workflow_id)
     if pending_payment is not None:
         return await _with_stored_answer(
             _waiting_approval_view(
@@ -2946,10 +6018,90 @@ async def get_demo_workflow_status(
                 plan=_plan_from_job_or_record(job, record),
                 record=record,
                 pending=pending_payment,
-                events=_public_events(job),
+                # RAM trước, database sau. `_DEMO_JOBS` có thì nó là bản mới
+                # nhất (gồm cả sự kiện chưa kịp ghim); trống — tức vừa restart —
+                # thì đọc lại từ `workflow_events`. Chỉ đọc RAM thì đúng những
+                # workflow sống sót qua restart lại là những workflow mất sạch
+                # dòng thời gian.
+                events=_public_events(job) or await _read_events(workflow_id),
             ),
             workflow_id,
         )
+
+    # Loại chờ THỨ BA. Hai nhánh trên có từ trước; nhánh này thì không, nên yêu
+    # cầu chờ đơn vị duyệt dịch vụ là loại DUY NHẤT không sống sót qua restart:
+    # `workflows.status` đọc ra WAITING_APPROVAL nhưng không có view nào dựng
+    # được báo cáo cho nó, và giao diện quay lại màn "đang chạy".
+    #
+    # Đặt SAU thanh toán và tham quan để khớp thứ tự của đường chạy thật: khi cả
+    # hai cùng tồn tại, `policy_error` mang mã của boundary dừng TRƯỚC, và
+    # `_demo_response` hiển thị thẻ thanh toán. Hai đường phải nói cùng một thứ.
+    # Việc cần KHÁCH làm luôn được nói trước việc cần ĐƠN VỊ làm.
+    #
+    # Một yêu cầu nhiều dịch vụ có thể vừa có câu hỏi dành cho khách vừa có
+    # dịch vụ khác đang chờ đơn vị duyệt. Đo được trên yêu cầu thật (tham quan
+    # + đăng ký tư vấn): đơn vị TỪ CHỐI lịch tham quan vì hết khung giờ, hệ
+    # thống ghim đúng câu hỏi đổi ngày — và màn hình vẫn nói "Đang chờ đơn vị
+    # cung cấp dịch vụ xác nhận", vì dòng AWAITING của dịch vụ KIA được xét
+    # trước. Yêu cầu kẹt cứng: không ô nào để đổi ngày, và câu duy nhất hiện ra
+    # nói sai chuyện đang xảy ra.
+    #
+    # Chờ đơn vị duyệt thì khách không phải làm gì; một câu hỏi thì có. Nên câu
+    # hỏi thắng — dịch vụ kia vẫn nằm trong hàng đợi và vẫn được duyệt bình
+    # thường, chỉ là nó không còn che mất phần khách phải trả lời.
+    # Loại chờ THỨ TƯ: khách còn phải CHỌN đơn vị. Đặt TRƯỚC hàng đợi duyệt vì
+    # cùng một luật đã viết ngay dưới — việc cần KHÁCH làm luôn được nói trước
+    # việc cần ĐƠN VỊ làm. Ở đây luật ấy còn chặt hơn: khi đề xuất còn chờ thì
+    # hàng đợi đơn vị CHƯA có gì, nên hai nhánh không thể cùng đúng.
+    pending_proposals = await _load_pending_proposals(workflow_id)
+    if pending_proposals:
+        return await _with_stored_answer(
+            _waiting_proposal_view(
+                workflow_id,
+                plan=_plan_from_job_or_record(job, record),
+                record=record,
+                pending=pending_proposals,
+                events=_public_events(job) or await _read_events(workflow_id),
+            ),
+            workflow_id,
+        )
+
+    # Loại chờ THỨ NĂM: đơn vị đã TỪ CHỐI và khách phải chọn bước tiếp theo.
+    #
+    # Đặt TRƯỚC hàng đợi duyệt vì cùng luật: việc cần KHÁCH làm được nói trước
+    # việc cần ĐƠN VỊ làm. Và đặt SAU đề xuất vì khi đã có đề xuất mới thì lời
+    # từ chối cũ đã được xử lý — `loi_tu_choi_dang_cho_khach` cũng tự loại nó,
+    # nên hai tầng cùng một luật.
+    #
+    # Và đặt SAU `_has_open_repair`: một lời từ chối mà hệ thống đã hỏi được
+    # khách một ô cụ thể ("chọn Khu B?") thì câu hỏi ấy thắng. Chọn lại đơn vị
+    # là đường CUỐI, dành cho lời từ chối không có ô nào để sửa.
+    rejection = None if _has_open_repair(record) else await _load_provider_rejection(workflow_id)
+    if rejection is not None:
+        return await _with_stored_answer(
+            _waiting_reselection_view(
+                workflow_id,
+                plan=_plan_from_job_or_record(job, record),
+                record=record,
+                rejection=rejection,
+                events=_public_events(job) or await _read_events(workflow_id),
+            ),
+            workflow_id,
+        )
+
+    if not _has_open_repair(record):
+        pending_services = await _load_pending_services(workflow_id)
+        if pending_services:
+            return await _with_stored_answer(
+                _waiting_service_view(
+                    workflow_id,
+                    plan=_plan_from_job_or_record(job, record),
+                    record=record,
+                    pending=pending_services,
+                    events=_public_events(job) or await _read_events(workflow_id),
+                ),
+                workflow_id,
+            )
 
     if job is not None and isinstance(job.get("response"), DemoWorkflowResponse):
         response = job["response"]
@@ -2975,21 +6127,69 @@ async def get_demo_workflow_status(
 
     # Repair Loop survive restart: nếu DB FAILED nhưng có repair hint, dựng
     # state từ DB + plan để `_demo_response` map sang NEEDS_INFORMATION + fields.
+    # `WAITING_APPROVAL` cũng phải vào đây, không chỉ `FAILED`/`CANCELLED`.
+    #
+    # Hai trạng thái cũ mô tả "cả yêu cầu đã chết". Nhưng một yêu cầu NHIỀU DỊCH
+    # VỤ có thể chết một phần: lịch tham quan bị từ chối vì hết khung giờ, còn
+    # chỗ đỗ thì giữ được và đang chờ trả tiền. Trạng thái tổng khi ấy là
+    # `WAITING_APPROVAL`, nên nhánh này không bao giờ chạy — và câu hỏi đổi ngày
+    # không có chỗ nào để hiện.
+    #
+    # KHÔNG mở cho `PENDING`/`RUNNING`: lúc ấy còn bước đang chạy, và một câu
+    # hỏi dựng giữa chừng có thể bị chính lượt chạy đang diễn ra trả lời.
     if (
         record is not None
-        and record.get("workflow", {}).get("status") in {"FAILED", "CANCELLED"}
+        and record.get("workflow", {}).get("status") in {"FAILED", "CANCELLED", "WAITING_APPROVAL"}
         and record.get("repair_hints")
     ):
         repair_state = _build_repair_state_from_record(record)
         if repair_state["repair_hints"]:
-            return _demo_response(repair_state, payment_approved=False).model_copy(
-                update={
-                    "workflow_id": workflow_id,
-                    "stage": "NEEDS_INFORMATION",
-                    "message": _STAGE_MESSAGES["NEEDS_INFORMATION"],
-                    "persisted": True,
-                    "events": _public_events(job),
-                }
+            # Nhường chỗ KHÔNG phải biến mất.
+            #
+            # Câu hỏi được nói TRƯỚC, nhưng khoản tiền vẫn phải đọc được — nếu
+            # không, khách trả lời xong câu hỏi rồi không còn gì để trả, và một
+            # chỗ đỗ đã giữ thật thì không được im lặng biến mất khỏi màn hình.
+            #
+            # `pending_payment` đã đọc ở trên và đang là None đúng vì nhánh này
+            # thắng; đọc lại ở đây là cách rẻ nhất để giữ con số mà không đảo
+            # ngược thứ tự hiển thị.
+            bao_gia = await _load_pending_payment(workflow_id)
+            return await _with_stored_answer(
+                _demo_response(repair_state, payment_approved=False).model_copy(
+                    update={
+                        **(
+                            {
+                                "payment_quote": {
+                                    "amount": bao_gia["amount"],
+                                    "currency": bao_gia["currency"],
+                                    "booking_id": bao_gia["booking_id"],
+                                }
+                            }
+                            if bao_gia
+                            else {}
+                        ),
+                        "workflow_id": workflow_id,
+                        "stage": "NEEDS_INFORMATION",
+                        "message": _STAGE_MESSAGES["NEEDS_INFORMATION"],
+                        "persisted": True,
+                        "events": _public_events(job),
+                        # Các BƯỚC ĐÃ CHẠY phải đi cùng câu hỏi.
+                        #
+                        # `_demo_response` dựng nhánh NEEDS_INFORMATION không kèm
+                        # `tasks` — hợp lý khi Planner hỏi TRƯỚC lúc chạy gì, vì
+                        # lúc đó chưa có bước nào. Nhưng nhánh này là repair: một
+                        # phần plan ĐÃ chạy rồi mới hỏng, và ở đây `record` có
+                        # đủ 4 dòng task.
+                        #
+                        # Đo được: workflow đăng ký xe + đặt chỗ đỗ, xe đã đăng
+                        # ký xong, chỗ đỗ hỏng. Mở trang chi tiết từ Lịch sử thì
+                        # thấy một trang gần như trống — không bước nào, không
+                        # câu trả lời, không báo giá — trong khi database có đủ.
+                        # Người dùng không có cách nào biết xe đã đăng ký được.
+                        "tasks": _polling_task_views(plan, record),
+                    }
+                ),
+                workflow_id,
             )
 
     # Clarification survive restart: `_DEMO_JOBS` trống nhưng bảng
@@ -3002,8 +6202,30 @@ async def get_demo_workflow_status(
     #
     # NEEDS_INFORMATION KHÔNG phải giá trị trong `WorkflowStatus`: nó được SUY
     # RA từ bảng con, đúng cách repair hint đang làm ở khối ngay trên.
+    #
+    # KHÔNG còn khoá sau `job is None`. Điều kiện ấy hẹp hơn ý định của chính
+    # nó: tới được đây nghĩa là cache RAM ĐÃ KHÔNG dựng nổi một response dùng
+    # được (nhánh `job["response"]` phía trên đã return nếu có). Còn một entry
+    # `_DEMO_JOBS` dở dang — `response = None` sau khi `retry` xoá nó, hoặc sau
+    # một lần dựng lại chỉ được một phần — thì `job is None` là False, nhánh
+    # này bị bỏ qua, và response rơi xuống bản dựng từ `workflows`/
+    # `workflow_tasks`. Bản đó không mang `question` lẫn `missing_fields`.
+    #
+    # Đo được trên máy người dùng, mở lại một yêu cầu từ Lịch sử:
+    #
+    #     GET  → status=NEEDS_INFORMATION, missing_fields=[]
+    #     UI   → không có ô nào để vẽ, dựng một ô "trả lời chung" khoá `answer`
+    #     POST → 422 "Biểu mẫu gửi lên có mục không nằm trong câu hỏi"
+    #
+    # Ngõ cụt tuyệt đối: `answer` không bao giờ nằm trong `missing_fields`, nên
+    # người dùng gõ gì cũng hỏng, và "tải lại trang" không sửa được vì lỗi
+    # không nằm ở trang.
+    #
+    # Chốt chặn theo TRẠNG THÁI thì giữ nguyên, và nó là chốt thật: `cancel`
+    # chỉ đổi `workflows.status`, KHÔNG xoá dòng clarification — thiếu nó, một
+    # yêu cầu vừa bấm Dừng sẽ hiện lại đúng câu hỏi cũ.
     database_status = record["workflow"]["status"] if record is not None else None
-    if job is None and record is not None and database_status not in {"SUCCESS", "FAILED", "CANCELLED"}:
+    if record is not None and database_status not in {"SUCCESS", "FAILED", "CANCELLED"}:
         pending = await _load_clarification_safely(workflow_id)
         if pending is not None:
             return DemoWorkflowResponse(
@@ -3018,21 +6240,31 @@ async def get_demo_workflow_status(
                 resumable=True,
                 plan=_plan_view(plan),
                 tasks=_polling_task_views(plan, record),
-                # Không bịa event: lượt chạy đó thuộc tiến trình đã chết.
-                events=[],
+                # Dòng thời gian ĐÃ GHIM thì đọc lại được, kể cả sau restart.
+                # Trước đây chỗ này trả rỗng kèm ghi chú "không bịa event" —
+                # đúng lúc đó, vì sự kiện chỉ sống trong RAM. Giờ chúng nằm
+                # trong `workflow_events`, nên trả rỗng mới là giấu dữ liệu có
+                # thật.
+                events=await _read_events(workflow_id),
             )
 
     task_views = _polling_task_views(plan, record)
-    stage = job["stage"] if job is not None else "FINISHED"
-    message = job["message"] if job is not None else _STAGE_MESSAGES["FINISHED"]
-    if database_status == "SUCCESS":
-        status = "SUCCESS"
-    elif database_status == "CANCELLED":
-        status = "CANCELLED"
-    elif database_status == "FAILED":
-        status = "FAILED"
-    else:
-        status = "RUNNING"
+    stage = job["stage"] if job is not None else None
+    message = job["message"] if job is not None else None
+    status = public_status_from_db(database_status)
+
+    if stage is None:
+        # `_DEMO_JOBS` trống KHÔNG có nghĩa là yêu cầu đã xong.
+        #
+        # Nó chỉ nói tiến trình theo dõi trong RAM không còn — sau một lần
+        # restart backend thì mọi workflow đều rơi vào đây. Mặc định cũ là
+        # `FINISHED`, nên một yêu cầu vẫn đang chạy hiện đồng thời "Yêu cầu đã
+        # hoàn tất." ở tiêu đề và "Đang thực hiện" ở dòng trạng thái — hai câu
+        # mâu thuẫn về cùng một việc, trên cùng một màn hình.
+        #
+        # Nguồn sự thật duy nhất còn lại lúc này là PostgreSQL, nên đọc từ đó.
+        stage = "FINISHED" if status in {"SUCCESS", "CANCELLED", "FAILED"} else "EXECUTING"
+        message = _STAGE_MESSAGES[stage]
 
     # Lỗi đã ghim thì đọc lại từ PostgreSQL, kể cả khi `_DEMO_JOBS` đã mất.
     #
@@ -3051,9 +6283,8 @@ async def get_demo_workflow_status(
         rejected = await _load_rejected_viewing(workflow_id)
         if rejected is not None:
             reason = (rejected.get("reject_reason") or "").strip()
-            message = (
-                "Lịch tham quan đã được gửi lại đơn vị tour, nhưng chưa được xác nhận. "
-                + (f"Lý do: {reason}." if reason else "Bạn có thể thử chọn khung giờ khác.")
+            message = "Lịch tham quan đã được gửi lại đơn vị tour, nhưng chưa được xác nhận. " + (
+                f"Lý do: {reason}." if reason else "Bạn có thể thử chọn khung giờ khác."
             )
             stage = "EXECUTION_FAILED"
 
@@ -3067,7 +6298,9 @@ async def get_demo_workflow_status(
             persisted=record is not None,
             plan=_plan_view(plan),
             tasks=task_views,
-            events=_public_events(job),
+            # Đường polling chung: RAM trước, database sau. Sau restart thì RAM
+            # trống, và đây là chỗ mọi yêu cầu cũ trong Lịch sử đi qua.
+            events=_public_events(job) or await _read_events(workflow_id),
             error_code=failure.code if failure else None,
             retryable=failure.retryable if failure else None,
         ),
@@ -3123,6 +6356,10 @@ async def list_demo_workflows_by_session(
                 needs_attention=row["status"] in _ATTENTION_STATUSES,
                 created_at=row["created_at"].isoformat() if row.get("created_at") else None,
                 updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
+                # `title` là bản cắt ngắn cho danh sách. Dựng bong bóng chat từ
+                # nó thì người dùng đọc lại chính câu mình vừa viết, bị cụt.
+                goal=row.get("goal"),
+                **_assistant_fields(row),
             )
         )
     return DemoSessionListResponse(session_id=session_id, workflows=items)
@@ -3170,7 +6407,7 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
     ),
     DemoCapabilityItem(
         name="Đăng ký phương tiện và chỗ đỗ xe",
-        description="Liên kết phương tiện và đặt chỗ tại Khu A hoặc Khu B.",
+        description="Đăng ký xe và giữ chỗ đỗ ở Khu A hoặc Khu B.",
         requires_resident=True,
     ),
     DemoCapabilityItem(
@@ -3207,6 +6444,20 @@ _CAPABILITY_CATALOGUE: tuple[DemoCapabilityItem, ...] = (
 # chỉ là không còn được rao như một dịch vụ độc lập.
 
 
+def _capability_dicts() -> list[dict[str, Any]]:
+    """Danh mục dịch vụ dưới dạng dict, cho làn small-talk đọc trong tiến trình.
+
+    Đây là CÙNG một `_CAPABILITY_CATALOGUE` mà `GET /capabilities` trả về, nên
+    câu trả lời "bạn làm được gì" không bao giờ lệch với danh sách người dùng
+    nhìn thấy trên màn hình.
+
+    Không lọc theo quyền ở đây: `_capability_reply` đã tách "dùng được ngay" và
+    "mở sau khi liên kết căn hộ" dựa trên `account_state`, và nó cố ý LIỆT KÊ
+    cả phần bị khoá — giấu đi thì người dùng không biết dịch vụ tồn tại.
+    """
+    return [item.model_dump() for item in _CAPABILITY_CATALOGUE]
+
+
 @router.get("/capabilities", response_model=DemoCapabilityListResponse)
 async def list_supported_capabilities(
     user: dict = Depends(get_current_user),
@@ -3234,7 +6485,7 @@ async def list_supported_capabilities(
     blocked_reason = {
         "PENDING": "Hồ sơ cư dân của bạn đang chờ ban quản lý duyệt.",
         "REJECTED": "Hồ sơ cư dân chưa được duyệt. Vui lòng liên hệ ban quản lý.",
-    }.get(status.value if status is not None else "", "Cần liên kết hồ sơ cư dân đã xác minh.")
+    }.get(status.value if status is not None else "", "Cần xác minh căn hộ trước.")
 
     def _resolve(item: DemoCapabilityItem) -> DemoCapabilityItem:
         if not item.requires_resident or is_resident:
@@ -3275,6 +6526,843 @@ async def delete_demo_workflow(
     # Bỏ job trong RAM để lượt poll đang chạy không dựng lại dòng vừa ẩn.
     _DEMO_JOBS.pop(workflow_id, None)
     return Response(status_code=204)
+
+
+# Ô nào của một yêu cầu được phép sửa.
+#
+# Đọc từ input của kế hoạch ĐÃ LƯU, không từ ký ức hội thoại — nên không có gì
+# để đoán và không guard nào bị nới. Bỏ định danh nội bộ và `InputRef`:
+# `InputRef` là con trỏ tới kết quả bước trước, không phải giá trị người dùng
+# chọn; đưa nó ra màn hình là hiện một cấu trúc nội bộ thay cho một dữ kiện.
+_AMEND_HIDDEN = frozenset({"resident_id", "vehicle_id", "booking_id", "viewing_id"})
+
+
+def _amendable_values(record: dict[str, Any]) -> dict[str, Any]:
+    """Ô sửa được của một yêu cầu, theo tên NỘI BỘ → giá trị đang lưu.
+
+    Một nguồn duy nhất cho câu hỏi "yêu cầu này có những ô nào". Biểu mẫu trên
+    trang chi tiết và nhánh sửa-bằng-lời cùng đọc từ đây; hai đường tự dựng lấy
+    danh sách ô thì sớm muộn chúng cho phép sửa hai tập khác nhau, và tập rộng
+    hơn mới là tập thật.
+    """
+    seen: dict[str, Any] = {}
+    for row in record.get("tasks") or []:
+        raw = row.get("input_data") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                continue
+        if not isinstance(raw, dict):
+            continue
+        for name, value in raw.items():
+            if name in _AMEND_HIDDEN or name in seen:
+                continue
+            if isinstance(value, dict):  # InputRef
+                continue
+            seen[name] = value
+    return seen
+
+
+def _amendable_fields(record: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": _to_public_missing_fields([name])[0],
+            "label": MISSING_FIELD_LABELS.get(name, name),
+            "value": value,
+        }
+        for name, value in _amendable_values(record).items()
+    ]
+
+
+# --- Intent lane: sửa yêu cầu vừa dừng, bằng lời ------------------------------
+#
+# Xem `src/api/intent.py` cho lý do tầng này tồn tại. Ở đây chỉ là phần cần
+# chạm database: tìm yêu cầu để sửa, và đọc ra ô nào đổi thành gì.
+
+
+def _changes_from_text(
+    goal: str,
+    current: dict[str, Any],
+    *,
+    today: date | None = None,
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Ô nào của yêu cầu cũ được câu này đổi, và đổi thành gì.
+
+    Chỉ nhận ô có giá trị mới KHÁC giá trị đang lưu. "Đổi sang khu B" khi khu
+    hiện tại đã là B thì không có gì để sửa — và chạy lại một kế hoạch y nguyên
+    là thêm một lần gọi provider chứ không phải một lần sửa.
+
+    Dùng CHÍNH bộ phân tích của biểu mẫu (`_extract_follow_up_answers`), một ô
+    một lần. Không có luật đọc giá trị nào được viết lại ở đây; chỗ này chỉ
+    quyết định hỏi bộ ấy về những ô nào.
+    """
+    anchor = next(
+        (value for name, value in current.items() if name in _DATE_FIELDS and isinstance(value, str)),
+        None,
+    )
+    text = rewrite_relative_dates(goal, anchor=anchor, today=today)
+
+    answers: dict[str, Any] = {}
+    described: list[tuple[str, str]] = []
+    for name, old in current.items():
+        if name not in AMENDABLE_FROM_TEXT:
+            continue
+        parsed, unresolved = _extract_follow_up_answers(text, [name])
+        if unresolved:
+            continue
+        new = parsed[name]
+        if new == old:
+            continue
+        answers[name] = new
+        label = MISSING_FIELD_LABELS.get(name, name)
+        described.append((label, ZONE_LABELS.get(str(new), str(new))))
+    return answers, described
+
+
+def _pending_intent_resolver() -> PendingIntentResolver:
+    """Điểm dựng DUY NHẤT cho bộ phân loại — để test thay được một chỗ."""
+    settings = get_settings()
+    return PendingIntentResolver(
+        get_llm(settings),
+        structured_output_method=structured_output_method(settings),
+    )
+
+
+async def _changes_from_intent(
+    goal: str,
+    current: dict[str, Any],
+    *,
+    decision_pending: bool,
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Hỏi model khi bộ đọc tất định KHÔNG rút được gì — và chỉ khi đó.
+
+    Bộ đọc tất định bắt được phần lớn cách nói và không tốn lượt gọi nào; nó
+    chạy trước và thắng khi nó có câu trả lời. Model chỉ được hỏi ở phần đuôi
+    mà một danh sách đóng động từ không bao giờ với tới:
+
+        "khu B được không"           không có động từ nào để bắt
+        "thôi khu A đắt quá, B nhé"  bị chính từ huỷ loại ra
+
+    Model chỉ ĐỀ XUẤT. Ô phải có thật trong kế hoạch đang chạy, giá trị phải qua
+    đúng bộ phân tích canonical của ô đó, và trích dẫn phải nằm trong chính câu
+    người dùng — cả bốn cửa nằm ở `src/agents/pending_intent.py`, không ở đây.
+
+    Mọi lỗi trả về rỗng, và caller đi tiếp vào Planner như cũ. Đây là hướng an
+    toàn của tầng này: bỏ sót một cách nói thì người dùng gõ lại, còn nhận nhầm
+    một yêu cầu MỚI thành "sửa" thì hệ thống lặng lẽ chạy lại kế hoạch cũ.
+    """
+    fields = [name for name in current if name in AMENDABLE_FROM_TEXT]
+    if not fields:
+        return {}, []
+    try:
+        resolved = await _pending_intent_resolver().resolve(
+            goal,
+            fields=fields,
+            decision_pending=decision_pending,
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("intent lane: không phân loại được câu (%s)", type(exc).__name__)
+        return {}, []
+
+    if resolved.intent is not PendingIntent.AMEND or resolved.field is None:
+        return {}, []
+    # Trả lời đúng giá trị đang có thì KHÔNG có gì để sửa — và chạy lại một kế
+    # hoạch y nguyên là một lần gọi provider thừa, không phải một lần sửa.
+    if current.get(resolved.field) == resolved.value:
+        return {}, []
+    label = MISSING_FIELD_LABELS.get(resolved.field, resolved.field)
+    shown = ZONE_LABELS.get(str(resolved.value), str(resolved.value))
+    return {resolved.field: resolved.value}, [(label, shown)]
+
+
+async def _de_xuat_dang_cho_trong_phien(session_id: str, *, owner_user_id: str) -> str | None:
+    """Workflow trong phiên này đang chờ CHÍNH KHÁCH chọn đơn vị. `None` nếu không có.
+
+    Bó trong một phiên và trong một chủ sở hữu, cùng lý do với `_amend_target`:
+    "còn bên nào rẻ hơn không" nói về việc vừa nói tới, không phải một việc từ
+    tuần trước — và chắc chắn không phải việc của người khác.
+
+    Đọc từ PostgreSQL mỗi lượt. Không cache, không `_DEMO_JOBS`: sau restart câu
+    hỏi tiếp vẫn phải tìm được đúng đề xuất, nếu không nó rơi xuống làn lập kế
+    hoạch và sinh ra một yêu cầu thứ hai.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await repository.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+        # MỚI NHẤT trước: đề xuất khách đang nhìn là đề xuất vừa được dựng.
+        for row in reversed(rows):
+            wid = str(row["workflow_id"])
+            if await de_xuat_dang_cho(pool, workflow_id=wid, task_id=None) is not None:
+                return wid
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("lan hoi them: khong doc duoc phien (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+    return None
+
+
+async def _conflict_dang_cho_trong_phien(session_id: str, *, owner_user_id: str) -> tuple[str, dict] | None:
+    """Tìm workflow đang chờ xác nhận xung đột lịch trong phiên.
+
+    Trả (workflow_id, conflict_row) hoặc None.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001
+        rows = await repository.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+        for row in reversed(rows):
+            wid = str(row["workflow_id"])
+            conflict = await load_conflict_check(pool, wid)
+            if conflict is not None:
+                return wid, conflict
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lan xung dot: khong doc duoc phien (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+    return None
+
+
+async def _xu_ly_conflict_ngon_ngu_tu_nhien(
+    goal: str,
+    session_id: str,
+    user: dict[str, Any],
+) -> DemoWorkflowResponse | None:
+    """Chặn câu của người dùng khi có xung đột lịch đang chờ xác nhận.
+
+    Phân loại bằng LLM nhỏ (KEEP_BOTH/CHANGE_A/CHANGE_B/UNKNOWN). UNKNOWN →
+    hỏi lại, KHÔNG tạo workflow mới, KHÔNG gọi Planner.
+    """
+    pending = await _conflict_dang_cho_trong_phien(session_id, owner_user_id=str(user["id"]))
+    if pending is None:
+        return None
+
+    workflow_id, conflict = pending
+
+    # Nhãn tiếng Việt theo tool thực tế từ conflict row
+    _svc_vi = {
+        "schedule_move": "Đăng ký chuyển nhà",
+        "create_maintenance_request": "Yêu cầu bảo trì",
+        "schedule_property_viewing": "Đặt lịch tham quan",
+    }
+    label_a = _svc_vi.get(str(conflict.get("service_a") or ""), str(conflict.get("service_a") or "Dịch vụ A"))
+    label_b = _svc_vi.get(str(conflict.get("service_b") or ""), str(conflict.get("service_b") or "Dịch vụ B"))
+
+    y_dinh = None
+    try:
+        from src.agents.conflict_intent import BoPhanLoaiXungDot
+        from src.services.llm import get_llm
+        from src.services.llm import structured_output_method as _som
+
+        phan_loai = BoPhanLoaiXungDot(get_llm(), structured_output_method=_som())
+        ket_qua = await phan_loai.doc(goal, label_a=label_a, label_b=label_b)
+        if ket_qua is not None:
+            y_dinh = ket_qua.y_dinh
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lan xung dot: khong phan loai duoc (%s)", type(exc).__name__)
+
+    # UNKNOWN hoặc lỗi LLM → hỏi lại. Không bao giờ rơi xuống Planner.
+    if y_dinh is None or y_dinh == "UNKNOWN":
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="WAITING_APPROVAL",
+            stage="WAITING_SCHEDULE_CONFLICT_CHECK",
+            summary=(
+                "Mình chưa hiểu rõ bạn muốn làm gì. "
+                "Bạn có thể cho mình biết: giữ nguyên cả hai lịch, "
+                "hay muốn đổi một trong hai?"
+            ),
+        )
+
+    # Xử lý theo ý định đã phân loại
+    settings = get_settings()
+    urls = {
+        "resident_url": settings.resident_service_url,
+        "transport_url": settings.transport_service_url,
+        "payment_url": settings.payment_service_url,
+        "property_url": settings.property_service_url,
+        "resident_services_url": settings.resident_services_service_url,
+        "shuttle_url": settings.shuttle_service_url,
+    }
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001
+    won = False
+    owner_id = ""
+    conflict_task_id = ""
+    try:
+        if y_dinh == "KEEP_BOTH":
+            won = await claim_conflict_ack(pool, conflict["fingerprint"])
+            owner_id = str(user.get("id") or "")
+            conflict_task_id = conflict.get("task_id", "")
+        elif y_dinh in ("CHANGE_A", "CHANGE_B"):
+            await clear_conflict_check(pool, workflow_id)
+            if y_dinh == "CHANGE_A":
+                target_wf = workflow_id
+                target_task = str(conflict.get("task_id") or "")
+            else:
+                target_wf = str(conflict.get("workflow_id_b") or "")
+                target_task = str(conflict.get("task_id_b") or "")
+                if target_wf:
+                    async with pool.acquire() as _conn:
+                        _wf_row = await _conn.fetchrow(
+                            "SELECT owner_user_id FROM workflows WHERE workflow_id=$1::uuid",
+                            target_wf,
+                        )
+                    if _wf_row is None or str(_wf_row["owner_user_id"]) != str(user.get("id") or ""):
+                        return DemoWorkflowResponse(
+                            workflow_id=workflow_id,
+                            status="EXECUTION_ERROR",
+                            summary="Không có quyền chỉnh sửa lịch kia.",
+                        )
+            await pool.close()
+            outcome = await repair_conflict_task(target_wf, target_task)
+            view = await _public_view_from_db(target_wf)
+            if view is not None:
+                return view
+            return DemoWorkflowResponse(
+                workflow_id=target_wf,
+                status=outcome.get("status", "FAILED"),
+            )
+    finally:
+        try:
+            await pool.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # keep_both: chỉ request nhận được RETURNING fingerprint (won=True) được resume.
+    if not won:
+        view = await _public_view_from_db(workflow_id)
+        if view is not None:
+            return view
+        return DemoWorkflowResponse(workflow_id=workflow_id, status="WAITING_APPROVAL")
+
+    try:
+        outcome = await resume_after_conflict_ack(
+            workflow_id,
+            owner_user_id=owner_id,
+            conflict_task_id=conflict_task_id,
+            **urls,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lan xung dot: resume that bai (%s)", type(exc).__name__)
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="EXECUTION_ERROR",
+            summary="Mình chưa tiếp tục được yêu cầu lúc này. Bạn thử lại sau nhé.",
+        )
+
+    view = await _public_view_from_db(workflow_id)
+    if view is not None:
+        return view
+    return DemoWorkflowResponse(
+        workflow_id=workflow_id,
+        status=outcome.get("status", "FAILED"),
+    )
+
+
+async def _tra_loi_ve_de_xuat(
+    goal: str,
+    *,
+    session_id: str,
+    user: dict[str, Any],
+) -> DemoWorkflowResponse | None:
+    """Trả lời một câu hỏi tiếp về đề xuất đơn vị. `None` = không phải việc này.
+
+    `None` ở MỌI nhánh không chắc chắn, và người gọi đi tiếp vào các làn cũ —
+    cùng hướng an toàn với làn sửa yêu cầu. Nhưng KHI đã có một đề xuất đang
+    chờ, làn này trả lời MỌI câu, kể cả câu nó không hiểu: để một câu hỏi về
+    báo giá rơi xuống làn lập kế hoạch chính là cách sinh ra workflow thứ hai.
+
+    Một lượt gọi model để PHÂN LOẠI, không hơn. Câu trả lời ghép từ dữ kiện đã
+    persist — xem `proposal_followup`.
+    """
+    if not chon_don_vi_theo_bao_gia_bat():
+        return None
+
+    workflow_id = await _de_xuat_dang_cho_trong_phien(session_id, owner_user_id=str(user["id"]))
+    if workflow_id is None:
+        return None
+
+    y_dinh = None
+    try:
+        from src.agents.proposal_followup_intent import BoPhanLoaiHoiThem
+        from src.services.llm import get_llm, structured_output_method
+
+        y_dinh = await BoPhanLoaiHoiThem(get_llm(), structured_output_method=structured_output_method()).doc(goal)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        # Không có mô hình thì vẫn KHÔNG rơi xuống Planner: `y_dinh=None` được
+        # đọc như `UNKNOWN`, và khách nhận một câu hỏi lại thay vì một kế hoạch
+        # họ không xin.
+        logger.warning("lan hoi them: khong phan loai duoc (%s)", type(exc).__name__)
+
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        ket_qua = await tra_loi_hoi_them(
+            pool,
+            workflow_id=workflow_id,
+            y_dinh=y_dinh,
+            owner_user_id=str(user["id"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("lan hoi them: khong tra loi duoc (%s)", type(exc).__name__)
+        # Đã xác định chắc phiên đang chờ đề xuất thì KHÔNG được thả câu xuống
+        # Planner. Một lỗi đọc chứng từ tạm thời mà sinh workflow mới là vừa
+        # lặp hội thoại, vừa trả lời sang dịch vụ khác.
+        ket_qua = CauTraLoi(
+            "Mình chưa đọc lại được các lựa chọn vận chuyển lúc này. "
+            "Yêu cầu cũ vẫn được giữ nguyên; bạn thử lại sau một chút nhé."
+        )
+    finally:
+        if pool is not None:
+            await pool.close()
+
+    if ket_qua is None:
+        # Tới đây nghĩa là `_de_xuat_dang_cho_trong_phien` ĐÃ thấy một đề xuất
+        # đang chờ, rồi `tra_loi_hoi_them` đọc lại và không thấy nữa. Giữa hai
+        # lần đọc có một khe: khách bấm xác nhận ở tab khác, hoặc một lượt đề
+        # xuất mới vừa thay chỗ.
+        #
+        # KHÔNG trả `None`. Trả `None` là thả câu hỏi xuống làn lập kế hoạch —
+        # nó lập một yêu cầu mới và trả lời sang chuyện khác, nên một lượt hỏi
+        # thành hai câu trả lời. Đó là chính lỗi mà làn này sinh ra để chặn, và
+        # nó không hết chỉ vì cửa vào hẹp hơn.
+        #
+        # Cùng cách xử lý với nhánh `except` ngay trên: nói ra rằng trạng thái
+        # vừa đổi, giữ nguyên workflow cũ, và mời khách đọc lại.
+        logger.info("lan hoi them: de xuat doi giua hai lan doc workflow=%s", workflow_id[:8])
+        ket_qua = CauTraLoi(
+            "Trạng thái yêu cầu vừa thay đổi nên mình chưa đọc lại được các lựa chọn. "
+            "Bạn mở lại yêu cầu để xem tình trạng mới nhất nhé."
+        )
+
+    # Cập nhật câu trả lời trong DB trên CHÍNH workflow đề xuất.
+    #
+    # `_persist_chat_turn` với `workflow_id` của đề xuất → `create_workflow` gây
+    # conflict (ID đã tồn tại) → bắt exception im lặng → DB không được cập nhật.
+    # Polling đọc câu cũ ("Mình tìm được…"), `said.current` đã bị frontend xoá
+    # trước khi gửi request → bong bóng cũ hiện lại trước bong bóng mới.
+    #
+    # Dùng `_save_answer_safely` thay: nó UPDATE trực tiếp `assistant_answer`,
+    # không cần tạo mới. Polling nhịp tiếp theo đọc đúng câu trả lời hỏi thêm,
+    # `sayOnce` dedupe thành công.
+    await _save_answer_safely(
+        workflow_id,
+        answer=ket_qua.cau,
+        suggestions=[],
+        state="READY",
+        for_status="CHAT",
+    )
+    # Trả về TRẠNG THÁI HIỆN TẠI của chính workflow ấy, đọc lại từ database.
+    #
+    # Không dựng một response rời: giao diện đọc `customer_action` để vẽ thẻ, và
+    # sau một lượt đổi đơn vị thẻ ấy phải đổi theo. Dựng rời nghĩa là câu trả
+    # lời nói một đằng còn thẻ vẽ một nẻo.
+    hien_tai = await _public_view_from_db(workflow_id)
+    if hien_tai is None:
+        return DemoWorkflowResponse(
+            workflow_id=workflow_id,
+            status="CHAT",
+            stage="CHAT",
+            message=ket_qua.cau,
+            answer=ket_qua.cau,
+            session_id=session_id,
+        )
+    return hien_tai.model_copy(
+        update={
+            "message": ket_qua.cau,
+            "answer": ket_qua.cau,
+            "response_state": "READY",
+            "session_id": session_id,
+        }
+    )
+
+
+async def _amend_target(session_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+    """Yêu cầu GẦN NHẤT trong chính phiên này mà sửa được. None nếu không có.
+
+    Bó trong một phiên có chủ ý: "đổi sang ngày 30" nói về việc vừa nói tới,
+    không phải một việc từ tuần trước. Nới ra khỏi phiên nghĩa là một câu mơ hồ
+    có thể chạm vào một cam kết người dùng đã quên mất.
+
+    Cùng ba hàng rào với `amend_and_rerun`, kiểm ở đây để nhánh này im lặng rơi
+    về Planner thay vì ném lỗi: trạng thái phải sửa được, và hàng đợi duyệt —
+    chứ không phải cột `status` — phải trống.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await repository.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("intent lane: không đọc được phiên (%s)", type(exc).__name__)
+        return None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+    # `list_workflows_by_session` sắp CŨ-TRƯỚC; cái sửa được gần nhất là cái
+    # người dùng đang nói tới.
+    for row in reversed(rows):
+        if row.get("status") not in AMENDABLE_WHILE_WAITING:
+            continue
+        workflow_id = str(row["workflow_id"])
+        if await _load_pending_services(workflow_id):
+            continue
+        record = await read_demo_workflow(workflow_id)
+        if record is not None:
+            return record
+    return None
+
+
+async def _nothing_left_to_amend(
+    goal: str,
+    *,
+    session_id: str,
+    user: dict[str, Any],
+) -> bool:
+    """Câu này đòi SỬA, nhưng trong phiên không còn gì sửa được. True = trả lời ngay.
+
+    Đo được trên `llm_usage` của stack demo: Planner chiếm 89% toàn bộ thời
+    gian gọi model (trung vị 32,98s, p90 78,28s), và 27% thời gian ấy sinh ra
+    KHÔNG task nào. Phần lớn số đó là một vòng lặp — người dùng gõ câu sửa,
+    phiên chưa từng đặt được gì để sửa, Planner chạy nửa phút rồi trả về rỗng,
+    họ gõ lại. Một lượt trong đó mất 125,0 GIÂY cho "đổi chỗ đỗ xe qua khu B".
+
+    Kiểm 19 lượt sửa/huỷ bị lãng phí: 18 lượt không có mục tiêu sửa nào trong
+    phiên. Lane sửa KHÔNG hỏng — nó tìm đúng và không thấy gì. Cái sai là dùng
+    Planner để phát hiện điều mà một truy vấn trả lời được.
+
+    Ba hàng rào, theo thứ tự rẻ dần:
+
+    1. `wants_to_amend` — không nói tới việc sửa thì không phải chuyện của hàm này.
+    2. `mentions_a_service` — "đặt lịch tham quan … ngày 2026-09-02" cũng mất
+       96 giây và cũng ra 0 task, nhưng nó là yêu cầu MỚI. Chặn nó lại là từ
+       chối một người đang muốn đặt chỗ, và đổi 96 giây lấy một khách mất là lỗ.
+    3. `_amend_target` + `_amendable_values` — phải KHÔNG có mục tiêu, HOẶC có
+       mà không còn ô nào sửa được. Vế sau không thừa: ba workflow đo được có
+       `task_plan` khác NULL nhưng không bước nào, nên xét mỗi trạng thái thì
+       chúng trông như mục tiêu hợp lệ — và mỗi lần thử lại hỏng, lượt hỏng ấy
+       chen lên đứng trước, khiến lần sau còn chậm hơn lần trước.
+    """
+    if not wants_to_amend(goal):
+        return False
+    if mentions_a_service(goal):
+        return False
+    # "Không SỬA ĐƯỢC" khác "KHÔNG CÓ GÌ để sửa". Luật này chỉ được nói vế sau.
+    #
+    # Hồi quy thật do chính luật này gây ra, workflow 208d9ada trên stack demo:
+    # người dùng vừa đặt xong lịch, đang chờ trả 150.000đ, gõ "tôi muốn đổi
+    # lịch" — và nhận "Mình chưa thấy yêu cầu nào đang dừng để sửa". Yêu cầu
+    # nằm ngay đó; nó chỉ ở trạng thái SUCCESS nên `_amend_target` không nhận.
+    #
+    # Nên phải hỏi database một câu RỘNG HƠN `_amend_target`: trong phiên này
+    # có yêu cầu nào KHÔNG, bất kể trạng thái. Có thì im lặng — câu trả lời
+    # đúng cho "đã xong rồi, không sửa được nữa" là việc của tầng khác, không
+    # phải của hàm này, và nói bừa còn tệ hơn để người dùng chờ.
+    if await _session_has_any_request(session_id, owner_user_id=str(user["id"])):
+        return False
+    record = await _amend_target(session_id, owner_user_id=str(user["id"]))
+    if record is None:
+        return True
+    return not _amendable_values(record)
+
+
+async def _session_has_any_request(session_id: str, *, owner_user_id: str) -> bool:
+    """Phiên này đã từng có yêu cầu nào chạy tới nơi chưa (có bước thật).
+
+    Đếm BƯỚC chứ không đếm workflow: đo được ba workflow liên tiếp có
+    `task_plan` khác NULL nhưng không bước nào — chúng là những lượt Planner
+    hỏng, không phải yêu cầu của người dùng. Đếm chúng thì luật im lặng đúng
+    vào lúc đáng lên tiếng nhất.
+    """
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        rows = await repository.list_workflows_by_session(session_id, owner_user_id=owner_user_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        # Không đọc được thì im lặng và để Planner xử lý như cũ: chậm còn hơn sai.
+        logger.warning("intent lane: không đếm được phiên (%s)", type(exc).__name__)
+        return True
+    finally:
+        if pool is not None:
+            await pool.close()
+    for row in rows:
+        record = await read_demo_workflow(str(row["workflow_id"]))
+        if record and (record.get("tasks") or []):
+            return True
+    return False
+
+
+async def _amend_from_conversation(
+    goal: str,
+    *,
+    session_id: str,
+    user: dict[str, Any],
+) -> DemoWorkflowResponse | None:
+    """Sửa yêu cầu vừa dừng bằng chính câu người dùng gõ. None = không phải việc này.
+
+    `None` ở MỌI nhánh không chắc chắn, và caller đi tiếp vào Planner như cũ.
+    Đây là hướng an toàn của tầng này: bỏ sót một cách nói thì người dùng gõ
+    lại đầy đủ, còn nhận nhầm một yêu cầu MỚI thành "sửa" thì hệ thống lặng lẽ
+    chạy lại kế hoạch cũ và trả về thứ họ không xin.
+    """
+    record = await _amend_target(session_id, owner_user_id=str(user["id"]))
+    if record is None:
+        # Không có gì đang dừng thì không có gì để sửa — và đây là nhánh thoát
+        # RẺ NHẤT, nên nó đứng trước cả việc đọc câu người dùng.
+        return None
+
+    # Đường deterministic hiện tại — CÒN TẠM.
+    #
+    # Nó nhận ra ý sửa qua một danh sách ĐÓNG động từ, nên "ngày 30 được không"
+    # đi lọt. Thay nó là việc của Bước 3 (Interaction Router), nơi
+    # `IntentResolver` + `validate_patch` được nối vào; ở Bước 1 hai module ấy
+    # đã có và đã kiểm, nhưng CHƯA có đường nào từ chúng tới Executor — đúng
+    # theo phạm vi đã chốt.
+    current = _amendable_values(record)
+    changes, described = _changes_from_text(goal, current) if wants_to_amend(goal) else ({}, [])
+    if not changes:
+        # Bộ đọc tất định im lặng — có thể vì câu không nói gì để sửa, có thể vì
+        # nó chỉ không biết cách nói ấy. Chỉ ở đây mới hỏi model.
+        changes, described = await _changes_from_intent(
+            goal,
+            current,
+            decision_pending=(record.get("workflow") or {}).get("status") == WorkflowStatus.WAITING_APPROVAL.value,
+        )
+    if not changes:
+        return None
+
+    workflow_id = str(record["workflow"]["workflow_id"])
+    settings = get_settings()
+    try:
+        await amend_and_rerun(
+            workflow_id,
+            changes,
+            resident_url=settings.resident_service_url,
+            transport_url=settings.transport_service_url,
+            payment_url=settings.payment_service_url,
+            property_url=settings.property_service_url,
+            resident_services_url=settings.resident_services_service_url,
+            tour_url=settings.tour_service_url,
+            consultation_url=settings.consultation_service_url,
+            shuttle_url=settings.shuttle_service_url,
+        )
+    except (NotAmendable, RetryNotAllowed) as exc:
+        # Sửa không được thì KHÔNG dựng câu lỗi ở đây. Người dùng vừa nói một
+        # câu hoàn toàn hợp lệ; đường Planner vẫn xử lý được nó như một yêu cầu
+        # mới, và đó là kết quả tốt hơn một lời từ chối.
+        logger.warning("intent lane: %s bỏ qua sửa (%s)", workflow_id[:8], type(exc).__name__)
+        return None
+
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+    request_fresh_answer(workflow_id, job=job)
+
+    view = await _public_view_from_db(workflow_id)
+    if view is None:
+        return None
+    # Nói ra ĐÃ ĐỔI GÌ. Nhánh này chạy lại một kế hoạch mà không hỏi lại câu
+    # nào, nên câu trả lời phải đủ để người đọc bắt được nếu hệ thống hiểu sai
+    # — họ còn kịp bấm Dừng.
+    #
+    # GHI ĐÈ CẢ `answer`, không riêng `message`. `request_fresh_answer` chạy
+    # nền, nên view dựng ngay sau đó vẫn mang câu của tình huống TRƯỚC — ở đây
+    # là lời báo đã huỷ. Đó đúng là thứ người dùng đã thấy: một câu từ chối
+    # hiện ra sau khi họ gõ một yêu cầu hợp lệ, rồi kế hoạch vẫn chạy. Hai câu
+    # nói ngược nhau về cùng một lượt.
+    said = amend_summary(described)
+    return view.model_copy(update={"message": said, "answer": said, "suggestions": [], "session_id": session_id})
+
+
+async def _planning_goal_after_an_early_cancel(
+    goal: str,
+    *,
+    session_id: str,
+    user: dict[str, Any],
+) -> str:
+    """Giữ ngữ cảnh khi người dùng sửa một yêu cầu bị huỷ trước khi có plan.
+
+    Nhánh sửa bình thường đọc giá trị từ ``workflow_tasks.input_data``. Nhưng
+    người dùng có thể bấm Dừng trong lúc Planner còn chạy; khi ấy workflow đã
+    được lưu mà chưa có ``task_plan`` hay task nào. Chỉ gửi câu ngắn như
+    "đổi sang Khu B" cho Planner sẽ biến nó thành một yêu cầu mới thiếu biển
+    số, loại xe và ngày đặt chỗ.
+
+    Chỉ nối lại yêu cầu gốc khi đủ cả ba điều kiện an toàn: câu mới nói rõ ý
+    sửa, mang một giá trị canonical có thể nhận ra, và target gần nhất trong
+    chính session/chính owner chưa có task để vá. Câu mơ hồ vẫn bắt đầu luồng
+    bình thường; workflow đã có plan vẫn đi qua ``amend_and_rerun``.
+
+    Giá trị trả về chỉ dùng làm input Planner. Shell PostgreSQL và hội thoại
+    vẫn lưu nguyên ``goal`` mới, nên UI không giả rằng người dùng đã gõ lại cả
+    yêu cầu cũ.
+    """
+    if not wants_to_amend(goal) or not _amends_a_previous_request(goal):
+        return goal
+    record = await _amend_target(session_id, owner_user_id=str(user["id"]))
+    if record is None or _amendable_values(record):
+        return goal
+    previous = str((record.get("workflow") or {}).get("goal") or "").strip()
+    if not previous:
+        return goal
+    return f"{previous}\nYêu cầu sửa đổi mới nhất của người dùng: {goal}"
+
+
+@router.get("/workflows/demo/{workflow_id}/amendable", summary="Các ô sửa được của một yêu cầu")
+async def amendable_demo_workflow(
+    workflow_id: str,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Yêu cầu này có sửa được không, và sửa được những ô nào.
+
+    Giao diện gọi trước khi mở biểu mẫu, để không dựng một form rồi mới báo
+    không dùng được — người dùng điền xong mới bị từ chối là cách tệ nhất.
+    """
+    await _require_workflow_owner(workflow_id, user)
+    record = await read_demo_workflow(workflow_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+    # Cùng luật với `amend_and_rerun`: hàng đợi duyệt là nguồn sự thật cho
+    # "đã gửi đi chưa", không phải cột `status`.
+    if await _load_pending_services(workflow_id):
+        return {
+            "can_amend": False,
+            "reason": (
+                "Yêu cầu này đã gửi tới đơn vị cung cấp và đang chờ duyệt, nên chưa sửa được. "
+                "Bạn huỷ yêu cầu trước rồi sửa nhé."
+            ),
+            "fields": [],
+        }
+    status = (record.get("workflow") or {}).get("status")
+    if status not in AMENDABLE_STATUSES:
+        return {
+            "can_amend": False,
+            "reason": (
+                "Yêu cầu đã hoàn tất nên không sửa đè lên được. Bạn tạo một yêu cầu mới giúp mình nhé."
+                if status == WorkflowStatus.SUCCESS.value
+                else "Yêu cầu đang chạy. Bạn dừng nó trước rồi sửa nhé."
+            ),
+            "fields": [],
+        }
+    return {"can_amend": True, "reason": None, "fields": _amendable_fields(record)}
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/amend",
+    response_model=DemoWorkflowResponse,
+    summary="Sửa vài ô rồi chạy lại chính yêu cầu đó",
+)
+async def amend_demo_workflow(
+    workflow_id: str,
+    request: DemoWorkflowContinueRequest,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Sửa-và-chạy-lại một yêu cầu đã dừng, KHÔNG đi qua Planner.
+
+    Giá trị cũ đến từ kế hoạch đã lưu — một kế hoạch đã qua Validator — nên
+    không có gì để đoán lại. Đây là điều dựng lại từ hội thoại không làm được:
+    ở đó mọi giá trị nhớ được đều phải hỏi xác nhận từng ô.
+    """
+    await _require_workflow_owner(workflow_id, user)
+    if not request.fields:
+        raise HTTPException(status_code=422, detail="Bạn cần sửa ít nhất một mục.")
+
+    answers, unresolved = _extract_structured_follow_up_answers(request.fields, list(request.fields.keys()))
+    if unresolved or not answers:
+        raise HTTPException(
+            status_code=422,
+            detail=_follow_up_validation_message(unresolved, " ".join(str(v) for v in request.fields.values())),
+        )
+
+    settings = get_settings()
+    try:
+        await amend_and_rerun(
+            workflow_id,
+            answers,
+            resident_url=settings.resident_service_url,
+            transport_url=settings.transport_service_url,
+            payment_url=settings.payment_service_url,
+            property_url=settings.property_service_url,
+            resident_services_url=settings.resident_services_service_url,
+            tour_url=settings.tour_service_url,
+            consultation_url=settings.consultation_service_url,
+            shuttle_url=settings.shuttle_service_url,
+        )
+    except NotAmendable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RetryNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+    request_fresh_answer(workflow_id, job=job)
+
+    view = await _public_view_from_db(workflow_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+    return view
+
+
+@router.post("/workflows/demo/{workflow_id}/support-requests", status_code=202)
+async def create_support_request(
+    workflow_id: str,
+    request: DemoSupportRequest,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Chuyển một lời nhờ ("xin đổi lịch", "xin huỷ lịch") tới đơn vị.
+
+    Hệ thống KHÔNG tự đổi hay tự huỷ. Một việc đã xong là một cam kết đã tồn tại
+    ở phía đơn vị; sửa nó là quyết định của họ, không phải của màn hình khách
+    đang mở. Route này chỉ ghim hồ sơ vào đúng hàng đợi đơn vị đang dùng.
+
+    Vì sao là route riêng chứ không phải `/cancel`: `/cancel` đánh dấu workflow
+    `CANCELLED` trong database của CHÍNH hệ thống này và không nói gì với đơn vị
+    — lịch VIEW-014 vẫn nằm nguyên bên kia. Hai việc khác hẳn nhau thì không
+    dùng chung một nút.
+
+    Không có câu trả lời nào được hứa ở đây: hàm trả về mã hồ sơ, và kết quả tới
+    khi đơn vị quyết.
+    """
+    await _require_workflow_owner(workflow_id, user)
+
+    pool = None
+    try:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
+        try:
+            ma = await save_support_request(
+                pool,
+                workflow_id=workflow_id,
+                task_id=request.task_id,
+                kind=request.kind,
+                # Lời khách gõ đi thẳng ra màn hình người duyệt. Cắt trắng hai
+                # đầu; phần còn lại giữ NGUYÊN VĂN — viết lại lời người nhờ là
+                # thay lời chứng bằng một bản diễn giải.
+                note=(request.note or "").strip() or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+    finally:
+        if pool is not None:
+            await pool.close()
+
+    return {
+        "workflow_id": workflow_id,
+        "request_id": ma,
+        "message": "Mình đã chuyển yêu cầu tới đơn vị. Họ sẽ phản hồi và bạn sẽ thấy kết quả ở đây.",
+    }
 
 
 @router.post(
@@ -3319,6 +7407,47 @@ async def cancel_demo_workflow(
     if not outcome.get("cancelled") and previous_status != "CANCELLED":
         raise HTTPException(status_code=409, detail="Yêu cầu đã kết thúc nên không thể huỷ.")
 
+    # Người dùng BỎ CUỘC một lỗi sửa được → gỡ side-effect ngay.
+    #
+    # `release_on_failure` bị chặn có chủ ý khi workflow còn repair hint: hint
+    # nghĩa là "người dùng sẽ sửa input rồi chạy tiếp", và hoàn tác sẽ phá đúng
+    # thứ họ định tiếp tục. Nhưng bấm Dừng là câu trả lời dứt khoát cho chính
+    # giả định đó — họ không tiếp tục nữa.
+    #
+    # Không đợi sweeper 48 giờ: người vừa nói "thôi" mà chỗ đỗ còn giữ và phí
+    # còn tính suốt hai ngày là một lời hứa bị bội.
+    #
+    # Chỉ chạy khi CÓ repair hint. Huỷ một workflow đang chờ thanh toán vẫn
+    # theo chính sách cũ — từ chối tiền, giữ booking — và đó là quyết định
+    # riêng, không đổi ở đây.
+    # Huỷ yêu cầu phải RÚT LUÔN lời nhờ duyệt đã gửi đi.
+    #
+    # `viewing_approvals` sống độc lập với `workflows.status`, nên huỷ chỉ đổi
+    # bảng workflow còn thẻ duyệt vẫn AWAITING. Hai hậu quả, cả hai đều đo được
+    # trên dữ liệu thật:
+    #
+    #   5 yêu cầu CANCELLED vẫn AWAITING  → đơn vị tour vẫn đang được hỏi về
+    #                                       một lịch khách đã huỷ
+    #   1 yêu cầu CANCELLED đã APPROVED   → và họ đã DUYỆT nó
+    #
+    # Cái thứ hai không dừng ở màn hình: có người sắp xếp đi phục vụ một buổi
+    # tham quan không còn tồn tại.
+    #
+    # Giao diện cũng đọc bảng này. Thẻ duyệt còn treo thì yêu cầu đã huỷ vẫn
+    # hiện là "đang chờ đơn vị xác nhận", và câu tiếp theo người dùng gõ bị
+    # đọc thành câu trả lời cho nó — đo được: gõ "tôi muốn đổi dịch vụ" sau
+    # khi huỷ, KHÔNG workflow nào được tạo và màn hình vẫn vẽ lịch cũ.
+    try:
+        await expire_pending_viewing_approval(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - chỉ giữ TÊN loại lỗi
+        logger.warning("không rút được yêu cầu duyệt lịch (%s)", type(exc).__name__)
+
+    try:
+        if await _read_repair_hints(workflow_id):
+            await release_on_failure(workflow_id)
+    except Exception as exc:  # noqa: BLE001 - hoàn tác hỏng không được chặn việc huỷ
+        logger.info("không release được sau khi huỷ (%s)", type(exc).__name__)
+
     # Dừng coroutine đúng workflow trong tiến trình hiện tại. Sau restart không
     # có task RAM nào; PostgreSQL vừa được chốt CANCELLED là nguồn sự thật.
     running_task = _DEMO_WORKFLOW_TASKS.get(workflow_id)
@@ -3346,8 +7475,55 @@ async def cancel_demo_workflow(
     answer_job["cancel_requested"] = True
     if job is not None:
         _append_job_event(job, "FINISHED")
-    _keep_demo_task(asyncio.create_task(_attach_answer(answer_job, workflow_id, goal=answer_job.get("goal") or "")))
+    request_fresh_answer(workflow_id, job=answer_job)
     return response
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/retry",
+    response_model=DemoWorkflowResponse,
+)
+async def retry_demo_workflow(
+    workflow_id: str,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Chạy lại TỪ BƯỚC HỎNG, giữ nguyên mọi bước đã thành công.
+
+    Chỉ cho lỗi HẠ TẦNG (`retryable=True`). Lỗi nghiệp vụ như "Khu A đã hết
+    chỗ" chạy lại y nguyên sẽ hỏng như cũ — lối ra của nó là câu hỏi lại để
+    người dùng đổi input, và endpoint này từ chối kèm đúng lời nhắc đó.
+
+    Bước đã SUCCESS được seed chứ không chạy lại: các tool này không idempotent.
+    """
+    await _require_workflow_owner(workflow_id, user)
+    settings = get_settings()
+
+    # Cache RAM dựng từ lượt chạy trước là ảnh cũ. Không bỏ đi thì mọi lần poll
+    # sau retry vẫn trả trạng thái hỏng cũ (mirror payment/viewing route).
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+
+    try:
+        await retry_failed_tasks(
+            workflow_id,
+            resident_url=settings.resident_service_url,
+            transport_url=settings.transport_service_url,
+            payment_url=settings.payment_service_url,
+            property_url=settings.property_service_url,
+            resident_services_url=settings.resident_services_service_url,
+            tour_url=settings.tour_service_url,
+            consultation_url=settings.consultation_service_url,
+            shuttle_url=settings.shuttle_service_url,
+        )
+    except RetryNotAllowed as exc:
+        status_code = 404 if exc.code == "NOT_FOUND" else 409
+        raise HTTPException(status_code=status_code, detail=exc.message) from None
+
+    view = await _public_view_from_db(workflow_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu này.")
+    return await _with_stored_answer(view, workflow_id)
 
 
 @router.post(
@@ -3357,6 +7533,11 @@ async def cancel_demo_workflow(
 async def decide_demo_payment(
     workflow_id: str,
     request: DemoPaymentDecisionRequest,
+    # Annotation PHẢI là `Request` đúng nguyên dạng: `Request | None` khiến
+    # FastAPI dựng Pydantic field từ nó và vỡ lúc import. Default None chỉ để
+    # test gọi trực tiếp không cần dựng HTTP request; runtime luôn được
+    # FastAPI tiêm object thật.
+    http_request: Request = None,  # type: ignore[assignment]
     user: dict = Depends(get_current_user),
 ) -> DemoWorkflowResponse:
     """Duyệt hoặc từ chối thanh toán cho một workflow đang chờ.
@@ -3393,6 +7574,43 @@ async def decide_demo_payment(
                 job["message"] = response.summary
             return response
 
+        # PAYMENT_PROVIDER=vnpay: duyệt KHÔNG thu tiền ngay — chốt APPROVED,
+        # mở phiên PENDING với số tiền đóng băng, trả URL VNPay đã ký để giao
+        # diện chuyển hướng. Tiền được xác nhận bởi callback IPN; workflow vẫn
+        # WAITING_APPROVAL tới lúc đó.
+        settings = get_settings()
+        if settings.payment_provider == "vnpay":
+            session = await open_vnpay_payment_session(
+                workflow_id,
+                client_ip=http_request.client.host if http_request.client else "",
+            )
+            view = await _public_view_from_db(workflow_id)
+            summary = (
+                "Mình đã mở phiên thanh toán VNPay cho bạn. Đang chuyển tới trang "
+                "thanh toán — sau khi hoàn tất, chỗ đỗ sẽ được xác nhận tự động."
+            )
+            response = (
+                view.model_copy(
+                    update={
+                        "status": "WAITING_APPROVAL",
+                        "summary": summary,
+                        "payment_redirect_url": session["payment_redirect_url"],
+                    }
+                )
+                if view is not None
+                else DemoWorkflowResponse(
+                    workflow_id=workflow_id,
+                    status="WAITING_APPROVAL",
+                    summary=summary,
+                    payment_redirect_url=session["payment_redirect_url"],
+                )
+            )
+            if job is not None:
+                _append_job_event(job, "WAITING_PAYMENT_GATEWAY")
+                job["message"] = summary
+                job["response"] = None
+            return response
+
         outcome = await resume_payment_after_approval(
             workflow_id,
             payment_url=get_settings().payment_service_url,
@@ -3413,10 +7631,26 @@ async def decide_demo_payment(
         )
 
     amount = f"{quote.amount:,.0f}".replace(",", ".")
-    response = DemoWorkflowResponse(
-        workflow_id=workflow_id,
-        status="SUCCESS",
-        summary=f"Đã thanh toán {amount} {quote.currency}. Chỗ đỗ xe của bạn đã được xác nhận.",
+    summary = f"Đã thanh toán {amount} {quote.currency}. Chỗ đỗ xe của bạn đã được xác nhận."
+
+    # Response này phải mang THEO các bước, không chỉ một câu tóm tắt.
+    #
+    # Bản trước dựng `DemoWorkflowResponse(workflow_id, status, summary)` trần.
+    # `status="SUCCESS"` là trạng thái kết thúc nên giao diện NGỪNG poll ngay —
+    # và bản trần ấy là thứ cuối cùng nó thấy. Người dùng vừa trả tiền xong mở
+    # trang chi tiết và không có bước nào cả: không biết chỗ đỗ nào, xe nào,
+    # lịch tham quan ra sao.
+    #
+    # Tệ hơn: nó còn được ghi vào `job["response"]`, nên mọi lượt poll sau đó
+    # cũng trả bản rỗng cho tới khi tiến trình khởi động lại.
+    #
+    # Dựng lại từ database như đường duyệt lịch tham quan vẫn làm, rồi chỉ ĐÈ
+    # câu tóm tắt — số tiền và mã đặt chỗ là thứ chỉ chỗ này biết.
+    view = await _public_view_from_db(workflow_id)
+    response = (
+        view.model_copy(update={"status": "SUCCESS", "summary": summary})
+        if view is not None
+        else DemoWorkflowResponse(workflow_id=workflow_id, status="SUCCESS", summary=summary)
     )
     if job is not None:
         _append_job_event(job, "FINISHED")
@@ -3430,11 +7664,7 @@ async def decide_demo_payment(
     #
     # Response trả NGAY cho người vừa bấm nút; câu trả lời tới ở lượt poll kế
     # tiếp, cùng đường với background job.
-    _keep_demo_task(
-        asyncio.create_task(
-            _attach_answer(job if job is not None else {}, workflow_id, goal=(job or {}).get("goal") or "")
-        )
-    )
+    request_fresh_answer(workflow_id, job=job)
     return response
 
 
@@ -3448,13 +7678,53 @@ _ACTIVE_STATUSES = ("PENDING", "RUNNING")
 # danh sách.
 _ATTENTION_STATUSES = ("WAITING_APPROVAL", "NEEDS_INFORMATION")
 _COMPLETED_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
+# "Đã xong" và "Chưa xong" là hai câu trả lời KHÁC NHAU cho cùng một câu hỏi
+# của người dùng: việc này có thành không?
+#
+# `completed` gộp cả ba trạng thái kết thúc, kể cả FAILED — hợp lý cho phép đếm
+# nội bộ, nhưng đặt tên "Đã xong" cho một việc đã hỏng là nói sai với người
+# đang tìm nó.
+_SUCCEEDED_STATUSES = ("SUCCESS",)
+# "Đang xử lý" là MỘT nhóm: đang chạy, chờ duyệt, chờ chính người dùng.
+#
+# Tách chúng ra bắt người dùng ĐOÁN TRƯỚC việc của mình đang kẹt kiểu gì thì mới
+# biết bấm tab nào — mà nếu đoán được thì họ đã không cần đi tìm. Từ chỗ họ
+# đứng, cả ba là cùng một câu: việc này chưa xong. Vấn đề CỤ THỂ thuộc về trang
+# chi tiết, nơi có đủ chỗ để nói nó là gì.
+#
+# FAILED/CANCELLED cũng ở đây. Chúng KHÔNG phải "đã xong": việc người dùng nhờ
+# vẫn chưa được làm, và họ còn nhắn tiếp với dịch vụ đó được. Xếp chúng cạnh
+# những việc đã hoàn tất là bảo người dùng rằng chuyện này khép lại rồi, trong
+# khi thứ họ cần vẫn chưa có.
+_IN_PROGRESS_STATUSES = _ACTIVE_STATUSES + _ATTENTION_STATUSES + ("FAILED", "CANCELLED")
 
+# Bộ lọc dạng "chỉ theo trạng thái". `upcoming`/`done` cần thêm một câu hỏi nữa
+# — workflow này còn sự kiện nào chưa diễn ra không — nên chúng nằm ở
+# `_EVENT_FILTERS` bên dưới, không nhét vừa vào bảng này.
 _LIST_FILTERS: dict[str, tuple[str, ...]] = {
-    "active": _ACTIVE_STATUSES + _ATTENTION_STATUSES,
+    "active": _IN_PROGRESS_STATUSES,
+    "in-progress": _IN_PROGRESS_STATUSES,
     "running": _ACTIVE_STATUSES,
     "attention": _ATTENTION_STATUSES,
     "completed": _COMPLETED_STATUSES,
+    "succeeded": _SUCCEEDED_STATUSES,
     "all": (),
+}
+
+# Hai bộ lọc chia đôi phần ĐÃ KẾT THÚC theo việc còn lịch phía trước hay không.
+#
+#   "upcoming" — đã CHẠY XONG và còn một sự kiện chưa diễn ra (chỗ đỗ đã đặt
+#                cho tuần sau, lịch tham quan ngày mai). Người dùng chưa xong
+#                việc: họ còn phải đi.
+#   "done"     — đã chạy xong và không còn gì phía trước.
+#
+# CẢ HAI dùng cùng một tập trạng thái, và chúng khác nhau đúng ở phép phủ định.
+# Cộng với `_IN_PROGRESS_STATUSES` phủ nốt phần còn lại, hợp của ba tab bằng
+# "Tất cả" THEO CẤU TRÚC — không yêu cầu nào rơi ra ngoài mọi bộ lọc rồi chỉ
+# tìm thấy khi xem tất cả. Có test khoá tính chất đó.
+_EVENT_FILTERS: dict[str, tuple[tuple[str, ...], bool]] = {
+    "upcoming": (_SUCCEEDED_STATUSES, True),
+    "done": (_SUCCEEDED_STATUSES, False),
 }
 
 _LIST_LIMIT_MAX = 50
@@ -3472,7 +7742,30 @@ def _assistant_fields(row: Any) -> dict[str, Any]:
     workflow: màn hình chính dựng lại vài cuộc hội thoại cùng lúc, và N+1 ở
     đó là N+1 người dùng phải ngồi chờ.
     """
-    if row.get("assistant_for_status") != row.get("status"):
+    # Ngoại lệ DUY NHẤT: câu trả lời cho một CÂU HỎI.
+    #
+    # Bộ lọc dưới đây tồn tại để câu MÔ TẢ TRẠNG THÁI không sống lâu hơn trạng
+    # thái nó mô tả. Câu trả lời cho "tôi đã đặt lịch lúc nào" không mô tả
+    # trạng thái nào cả, nên nó không thể lỗi thời theo cách đó.
+    #
+    # Workflow chỉ-hỏi giữ `status` của riêng nó (PENDING rồi SUCCESS) trong
+    # khi câu được đóng dấu `CHAT`. Hai giá trị không bao giờ khớp, nên mọi câu
+    # P-118 nói trong hội thoại đều bị loại — đo được: 4 workflow liên tiếp có
+    # `assistant_answer` đầy đủ mà danh sách trả về `answer=None`, và người
+    # dùng nhìn một khung chat chỉ có lời của chính mình.
+    if _key_status(row.get("assistant_for_status")) == "CHAT":
+        raw_chat = row.get("assistant_suggestions")
+        return {
+            "answer": row.get("assistant_answer"),
+            "suggestions": json.loads(raw_chat) if isinstance(raw_chat, str) else list(raw_chat or []),
+            "response_state": row.get("assistant_response_state"),
+        }
+    # So phần TRẠNG THÁI, không so cả khoá: dòng trong danh sách không mang
+    # `approval_actor`, và nó không cần mang. Câu đã ghi luôn là câu MỚI NHẤT —
+    # khi việc chờ đổi tay, `answer_key` đổi theo nên `claim_assistant_response`
+    # giành quyền sinh và ghi đè. Việc còn lại ở đây chỉ là chặn câu của một
+    # trạng thái KHÁC hẳn (viết lúc chờ duyệt, workflow đã SUCCESS).
+    if _key_status(row.get("assistant_for_status")) != row.get("status"):
         return {"answer": None, "suggestions": [], "response_state": None}
     raw = row.get("assistant_suggestions")
     return {
@@ -3480,6 +7773,116 @@ def _assistant_fields(row: Any) -> dict[str, Any]:
         "suggestions": json.loads(raw) if isinstance(raw, str) else list(raw or []),
         "response_state": row.get("assistant_response_state"),
     }
+
+
+@router.post(
+    "/workflows/demo/{workflow_id}/conflict-respond",
+    response_model=DemoWorkflowResponse,
+)
+async def respond_to_conflict(
+    workflow_id: str,
+    request: ConflictRespondRequest,
+    user: dict = Depends(get_current_user),
+) -> DemoWorkflowResponse:
+    """Người dùng quyết định "giữ nguyên" hay "đổi lịch" khi phát hiện xung đột.
+
+    - `keep_both`: xác nhận xung đột, tiếp tục workflow.
+    - `change_a`: huỷ conflict check, trả thông báo để người dùng đặt lịch mới cho workflow hiện tại.
+    - `change_b`: huỷ conflict check, trả thông báo để người dùng đặt lịch mới cho workflow kia.
+    """
+    await _require_workflow_owner(workflow_id, user)
+
+    job = _DEMO_JOBS.get(workflow_id)
+    if job is not None:
+        job["response"] = None
+
+    settings = get_settings()
+    urls = {
+        "resident_url": settings.resident_service_url,
+        "transport_url": settings.transport_service_url,
+        "payment_url": settings.payment_service_url,
+        "property_url": settings.property_service_url,
+        "resident_services_url": settings.resident_services_service_url,
+        "shuttle_url": settings.shuttle_service_url,
+    }
+    repository = await acquire_repository()
+    pool = repository._pool  # noqa: SLF001
+    won = False
+    owner_id = ""
+    conflict_task_id = ""
+    try:
+        conflict = await load_conflict_check(pool, workflow_id)
+        if conflict is None:
+            return await _public_view_from_db(workflow_id) or DemoWorkflowResponse(
+                status="EXECUTION_ERROR",
+                summary="Không tìm thấy thông tin xung đột lịch.",
+            )
+
+        if request.choice == "keep_both":
+            won = await claim_conflict_ack(pool, conflict["fingerprint"])
+            owner_id = str(user.get("id") or "")
+            conflict_task_id = conflict.get("task_id", "")
+        elif request.choice in ("change_a", "change_b"):
+            await clear_conflict_check(pool, workflow_id)
+            if request.choice == "change_a":
+                target_wf = workflow_id
+                target_task = conflict.get("task_id", "")
+            else:
+                target_wf = str(conflict.get("workflow_id_b") or "")
+                target_task = str(conflict.get("task_id_b") or "")
+                # Kiểm sở hữu workflow_b trước khi sửa
+                if target_wf:
+                    async with pool.acquire() as _conn:
+                        _wf_row = await _conn.fetchrow(
+                            "SELECT owner_user_id FROM workflows WHERE workflow_id=$1::uuid",
+                            target_wf,
+                        )
+                    if _wf_row is None or str(_wf_row["owner_user_id"]) != str(user.get("id") or ""):
+                        return DemoWorkflowResponse(
+                            workflow_id=workflow_id,
+                            status="EXECUTION_ERROR",
+                            summary="Không có quyền chỉnh sửa lịch kia.",
+                        )
+            await pool.close()
+            outcome = await repair_conflict_task(target_wf, target_task)
+            view = await _public_view_from_db(target_wf)
+            if view is not None:
+                return view
+            return DemoWorkflowResponse(
+                workflow_id=target_wf,
+                status=outcome.get("status", "FAILED"),
+                summary=outcome.get("summary"),
+            )
+        else:
+            return DemoWorkflowResponse(
+                status="EXECUTION_ERROR",
+                summary="Lựa chọn không hợp lệ.",
+            )
+    finally:
+        await pool.close()
+
+    # keep_both: chỉ request nhận được RETURNING fingerprint (won=True) được resume.
+    if not won:
+        view = await _public_view_from_db(workflow_id)
+        if view is not None:
+            return view
+        return DemoWorkflowResponse(workflow_id=workflow_id, status="WAITING_APPROVAL")
+
+    try:
+        outcome = await resume_after_conflict_ack(
+            workflow_id,
+            owner_user_id=owner_id,
+            conflict_task_id=conflict_task_id,
+            **urls,
+        )
+    except ResumeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    view = await _public_view_from_db(workflow_id)
+    if view is not None:
+        return view
+    status = outcome.get("status", "FAILED")
+    return DemoWorkflowResponse(workflow_id=workflow_id, status=status)
 
 
 @router.get("/workflows/demo", response_model=DemoWorkflowListResponse)
@@ -3503,7 +7906,7 @@ async def list_demo_workflows(
     Bù lại, nó không trả bất kỳ dữ liệu cá nhân nào: chỉ id, tiêu đề cắt từ
     goal, trạng thái, số bước và mốc thời gian.
     """
-    if status not in _LIST_FILTERS:
+    if status not in _LIST_FILTERS and status not in _EVENT_FILTERS:
         raise HTTPException(status_code=422, detail="Bộ lọc trạng thái không hợp lệ.")
     if limit < 1 or limit > _LIST_LIMIT_MAX:
         raise HTTPException(status_code=422, detail="Giới hạn số dòng không hợp lệ.")
@@ -3515,14 +7918,30 @@ async def list_demo_workflows(
     repository = await acquire_repository()
     pool = repository._pool  # noqa: SLF001 - composition root sở hữu pool
     try:
+        # Cắt lịch sử NGAY TRƯỚC khi đọc, cùng chỗ với lazy zombie sweep.
+        #
+        # Đặt ở đây chứ không đặt trong vòng quét nền: yêu cầu là "lịch sử chỉ
+        # giữ N cái gần nhất", tức là một tính chất của thứ người dùng NHÌN
+        # THẤY. Để vòng nền lo thì có khoảng vài phút danh sách dài hơn hạn mức,
+        # và không có gì giải thích cho người đang nhìn vào nó.
+        keep = get_settings().history_keep_per_user
+        if keep > 0:
+            trimmed = await repository.trim_history_for_owner(owner_user_id=str(user["id"]), keep=keep)
+            if trimmed:
+                logger.info("history trimmed (owner=%s archived=%d)", user["username"], len(trimmed))
         if session_id:
             # Session phải thuộc chính user này. `session_id` là giá trị client
             # biết và gửi lại được, nên nó không phải bằng chứng về quyền. Lọc
             # trong SQL, không đọc hết rồi lọc ở Python.
             rows = await repository.list_workflows_by_session(session_id, owner_user_id=user["id"])
         else:
-            statuses = _LIST_FILTERS[status] or None
-            rows = await repository.list_workflows(statuses=statuses, limit=limit, owner_user_id=user["id"])
+            if status in _EVENT_FILTERS:
+                statuses, upcoming = _EVENT_FILTERS[status]
+            else:
+                statuses, upcoming = _LIST_FILTERS[status] or None, None
+            rows = await repository.list_workflows(
+                statuses=statuses, limit=limit, owner_user_id=user["id"], upcoming=upcoming
+            )
         step_tools = await repository.current_step_titles([str(row["workflow_id"]) for row in rows])
     finally:
         await pool.close()
@@ -3535,12 +7954,19 @@ async def list_demo_workflows(
             DemoWorkflowListItem(
                 workflow_id=workflow_id,
                 title=goal_to_title(row.get("goal")),
-                status=row["status"],
+                # Danh sách và trang chi tiết phải nói CÙNG một điều.
+                #
+                # Workflow hỏng giữa chừng mà còn clarification mở là việc người
+                # dùng sửa tiếp được; trang chi tiết dựng lại thành
+                # NEEDS_INFORMATION, nên danh sách cũng phải vậy. Đọc thẳng cột
+                # `status` khiến hai màn hình mâu thuẫn về cùng một yêu cầu, và
+                # người dùng mất luôn tín hiệu rằng họ trả lời tiếp được.
+                status="NEEDS_INFORMATION" if row.get("cho_bo_sung") else row["status"],
                 # Tên bước hiện tại lấy từ bảng trình bày nghiệp vụ, không phải tên tool.
                 current_step=_TOOL_PRESENTATION.get(tool, (None, ""))[0] if tool else None,
                 completed_tasks=int(row.get("completed_tasks") or 0),
                 total_tasks=int(row.get("total_tasks") or 0),
-                needs_attention=row["status"] in _ATTENTION_STATUSES,
+                needs_attention=bool(row.get("cho_bo_sung")) or row["status"] in _ATTENTION_STATUSES,
                 created_at=row["created_at"].isoformat() if row.get("created_at") else None,
                 updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
                 goal=row.get("goal"),

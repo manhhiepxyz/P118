@@ -77,6 +77,23 @@ export type AgentWorkflowStage =
   | 'RESIDENT_CHECKING'
   | 'RESIDENT_VERIFIED'
   | 'WAITING_APPROVAL'
+  /**
+   * Chờ CHÍNH KHÁCH chọn đơn vị cung cấp — khác hẳn `WAITING_APPROVAL` (chờ
+   * khách trả tiền) và chờ đơn vị duyệt. Ba tình huống, ba câu, ba màn hình.
+   *
+   * Backend tách giai đoạn này ra vì `WAITING_APPROVAL` mang câu "Đang chờ bạn
+   * xác nhận thanh toán" — dùng lại nó nghĩa là gọi việc chọn đơn vị là trả
+   * tiền, và khách đi tìm một nút không tồn tại.
+   */
+  | 'WAITING_PROVIDER_PROPOSAL'
+  /**
+   * Đơn vị đã TỪ CHỐI và khách phải chọn bước tiếp theo.
+   *
+   * Khác ba giai đoạn chờ kia ở một điểm: KHÔNG ai đang chờ. Đơn vị đã trả
+   * lời, việc đã dừng, và khách là người duy nhất còn phải quyết định. Nhãn ở
+   * đây không được có chữ "đang chờ".
+   */
+  | 'WAITING_PROVIDER_RESELECTION'
   | 'EXECUTING'
   | 'FINISHED'
   | 'CHAT'
@@ -137,6 +154,17 @@ export interface AgentWorkflowEvent {
   sequence: number
   stage: AgentWorkflowStage
   message: string
+  /** Thời điểm xảy ra, ISO. Backend đóng dấu lúc phát, không phải lúc ghim. */
+  at?: string | null
+  /**
+   * Sự kiện này thuộc về BƯỚC nào. Null với các mốc của cả workflow
+   * (lập kế hoạch, kiểm tra, hoàn tất).
+   *
+   * Backend gửi hai trường này từ lâu (`DemoWorkflowEvent`), nhưng kiểu ở đây
+   * bỏ sót — nên không có cách nào lọc nhật ký theo từng chặng.
+   */
+  task_id?: string | null
+  task_status?: string | null
 }
 
 /** Báo giá do backend tính. Browser hiển thị, không gửi lại. */
@@ -162,8 +190,118 @@ export interface AgentViewingApproval {
   wants_shuttle: boolean
 }
 
+/** Đơn vị cung cấp, ở dạng người đọc được. */
+export interface AgentServiceProposalProvider {
+  /** Mã nội bộ — dùng để đối chiếu log/hỗ trợ, KHÔNG vẽ ra màn hình. */
+  id: string
+  name: string
+}
+
+/**
+ * MỘT việc khách phải quyết: đồng ý với đơn vị này cho bước này.
+ *
+ * Không mang `quote_id` hay vân tay yêu cầu — chúng là chứng cứ nội bộ, và cái
+ * duy nhất cần gửi lại là `proposal_id`. Backend chặn chúng bằng
+ * `extra="forbid"`, nên nếu chúng xuất hiện ở đây thì response đã sai từ server.
+ */
+/** Khách còn phải xác nhận một khoản tiền. */
+export interface AgentPaymentApprovalAction {
+  kind: 'PAYMENT_APPROVAL'
+  task_id: string
+  title: string
+  /** Câu mô tả do BACKEND soạn — giao diện không tự viết. */
+  body: string
+  amount: number
+  currency: string
+  can_act: boolean
+}
+
+/** Khách còn phải bổ sung thông tin. */
+export interface AgentClarificationAction {
+  kind: 'CLARIFICATION'
+  task_id: string | null
+  title: string
+  question: string | null
+  missing_fields: string[]
+  can_act: boolean
+}
+
+export interface ConflictTaskInfo {
+  workflow_id: string
+  task_id: string
+  service: string
+  service_label: string
+  datetime_display: string
+}
+
+export interface AgentScheduleConflictAction {
+  kind: 'SCHEDULE_CONFLICT'
+  title: string
+  task_a: ConflictTaskInfo
+  task_b: ConflictTaskInfo
+  can_act: boolean
+}
+
+/**
+ * Union phân biệt bằng `kind` — TypeScript thu hẹp được, nên quên một nhánh là
+ * lỗi biên dịch chứ không phải một thẻ vẽ sai lúc chạy.
+ */
+export type AgentCustomerAction =
+  | AgentPaymentApprovalAction
+  | AgentServiceProposal
+  | AgentClarificationAction
+  | AgentScheduleConflictAction
+
+export interface AgentServiceProposal {
+  /** Mã định danh loại hành động. Giao diện chuyển theo trường NÀY. */
+  kind: 'PROVIDER_PROPOSAL'
+  /** Tiêu đề card, do backend soạn. Không bao giờ rỗng — Pydantic chặn. */
+  title: string
+  proposal_id: string
+  /** BƯỚC mà đề xuất này thuộc về — thứ phân biệt hai thẻ với nhau. */
+  task_id: string
+  provider: AgentServiceProposalProvider
+  amount: number
+  currency: string
+  reason: string
+  /** ISO. Sau mốc này báo giá hết hiệu lực và phải xin lại. */
+  valid_until: string
+  effective_status: 'PROPOSED' | 'CONFIRMED' | 'EXPIRED' | 'SUPERSEDED'
+  /**
+   * Còn bấm được không. ĐỌC TRƯỜNG NÀY để dựng nút, không suy từ
+   * `effective_status`.
+   *
+   * Hai trường vì hai câu hỏi khác nhau: "còn bấm được không" và "vì sao
+   * không". Suy cái thứ nhất từ cái thứ hai nghĩa là mỗi lần backend thêm một
+   * trạng thái là một lần phải sửa giao diện.
+   */
+  can_confirm: boolean
+}
+
+/**
+ * Một đơn vị đã từ chối, kèm hành động khách có thể chọn.
+ *
+ * `sanitized_reason` là câu NGƯỜI của đơn vị gõ. Nó quan trọng vì nó có thể
+ * đổi quyết định của khách: "hết xe ngày ấy" mời họ đổi ngày, chứ không phải
+ * đổi đơn vị. Hiện nguyên văn, không tóm tắt.
+ */
+export interface AgentProviderRejection {
+  workflow_id: string
+  /** Bước bị từ chối — thứ phải gửi lại khi bấm "tìm đơn vị khác". */
+  rejected_task_id: string
+  rejected_provider: AgentServiceProposalProvider
+  /** Mã CANONICAL của nghiệp vụ, không phải tên một exception. */
+  reject_code: string | null
+  sanitized_reason: string | null
+  can_request_another_provider: boolean
+}
+
 export interface AgentWorkflowResponse {
-  status: AgentWorkflowStatus
+  /* Union HIỂN THỊ: backend trả cả `CANCELLED` và các mã lỗi terminal.
+     Dùng union hẹp hơn ở đây thì mọi phép so với 'CANCELLED' bị TypeScript báo
+     "không bao giờ khớp" — và cách chữa dễ nhất lại là bỏ nhánh đó đi, tức là
+     giao diện im lặng với đúng những workflow đã bị huỷ. */
+  status: AgentDisplayWorkflowStatus
   stage?: AgentWorkflowStage | null
   workflow_id: string | null
   session_id: string | null
@@ -173,6 +311,60 @@ export interface AgentWorkflowResponse {
   question: string | null
   missing_fields: string[]
   payment_quote: AgentPaymentQuote | null
+  /**
+   * MỌI việc khách còn phải quyết: đồng ý với đơn vị nào cho bước nào.
+   *
+   * MẢNG chứ không phải một cái. Một kế hoạch được phép có hai bước chuyển nhà
+   * độc lập, và khi ấy khách có hai việc phải bấm — vẽ một cái rồi im lặng bỏ
+   * cái kia là nói dối về khối lượng công việc còn lại.
+   *
+   * Giao diện dựng thẻ từ MẢNG NÀY, không từ `provider_proposal`.
+   */
+  service_proposals: AgentServiceProposal[]
+  /**
+   * Alias, và CHỈ có giá trị khi mảng có đúng một phần tử.
+   *
+   * Nhiều hơn một thì backend trả `null` — chọn cái đầu là một quyết định giao
+   * diện không ai chủ ý đưa ra. Đừng dùng trường này để render; nó tồn tại cho
+   * các lối gọi cũ đọc "có đúng một việc không".
+   */
+  provider_proposal: AgentServiceProposal | null
+  /**
+   * Lời từ chối khách còn phải xử lý. Khác `null` → hiện lý do và nút "tìm đơn
+   * vị khác", KHÔNG hiện màn chờ.
+   *
+   * `null` ngay khi lần thử mới đã được mở: lúc đó thứ khách cần thấy là ĐỀ
+   * XUẤT MỚI, không phải lời từ chối cũ. Để cả hai cùng hiện nghĩa là màn hình
+   * có hai việc trong khi thật ra chỉ có một.
+   */
+  provider_rejection: AgentProviderRejection | null
+  /**
+   * URL thanh toán gateway (VNPay) trả về NGAY khi user bấm duyệt.
+   *
+   * Khác null → giao diện chuyển hướng CẢ CỬA SỔ sang đây thay vì coi duyệt là
+   * xong: tiền chưa về lúc này, workflow vẫn WAITING_APPROVAL cho tới khi
+   * callback IPN của gateway xác nhận (backend là nơi duy nhất được tin).
+   * Mock không bao giờ đặt field này — hai chế độ phân biệt bằng null.
+   */
+  payment_redirect_url: string | null
+  /**
+   * VIỆC khách còn phải làm, và LOẠI của nó.
+   *
+   * `null` nghĩa là khách KHÔNG phải làm gì — đang chờ đơn vị, đang chạy, hoặc
+   * đã xong. Đừng dựng card hành động khi trường này `null`, kể cả lúc
+   * `status === 'WAITING_APPROVAL'`: chờ đơn vị cũng mang status ấy.
+   *
+   * Trước khi có trường này, trang chi tiết suy loại việc bằng
+   * `status === 'WAITING_APPROVAL' && !viewing_approval` rồi vẽ thẻ thanh toán
+   * — nên một yêu cầu chuyển nhà đang chờ chọn đơn vị hiện ra tiêu đề "—", câu
+   * "Chỗ đỗ xe đã được giữ…" và một nút chung. Chuyển theo `kind`, không suy.
+   *
+   * KHÔNG thay `payment_redirect_url` ở trên: hai trường trả lời hai câu khác
+   * nhau. `customer_action` nói KHÁCH PHẢI LÀM GÌ; `payment_redirect_url` nói
+   * TRÌNH DUYỆT PHẢI ĐI ĐÂU khi việc ấy là trả tiền qua cổng. Gộp chúng lại là
+   * mất một trong hai — và lượt gộp nhánh này đã suýt làm đúng thế.
+   */
+  customer_action: AgentCustomerAction | null
   /**
    * Cùng status WAITING_APPROVAL với thanh toán nhưng KHÁC loại chờ: lịch tham
    * quan đang chờ provider duyệt trong /review. Khác null → hiển thị màn chờ
@@ -196,6 +388,12 @@ export interface AgentWorkflowResponse {
    * đang chạy hoặc lớp trả lời không dùng được — khi đó hiển thị `message`.
    */
   answer: string | null
+  /** Câu người dùng đã nói, nguyên văn — để dựng lại cuộc trao đổi. */
+  goal: string | null
+  /** Mã lỗi đã ghim (`EXECUTION_ERROR`, …) — null khi không hỏng. */
+  error_code: string | null
+  /** Gửi lại có ích không. `null` = không có lỗi, KHÁC `false` = thử lại vô ích. */
+  retryable: boolean | null
   /** Tối đa 3 việc gợi ý tiếp theo, chỉ gồm dịch vụ tài khoản đang dùng được. */
   suggestions: string[]
   /**
@@ -230,6 +428,18 @@ export interface AgentWorkflowListItem {
 
 export interface AgentWorkflowListResponse {
   items: AgentWorkflowListItem[]
+}
+
+/**
+ * Toàn bộ các lượt của MỘT cuộc hội thoại, cũ đến mới.
+ *
+ * Mỗi câu người dùng gõ tiếp sinh ra một workflow riêng — plan mới, id mới.
+ * Nên "cuộc hội thoại" không nằm trên một workflow nào cả; nó là cả nhóm cùng
+ * `session_id`. Đọc mỗi workflow đang mở thì mọi lượt trước biến mất.
+ */
+export interface AgentSessionResponse {
+  session_id: string
+  workflows: AgentWorkflowListItem[]
 }
 
 /** Trạng thái liên kết căn hộ. Chỉ VERIFIED mở dịch vụ cư dân. */
@@ -271,9 +481,51 @@ export interface VehicleClaim {
 
 export type VerificationClaim = ApartmentClaim | VehicleClaim
 
-export interface VerificationRecord {
+/** Đơn vị đã quyết định gì. KHÔNG phải kết luận "đã xong". */
+export type VerificationProviderStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'UNKNOWN'
+
+/** main app đã ghi xong kết quả chưa. */
+export type VerificationMaterializationStatus =
+  | 'NOT_STARTED'
+  | 'PENDING'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'NOT_REQUIRED'
+  | 'UNKNOWN'
+
+/**
+ * Trạng thái người dùng thực sự đang ở. Đây là field DUY NHẤT được phép dùng để
+ * kết luận "đã xác minh" — và chỉ khi nó bằng `VERIFIED`.
+ *
+ * `provider_status === 'APPROVED'` chỉ nói đơn vị đã ký. Quyền cư dân mở hay
+ * chưa còn phụ thuộc main app đã ghi xong chưa; hai chuyện ở hai hệ thống.
+ */
+export type VerificationEffectiveStatus =
+  | 'WAITING_PROVIDER'
+  | 'REJECTED'
+  | 'APPROVED_PROCESSING'
+  | 'APPROVED_NEEDS_RETRY'
+  | 'APPROVED_BLOCKED'
+  | 'VERIFIED'
+  | 'APPROVED_NEEDS_RECONCILIATION'
+  | 'NEEDS_RECONCILIATION'
+  | 'UNKNOWN'
+
+export type VerificationConsistencyStatus = 'CONSISTENT' | 'NEEDS_RECONCILIATION'
+
+/** Phần trạng thái mà cả ba vai đều nhận, và nhận giống nhau. */
+export interface VerificationStatusFields {
+  provider_status: VerificationProviderStatus
+  materialization_status: VerificationMaterializationStatus
+  effective_status: VerificationEffectiveStatus
+  display_status: string
+  consistency_status: VerificationConsistencyStatus
+}
+
+export interface VerificationRecord extends VerificationStatusFields {
   record_id: string
   record_type: VerificationRecordType
+  /** @deprecated Alias của `provider_status`. Không dùng để kết luận VERIFIED. */
   status: VerificationStatus
   /** UUID tài khoản người nộp đơn — do backend đặt từ JWT, browser không gửi. */
   applicant_user_id: string | null
@@ -287,6 +539,12 @@ export interface VerificationRecord {
   ownership_match?: boolean | null
   /** Chỉ khi duyệt thành công — xe thì kèm vehicle_id đã tạo. */
   materialized?: { vehicle_id?: string } | null
+  /**
+   * Được phép bấm Duyệt/Từ chối không. Backend tính, frontend KHÔNG tự suy:
+   * một hồ sơ đã quyết định hoặc đang lệch dữ liệu thì bấm lại chỉ nhận 409.
+   */
+  can_decide?: boolean
+  recovery_required?: boolean
 }
 
 /** Body duyệt/từ chối — từ chối bắt buộc lý do. */
@@ -348,10 +606,60 @@ export interface ViewingApprovalRecord {
   decided_by: string | null
 }
 
+/**
+ * Một bước đang chờ ĐƠN VỊ CUNG CẤP duyệt — mọi dịch vụ.
+ *
+ * Một dòng cho MỖI BƯỚC, không phải mỗi yêu cầu: một yêu cầu có thể gồm nhiều
+ * dịch vụ của nhiều đơn vị, và mỗi đơn vị chỉ quyết định phần của mình.
+ *
+ * `details` để mở vì mỗi dịch vụ có dữ kiện khác nhau — thêm một dịch vụ không
+ * được kéo theo một lần đổi kiểu ở đây.
+ */
+export interface ServiceApprovalRecord {
+  workflow_id: string
+  task_id: string
+  tool: string
+  service_label: string
+  details: Record<string, string | number | boolean | null>
+  applicant_name: string | null
+  applicant_phone: string | null
+  created_at: string | null
+  /** AWAITING khi ở hàng đợi; APPROVED/REJECTED/EXPIRED khi xem lịch sử. */
+  status?: string
+  decided_by?: string | null
+  decided_at?: string | null
+  reject_reason?: string | null
+  /** Nguyên nhân canonical của lời từ chối. Backend đọc MÃ này để quyết định
+   *  hậu quả — `NO_AVAILABILITY` cho phép khách chọn lại khu/ngày, các mã còn
+   *  lại dừng hẳn bước đó. Câu chữ trong `reject_reason` chỉ để người đọc. */
+  reject_code?: 'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER' | null
+  /** Allowlist canonical do backend tính theo tool; UI không tự suy policy. */
+  allowed_reject_codes: Array<'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER'>
+  /**
+   * Đơn vị chịu trách nhiệm dòng này.
+   *
+   * Một tài khoản có thể được gắn NHIỀU đơn vị, và khi đó hàng đợi trộn việc
+   * của mấy đơn vị. Không có trường này thì màn hình không chia được, và người
+   * duyệt quyết định thay một đơn vị khác mà không biết.
+   *
+   * `null` cho dữ liệu có trước khi cột tồn tại — không phải lỗi, nhưng cũng
+   * KHÔNG được vẽ ra như một đơn vị tên rỗng.
+   */
+  service_provider_id?: string | null
+  /** Tên người đọc được, do backend tính. UI không tự map mã → tên. */
+  service_provider_name?: string | null
+}
+
 /** Body duyệt/từ chối lịch tham quan — từ chối bắt buộc lý do. */
 export interface ViewingApprovalDecision {
   decision: 'approve' | 'reject'
   reject_reason?: string
+  /**
+   * Nguyên nhân canonical. BẮT BUỘC khi `decision === 'reject'` — cùng hợp
+   * đồng với hàng đợi dịch vụ. Thiếu nó thì backend trả 422 và đơn vị đọc
+   * "Yêu cầu chưa hợp lệ" cho một lời từ chối hoàn toàn hợp lệ.
+   */
+  reject_code?: 'NO_AVAILABILITY' | 'INVALID_REQUEST' | 'SERVICE_UNAVAILABLE' | 'OTHER'
 }
 
 export interface ViewingApprovalListResponse {

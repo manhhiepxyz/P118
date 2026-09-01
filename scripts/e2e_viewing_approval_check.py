@@ -6,8 +6,9 @@ mọi thứ qua API. Kiểm ba thứ feature yêu cầu:
 
   1. Khách gửi "đặt lịch tham quan + đặt xe" → workflow DỪNG ở
      `WAITING_APPROVAL`, response có `viewing_approval` (lịch + dự án, KHÔNG PII).
-  2. Provider duyệt qua `/viewing-approvals/{wf}/decide` → materialize lịch tour
-     → `book_shuttle` chạy (~30s) → workflow SUCCESS; task xe có details
+  2. Provider duyệt lịch qua `/viewing-approvals/{wf}/decide`, rồi duyệt riêng
+     bước `book_shuttle` qua hàng đợi `/service-approvals` → workflow SUCCESS;
+     task xe có details
      Tài xế / Biển số xe / Loại xe / Giờ đón.
   3. Reject path: provider từ chối kèm lý do → workflow FAILED, khách thấy lý do.
 
@@ -129,6 +130,21 @@ class _Client:
         return self._request(
             f"/api/v1/viewing-approvals/{workflow_id}/decide", method="POST",
             body=body, token=token,
+        )
+
+    def list_service_approvals(self, token: str, status: str = "AWAITING") -> list[dict]:
+        return self._request(
+            f"/api/v1/service-approvals?status={status}", token=token,
+        )["items"]
+
+    def decide_service(self, workflow_id: str, task_id: str, token: str,
+                       decision: str, reject_reason: str | None = None) -> dict:
+        body: dict = {"decision": decision}
+        if reject_reason is not None:
+            body["reject_reason"] = reject_reason
+        return self._request(
+            f"/api/v1/service-approvals/{workflow_id}/{task_id}/decide",
+            method="POST", body=body, token=token,
         )
 
 
@@ -309,6 +325,28 @@ def main() -> int:
     decided = client.decide_viewing(workflow_id, provider["token"], decision="approve")
     if decided.get("decision") != "approve" or decided.get("status") != "APPROVED":
         return _fail(f"provider duyệt thất bại: {decided}")
+
+    after_viewing = _poll(client, workflow_id, customer["token"], timeout=120)
+    if after_viewing.get("status") != "WAITING_APPROVAL":
+        return _fail(
+            f"sau duyệt lịch, workflow phải chờ đơn vị xe mà {after_viewing.get('status')}."
+        )
+    service_queue = client.list_service_approvals(provider["token"])
+    shuttle_request = next(
+        (
+            item for item in service_queue
+            if item.get("workflow_id") == workflow_id and item.get("tool") == "book_shuttle"
+        ),
+        None,
+    )
+    if shuttle_request is None:
+        return _fail("provider không thấy bước book_shuttle trong hàng đợi dịch vụ.")
+    client.decide_service(
+        workflow_id,
+        str(shuttle_request["task_id"]),
+        provider["token"],
+        decision="approve",
+    )
 
     final = _poll(client, workflow_id, customer["token"], timeout=120)
     if final.get("status") != "SUCCESS":

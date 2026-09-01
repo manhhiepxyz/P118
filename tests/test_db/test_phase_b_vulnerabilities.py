@@ -337,14 +337,44 @@ async def test_a_child_workflow_inherits_the_owner_and_session_of_its_parent(cli
     chính người vừa tạo ra nó; con mang owner khác thì tệ hơn nhiều.
     """
     from src.api import routes
+    from src.db.link_request_repository import materialize_resident_link
 
     token = await _register_and_login(client, "nn_cha_con")
     owner_id = await db_pool.fetchval("SELECT id FROM users WHERE username = 'nn_cha_con'")
+
+    # Tài khoản phải ĐÃ xác minh căn hộ, nếu không `/start` không tạo workflow.
+    #
+    # Test này từng đỏ vì chính sách đã siết mà nó không theo: đăng ký xe và
+    # chỗ đỗ yêu cầu liên kết cư dân VERIFIED. Người chưa xác minh gửi mục tiêu
+    # đó thì route trả 202 kèm `status="CHAT"` và hướng dẫn đi xác minh — không
+    # có row `workflows` nào được ghi, nên `parent_workflow_id` của con vi phạm
+    # khoá ngoại, `_ensure_workflow_shell` nuốt lỗi và trả False, và test nổ ở
+    # `child["owner_user_id"]` với TypeError: NoneType.
+    #
+    # Triệu chứng cách nguyên nhân bốn bước và không nhắc gì tới xác minh căn
+    # hộ. Đo mới ra: in body của `/start` thấy `stage="CHAT"`.
+    #
+    # Dùng chính `materialize_resident_link` mà luồng duyệt thật gọi, thay vì
+    # INSERT tay vào `user_resident_links` — INSERT tay sẽ vẫn xanh kể cả khi
+    # hàm thật đổi hình dạng dữ liệu.
+    await materialize_resident_link(
+        db_pool,
+        user_id=str(owner_id),
+        apartment_code="A1201",
+        residential_area="Vinhomes Ocean Park",
+        full_name="Nguyen Van A",
+    )
 
     created = await client.post(
         "/api/v1/workflows/demo/start",
         json={"goal": "Đăng ký xe và đặt chỗ đậu xe"},
         headers={"Authorization": f"Bearer {token}"},
+    )
+    # Khẳng định NGAY rằng `/start` đã vào lane dịch vụ. Không có dòng này thì
+    # một chính sách siết thêm trong tương lai lại làm test đỏ ở chỗ khác, với
+    # một TypeError không nói gì.
+    assert created.json().get("stage") != "CHAT", (
+        f"/start không tạo workflow, nó trả CHAT: {created.json().get('message')}"
     )
     parent_id = created.json()["workflow_id"]
     session_id = created.json()["session_id"]

@@ -1,7 +1,8 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import {
   Controls,
   ReactFlow,
+  useReactFlow,
   type Edge,
   type Node,
 } from '@xyflow/react'
@@ -40,6 +41,48 @@ interface Props {
  * tranh hành trình của khách hàng, không phải trình dựng workflow — kế hoạch do
  * agent lập, người dùng thay đổi nó bằng lời ở dock đáy chứ không bằng chuột.
  */
+/**
+ * Canh lại khung nhìn khi vùng vẽ đổi kích thước.
+ *
+ * `fitView` của React Flow chỉ chạy lúc khởi tạo. Kéo thanh chia làm vùng vẽ
+ * thấp đi mà khung nhìn giữ nguyên, nên thẻ bị cắt ngang THÂN CHỮ — đọc như
+ * giao diện hỏng, dù canvas vốn là mặt phẳng có pan/zoom và cắt là bình thường.
+ *
+ * Dùng `ResizeObserver` chứ không nối vào chính thanh chia: nó đúng luôn cả khi
+ * đổi kích thước cửa sổ, mở/đóng cột phải, hay đổi thu phóng trình duyệt — ba
+ * đường mà một cái móc gắn vào thanh chia sẽ bỏ sót.
+ *
+ * `duration: 0` để khung nhìn bám sát tay kéo thay vì chạy đuổi theo, và cũng
+ * là hướng an toàn với `prefers-reduced-motion`: không có hoạt ảnh nào để giảm.
+ *
+ * Gộp nhiều lần báo vào một khung hình (`requestAnimationFrame`): kéo một lần
+ * phát ra hàng chục lần báo, canh lại từng lần là việc thừa.
+ */
+function CanhLaiKhiDoiKichThuoc({ vung }: { vung: React.RefObject<HTMLDivElement | null> }) {
+  const { fitView } = useReactFlow()
+  const cho = useRef<number | null>(null)
+
+  useEffect(() => {
+    const el = vung.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const theo = new ResizeObserver(() => {
+      if (cho.current !== null) return
+      cho.current = requestAnimationFrame(() => {
+        cho.current = null
+        void fitView({ padding: 0.12, duration: 0 })
+      })
+    })
+    theo.observe(el)
+    return () => {
+      theo.disconnect()
+      if (cho.current !== null) cancelAnimationFrame(cho.current)
+    }
+  }, [fitView, vung])
+
+  return null
+}
+
+
 export function JourneyCanvas({ selectedId, onSelect, steps, edges, lanes = false }: Props) {
   const nodes = useMemo<Node[]>(() => {
     const laneNodes: Node[] = (lanes ? JOURNEY_LANES : []).map((lane) => ({
@@ -91,7 +134,10 @@ export function JourneyCanvas({ selectedId, onSelect, steps, edges, lanes = fals
     [edges, steps],
   )
 
+  const vungVe = useRef<HTMLDivElement>(null)
+
   return (
+    <div ref={vungVe} className="h-full w-full">
     <ReactFlow
       nodes={nodes}
       edges={flowEdges}
@@ -115,6 +161,8 @@ export function JourneyCanvas({ selectedId, onSelect, steps, edges, lanes = fals
           Không chồng thêm `Background` của React Flow: hai lớp lưới lệch pha
           nhau tạo hoa văn moiré khi zoom. */}
       <Controls showInteractive={false} position="bottom-right" />
+      <CanhLaiKhiDoiKichThuoc vung={vungVe} />
     </ReactFlow>
+    </div>
   )
 }

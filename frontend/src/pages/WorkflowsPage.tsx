@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronRight, MessageSquare, Trash2 } from 'lucide-react'
+import { ChevronRight, Trash2 } from 'lucide-react'
 
 import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { deleteWorkflow, listWorkflows } from '../lib/agentApi'
@@ -19,16 +19,42 @@ import { usePolling } from '../lib/usePolling'
  * hội thoại vốn đã nằm sẵn trên workflow, chỉ chưa ai bày nó ra.
  */
 
+/*
+ * Ba câu trả lời cho "việc của tôi đang ra sao", cộng "Tất cả".
+ *
+ *   Đang xử lý — việc bạn nhờ chưa được làm xong: đang chạy, chờ duyệt, chờ
+ *                chính bạn, hoặc đã hỏng/bị huỷ. Cả nhóm này còn nhắn tiếp
+ *                được, nên chúng thuộc về chỗ bạn quay lại.
+ *   Sắp tới    — chạy xong rồi nhưng còn một sự kiện CHƯA diễn ra (chỗ đỗ đã
+ *                đặt cho tuần sau, lịch tham quan ngày mai). Việc của bạn chưa
+ *                khép lại: bạn còn phải đi.
+ *   Đã xong    — chạy xong và không còn gì phía trước.
+ *
+ * "Sắp tới" là chiều thông tin mà trạng thái workflow KHÔNG mang: một chỗ đỗ
+ * đặt cho tháng sau và một chỗ đỗ đã dùng xong đều là SUCCESS, nhưng chỉ một
+ * trong hai còn cần người dùng nhớ.
+ *
+ * FAILED/CANCELLED KHÔNG nằm ở "Đã xong". Việc người dùng nhờ vẫn chưa được
+ * làm; xếp chúng cạnh những việc đã hoàn tất là bảo họ rằng chuyện này khép lại
+ * rồi, trong khi thứ họ cần vẫn chưa có.
+ */
 const FILTERS = [
-  { value: 'active', label: 'Đang diễn ra' },
-  { value: 'needs-you', label: 'Cần bạn' },
-  { value: 'completed', label: 'Đã xong' },
+  { value: 'in-progress', label: 'Đang xử lý' },
+  { value: 'upcoming', label: 'Sắp tới' },
+  { value: 'done', label: 'Đã xong' },
   { value: 'all', label: 'Tất cả' },
 ] as const
 
 type FilterValue = (typeof FILTERS)[number]['value']
 
-const NEEDS_YOU = new Set(['NEEDS_INFORMATION', 'WAITING_APPROVAL'])
+/* Câu rỗng nói đúng NHÓM đang xem. "Chưa có hành trình nào" khi người dùng
+   đang lọc "Đã xong" đọc như tài khoản trống trơn, dù họ có hai chục yêu cầu. */
+const EMPTY_TEXT: Record<string, string> = {
+  'in-progress': 'Không có việc nào đang dở.',
+  upcoming: 'Không có lịch nào sắp tới.',
+  done: 'Chưa có hành trình nào kết thúc.',
+  all: 'Chưa có hành trình nào.',
+}
 const RESUMABLE = new Set(['PENDING', 'RUNNING', 'NEEDS_INFORMATION', 'WAITING_APPROVAL'])
 
 /** Trạng thái → sắc ngữ nghĩa. Cùng bảng vai trò với canvas hành trình. */
@@ -43,21 +69,27 @@ const TONE: Record<string, { label: string; token: string }> = {
 }
 
 export function WorkflowsPage() {
-  const [view, setView] = useState<'journeys' | 'chat'>('journeys')
+  // Mặc định "Đang xử lý": thứ người dùng mở Lịch sử để tìm gần như luôn là
+  // việc còn dở, không phải kho lưu trữ.
+  /**
+   * Mở ra là thấy TẤT CẢ.
+   *
+   * Mặc định cũ là "Đang xử lý" — hợp lý về mặt ưu tiên, nhưng nó ẩn mất mọi
+   * thứ đã xong, và người vào Lịch sử thường đi tìm đúng những thứ ấy. Tệ hơn,
+   * khi nhóm đó rỗng thì màn hình trông như chưa từng có yêu cầu nào.
+   */
   const [filter, setFilter] = useState<FilterValue>('all')
-  const [confirming, setConfirming] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   const { data, loading, error, refresh } = usePolling(
-    () => listWorkflows(filter === 'needs-you' ? 'active' : filter, 50).then((r) => r.items),
+    () => listWorkflows(filter, 50).then((r) => r.items),
     10000,
   )
 
   const all = data ?? []
-  const items = filter === 'needs-you' ? all.filter((item) => NEEDS_YOU.has(item.status)) : all
+  const items = all
   /** Chỉ những lượt có LỜI của cả hai bên mới thành một trao đổi đọc được. */
-  const turns = all.filter((item) => item.goal || item.answer)
 
   useEffect(() => {
     refresh()
@@ -70,7 +102,6 @@ export function WorkflowsPage() {
     setActionError(null)
     try {
       await deleteWorkflow(workflowId)
-      setConfirming(null)
       refresh()
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Không xoá được yêu cầu này.')
@@ -90,38 +121,14 @@ export function WorkflowsPage() {
             Lịch sử
           </h1>
 
-          {/* Hai cách nhìn: theo VIỆC hoặc theo LỜI NÓI. */}
-          <div className="mt-8 flex gap-1 border-b border-[var(--border-subtle)]">
-            {(
-              [
-                { key: 'journeys', label: 'Hành trình' },
-                { key: 'chat', label: 'Trao đổi' },
-              ] as const
-            ).map((tab) => (
-              <button
-                key={tab.key}
-                type="button"
-                onClick={() => setView(tab.key)}
-                aria-current={view === tab.key ? 'page' : undefined}
-                className={`relative cursor-pointer px-4 pb-3 pt-2 text-[15px] transition-colors duration-[var(--t-hover)] ${
-                  view === tab.key
-                    ? 'font-semibold text-[var(--text-primary)]'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                }`}
-              >
-                {tab.label}
-                {view === tab.key && (
-                  <span
-                    aria-hidden
-                    className="absolute inset-x-2 -bottom-px h-[2px]"
-                    style={{ backgroundColor: 'var(--agent)' }}
-                  />
-                )}
-              </button>
-            ))}
-          </div>
+          {/* Thanh tab "Hành trình / Trao đổi" đã bỏ.
 
-          {view === 'journeys' && (
+              Cuộc trao đổi giờ nằm trong trang chi tiết của chính workflow,
+              nên tab kia hiển thị lại đúng thứ đó, tách khỏi ngữ cảnh. Một
+              danh sách, một chỗ xem chi tiết — hai bề mặt kể cùng một chuyện
+              là hai chỗ để chúng nói khác nhau. */}
+
+          {(
             <div className="mt-7 flex flex-wrap gap-2" role="group" aria-label="Lọc theo trạng thái">
               {FILTERS.map((option) => (
                 <button
@@ -167,15 +174,11 @@ export function WorkflowsPage() {
           )}
 
           {/* ── Theo VIỆC ────────────────────────────────────────────── */}
-          {!loading && view === 'journeys' && (
+          {!loading && (
             <ul className="seq mt-6 border-t border-[var(--border-subtle)]">
               {items.length === 0 && (
                 <li className="py-14 text-center text-[14.5px] text-[var(--text-muted)]">
-                  {filter === 'completed'
-                    ? 'Chưa có hành trình nào hoàn thành.'
-                    : filter === 'needs-you'
-                      ? 'Không có việc nào đang chờ bạn.'
-                      : 'Chưa có hành trình nào.'}
+                  {EMPTY_TEXT[filter] ?? 'Chưa có hành trình nào.'}
                 </li>
               )}
 
@@ -185,6 +188,11 @@ export function WorkflowsPage() {
                 return (
                   <li
                     key={item.workflow_id}
+                    /* `data-workflow-row`: một HÀNG = một workflow. Mỗi hàng có
+                       ba `<Link>` cùng trỏ về `/workflow/:id`, nên đếm thẻ `<a>`
+                       không đo được "danh sách có nhân đôi workflow không" — nó
+                       chỉ đếm số lối vào. */
+                    data-workflow-row={item.workflow_id}
                     className="group relative border-b border-[var(--border-subtle)] transition-colors duration-[var(--t-hover)] hover:bg-[var(--surface-raised)]"
                   >
                     <div className="flex min-h-[76px] items-center gap-5 py-4 pl-4 pr-4">
@@ -214,41 +222,32 @@ export function WorkflowsPage() {
                       </Link>
 
                       <div className="flex shrink-0 items-center gap-3">
-                        {/* Xoá chỉ hiện với việc ĐÃ kết thúc: giấu một hành trình
-                            đang chờ duyệt thanh toán là giấu một khoản đang treo. */}
-                        {!RESUMABLE.has(item.status) &&
-                          (confirming === item.workflow_id ? (
-                            <span className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => remove(item.workflow_id)}
-                                disabled={busy === item.workflow_id}
-                                className="press cursor-pointer rounded-[var(--r-xs)] px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-60"
-                                style={{ backgroundColor: 'var(--danger)' }}
-                              >
-                                {busy === item.workflow_id ? 'Đang xoá…' : 'Xoá thật'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirming(null)}
-                                className="cursor-pointer text-[13px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                              >
-                                Thôi
-                              </button>
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setConfirming(item.workflow_id)
-                                setActionError(null)
-                              }}
-                              aria-label={`Xoá ${item.title}`}
-                              className="press cursor-pointer rounded-[var(--r-xs)] p-2 text-[var(--text-muted)] opacity-0 transition-all duration-[var(--t-hover)] hover:text-[var(--danger)] focus-visible:opacity-100 group-hover:opacity-100"
-                            >
-                              <Trash2 className="h-4 w-4" strokeWidth={1.9} aria-hidden />
-                            </button>
-                          ))}
+                        {/* Xoá NGAY, không hỏi lại.
+                            Bước xác nhận "Xoá thật / Thôi" tồn tại để chặn mất
+                            mát không lấy lại được — mà xoá ở đây là xoá MỀM
+                            (`archived_at`), hàng vẫn nguyên trong database. Bắt
+                            xác nhận cho một thao tác khôi phục được là thu phí
+                            hai cú bấm để đổi lấy không gì cả, và nó dạy người
+                            dùng bấm qua hộp thoại mà không đọc — đúng lúc gặp
+                            hộp thoại thật sự nguy hiểm thì họ đã quen tay.
+
+                            Xoá vẫn chỉ hiện với việc ĐÃ kết thúc: giấu một hành
+                            trình đang chờ duyệt thanh toán là giấu một khoản
+                            đang treo. Đó mới là ranh giới cần canh. */}
+                        {!RESUMABLE.has(item.status) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActionError(null)
+                              void remove(item.workflow_id)
+                            }}
+                            disabled={busy === item.workflow_id}
+                            aria-label={`Xoá ${item.title}`}
+                            className="press cursor-pointer rounded-[var(--r-xs)] p-2 text-[var(--text-muted)] opacity-0 transition-all duration-[var(--t-hover)] hover:text-[var(--danger)] focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+                          >
+                            <Trash2 className="h-4 w-4" strokeWidth={1.9} aria-hidden />
+                          </button>
+                        )}
 
                         <Link
                           to={`/workflow/${item.workflow_id}`}
@@ -265,53 +264,6 @@ export function WorkflowsPage() {
             </ul>
           )}
 
-          {/* ── Theo LỜI NÓI ─────────────────────────────────────────── */}
-          {!loading && view === 'chat' && (
-            <div className="seq mt-8 space-y-9">
-              {turns.length === 0 && (
-                <p className="py-14 text-center text-[14.5px] text-[var(--text-muted)]">
-                  Chưa có trao đổi nào. Mọi yêu cầu bạn gửi cho P-118 sẽ xuất hiện ở đây.
-                </p>
-              )}
-
-              {turns.map((item) => (
-                <section key={item.workflow_id}>
-                  <div className="flex items-center gap-2.5">
-                    <MessageSquare className="h-3.5 w-3.5 text-[var(--text-muted)]" aria-hidden />
-                    <span className="font-mono text-[11.5px] uppercase tracking-[0.14em] text-[var(--text-muted)]">
-                      #{shortId(item.workflow_id)}
-                    </span>
-                    <span className="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden />
-                    <Link
-                      to={`/workflow/${item.workflow_id}`}
-                      className="text-[12.5px] font-medium text-[var(--text-muted)] transition-colors hover:text-[var(--agent)]"
-                    >
-                      Mở hành trình
-                    </Link>
-                  </div>
-
-                  {item.goal && (
-                    <div className="mt-4 flex justify-end">
-                      <p
-                        className="max-w-[76%] rounded-[var(--r-sm)] px-4 py-2.5 text-[14.5px] font-medium leading-[1.55]"
-                        style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
-                      >
-                        {item.goal}
-                      </p>
-                    </div>
-                  )}
-
-                  {item.answer && (
-                    <div className="mt-2.5 flex justify-start">
-                      <p className="mat-raised max-w-[76%] rounded-[var(--r-sm)] px-4 py-2.5 text-[14.5px] leading-[1.6] text-[var(--text-secondary)]">
-                        {item.answer}
-                      </p>
-                    </div>
-                  )}
-                </section>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </WorkspaceShell>

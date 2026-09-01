@@ -48,6 +48,18 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+def _unique_plate() -> str:
+    """Biển số riêng nhưng HỢP LỆ.
+
+    Bản trước dùng `_unique_plate()` → `51A-<hex 8 ký tự>`, không phải biển thật.
+    `TaskPlanValidator` giờ áp chính luật của `_extract_plate_number` — cùng luật
+    biểu mẫu đã áp — nên biển giả không qua được nữa. Đó là điều đúng: một kế
+    hoạch mang biển số không tồn tại vẫn đi tới đơn vị là lỗi thật, đã đo được
+    trên stack demo với "ABCXYZ".
+    """
+    return f"51A-{uuid.uuid4().int % 1000000:06d}"
+
+
 def _unique_booking_date() -> str:
     """Ngày riêng, nhưng nằm trong khung ngày hợp lệ.
 
@@ -83,7 +95,7 @@ def _full_flow_plan(
     apartment_code: str,
     plate_number: str,
     booking_date: str,
-    parking_zone: str = "ZONE_A",
+    parking_zone: str = "ZONE_B",
 ) -> TaskPlan:
     """TaskPlan 4 bước với chuỗi InputRef đầy đủ (giống fake Planner)."""
     return TaskPlan(
@@ -146,7 +158,7 @@ def _boundary(connectors: list, repository: PostgreSQLWorkflowStateRepository) -
 async def test_boundary_happy_path_succeeds_and_persists(e2e_pool: asyncpg.Pool) -> None:
     """boundary.execute() chạy full flow → tuple chuẩn, DB lưu SUCCESS."""
     repository = PostgreSQLWorkflowStateRepository(e2e_pool)
-    plan = _full_flow_plan(_unique("APT"), _unique("51A"), _unique_booking_date())
+    plan = _full_flow_plan(_unique("APT"), _unique_plate(), _unique_booking_date())
 
     async with _real_connectors() as connectors:
         workflow_id, task_results = await _boundary(connectors, repository).execute(plan)
@@ -178,7 +190,7 @@ async def test_boundary_input_ref_chain_reaches_real_providers(e2e_pool: asyncpg
     qua boundary (không phải chỉ khi gọi Executor trực tiếp).
     """
     repository = PostgreSQLWorkflowStateRepository(e2e_pool)
-    plan = _full_flow_plan(_unique("APT"), _unique("51A"), _unique_booking_date())
+    plan = _full_flow_plan(_unique("APT"), _unique_plate(), _unique_booking_date())
 
     async with _real_connectors() as connectors:
         _, task_results = await _boundary(connectors, repository).execute(plan)
@@ -221,14 +233,11 @@ async def test_boundary_no_availability_returns_standard_result(e2e_pool: asyncp
     booking_date = _unique_booking_date()
 
     async with _real_connectors() as connectors:
-        # Đổ đầy ZONE_A (capacity = 3) bằng các workflow thật.
-        for _ in range(3):
-            filler = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date)
-            _, filler_results = await _boundary(connectors, repository).execute(filler)
-            assert all(result.success for result in filler_results.values())
-
-        # Workflow tiếp theo phải chạm NO_AVAILABILITY ở T3.
-        plan = _full_flow_plan(_unique("APT"), _unique("51A"), booking_date)
+        # ZONE_A được CẤU HÌNH kín (sức chứa 0), không cần đổ đầy bằng
+        # booking giả. Vòng lặp cũ đặt ba booking thật rồi mới chạm được lỗi —
+        # nó phụ thuộc sức chứa đúng bằng 3, và mỗi lần đổi cấu hình là test
+        # này hỏng theo. Giờ nó đọc thẳng cấu hình.
+        plan = _full_flow_plan(_unique("APT"), _unique_plate(), booking_date, parking_zone="ZONE_A")
         workflow_id, task_results = await _boundary(connectors, repository).execute(plan)
 
     failure = task_results["T3"]

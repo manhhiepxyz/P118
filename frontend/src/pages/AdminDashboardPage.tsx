@@ -1,288 +1,405 @@
-import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import {
-  Activity,
-  Inbox,
-  RotateCcw,
-  Search,
-  Workflow,
-  XCircle,
-} from 'lucide-react'
+  AlertTriangle,
+  Building2,
+  CheckCircle2,
+  Loader2,
+  Cpu,
+  ArrowRight,
+  ShieldAlert,
+  Clock,
+  Zap,
+  TrendingUp,
+  Users,
+  BarChart3,
+  TimerReset,
+} from "lucide-react";
+import { Link } from "react-router-dom";
 
-import { EmptyState, SkeletonRows } from '../components/Bits'
-import { StatusBadge } from '../components/StatusBadge'
-import { listWorkflows } from '../lib/agentApi'
-import { shortId } from '../lib/status'
-import type { AgentDisplayWorkflowStatus, AgentWorkflowListItem } from '../lib/types'
-import { usePolling } from '../lib/usePolling'
+import { adminMetrics } from "../lib/agentApi";
+import { usePolling } from "../lib/usePolling";
 
-const STATUS_OPTIONS: Array<{ value: AgentDisplayWorkflowStatus | ''; label: string }> = [
-  { value: '', label: 'Tất cả' },
-  { value: 'PENDING', label: 'Đang chờ' },
-  { value: 'RUNNING', label: 'Đang thực hiện' },
-  { value: 'WAITING_APPROVAL', label: 'Chờ xác nhận' },
-  { value: 'SUCCESS', label: 'Hoàn thành' },
-  { value: 'FAILED', label: 'Thất bại' },
-  { value: 'CANCELLED', label: 'Đã hủy' },
-]
+// ─── Hero Cards ───────────────────────────────────────────────────────────────
+const HERO_CARDS = [
+  { key: "total",   label: "Tổng luồng hệ thống", badge: "TỔNG SỐ",   Icon: Building2,   token: "var(--agent)",   spin: false, linkStatus: "" },
+  { key: "running", label: "Đang xử lý",           badge: "ĐANG CHẠY", Icon: Loader2,      token: "var(--running)", spin: true,  linkStatus: "RUNNING" },
+  { key: "success", label: "Thành công",            badge: "HOÀN TẤT", Icon: CheckCircle2, token: "var(--success)", spin: false, linkStatus: "SUCCESS" },
+  { key: "failed",  label: "Sự cố / Thất bại",     badge: "CẦN XỬ LÝ",Icon: AlertTriangle,token: "var(--danger)",  spin: false, linkStatus: "FAILED" },
+];
 
-const PAGE_SIZE = 10
+// ─── Lifecycle breakdown rows ─────────────────────────────────────────────────
+const LIFECYCLE_ROWS = [
+  { key: "running",          label: "Đang xử lý",       token: "var(--running)"      },
+  { key: "waiting_approval", label: "Chờ duyệt (HITL)", token: "var(--waiting-user)" },
+  { key: "awaiting_user",    label: "Chờ người dùng",    token: "var(--agent)"        },
+  { key: "cancelled",        label: "Đã hủy",            token: "var(--text-muted)"   },
+];
 
-/** Mảng rỗng ổn định — tránh tạo mới mỗi render khi data null (usePolling). */
-const EMPTY_WORKFLOWS: AgentWorkflowListItem[] = []
+function successRateColor(r: number) {
+  if (r >= 90) return "var(--success)";
+  if (r >= 70) return "var(--waiting-user)";
+  return "var(--danger)";
+}
+function successRateLabel(r: number) {
+  if (r >= 90) return "Khỏe";
+  if (r >= 70) return "Cần chú ý";
+  return "Nguy hiểm";
+}
 
-/** Admin Dashboard — giám sát toàn bộ workflow (Prompt 3.1). */
 export function AdminDashboardPage() {
-  // `all`, không phải mặc định `active`.
-  //
-  // Trang này có bộ lọc trạng thái ở phía client, trong đó có "Hoàn thành" và
-  // "Thất bại". Nạp bằng `active` thì backend đã loại sẵn đúng những trạng
-  // thái đó, nên chọn chúng luôn ra danh sách rỗng — bộ lọc trông như hỏng.
-  // KPI "Hoàn thành" cũng vì thế luôn bằng 0.
-  const { data, loading, error } = usePolling(() => listWorkflows('all', 50).then((r) => r.items), 10000)
-  const workflows = data ?? EMPTY_WORKFLOWS
+  const { data, loading, error } = usePolling(adminMetrics, 10_000);
 
-  const [query, setQuery] = useState('')
-  const [status, setStatus] = useState<AgentDisplayWorkflowStatus | ''>('')
-  const [page, setPage] = useState(1)
+  // Derived
+  const total     = data?.total    ?? 0;
+  const failed    = data?.failed   ?? 0;
+  const success   = data?.success  ?? 0;
+  const cancelled = data?.cancelled ?? 0;
+  const waiting   = data?.waiting_approval ?? 0;
+  const orphaned  = (data as any)?.orphaned ?? 0;
 
-  const kpi = useMemo(() => {
-    const total = workflows.length
-    return [
-      { label: 'Tổng workflow', value: total, icon: Workflow, color: 'bg-slate-100 text-slate-600' },
-      {
-        label: 'Đang chạy',
-        value: workflows.filter((w) => w.status === 'RUNNING').length,
-        icon: Activity,
-        color: 'bg-blue-50 text-blue-600',
-      },
-      {
-        label: 'Chờ xác nhận',
-        value: workflows.filter((w) => w.status === 'WAITING_APPROVAL').length,
-        icon: Inbox,
-        color: 'bg-amber-50 text-amber-600',
-      },
-      {
-        label: 'Thất bại',
-        value: workflows.filter((w) => w.status === 'FAILED').length,
-        icon: XCircle,
-        color: 'bg-red-50 text-red-600',
-      },
-    ]
-  }, [workflows])
+  const denominator = success + failed + cancelled;
+  const successRate = denominator > 0 ? Math.round((success / denominator) * 100) : null;
+  const rateColor   = successRate !== null ? successRateColor(successRate) : "var(--text-muted)";
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return workflows.filter((w) => {
-      if (status && w.status !== status) return false
-      if (q && !w.title.toLowerCase().includes(q) && !w.workflow_id.toLowerCase().includes(q)) {
-        return false
-      }
-      return true
-    })
-  }, [workflows, query, status])
+  const tokensPerWf = total > 0 ? Math.round((data?.llm_tokens ?? 0) / total) : null;
+  const callsPerWf  = total > 0 ? ((data?.llm_calls ?? 0) / total).toFixed(1)  : null;
+  const latencyS    = data?.avg_latency_ms ? (data.avg_latency_ms / 1000).toFixed(1) : null;
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
-  const currentPage = Math.min(page, totalPages)
-  const pageItems = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  // Alert
+  const hasAlert   = failed > 0 || orphaned > 0 || waiting > 0;
+  const alertParts: string[] = [];
+  if (failed > 0)   alertParts.push(`${failed} luồng thất bại`);
+  if (orphaned > 0) alertParts.push(`${orphaned} luồng treo (orphaned)`);
+  if (waiting > 0)  alertParts.push(`${waiting} luồng chờ duyệt HITL`);
 
-  function reset() {
-    setQuery('')
-    setStatus('')
-    setPage(1)
-  }
+  // Lifecycle max for proportional bars
+  const lifecycleMax = Math.max(
+    data?.running ?? 0, data?.waiting_approval ?? 0,
+    data?.awaiting_user ?? 0, data?.cancelled ?? 0, 1
+  );
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-900">Quản trị hệ thống</h1>
-          <p className="mt-1 text-sm text-gray-500">Giám sát toàn bộ workflow và trạng thái vận hành.</p>
-        </div>
+    <div className="space-y-7">
+      {/* Header */}
+      <div>
+        <p className="font-mono text-[12px] font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">
+          BẢNG ĐIỀU KHIỂN QUẢN TRỊ
+        </p>
+        <h1 className="mt-2 text-[32px] sm:text-[38px] font-semibold leading-[1.12] tracking-[-0.03em] text-[var(--text-primary)]">
+          Tổng quan Vận hành
+        </h1>
+        <p className="mt-2 text-[14.5px] text-[var(--text-secondary)]">
+          Theo dõi sức khỏe hệ thống và hiệu suất Agent AI theo thời gian thực.
+        </p>
       </div>
 
-      {/* KPI */}
-      <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {kpi.map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="rounded-2xl border border-gray-200 bg-card p-4 shadow-sm dark:border-gray-800">
-            <div className={`flex h-9 w-9 items-center justify-center rounded-xl ${color}`}>
-              <Icon className="h-[18px] w-[18px]" aria-hidden />
-            </div>
-            <p className="mt-3 text-2xl font-semibold text-gray-900 dark:text-gray-100">{value}</p>
-            <p className="text-xs text-gray-500">{label}</p>
-          </div>
-        ))}
-      </section>
+      {/* Backend error */}
+      {error && (
+        <div
+          role="alert"
+          className="flex items-center gap-3 rounded-[var(--r-sm)] p-4 text-[14px]"
+          style={{
+            color: "var(--danger)",
+            backgroundColor: "color-mix(in srgb, var(--danger) 11%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--danger) 25%, transparent)",
+          }}
+        >
+          <ShieldAlert className="h-5 w-5 shrink-0" />
+          <span>Không thể tải dữ liệu chỉ số. Vui lòng kiểm tra kết nối với máy chủ backend!</span>
+        </div>
+      )}
 
-      {/* Service Health Monitor Widget */}
-      <section className="rounded-2xl border border-gray-200 bg-card p-5 shadow-sm dark:border-gray-800">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300">
-            Giám sát Trạng thái 3 Dịch vụ Mô phỏng (Service Health Monitor)
+      {/* ── Alert Banner ── */}
+      {!loading && hasAlert && (
+        <div
+          className="flex items-start gap-3 rounded-[var(--r-sm)] p-4 text-[14px]"
+          style={{
+            color: "var(--danger)",
+            backgroundColor: "color-mix(in srgb, var(--danger) 9%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--danger) 22%, transparent)",
+          }}
+        >
+          <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold">Hệ thống cần chú ý</p>
+            <p className="text-[13px] mt-0.5 opacity-80">
+              {alertParts.join(" · ")}.{" "}
+              <Link
+                to="/admin/workflows"
+                className="underline underline-offset-2 font-medium hover:opacity-100 transition-opacity"
+              >
+                Xem chi tiết →
+              </Link>
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── 4 Hero Cards ── */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {HERO_CARDS.map(({ key, label, badge, Icon, token, spin, linkStatus }) => {
+          const value = loading && !data ? null : (data?.[key as keyof typeof data] ?? 0) as number;
+          const isCritical = key === "failed" && (value ?? 0) > 0;
+          return (
+            <Link
+              key={key}
+              to={linkStatus ? `/admin/workflows?status=${linkStatus}` : "/admin/workflows"}
+              className="group relative flex flex-col justify-between rounded-[var(--r-md)] border bg-[var(--surface-overlay)] p-5 shadow-[var(--shadow-1)] transition-all duration-[var(--t-hover)] hover:shadow-[var(--shadow-2)]"
+              style={{
+                borderColor: isCritical
+                  ? `color-mix(in srgb, ${token} 35%, transparent)`
+                  : "var(--border-subtle)",
+              }}
+            >
+              {isCritical && (
+                <span
+                  className="absolute inset-x-0 top-0 h-[3px] rounded-t-[var(--r-md)]"
+                  style={{ backgroundColor: token }}
+                />
+              )}
+              <div className="flex items-center justify-between mb-4">
+                <div
+                  className="flex h-9 w-9 items-center justify-center rounded-[var(--r-sm)]"
+                  style={{
+                    backgroundColor: `color-mix(in srgb, ${token} 13%, transparent)`,
+                    color: token,
+                  }}
+                >
+                  <Icon className={`h-4.5 w-4.5 ${spin && (value ?? 0) > 0 ? "animate-spin" : ""}`} strokeWidth={2} />
+                </div>
+                <span
+                  className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.08em] px-2 py-0.5 rounded-[var(--r-xs)]"
+                  style={{ backgroundColor: "var(--surface-sunken)", color: "var(--text-muted)" }}
+                >
+                  {badge}
+                </span>
+              </div>
+              <div>
+                <p
+                  className="font-mono text-[32px] font-bold tracking-tight tabular-nums"
+                  style={{ color: isCritical ? token : "var(--text-primary)" }}
+                >
+                  {value === null ? "—" : value.toLocaleString("vi-VN")}
+                </p>
+                <div className="flex items-center justify-between mt-1 text-[13px] font-medium text-[var(--text-secondary)]">
+                  <span>{label}</span>
+                  <ArrowRight
+                    className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 transition-all transform group-hover:translate-x-0.5"
+                    style={{ color: "var(--agent)" }}
+                  />
+                </div>
+              </div>
+            </Link>
+          );
+        })}
+      </div>
+
+      {/* ── System Health KPI ── */}
+      <div className="rounded-[var(--r-md)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-1)]">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-[15px] font-semibold text-[var(--text-primary)] tracking-[-0.01em] flex items-center gap-2">
+            <TrendingUp className="h-4 w-4" style={{ color: "var(--agent)" }} />
+            Sức khỏe Hệ thống
           </h2>
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
-            <span className="h-2 w-2 animate-ping rounded-full bg-emerald-500" />
-            ALL SYSTEMS OPERATIONAL
+          <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+            TARGET ≥ 90%
           </span>
         </div>
 
-        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-900/50 dark:bg-emerald-950/30">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-gray-800 dark:text-gray-200">🏢 Resident Service</span>
-              <span className="rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200">ONLINE</span>
-            </div>
-            <p className="mt-2 text-xs text-gray-500">FastAPI Mock · Port 8000</p>
-            <p className="mt-1 font-mono text-[11px] text-emerald-600 dark:text-emerald-400">Latency: 12ms · Uptime 100%</p>
+        {loading && !data ? (
+          <div className="flex items-center gap-2 text-[var(--text-muted)]">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span className="text-[13.5px]">Đang tải...</span>
           </div>
-
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-900/50 dark:bg-emerald-950/30">
+        ) : successRate === null ? (
+          <p className="text-[13.5px] text-[var(--text-muted)]">Chưa có đủ dữ liệu để tính tỷ lệ.</p>
+        ) : (
+          <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-gray-800 dark:text-gray-200">🚗 Transport & Parking</span>
-              <span className="rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200">ONLINE</span>
+              <span className="text-[13.5px] text-[var(--text-secondary)]">
+                Tỷ lệ thành công — {success} / {denominator} luồng đã kết thúc
+              </span>
+              <div className="flex items-center gap-2">
+                <span
+                  className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] px-2 py-0.5 rounded-[var(--r-xs)]"
+                  style={{
+                    color: rateColor,
+                    backgroundColor: `color-mix(in srgb, ${rateColor} 13%, transparent)`,
+                  }}
+                >
+                  {successRateLabel(successRate)}
+                </span>
+                <span className="font-mono text-[22px] font-bold tabular-nums" style={{ color: rateColor }}>
+                  {successRate}%
+                </span>
+              </div>
             </div>
-            <p className="mt-2 text-xs text-gray-500">FastAPI Mock · Port 8000</p>
-            <p className="mt-1 font-mono text-[11px] text-emerald-600 dark:text-emerald-400">ZONE_A & ZONE_B Active</p>
-          </div>
-
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-900/50 dark:bg-emerald-950/30">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-gray-800 dark:text-gray-200">💳 Payment Gateway</span>
-              <span className="rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200">ONLINE</span>
+            <div className="h-2.5 w-full rounded-full bg-[var(--surface-sunken)] overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-700"
+                style={{ width: `${successRate}%`, backgroundColor: rateColor }}
+              />
             </div>
-            <p className="mt-2 text-xs text-gray-500">FastAPI Mock · Port 8000</p>
-            <p className="mt-1 font-mono text-[11px] text-emerald-600 dark:text-emerald-400">Auto-Pay Gateway Ready</p>
+            <div className="flex justify-between text-[11px] font-mono text-[var(--text-muted)]">
+              <span>0%</span>
+              <span className="opacity-50">70%</span>
+              <span className="opacity-50">90%</span>
+              <span>100%</span>
+            </div>
           </div>
-        </div>
-      </section>
-
-      {/* Filter bar */}
-      <div className="flex flex-col gap-3 rounded-2xl border border-gray-200 bg-card p-4 shadow-sm sm:flex-row sm:items-center">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden />
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value)
-              setPage(1)
-            }}
-            placeholder="Tìm theo mục tiêu hoặc workflow_id…"
-            className="w-full rounded-xl border border-gray-300 bg-card py-2 pl-9 pr-3 text-sm text-gray-900 shadow-sm outline-none placeholder:text-gray-300 focus:border-teal-700 focus:ring-2 focus:ring-teal-700/20"
-          />
-        </div>
-        <select
-          value={status}
-          onChange={(e) => {
-            setStatus(e.target.value as AgentDisplayWorkflowStatus | '')
-            setPage(1)
-          }}
-          className="rounded-xl border border-gray-300 bg-card px-3 py-2 text-sm text-gray-700 shadow-sm outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-700/20"
-        >
-          {STATUS_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={reset}
-          className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-gray-200 bg-card px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
-        >
-          <RotateCcw className="h-4 w-4" aria-hidden />
-          Reset
-        </button>
+        )}
       </div>
 
-      {error && (
-        <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
-          {error}
-        </p>
-      )}
+      {/* ── Bottom Two Panels ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
-      {/* Bảng */}
-      {loading && <SkeletonRows count={5} />}
+        {/* Panel A: AI Efficiency */}
+        <div className="rounded-[var(--r-md)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-1)]">
+          <div className="flex items-center justify-between mb-5 pb-3 border-b border-[var(--border-subtle)]">
+            <h2 className="text-[15px] font-semibold text-[var(--text-primary)] tracking-[-0.01em] flex items-center gap-2">
+              <Cpu className="h-4 w-4" style={{ color: "var(--agent)" }} />
+              AI Agent Efficiency
+            </h2>
+            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">PER WORKFLOW</span>
+          </div>
 
-      {!loading && filtered.length === 0 && (
-        <EmptyState message="Không có workflow phù hợp." />
-      )}
+          <div className="space-y-3.5">
+            {/* Tokens/wf */}
+            <div className="flex items-center justify-between rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-4 py-3">
+              <div className="flex items-center gap-2.5">
+                <Zap className="h-4 w-4 shrink-0" style={{ color: "var(--agent)" }} />
+                <div>
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Tokens / Workflow</p>
+                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                    Tổng: {loading && !data ? "—" : (data?.llm_tokens ?? 0).toLocaleString("vi-VN")}
+                  </p>
+                </div>
+              </div>
+              <p className="font-mono text-[24px] font-bold text-[var(--text-primary)] tabular-nums">
+                {loading && !data ? "—" : tokensPerWf !== null ? tokensPerWf.toLocaleString("vi-VN") : "—"}
+              </p>
+            </div>
 
-      {!loading && filtered.length > 0 && (
-        <div className="overflow-hidden rounded-2xl border border-gray-200 bg-card shadow-sm">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-gray-200 text-xs uppercase tracking-wide text-gray-400">
-                <th className="px-4 py-3 font-medium">Workflow</th>
-                <th className="hidden px-4 py-3 font-medium md:table-cell">Mục tiêu</th>
-                <th className="px-4 py-3 font-medium">Trạng thái</th>
-                <th className="hidden px-4 py-3 font-medium lg:table-cell">Bắt đầu</th>
-                <th className="px-4 py-3 text-right font-medium">Hành động</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pageItems.map((wf: AgentWorkflowListItem) => (
-                <tr
-                  key={wf.workflow_id}
-                  className="border-b border-gray-100 last:border-0 hover:bg-gray-50"
+            {/* Calls/wf */}
+            <div className="flex items-center justify-between rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-4 py-3">
+              <div className="flex items-center gap-2.5">
+                <BarChart3 className="h-4 w-4 shrink-0" style={{ color: "var(--running)" }} />
+                <div>
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Lần Gọi LLM / Workflow</p>
+                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                    Tổng: {loading && !data ? "—" : (data?.llm_calls ?? 0).toLocaleString("vi-VN")}
+                  </p>
+                </div>
+              </div>
+              <p className="font-mono text-[24px] font-bold text-[var(--text-primary)] tabular-nums">
+                {loading && !data ? "—" : callsPerWf ?? "—"}
+              </p>
+            </div>
+
+            {/* Avg Latency */}
+            <div className="flex items-center justify-between rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-4 py-3">
+              <div className="flex items-center gap-2.5">
+                <TimerReset className="h-4 w-4 shrink-0" style={{ color: "var(--waiting-user)" }} />
+                <div>
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Avg E2E Latency</p>
+                  <p className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">Target: &lt; 5s</p>
+                </div>
+              </div>
+              {latencyS !== null ? (
+                <p
+                  className="font-mono text-[24px] font-bold tabular-nums"
+                  style={{ color: parseFloat(latencyS) < 5 ? "var(--success)" : "var(--danger)" }}
                 >
-                  <td className="px-4 py-3">
-                    <Link
-                      to={`/admin/workflow/${wf.workflow_id}`}
-                      className="font-mono text-xs text-teal-700 hover:underline"
-                    >
-                      #{shortId(wf.workflow_id, 12)}
-                    </Link>
-                  </td>
-                  <td className="hidden max-w-0 truncate px-4 py-3 text-gray-700 md:table-cell">
-                    <span className="block max-w-xs truncate">{wf.title}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={wf.status} />
-                  </td>
-                  <td className="hidden px-4 py-3 text-xs text-gray-500 lg:table-cell">
-                    {wf.current_step ?? '—'}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <Link
-                      to={`/admin/workflow/${wf.workflow_id}`}
-                      className="text-xs font-medium text-teal-700 hover:underline"
-                    >
-                      Chi tiết
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* Phân trang */}
-          <div className="flex items-center justify-between border-t border-gray-200 px-4 py-3 text-xs text-gray-500">
-            <span>
-              {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)} /{' '}
-              {filtered.length}
-            </span>
-            <div className="flex gap-1">
-              <button
-                type="button"
-                disabled={currentPage <= 1}
-                onClick={() => setPage(currentPage - 1)}
-                className="rounded-lg border border-gray-200 px-2.5 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-40"
-              >
-                Trước
-              </button>
-              <button
-                type="button"
-                disabled={currentPage >= totalPages}
-                onClick={() => setPage(currentPage + 1)}
-                className="rounded-lg border border-gray-200 px-2.5 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-40"
-              >
-                Sau
-              </button>
+                  {latencyS}s
+                </p>
+              ) : (
+                <p className="font-mono text-[18px] font-bold text-[var(--text-muted)]">N/A</p>
+              )}
             </div>
           </div>
         </div>
-      )}
+
+        {/* Panel B: Workflow Lifecycle */}
+        <div className="rounded-[var(--r-md)] border border-[var(--border-subtle)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-1)]">
+          <div className="flex items-center justify-between mb-5 pb-3 border-b border-[var(--border-subtle)]">
+            <h2 className="text-[15px] font-semibold text-[var(--text-primary)] tracking-[-0.01em] flex items-center gap-2">
+              <Clock className="h-4 w-4" style={{ color: "var(--running)" }} />
+              Vòng đời Luồng
+            </h2>
+            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">TRẠNG THÁI</span>
+          </div>
+
+          <div className="space-y-4">
+            {LIFECYCLE_ROWS.map(({ key, label, token }) => {
+              const count = loading && !data ? null : (data?.[key as keyof typeof data] ?? 0) as number;
+              const pct = count !== null && lifecycleMax > 0 ? Math.round((count / lifecycleMax) * 100) : 0;
+              return (
+                <div key={key}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[13px] font-medium text-[var(--text-secondary)]">{label}</span>
+                    <span
+                      className="font-mono text-[14px] font-bold tabular-nums"
+                      style={{ color: (count ?? 0) > 0 ? token : "var(--text-muted)" }}
+                    >
+                      {count === null ? "—" : count}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-[var(--surface-sunken)] overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-700"
+                      style={{
+                        width: `${pct}%`,
+                        backgroundColor: (count ?? 0) > 0 ? token : "transparent",
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Orphaned alert */}
+            {!loading && orphaned > 0 && (
+              <div
+                className="mt-1 flex items-center justify-between rounded-[var(--r-sm)] px-3 py-2.5 text-[13px]"
+                style={{
+                  color: "var(--danger)",
+                  backgroundColor: "color-mix(in srgb, var(--danger) 10%, transparent)",
+                  border: "1px solid color-mix(in srgb, var(--danger) 22%, transparent)",
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  <span className="font-medium">Luồng treo (Orphaned)</span>
+                </div>
+                <span className="font-mono font-bold">{orphaned}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Quick Actions ── */}
+      <div className="flex items-center gap-3 pt-1">
+        <span className="font-mono text-[11.5px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)] whitespace-nowrap">
+          ĐIỀU HƯỚNG NHANH
+        </span>
+        <div className="flex-1 h-px bg-[var(--border-subtle)]" />
+        <Link
+          to="/admin/workflows"
+          className="press inline-flex items-center gap-2 px-4 py-2 rounded-[var(--r-sm)] text-[13px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-overlay)] text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-raised)] transition-all whitespace-nowrap"
+        >
+          <BarChart3 className="h-4 w-4" style={{ color: "var(--agent)" }} />
+          Xem Lịch sử Luồng
+          <ArrowRight className="h-3.5 w-3.5 text-[var(--text-muted)]" />
+        </Link>
+        <Link
+          to="/admin/users"
+          className="press inline-flex items-center gap-2 px-4 py-2 rounded-[var(--r-sm)] text-[13px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-overlay)] text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-raised)] transition-all whitespace-nowrap"
+        >
+          <Users className="h-4 w-4" style={{ color: "var(--running)" }} />
+          Quản lý Tài khoản
+          <ArrowRight className="h-3.5 w-3.5 text-[var(--text-muted)]" />
+        </Link>
+      </div>
     </div>
-  )
+  );
 }

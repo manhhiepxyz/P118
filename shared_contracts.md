@@ -89,7 +89,7 @@ Gate 2 mở rộng dùng đúng 9 tool nghiệp vụ:
 | `schedule_property_viewing`  | `project_id`, `viewing_date`, `viewing_time`                                            | `viewing_id`, `project_id`, `project_name`, `viewing_date`, `viewing_time`, `viewing_status`, `contact_name`, `contact_phone` |
 | `register_property_interest` | `project_id`, `interest_type`, `preferred_contact_time`, `consent`                    | `interest_id`, `project_id`, `project_name`, `interest_status`, `contact_channel`                                                   |
 | `create_maintenance_request` | `issue_type`, `description`, `location`, `preferred_date`, `preferred_time`         | `maintenance_id`, `maintenance_status`, `appointment_date`, `appointment_time`                                                        |
-| `schedule_move`              | `move_date`, `move_time`, `needs_elevator`, `needs_loading_support`, `move_vehicle` | `move_request_id`, `move_status`, `move_date`, `move_time`, `elevator_slot`                                                         |
+| `schedule_move`              | `move_date`, `move_time`, `move_origin_id`, `move_destination_id`, `move_size`, `needs_elevator`, `needs_loading_support`, `move_vehicle` | `move_request_id`, `move_status`, `move_date`, `move_time`, `elevator_slot`                                                         |
 | `register_resident`          | `full_name`, `apartment_code`, `residential_area`                                       | `resident_id`                                                                                                                               |
 | `register_vehicle`           | `resident_id`, `plate_number`, `vehicle_type`                                           | `vehicle_id`                                                                                                                                |
 | `book_parking`               | `vehicle_id`, `booking_date`, `parking_zone`                                            | `booking_id`, `parking_zone`, `booking_date`, `amount`, `currency`                                                                  |
@@ -273,6 +273,13 @@ chạy song song và không tự tạo `pay_fee` trong MVP.
 ```
 
 ### book_parking
+
+Availability của luồng demo do đơn vị cung cấp quyết định tại hàng đợi
+`/review`. `NO_AVAILABILITY` là mã từ chối hợp lệ cho `book_parking`, không
+phải cho `register_vehicle`. Sau khi đơn vị đã duyệt, mock Transport chỉ
+materialize booking và không được dùng capacity seed trong main DB để phủ
+quyết định ấy. Primitive repository vẫn kiểm capacity mặc định cho caller
+không đi qua hàng đợi duyệt.
 
 ```json
 // Input
@@ -625,6 +632,24 @@ book_parking internal input
 | Mục đích     | Phát triển, Gate 2, Demo Day | Production                |
 
 > **Endpoint của mock service không phải là contract bất biến của hệ thống. Contract bất biến tương đối là internal tool contract, TaskPlan và StandardResult.**
+
+### 11b. Cổng thanh toán gateway thật (VNPay sandbox) — tùy chọn
+
+`PAYMENT_PROVIDER=mock|vnpay` chọn đường chạy của `pay_fee` **mà không đổi contract**: tool name, input/output, StandardResult và error codes giữ nguyên.
+
+| | `mock` (mặc định) | `vnpay` |
+| --- | --- | --- |
+| Duyệt thanh toán | Thu tiền đồng bộ — xong ngay | Chỉ **MỞ PHIÊN**: row `payments` PENDING với số tiền **ĐÓNG BĂNG**, trả `payment_redirect_url` cho UI chuyển hướng |
+| Nguồn sự thật về tiền | Mock service | Callback **IPN** máy-nhân-máy (`GET /api/v1/webhooks/vnpay/ipn`, xác minh HMAC-SHA512, không JWT) |
+| Trạng thái | `PAID` tức thì | `PENDING` → `PAID` khi IPN xác nhận; hết hạn TTL → `FAILED`. **Không thêm trạng thái mới** |
+
+Quy tắc bổ sung:
+
+- Return URL (trình duyệt quay về) **chỉ hiển thị** — không bao giờ dùng để ghi dữ liệu tài chính.
+- `payment_approvals.status='APPROVED'` nghĩa là *người dùng đồng ý*, KHÔNG phải *đã thu tiền*. Tiền chỉ được coi là PAID sau IPN hợp lệ.
+- Khi một booking còn phiên PENDING, yêu cầu đổi khu bị từ chối ở tầng domain (`PAYMENT_SESSION_ACTIVE`) — số tiền user thấy khi trả phải là số được tất toán.
+- Sweeper đóng phiên quá hạn (khớp `vnp_ExpireDate` phía gateway) và hàn workflow đã PAID nhưng chưa chốt (process chết giữa lượt IPN).
+- Secret (`VNPAY_HASH_SECRET`) chỉ nằm trong `.env`; mọi tham số `vnp_*`, nhân-100 số tiền, ký HMAC nằm trong `src/connectors/vnpay.py` — Executor/orchestration không nhìn thấy đặc tả gateway.
 
 ---
 

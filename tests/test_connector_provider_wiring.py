@@ -25,12 +25,12 @@ from src.connectors.property import PropertyConnector
 from src.connectors.resident_services import ResidentServicesConnector
 from src.connectors.shuttle import ShuttleConnector
 from src.connectors.tour import TourConnector
+from src.services.mock import shuttle as shuttle_module
 from src.services.mock.consultation import consultation_app
 from src.services.mock.property import property_app
 from src.services.mock.resident_services import resident_services_app
 from src.services.mock.shuttle import shuttle_app
 from src.services.mock.tour import tour_app
-from src.services.mock import shuttle as shuttle_module
 
 # Ngày trong tương lai: provider từ chối ngày quá khứ, và một hằng số ngày cứng
 # sẽ biến test thành quả bom hẹn giờ.
@@ -196,6 +196,9 @@ async def test_schedule_move_reaches_resident_services(resident_services_client)
         {
             "move_date": FUTURE,
             "move_time": "09:00",
+            "move_origin_id": "MOVE-Q7-A1",
+            "move_destination_id": "MOVE-Q7-B1",
+            "move_size": "medium",
             "needs_elevator": True,
             "needs_loading_support": False,
             "move_vehicle": "truck",

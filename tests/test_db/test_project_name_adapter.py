@@ -15,6 +15,20 @@ import pytest
 from tests.test_db.conftest import _register_and_login
 
 
+async def _await_background_workflow_task(routes, workflow_id: str) -> None:
+    """Chờ task nền `_run_demo_job` của `workflow_id` (nếu còn) chạy xong thật.
+
+    `_keep_demo_task` đăng ký task vào `_DEMO_WORKFLOW_TASKS` TRƯỚC KHI handler
+    trả response 202 — nên tới đây entry hoặc còn nằm trong registry (await
+    thẳng chính task, không đoán bằng sleep), hoặc đã chạy xong và tự xoá mình
+    trước khi ta kịp đọc (không còn gì để chờ). Không có khoảng nào ở giữa hai
+    trường hợp đó còn hở race.
+    """
+    task = routes._DEMO_WORKFLOW_TASKS.get(workflow_id)
+    if task is not None:
+        await task
+
+
 async def _pending_viewing(routes, db_pool, username: str):
     """Dựng một workflow đang chờ bổ sung thông tin dự án."""
     owner = str(await db_pool.fetchval("SELECT id FROM users WHERE username = $1", username))
@@ -93,11 +107,23 @@ async def test_continue_with_a_project_name_puts_the_id_into_the_child_context(c
         json={"fields": {"project_name": "Vinhomes Ocean Park", "viewing_date": "2030-07-15", "viewing_time": "09:30"}},
     )
     assert response.status_code in {200, 202}, response.text
+    # `/continue` luôn tạo workflow CON mới — `_run_demo_job` chạy nền dưới id
+    # này, không dưới `workflow_id` gốc đã đóng.
+    child_workflow_id = response.json()["workflow_id"]
 
     await asyncio.wait_for(done.wait(), timeout=10)
+    # `done.set()` chỉ chứng minh Planner giả đã NHẬN context — `_run_demo_job`
+    # còn ghi `workflow_events` và giữ khoá workflow SAU đó. Phải chờ chính
+    # task nền đó kết thúc thật, không phải suy đoán qua thời điểm Planner
+    # thấy context, nếu không teardown `TRUNCATE` của `clean_tables` đua với
+    # task còn sống và deadlock.
+    await _await_background_workflow_task(routes, child_workflow_id)
 
     assert seen.get("project_id", "").startswith("PRJ-")
     assert "project_name" not in seen
+
+    lingering = routes._DEMO_WORKFLOW_TASKS.get(child_workflow_id)
+    assert lingering is None or lingering.done(), "task nền của workflow con vẫn đang chạy sau khi test kết thúc"
 
 
 @pytest.mark.asyncio
@@ -154,8 +180,15 @@ async def test_combined_viewing_and_parking_form_accepts_every_displayed_value(c
     )
 
     assert response.status_code == 202, response.text
+    child_workflow_id = response.json()["workflow_id"]
+
     await asyncio.wait_for(done.wait(), timeout=10)
+    await _await_background_workflow_task(routes, child_workflow_id)
+
     assert set(seen) >= {"project_id", "viewing_time", "plate_number", "vehicle_type", "parking_zone"}
+
+    lingering = routes._DEMO_WORKFLOW_TASKS.get(child_workflow_id)
+    assert lingering is None or lingering.done(), "task nền của workflow con vẫn đang chạy sau khi test kết thúc"
 
 
 @pytest.mark.asyncio

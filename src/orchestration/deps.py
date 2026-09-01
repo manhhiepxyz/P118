@@ -44,6 +44,7 @@ from src.db.migrations import run_migrations
 from src.db.postgres_repository import PostgreSQLWorkflowStateRepository
 from src.executor.executor import Executor
 from src.orchestration.boundary import ValidatedExecutionBoundary
+from src.orchestration.runtime_provider import acquire_repository
 
 
 def build_connectors(
@@ -56,6 +57,7 @@ def build_connectors(
     consultation_url: str = "http://localhost:8007",
     shuttle_url: str = "http://localhost:8009",
     contact_profile: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
 ) -> list[Any]:
     """Dựng các Connector thật trỏ tới Mock Provider.
 
@@ -71,13 +73,49 @@ def build_connectors(
     return [
         ResidentConnector(base_url=resident_url),
         TransportConnector(base_url=transport_url),
-        PaymentConnector(base_url=payment_url),
+        # `workflow_id` là thứ cho phép `pay_fee` mang khoá idempotency.
+        # Thiếu nó thì provider coi mỗi request là một giao dịch mới, và một
+        # lượt gọi lặp — sau timeout, sau restart, sau bất kỳ đường resume nào —
+        # sẽ báo "Booking has already been paid" thay vì trả lại đúng giao dịch
+        # cũ. Đo được: tiền đã trừ thật mà task ghi FAILED.
+        build_payment_connector(payment_url=payment_url, workflow_id=workflow_id),
         PropertyConnector(base_url=property_url, contact_profile=contact_profile),
         TourConnector(base_url=tour_url),
         ResidentServicesConnector(base_url=resident_services_url),
         ConsultationConnector(base_url=consultation_url),
         ShuttleConnector(base_url=shuttle_url),
     ]
+
+
+def build_payment_connector(
+    *,
+    payment_url: str = "http://localhost:8003",
+    workflow_id: str | None = None,
+    client: Any | None = None,
+) -> Any:
+    """Chọn connector `pay_fee` theo `PAYMENT_PROVIDER` — MỘT điểm quyết định duy nhất.
+
+    Cả hai connector cùng giao diện (`tool_names=["pay_fee"]`, cùng công thức
+    idempotency key), nên Executor/boundary không cần biết provider là ai:
+
+      * mock  → PaymentConnector: POST đồng bộ tới mock service (cổng 8003).
+      * vnpay → VnPayPaymentConnector: đọc phiên PENDING→PAID do IPN ghi; mở
+        phiên nằm ở đường `/payment-decision`, không phải ở đây.
+
+    Fail-fast khi bật vnpay mà thiếu cấu hình merchant: một phiên mở nhầm là
+    một chỗ đỗ bị treo — im lặng rơi về mock là giấu đúng lỗi đó.
+    """
+    settings = get_settings()
+    if settings.payment_provider == "vnpay":
+        from src.connectors.vnpay import VnPayPaymentConnector
+
+        if not settings.vnpay_tmn_code or not settings.vnpay_hash_secret:
+            raise RuntimeError(
+                "PAYMENT_PROVIDER=vnpay nhưng thiếu VNPAY_TMN_CODE/VNPAY_HASH_SECRET — "
+                "điền .env hoặc đặt PAYMENT_PROVIDER=mock"
+            )
+        return VnPayPaymentConnector(workflow_id=workflow_id)
+    return PaymentConnector(base_url=payment_url, workflow_id=workflow_id, client=client)
 
 
 async def build_repository(*, migrate: bool = True) -> PostgreSQLWorkflowStateRepository:
@@ -108,6 +146,10 @@ async def build_execution_boundary(
     contact_profile: dict[str, Any] | None = None,
     on_task_progress: Callable[[str, str, TaskStatus], Awaitable[None]] | None = None,
     on_failure: Callable[[str, str, ErrorCode, str, bool], None] | None = None,
+    # Đi thẳng xuống `PaymentConnector`: thiếu nó thì `pay_fee` ra provider
+    # không mang khoá idempotency, và một lượt gọi lặp báo "Booking has already
+    # been paid" trong khi tiền đã trừ thật.
+    workflow_id: str | None = None,
 ) -> tuple[ValidatedExecutionBoundary, PostgreSQLWorkflowStateRepository]:
     """Dựng boundary tương thích trực tiếp với Planner graph.
 
@@ -122,6 +164,7 @@ async def build_execution_boundary(
         resident_services_url,
         contact_profile=contact_profile,
         shuttle_url=shuttle_url,
+        workflow_id=workflow_id,
     )
     executor = Executor(connectors, repository, on_progress=on_task_progress, on_failure=on_failure)
     return ValidatedExecutionBoundary(executor), repository
@@ -137,6 +180,7 @@ async def build_runtime(
     consultation_url: str | None = None,
     shuttle_url: str | None = None,
     contact_profile: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
 ) -> tuple[list[Any], PostgreSQLWorkflowStateRepository]:
     """Dựng toàn bộ runtime: connectors + repository.
 
@@ -161,6 +205,22 @@ async def build_runtime(
         consultation_url=consultation_url or settings.consultation_service_url,
         shuttle_url=shuttle_url or settings.shuttle_service_url,
         contact_profile=contact_profile,
+        workflow_id=workflow_id,
     )
-    repository = await build_repository()
+    # Repository lấy từ COMPOSITION ROOT, không tự dựng.
+    #
+    # `build_repository()` mở một `asyncpg.create_pool()` mới rồi chạy lại toàn
+    # bộ migration — mỗi lần một workflow chạy. Đo được trên log Docker: mỗi
+    # yêu cầu của người dùng kéo theo `schema.sql` + `schema_migrations.sql` +
+    # `seed.sql`, 21 lượt trong một phiên.
+    #
+    # Cái giá không chỉ là ~0,2s và một bắt tay TCP. Pool ấy đọc thẳng
+    # `settings.database_url` — đúng đường mà `runtime_provider` sinh ra để
+    # bịt, vì nó là cách test lặng lẽ kết nối tới database phát triển trong khi
+    # phần còn lại chạy trên database test.
+    #
+    # Lifespan đã dựng sẵn một `SharedPool` dùng chung cho cả tiến trình;
+    # `close()` trên nó là no-op, nên người gọi vẫn giữ nguyên khuôn
+    # try/finally cũ mà không đóng nhầm pool của người khác.
+    repository = await acquire_repository()
     return connectors, repository

@@ -49,6 +49,31 @@ def _require_deepseek_model(value: str) -> str:
     return value.strip()
 
 
+_INVALID_PROVIDER = "LLM_PROVIDER không hợp lệ; chỉ chấp nhận: openai, openrouter, deepseek, groq."
+
+
+def _require_groq_model(value: str) -> str:
+    """Groq không có quy tắc đặt tên cố định — chỉ chặn kiểu gõ nhầm đã có tiền lệ.
+
+    Không khoá cứng danh sách model: danh mục Groq đổi thường xuyên và họ gỡ
+    model cũ, nên khoá lại sẽ biến một lần dọn danh mục bên họ thành sự cố bên
+    mình.
+
+    Nhưng chặn đúng lỗi đã xảy ra với OpenRouter: đổi `LLM_PROVIDER` mà quên đổi
+    tên model. Tên DeepSeek đi vào Groq sẽ bị từ chối lúc GỌI — lỗi nổ ra khi
+    người dùng đã bấm nút, thay vì lúc khởi động.
+    """
+    model = value.strip()
+    if not model:
+        raise LLMConfigurationError("Thiếu biến môi trường GROQ_MODEL_NAME.")
+    if model.startswith("deepseek-"):
+        raise LLMConfigurationError(
+            "GROQ_MODEL_NAME đang là tên model DeepSeek. Đổi LLM_PROVIDER sang groq "
+            "thì phải đổi cả tên model (ví dụ: openai/gpt-oss-20b)."
+        )
+    return model
+
+
 def _require_openrouter_model(value: str) -> str:
     """OpenRouter định tuyến theo `nhà-cung-cấp/model`, nên tên phải có dấu `/`.
 
@@ -97,17 +122,50 @@ def check_llm_configuration(settings: Settings | None = None) -> None:
         _require_openrouter_model(settings.openrouter_model_name)
         return
 
+    if provider == "groq":
+        _require_key(settings.groq_api_key, "GROQ_API_KEY")
+        _require_groq_model(settings.groq_model_name)
+        return
+
     if provider == "openai":
         _require_key(settings.openai_api_key, "OPENAI_API_KEY")
         if not settings.model_name.strip():
             raise LLMConfigurationError("Thiếu biến môi trường MODEL_NAME.")
         return
 
-    raise LLMConfigurationError("LLM_PROVIDER không hợp lệ; chỉ chấp nhận: openai, openrouter, deepseek.")
+    raise LLMConfigurationError(_INVALID_PROVIDER)
 
 
-def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = None) -> ChatOpenAI:
+def get_llm(
+    settings: Settings | None = None,
+    *,
+    callbacks: list[Any] | None = None,
+    fast: bool = False,
+) -> ChatOpenAI:
     """Tạo LangChain chat model theo provider đã cấu hình.
+
+    `fast=True` TẮT phần suy luận nội bộ của model. Chỉ dùng cho tầng DIỄN ĐẠT
+    lại dữ liệu đã được xác minh (Response Agent) — KHÔNG dùng cho tầng phải
+    quyết định (Planner).
+
+    Đo trên `deepseek-v4-flash`, cùng tải thật, 10 và 6 lượt:
+
+        Response Agent  có suy luận   trung vị 3.6s   p90 11.8s   đúng 10/10
+                        TẮT           trung vị 1.3s   p90  1.6s   đúng 10/10
+        Planner         có suy luận   trung vị 5.8s   max 40.1s   đúng  5/6
+                        TẮT           trung vị 1.1s   max  1.2s   đúng  4/6
+
+    Với tầng viết câu, tắt là thắng thuần: nhanh 2.8 lần ở trung vị, 7.4 lần ở
+    p90, chất lượng không đổi. Bảng `llm_usage` cho thấy vì sao — tầng này sinh
+    trung bình 1.535 token cho một câu ~50 token, tức ~97% công sức dành cho
+    suy nghĩ nội bộ, cho một việc chỉ là kể lại dữ liệu đã có.
+
+    Với Planner thì KHÔNG: tắt đi là mất một kế hoạch đúng (trả
+    NEEDS_INFORMATION cho một yêu cầu đã đủ thông tin). Lập kế hoạch cần suy
+    luận thật; diễn đạt thì không.
+
+    `reasoning_effort="minimal"` KHÔNG phải mức trung gian — đo được 583 token
+    suy luận, nhiều hơn cả mặc định. Chỉ `"none"` mới thực sự tắt.
 
     OpenRouter và DeepSeek đều dùng API tương thích OpenAI, nên cùng dùng
     ``ChatOpenAI`` với base URL riêng. Không provider nào được tạo ở import
@@ -124,6 +182,8 @@ def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = N
     """
     settings = settings or get_settings()
     provider = settings.llm_provider
+    # Rỗng khi `fast=False` — provider không hỗ trợ tham số này vẫn chạy nguyên vẹn.
+    extra: dict[str, Any] = {"reasoning_effort": "none"} if fast else {}
 
     if provider == "deepseek":
         return ChatOpenAI(
@@ -132,6 +192,7 @@ def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = N
             base_url=settings.deepseek_base_url,
             temperature=settings.llm_temperature,
             callbacks=callbacks,
+            **extra,
         )
 
     if provider == "openrouter":
@@ -141,6 +202,25 @@ def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = N
             base_url=settings.openrouter_base_url,
             temperature=settings.llm_temperature,
             callbacks=callbacks,
+            **extra,
+        )
+
+    if provider == "groq":
+        return ChatOpenAI(
+            model=_require_groq_model(settings.groq_model_name),
+            base_url=settings.groq_base_url,
+            api_key=_require_key(settings.groq_api_key, "GROQ_API_KEY"),
+            temperature=settings.llm_temperature,
+            callbacks=callbacks,
+            # CỐ Ý không truyền `reasoning_effort`, kể cả khi `fast=True`.
+            #
+            # Groq chỉ chấp nhận tham số này trên vài model suy luận (qwen3,
+            # gpt-oss); gửi nó tới `llama-3.3-70b` là 400 ngay — và 400 đó xảy
+            # ra ở ĐÚNG lớp trả lời cho người dùng, tức mọi câu trả lời hỏng.
+            #
+            # Mất mát gần như bằng không: `reasoning_effort="none"` sinh ra để
+            # cắt reasoning token của DeepSeek, còn tốc độ của Groq đến từ phần
+            # cứng chứ không từ việc tắt suy luận.
         )
 
     if provider == "openai":
@@ -149,12 +229,13 @@ def get_llm(settings: Settings | None = None, *, callbacks: list[Any] | None = N
             api_key=_require_key(settings.openai_api_key, "OPENAI_API_KEY"),
             temperature=settings.llm_temperature,
             callbacks=callbacks,
+            **extra,
         )
 
     # `Settings.llm_provider` là Literal nên Pydantic đã chặn giá trị lạ. Nhánh
     # này bắt trường hợp caller tự dựng một Settings-like object bỏ qua
     # validation — vẫn phải từ chối, không được đoán provider thay họ.
-    raise LLMConfigurationError("LLM_PROVIDER không hợp lệ; chỉ chấp nhận: openai, openrouter, deepseek.")
+    raise LLMConfigurationError(_INVALID_PROVIDER)
 
 
 def structured_output_method(settings: Settings | None = None) -> str | None:
@@ -176,6 +257,7 @@ def structured_output_method(settings: Settings | None = None) -> str | None:
     settings = settings or get_settings()
     if settings.llm_provider == "deepseek":
         return "json_mode"
-    # openai, openrouter: dùng function calling để tránh strict json_schema
-    # từ chối schema TaskPlan.
+    # openai, openrouter, groq: đều tương thích OpenAI. Dùng function calling
+    # để tránh strict json_schema từ chối schema TaskPlan (`Task.input` là dict
+    # tự do).
     return "function_calling"

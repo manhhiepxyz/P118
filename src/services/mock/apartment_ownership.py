@@ -28,7 +28,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncpg
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.db.parking_payment_repository import BookingError
@@ -122,9 +122,7 @@ async def create_verification_record(
             proof_image_urls=payload.proof_image_urls,
             record_id=payload.record_id,
         )
-        match = await verification_service.compute_ownership_match(
-            pool, payload.record_type, payload.claimed_data
-        )
+        match = await verification_service.compute_ownership_match(pool, payload.record_type, payload.claimed_data)
     except BookingError as exc:
         raise as_api_error(exc) from exc
 
@@ -149,6 +147,28 @@ async def list_verification_records(
         match = await verification_service.compute_ownership_match(pool, record.record_type, record.claimed_data)
         data.append(record.as_output(ownership_match=match))
     return schemas.ApiEnvelope(success=True, data=data, message="Found")
+
+
+@apartment_ownership_app.get("/api/verification-records/{record_id}", summary="Đọc MỘT hồ sơ xác thực")
+async def get_verification_record(
+    record_id: str,
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> schemas.ApiEnvelope:
+    """Tra theo ID. Chỉ ĐỌC — không đổi trạng thái nào.
+
+    Vì sao cần đường này thay vì lọc `list_records()` ở phía caller: caller cần
+    biết trạng thái AUTHORITATIVE của đúng một hồ sơ để quyết định có phải gọi
+    `decide` nữa hay không. Lọc danh sách trong Python nghĩa là tải về hồ sơ của
+    người khác cho một câu hỏi về một hồ sơ, và nó sai ngay khi danh sách bị
+    phân trang.
+    """
+    record = await verification_service.get_record(pool, record_id)
+    if record is None:
+        # Message chung: phân biệt "không có" với "không được xem" biến endpoint
+        # này thành công cụ dò ID.
+        raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ.")
+    match = await verification_service.compute_ownership_match(pool, record.record_type, record.claimed_data)
+    return schemas.ApiEnvelope(success=True, data=record.as_output(ownership_match=match), message="Found")
 
 
 @apartment_ownership_app.post("/api/verification-records/{record_id}/decide", summary="Duyệt / từ chối hồ sơ")

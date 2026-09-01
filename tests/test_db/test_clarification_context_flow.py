@@ -34,6 +34,25 @@ async def test_structured_answers_reach_the_child_planner_context(client, db_poo
         parent_workflow_id=None,
         owner_user_id=owner_id,
     )
+    # Danh tính phải có THẬT trong database, không chỉ nằm trong bản ghim.
+    #
+    # Trước đây bài kiểm này ghim sẵn một `resident_id` giả vào clarification và
+    # khẳng định nó sống sót — tức nó khoá đúng hành vi vừa phải sửa: bản chép
+    # được tin làm nguồn sự thật cho một câu hỏi về quyền. Bản chép ấy trong dữ
+    # liệu thật là `{}`, và cư dân đã xác minh bị từ chối vì nó.
+    #
+    # Giờ `/continue` tra lại `user_resident_links` ở mỗi lượt, nên muốn thấy
+    # `VERIFIED` thì tài khoản phải thật sự được liên kết.
+    await db_pool.execute(
+        "INSERT INTO residents (resident_id, full_name, apartment_code, residential_area)"
+        " VALUES ('RES-CTX','Nguyen Van C','C0303','Vinhomes Ocean Park') ON CONFLICT DO NOTHING"
+    )
+    await db_pool.execute(
+        "INSERT INTO user_resident_links (user_id, resident_id, verification_status, verified_at)"
+        " VALUES ($1::uuid,'RES-CTX','VERIFIED',NOW())"
+        " ON CONFLICT (user_id) DO UPDATE SET resident_id='RES-CTX', verification_status='VERIFIED'",
+        owner_id,
+    )
     trusted = {"resident_id": "RES-CTX", "resident_verification_status": "VERIFIED"}
     await routes._persist_clarification(
         workflow_id,

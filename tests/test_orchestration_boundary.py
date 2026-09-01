@@ -41,6 +41,7 @@ class _Executor:
         finalize: bool = True,
         parent_workflow_id: str | None = None,
         session_id: str | None = None,
+        **_forwarded,
     ) -> tuple[str, dict[str, StandardResult]]:
         # `finalize` thuộc contract: double phải nhận, nếu không nó che mất
         # việc boundary thật có chuyển tiếp cờ hay không.
@@ -54,7 +55,7 @@ class _Validator:
         self.result = result
         self.calls: list[TaskPlan] = []
 
-    def validate(self, plan: TaskPlan) -> TaskPlan:
+    def validate(self, plan: TaskPlan, *, seeded_task_ids: frozenset[str] = frozenset()) -> TaskPlan:
         self.calls.append(plan)
         return self.result or plan
 
@@ -81,7 +82,7 @@ async def test_validation_error_is_safe_and_does_not_execute() -> None:
     executor = _Executor()
 
     class _RejectingValidator:
-        def validate(self, plan: TaskPlan) -> TaskPlan:
+        def validate(self, plan: TaskPlan, *, seeded_task_ids: frozenset[str] = frozenset()) -> TaskPlan:
             raise ValueError(f"invalid input contained {secret}")
 
     boundary = ValidatedExecutionBoundary(executor, _RejectingValidator())
@@ -100,7 +101,7 @@ async def test_unexpected_validator_error_is_not_converted_to_public_message() -
     executor = _Executor()
 
     class _BrokenValidator:
-        def validate(self, plan: TaskPlan) -> TaskPlan:
+        def validate(self, plan: TaskPlan, *, seeded_task_ids: frozenset[str] = frozenset()) -> TaskPlan:
             raise RuntimeError("internal failure")
 
     boundary = ValidatedExecutionBoundary(executor, _BrokenValidator())

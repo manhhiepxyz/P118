@@ -9,14 +9,8 @@ import {
 } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 
-import {
-  getMe,
-  getStoredToken,
-  login as apiLogin,
-  logout as apiLogout,
-  register as apiRegister,
-  type RegisterProfileInput,
-} from './agentApi'
+import * as api from './agentApi'
+import type { GoogleVerifyResult, RegisterProfileInput } from './agentApi'
 import type { AuthUser } from './types'
 
 /* ---------------------------------------------------------------------------
@@ -40,15 +34,18 @@ interface AuthContextValue {
   token: string | null
   initializing: boolean
   isAdmin: boolean
-  /** provider hoặc admin — cả hai được duyệt hồ sơ xác thực. */
+  /** CHỈ provider (bên thứ 3) mới được duyệt hồ sơ xác thực, Admin không có quyền này. */
   isProvider: boolean
   login: (username: string, password: string) => Promise<void>
   register: (
     username: string,
     password: string,
-    email?: string,
+    email: string,
+    otpCode: string,
     profile?: RegisterProfileInput,
   ) => Promise<void>
+  googleLogin: (credential: string) => Promise<GoogleVerifyResult>
+  googleRegister: (credential: string, username: string, phone?: string) => Promise<void>
   /** Đọc lại user qua /auth/me — dùng sau PATCH /users/me để UI cập nhật ngay. */
   refreshUser: () => Promise<void>
   logout: () => void
@@ -63,17 +60,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Khôi phục phiên khi app load.
   useEffect(() => {
-    const stored = getStoredToken()
+    const stored = api.getStoredToken()
     if (!stored) {
       setInitializing(false)
       return
     }
     setToken(stored)
-    getMe()
+    api.getMe()
       .then((u) => setUser(u))
       .catch(() => {
         // Token cũ/hết hạn — `agentApi` đã xoá nó khi gặp 401.
-        apiLogout()
+        api.logout()
         setToken(null)
         setUser(null)
       })
@@ -81,34 +78,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const login = useCallback(async (username: string, password: string) => {
-    const res = await apiLogin(username, password)
+    const res = await api.login(username, password)
     setToken(res.access_token)
     // Đọc lại qua /auth/me: response login chưa mang trạng thái liên kết cư
     // dân, mà UI cần nó ngay để biết dịch vụ nào đang mở.
-    setUser(await getMe())
+    setUser(await api.getMe())
   }, [])
 
   const register = useCallback(
     async (
       username: string,
       password: string,
-      email?: string,
+      email: string,
+      otpCode: string,
       profile?: RegisterProfileInput,
     ) => {
       // Register trả user (không token) — tự login sau để có phiên.
-      await apiRegister(username, password, email, profile)
+      await api.register(username, password, email, otpCode, profile)
       await login(username, password)
     },
     [login],
   )
 
+  const googleLogin = useCallback(async (credential: string) => {
+    const res = await api.googleVerify(credential)
+    if (res.status === 202) {
+      return res // Cần đăng ký
+    }
+    setToken(res.data.access_token)
+    setUser(await api.getMe())
+    return res
+  }, [])
+
+  const googleRegister = useCallback(async (credential: string, username: string, phone?: string) => {
+    const res = await api.googleRegister(credential, username, phone)
+    setToken(res.access_token)
+    setUser(await api.getMe())
+  }, [])
+
   const refreshUser = useCallback(async () => {
-    const u = await getMe()
+    const u = await api.getMe()
     setUser(u)
   }, [])
 
   const logout = useCallback(() => {
-    apiLogout()
+    api.logout()
     setToken(null)
     setUser(null)
   }, [])
@@ -119,13 +133,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       token,
       initializing,
       isAdmin: user?.role === 'admin',
-      isProvider: user?.role === 'provider' || user?.role === 'admin',
+      isProvider: user?.role === 'provider',
       login,
       register,
+      googleLogin,
+      googleRegister,
       refreshUser,
       logout,
     }),
-    [user, token, initializing, login, register, refreshUser, logout],
+    [user, token, initializing, login, register, googleLogin, googleRegister, refreshUser, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
@@ -137,7 +153,28 @@ export function useAuth(): AuthContextValue {
   return ctx
 }
 
-/** Chặn route cần đăng nhập — chưa login → chuyển về /login. */
+/**
+ * Bề mặt KHÁCH HÀNG. Cần đăng nhập, và cần đúng vai.
+ *
+ * Trước đây route này chỉ hỏi "có phải người đăng nhập không", không hỏi vai —
+ * nên provider vào được toàn bộ màn hình khách hàng: `/workspace` (Agent),
+ * `/profile`, `/apartment-link`, `/verify`, `/workflows`. Đo bằng trình duyệt
+ * thật, cả sáu đều mở. Tài khoản provider vì thế chỉ là tài khoản khách hàng
+ * kèm một cờ role, chứ không phải một danh tính riêng của bên thứ 3.
+ *
+ * Nghiêm trọng hơn vẻ ngoài: `/verify` cho provider tự nộp hồ sơ xác minh căn
+ * hộ, mà họ lại có quyền duyệt. Đường tự duyệt đó đã chạy được thật (xem
+ * `_reject_self_review` phía backend). Chốt backend là thứ ngăn leo thang
+ * quyền; cổng này chỉ ngăn người ta đi lạc vào chỗ không thuộc về mình.
+ *
+ * Đưa họ về ĐÚNG NHÀ của vai mình chứ không phải `/`: `/` là `HomeRedirect`,
+ * và để nó tự phân luồng thì mỗi lần đi lạc là một lần nhảy hai chặng.
+ */
+const ROLE_HOME: Record<string, string> = {
+  provider: '/review',
+  admin: '/admin',
+}
+
 export function ProtectedRoute({ children }: { children: ReactNode }) {
   const { user, initializing } = useAuth()
   const location = useLocation()
@@ -151,6 +188,10 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   }
   if (!user) {
     return <Navigate to="/login" state={{ from: location.pathname }} replace />
+  }
+  const home = ROLE_HOME[user.role]
+  if (home && home !== location.pathname) {
+    return <Navigate to={home} replace />
   }
   return <>{children}</>
 }
@@ -171,7 +212,7 @@ export function AdminRoute({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
-/** Chỉ người duyệt hồ sơ xác thực — provider hoặc admin. */
+/** Chỉ người duyệt hồ sơ xác thực — provider. */
 export function ProviderRoute({ children }: { children: ReactNode }) {
   const { user, isProvider, initializing } = useAuth()
 

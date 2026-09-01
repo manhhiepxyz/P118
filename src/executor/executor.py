@@ -5,6 +5,7 @@ File: src/executor/executor.py
 """
 
 import asyncio
+import logging
 import random
 import time
 import uuid
@@ -17,6 +18,9 @@ from src.common.results import StandardResult
 from src.common.task_plan import InputRef, Task, TaskPlan
 from src.connectors.base import Connector
 from src.monitoring.llm_trace import trace_task_result
+from src.orchestration.provider_gateway import ProviderCall, call_provider
+
+logger = logging.getLogger(__name__)
 
 # Inline retry policy cho lỗi transient. Business errors (NO_AVAILABILITY,
 # PAYMENT_FAILED...) không retry. Chỉ SERVICE_TIMEOUT và SERVICE_UNAVAILABLE.
@@ -250,20 +254,48 @@ class Executor:
                 #
                 # `getattr` với mặc định False: connector nào chưa khai báo thì
                 # coi như KHÔNG an toàn.
+                # Retry cần HAI điều, không phải một:
+                #
+                #   tool có năng lực idempotency  (`is_retry_safe`)
+                #   lần gọi NÀY thật sự có khoá   (`candidate is not None`)
+                #
+                # Bản trước chỉ hỏi điều thứ nhất, và điều thứ nhất từng được
+                # trả lời bằng state constructor của connector. Một `pay_fee`
+                # không dựng được khoá vẫn được retry — đúng thứ khoá sinh ra
+                # để chặn.
+                # Một guard, một chỗ. Retry vẫn theo `is_retry_safe` như cũ:
+                # tool read-only an toàn vì nó read-only, không vì có khoá.
+                #
+                # Còn `pay_fee` KHÔNG dựng được khoá thì lần thử thứ hai bị
+                # `prepare_submission` chặn với `IN_FLIGHT_WITHOUT_KEY` —
+                # trạng thái lúc đó là SUBMITTING và không có khoá nào để
+                # provider dedupe. Không cần luật thứ hai ở đây.
                 retry_safe = getattr(connector, "is_retry_safe", None)
                 max_attempts = _MAX_ATTEMPTS if callable(retry_safe) and retry_safe(task.tool) else 1
 
                 result: StandardResult | None = None
                 for attempt in range(1, max_attempts + 1):
                     start = time.monotonic()
-                    try:
-                        result = await connector.execute(task.tool, resolved_input)
-                    except Exception:  # noqa: BLE001 - cô lập lỗi của một nhánh song song
-                        result = StandardResult.fail(
-                            ErrorCode.INTERNAL_SERVICE_ERROR,
-                            "Connector gặp lỗi không mong đợi",
-                            retryable=False,
-                        )
+                    # MỘT ranh giới provider cho cả hệ thống.
+                    #
+                    # Bốn bước — xin phép, gắn khoá đã lưu, gọi, ghi kết luận —
+                    # nằm ở `provider_gateway`. Chép chúng vào đây là dựng bản
+                    # thứ hai của cùng một luật, và hai bản đã lệch nhau một
+                    # lần: đường duyệt thanh toán bỏ qua toàn bộ hàng rào này.
+                    result = await call_provider(
+                        connector,
+                        self.repository,
+                        ProviderCall(
+                            workflow_id=workflow_id,
+                            task_id=task.task_id,
+                            tool=task.tool,
+                            input_data=resolved_input,
+                        ),
+                        # Chỉ nói NGÂN SÁCH. Việc kết quả này có thật sự được
+                        # thử lại hay không do cổng kết luận — nó là bên nhìn
+                        # thấy `result`, còn ở đây thì chưa.
+                        has_retry_budget=attempt < max_attempts,
+                    )
                     duration_ms = int((time.monotonic() - start) * 1000)
 
                     # Best-effort audit log cho mỗi attempt. Logging không được phép
@@ -313,6 +345,10 @@ class Executor:
                     )
                 await self.repository.update_task_status(workflow_id, task.task_id, status)
                 await self.repository.save_task_result(workflow_id, task.task_id, result)
+                # Kết luận về BẰNG CHỨNG gửi đi — một trục khác hẳn `status`.
+                # `status` nói kết quả nghiệp vụ; cột này nói request đã rời hệ
+                # thống hay chưa, và có ID nào để đối chiếu về sau không. Một
+                # task `FAILED` vì "hết chỗ" vẫn là một task provider ĐÃ nhận.
                 # Đây là dòng người demo cần nhất khi có lỗi: lý do provider từ
                 # chối nằm trong `result.message` và biến mất ngay sau đó nếu
                 # không ghi lại. No-op khi trace tắt.
@@ -330,7 +366,21 @@ class Executor:
         #
         # Task status vẫn được cập nhật đầy đủ: chỉ trạng thái TỔNG THỂ của
         # workflow là thứ caller giữ quyền quyết định.
-        all_success = all(task_statuses[t.task_id] == TaskStatus.SUCCESS for t in plan.tasks)
+        # "Xong" gồm cả bước ĐÃ HUỶ, không chỉ bước SUCCESS.
+        #
+        # Một bước huỷ là một bước không còn gì để chờ: nó bị người dùng dừng,
+        # bị đơn vị từ chối, hoặc bị THAY THẾ bởi một lần thử mới (xem
+        # `src/orchestration/repair_attempt.py`). Không cái nào là một thất bại.
+        #
+        # Đây đúng là luật mà `_final_status` (demo_service) đã viết —
+        # `{SUCCESS, CANCELLED}` → SUCCESS. Hai bản của cùng một luật thì sẽ
+        # lệch nhau, và bản ở đây đã lệch: sau khi Khu A được thay bằng Khu B,
+        # kế hoạch mang theo bước Khu A đã huỷ, `all_success` đọc nó là chưa
+        # xong và chốt cả workflow thành FAILED — trong khi Khu B đã đặt xong.
+        # `save_pending_approval` từ chối ghim thẻ thanh toán cho một workflow
+        # FAILED, nên khách không bao giờ thấy nút trả tiền.
+        settled = {TaskStatus.SUCCESS, TaskStatus.CANCELLED}
+        all_success = all(task_statuses[t.task_id] in settled for t in plan.tasks)
         if finalize:
             final_status = WorkflowStatus.SUCCESS if all_success else WorkflowStatus.FAILED
             await self.repository.update_workflow_status(workflow_id, final_status)

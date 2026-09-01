@@ -13,7 +13,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from src.common.enums import ErrorCode
-from src.connectors.base import Connector
+from src.connectors.base import Connector, ProviderCallContext
 from src.connectors.payment import PaymentConnector
 from src.connectors.resident import ResidentConnector
 from src.connectors.transport import TransportConnector
@@ -209,6 +209,39 @@ async def test_transport_connector_book_parking_url_and_payload(mock_httpx_clien
     mock_httpx_client.post_mock.assert_called_once_with(
         "http://localhost:8002/api/parking/bookings",
         json=payload,
+        timeout=30.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_transport_connector_carries_the_approved_task_identity(mock_httpx_client):
+    """Mock provider chỉ bỏ capacity khi đối chiếu được đúng approval đã ký."""
+    mock_response = MagicMock()
+    mock_response.is_success = True
+    mock_response.json.return_value = {
+        "success": True,
+        "data": {
+            "booking_id": "BOOK-778",
+            "parking_zone": "ZONE_B",
+            "booking_date": "2026-12-10",
+            "amount": 100000,
+            "currency": "VND",
+        },
+    }
+    mock_httpx_client.post_mock.return_value = mock_response
+    payload = {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_B"}
+    connector = TransportConnector(base_url="http://localhost:8002", client=mock_httpx_client)
+
+    await connector.execute(
+        "book_parking",
+        payload,
+        context=ProviderCallContext(workflow_id="wf-1", task_id="T3"),
+    )
+
+    mock_httpx_client.post_mock.assert_called_once_with(
+        "http://localhost:8002/api/parking/bookings",
+        json=payload,
+        headers={"X-P118-Workflow-ID": "wf-1", "X-P118-Task-ID": "T3"},
         timeout=30.0,
     )
 
@@ -748,8 +781,16 @@ async def test_payment_connector_sends_idempotency_key_as_a_header_not_in_body(m
     }
     mock_httpx_client.post_mock.return_value = mock_response
 
-    connector = PaymentConnector(client=mock_httpx_client, idempotency_key="wf:abc:task:T3")
-    await connector.execute("pay_fee", {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"})
+    # Khoá đến TỪ context của lần gọi, không từ state constructor: connector
+    # được dựng một lần cho cả workflow và dùng chung cho mọi task.
+    from src.connectors.base import ProviderCallContext
+
+    connector = PaymentConnector(client=mock_httpx_client)
+    await connector.execute(
+        "pay_fee",
+        {"booking_id": "BOOK-001", "amount": 150000, "currency": "VND"},
+        context=ProviderCallContext(idempotency_key="wf:abc:task:T3"),
+    )
 
     _, kwargs = mock_httpx_client.post_mock.call_args
     assert kwargs["headers"] == {"Idempotency-Key": "wf:abc:task:T3"}

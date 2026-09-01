@@ -122,7 +122,10 @@ async def test_flush_writes_rows_and_clears_pending(monkeypatch) -> None:
     finally:
         reset_usage_context(token)
 
-    assert len(pool.inserted) == 1
+    # HAI câu lệnh: ghi dòng `llm_usage`, rồi cộng dồn vào `workflows`
+    # (total_tokens/total_cost) cho dashboard vận hành đọc. Bản trước chỉ có
+    # câu thứ nhất; khẳng định "đúng 1" ở đây sẽ chặn đúng phần cộng dồn ấy.
+    assert len(pool.inserted) == 2, pool.inserted
     row = pool.inserted[0]
     assert row[0] == "wf-9"  # workflow_id
     assert row[1] is None  # run_id

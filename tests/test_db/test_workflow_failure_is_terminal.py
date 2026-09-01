@@ -192,3 +192,74 @@ async def test_a_failed_workflow_keeps_its_untouched_steps_out_of_success(client
 
     rows = await db_pool.fetch("SELECT status FROM workflow_tasks WHERE workflow_id = $1::uuid", workflow_id)
     assert all(r["status"] != "SUCCESS" for r in rows), "task chưa chạy bị đánh dấu thành công"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_is_RETURNED_also_lands_in_postgresql(client, db_pool, monkeypatch):  # noqa: N802 - RETURNED viết hoa có chủ đích, đối lập với "ném lỗi"
+    """Cùng defect, nhánh khác: job KHÔNG ném lỗi, nó TRẢ VỀ một response lỗi.
+
+    Mọi test phía trên đều làm `run_demo_workflow` ném exception, nên chỉ nhánh
+    `except` được kiểm — và chỉ nhánh `except` ghim trạng thái. Đường còn lại
+    (graph chạy xong rồi trả về `execution_error`) không ghi gì xuống database.
+
+    Đo được trên stack thật, lặp lại 100% với goal liên hoàn thất bại ở khâu
+    lập kế hoạch:
+
+        t+40s   API: EXECUTION_ERROR / EXECUTION_FAILED
+        DB : PENDING, 0 task — và giữ nguyên như vậy mãi
+
+    Trang Lịch sử đọc database nên hiển thị "Đang diễn ra" vĩnh viễn, còn
+    zombie sweeper thì đếm nó như việc đang chạy.
+    """
+    from src.api import routes
+
+    scheduled: list[tuple] = []
+
+    async def _defer(*args, **kwargs):
+        scheduled.append((args, kwargs))
+
+    monkeypatch.setattr(routes, "_run_demo_job", _defer)
+
+    token = await _register_and_login(client, "nn_fail_returned")
+    headers = {"Authorization": f"Bearer {token}"}
+    started = await client.post("/api/v1/workflows/demo/start", headers=headers, json={"goal": GOAL})
+    assert started.status_code == 202, started.text
+    workflow_id = started.json()["workflow_id"]
+    await asyncio.sleep(0)
+    assert scheduled, "background job không được lên lịch"
+
+    async def _returns_an_error(*_args, **_kwargs):
+        # KHÔNG raise. Graph chạy xong và báo lỗi bằng giá trị trả về.
+        return {"workflow_id": workflow_id, "execution_error": "provider từ chối"}
+
+    monkeypatch.setattr(routes, "run_demo_workflow", _returns_an_error)
+    args, kwargs = scheduled[0]
+    await _original_run_demo_job(*args, **kwargs)
+
+    status = await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id = $1::uuid", workflow_id)
+    assert status is not None, "shell workflow không tồn tại"
+    assert status != "PENDING", "lỗi TRẢ VỀ bị bỏ lại ở PENDING — zombie, y như lỗi NÉM RA"
+    assert status in {"FAILED", "CANCELLED"}, f"trạng thái kết thúc không hợp lệ: {status}"
+
+
+@pytest.mark.asyncio
+async def test_a_successful_workflow_is_never_overwritten_as_failed(client, db_pool, monkeypatch):
+    """Lá chắn cho chính bản vá trên: chỉ workflow CHƯA kết thúc mới bị đóng.
+
+    `mark_workflow_failed` lọc `status IN ('PENDING','RUNNING')`. Không có phép
+    thử này, một lần nới điều kiện đó sẽ ghi đè SUCCESS thành FAILED — nói sai
+    về một việc người dùng đã trả tiền xong — mà suite vẫn xanh.
+    """
+    from src.api import routes
+
+    token = await _register_and_login(client, "nn_success_kept")
+    headers = {"Authorization": f"Bearer {token}"}
+    started = await client.post("/api/v1/workflows/demo/start", headers=headers, json={"goal": GOAL})
+    workflow_id = started.json()["workflow_id"]
+    await asyncio.sleep(0)
+
+    await db_pool.execute("UPDATE workflows SET status = 'SUCCESS' WHERE workflow_id = $1::uuid", workflow_id)
+    await routes._mark_workflow_failed_safely(workflow_id, "EXECUTION_ERROR")
+
+    status = await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id = $1::uuid", workflow_id)
+    assert status == "SUCCESS", "một workflow đã xong bị ghi đè thành FAILED"

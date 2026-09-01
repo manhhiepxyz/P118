@@ -49,6 +49,20 @@ export interface JourneyStep {
   actions: StepAction[]
   /** Câu nói rõ ai đang phải hành động. Null khi không chờ ai. */
   waitingOn: string | null
+  /**
+   * TÊN các bước phải xong trước bước này — không phải task_id.
+   *
+   * Người dùng bấm vào một chặng "Chưa bắt đầu" và câu hỏi đầu tiên của họ là
+   * "sao nó chưa chạy". Trả lời đúng là tên bước đang chặn nó.
+   */
+  blockedBy?: string[]
+  /**
+   * Nhật ký của RIÊNG chặng này, lấy từ `events` lọc theo `task_id`.
+   *
+   * Trả lời "hệ thống đang làm gì ở bước này" bằng dòng thời gian có thật,
+   * không phải một câu tóm tắt.
+   */
+  log?: string[]
 }
 
 export interface JourneyEdge {
@@ -193,15 +207,20 @@ export interface ActivityEvent {
   time: string | null
 }
 
-export const ACTIVITY: ActivityEvent[] = [
-  { id: 'a1', state: 'success', text: 'Đã nhận yêu cầu của bạn', time: '14:01' },
-  { id: 'a2', state: 'success', text: 'Đã tìm thấy dự án Vinhomes Ocean Park', time: '14:01' },
-  { id: 'a3', state: 'success', text: 'Đã đặt lịch tham quan lúc 10:00', time: '14:02' },
-  { id: 'a4', state: 'failed', text: 'Khu A hết chỗ đỗ xe ngày 20/09', time: '14:03' },
-  { id: 'a5', state: 'running', text: 'Đang sắp xếp xe đón', time: '14:03' },
-  { id: 'a6', state: 'pending', text: 'Chờ sắp xếp chuyên viên tư vấn', time: null },
-  { id: 'a7', state: 'pending', text: 'Chờ bạn xác nhận thanh toán', time: null },
-]
+/*
+ * `ACTIVITY` đã bị XOÁ, không phải chuyển đi.
+ *
+ * Nó là bảy sự kiện bịa cứng — giờ giả, dự án giả, "Khu A hết chỗ ngày 20/09"
+ * — và `ActivityFeed` vẽ chúng cho MỌI người dùng, kể cả khi họ vừa làm một
+ * việc hoàn toàn khác. Trong một buổi trình bày thì đó là nói dối người xem.
+ *
+ * Giữ lại dưới dạng "dữ liệu mẫu cho lúc chưa có gì" là mời nó quay lại: lần
+ * sau ai đó cần một danh sách không rỗng sẽ với tay lấy đúng nó. Danh sách
+ * rỗng nói đúng sự thật.
+ *
+ * `ActivityEvent` thì giữ — nó là KIỂU, và `ActivityFeed` vẫn dựng dữ liệu
+ * thật theo đúng hình dạng đó.
+ */
 
 export interface ChatTurn {
   id: string

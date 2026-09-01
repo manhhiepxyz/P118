@@ -30,18 +30,38 @@ Ranh giới HITL:
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, get_args
+from datetime import date
+from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from langchain_core.exceptions import OutputParserException
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from src.agents.prompts.planner_prompt import (
     PLANNER_SYSTEM_PROMPT,
     build_planner_user_message,
 )
-from src.common.task_plan import AllowedTool, InputRef, TaskPlan
+from src.common.agent_tool_policy import AGENT_FORBIDDEN_TOOLS, AGENT_REACHABLE_TOOLS
+from src.common.failure_messages import spoken_forms
+from src.common.task_plan import InputRef, TaskPlan
+from src.common.tool_contract import TOOL_CONTRACTS
 
-PlannerStatus = Literal["READY", "NEEDS_INFORMATION"]
+logger = logging.getLogger(__name__)
+
+# QUESTION: câu người dùng gõ là một CÂU HỎI về dịch vụ, không phải việc cần làm.
+#
+# Thiếu trạng thái này, mọi câu hỏi đều bị ép vào khuôn "lập kế hoạch hoặc là
+# thiếu dữ liệu", và cái thứ hai hiện ra với người dùng thành "thông tin bạn
+# cung cấp chưa hợp lệ" — đổ lỗi cho họ vì đã hỏi. Đã vá bằng từ khoá năm lần
+# (hỏi năng lực, hỏi cách làm, xác minh căn hộ, hỏi ngày, hỏi quyền) và lần nào
+# cũng chỉ bịt được đúng những cách hỏi mình nghĩ ra được.
+#
+# QUAN TRỌNG: `QUESTION` KHÔNG mang theo câu trả lời. Planner phân loại, không
+# viết — Response Agent vẫn là nơi duy nhất soạn chữ cho người dùng, và nó đã có
+# guard. Trộn hai vai lại là mở một đường cho LLM nói thẳng ra ngoài mà không ai kiểm.
+PlannerStatus = Literal["READY", "NEEDS_INFORMATION", "QUESTION"]
 
 # Dùng khi mục tiêu chứa việc nằm ngoài 6 tool được hỗ trợ. Đây là control
 # value, không phải một field nghiệp vụ.
@@ -62,12 +82,15 @@ PAYMENT_QUOTE_REQUIRED_FIELD = "payment_quote"
 # lập hồ sơ cư dân, việc nằm ngoài Agent. Giữ chúng ở đây nghĩa là Planner vẫn
 # hỏi được, và giao diện thì không có ô nhập nào cho chúng.
 MISSING_FIELD_LABELS: dict[str, str] = {
-    # Dùng cho `search_properties`. `register_resident` cũng nhận field này,
-    # nhưng tool đó đã bị loại khỏi không gian kế hoạch của Agent.
-    "residential_area": "tên khu đô thị",
-    "transaction_type": "hình thức giao dịch (rent hoặc buy)",
-    "property_type": "loại bất động sản (apartment hoặc room)",
-    "max_price": "ngân sách tối đa",
+    # `residential_area`, `transaction_type`, `property_type`, `max_price` KHÔNG
+    # có nhãn ở đây, và không phải vì quên: cả bốn chỉ thuộc `search_properties`
+    # và `register_resident`, hai tool đã nằm ngoài `PLANNER_ALLOWED_TOOLS`.
+    #
+    # Một nhãn tồn tại nghĩa là có người định hiển thị nó cho người dùng. Giữ
+    # chúng lại thì Planner vẫn HỎI được — và câu trả lời không đi đâu cả, vì
+    # bộ đọc cho chúng đã bị gỡ cùng với dịch vụ. Đo được: workflow
+    # clarification hỏi "ngân sách tối đa", người dùng đáp, và vòng lặp lặp lại
+    # không có lối ra.
     # Nhãn nói "tên dự án", không nói "mã dự án": người dùng không biết PRJ-xxx.
     # Việc đổi tên field sang `project_name` cho client là việc của biên API
     # (`_to_public_missing_fields`); Planner không cần biết tới alias đó.
@@ -84,30 +107,113 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "preferred_time": "giờ muốn bảo trì",
     "move_date": "ngày muốn chuyển nhà",
     "move_time": "giờ muốn chuyển nhà",
+    "move_origin_id": "nơi bạn hiện đang ở (địa chỉ hoặc tên tòa nhà)",
+    "move_destination_id": "nơi bạn muốn chuyển đến (địa chỉ hoặc tên tòa nhà)",
+    "move_size": "quy mô đồ cần chuyển (ít, vừa hoặc nhiều)",
     "needs_elevator": "có cần đăng ký thang máy hay không",
     "needs_loading_support": "có cần hỗ trợ bốc dỡ hay không",
     "move_vehicle": "phương tiện chuyển nhà (none, van hoặc truck)",
-    "resident_id": "mã cư dân",
     "plate_number": "biển số xe",
     "vehicle_type": "loại xe (ô tô hoặc xe máy)",
-    "vehicle_id": "phương tiện muốn dùng",
     "booking_date": "ngày muốn đặt chỗ",
     "parking_zone": "khu vực đỗ xe (Khu A hoặc Khu B)",
-    "booking_id": "mã đặt chỗ",
-    "amount": "số tiền",
-    "currency": "loại tiền tệ",
+    # `resident_id`, `vehicle_id`, `booking_id`, `amount`, `currency` KHÔNG có
+    # nhãn, và không phải vì quên. Một nhãn tồn tại nghĩa là có người định HIỆN
+    # nó ra cho người dùng, và cả năm đều là dữ liệu của provider hoặc của phiên
+    # đăng nhập. Đo được trước khi gỡ — bốn câu hỏi này dựng và hiển thị được:
+    #
+    #     "Mình cần thêm thông tin: mã cư dân."
+    #     "Mình cần thêm thông tin: số tiền và loại tiền tệ."
+    #
+    # Câu thứ hai là mời chính người phải trả tiền khai số tiền phải trả.
+    #
+    # `vehicle_id` có đường riêng: nó được HẠ CẤP thành plate_number +
+    # vehicle_type (xem `_DOWNGRADABLE_MISSING_FIELDS`), nên nó không bao giờ
+    # cần một nhãn của riêng mình.
     "tour_date": "ngày muốn đặt xe tham quan",
     "passenger_count": "số người đi xe (tối thiểu 1, tối đa 30)",
 }
 
 # `Literal` không được kiểm tra lúc chạy — giữ bản runtime để `PlannerResult`
 # và `Planner` cùng dựa vào một nguồn.
-_VALID_STATUSES: frozenset[str] = frozenset({"READY", "NEEDS_INFORMATION"})
+_VALID_STATUSES: frozenset[str] = frozenset({"READY", "NEEDS_INFORMATION", "QUESTION"})
 
-_ALLOWED_MISSING_FIELDS: frozenset[str] = frozenset(MISSING_FIELD_LABELS) | {
+# Hai tên cũ, giữ lại vì nhiều chỗ đã import chúng. Định nghĩa THẬT nằm ở
+# `src/common/agent_tool_policy.py` — xem docstring ở đó cho lý do từng tool bị
+# cấm, và vì sao chính sách không thể sống trong `agents/`.
+PLANNER_FORBIDDEN_TOOLS: frozenset[str] = AGENT_FORBIDDEN_TOOLS
+PLANNER_ALLOWED_TOOLS: frozenset[str] = AGENT_REACHABLE_TOOLS
+
+
+def _fields_of_tools(tools: frozenset[str]) -> frozenset[str]:
+    return frozenset(name for tool, contract in TOOL_CONTRACTS.items() if tool in tools for name in contract.inputs)
+
+
+# Field Planner được phép NÊU là còn thiếu. Allowlist DƯƠNG, suy từ đúng những
+# tool nó lập được — không từ `MISSING_FIELD_LABELS`, và không từ toàn bộ
+# contract provider.
+#
+# Bản cũ lấy `frozenset(MISSING_FIELD_LABELS)`, tức hai bảng cùng trả lời một
+# câu hỏi ở hai chỗ. Chúng lệch nhau ngay lần đầu có tool bị loại: kế hoạch
+# không tạo được nữa, nhưng câu hỏi thì vẫn hỏi được.
+#
+# Hai field điều khiển đi kèm vì chúng không thuộc tool nào — chúng là cách
+# Planner nói "mục tiêu ngoài phạm vi" / "cần báo giá trước".
+# Dữ liệu CÓ THẨM QUYỀN. Model có thể nêu tên chúng — nó đọc bảng tool và thấy
+# chúng là input thật — nhưng chúng không bao giờ đi ra tới người dùng.
+#
+# Nguồn của từng thứ, và vì sao câu trả lời của người dùng không được là nguồn:
+#
+#   resident_id            tài khoản đã xác minh
+#   booking_id/amount/     `InputRef` từ `book_parking`, hoặc ngữ cảnh backend
+#   currency               — hỏi khách số tiền là để người trả tiền tự khai
+#   viewing_id             kết quả của `schedule_property_viewing`
+AUTHORITATIVE_MISSING_FIELDS: frozenset[str] = frozenset(
+    {"resident_id", "booking_id", "amount", "currency", "viewing_id", "owner_user_id", "workflow_id"}
+)
+
+# Alias nội bộ CÓ đường hạ cấp deterministic sang thứ người dùng hiểu được.
+#
+# Đây là lý do `RAW_MODEL_MISSING_FIELDS` tồn tại tách khỏi `PUBLIC_...`: model
+# nêu một cái tên nội bộ, và code đổi nó thành câu hỏi đúng — chứ không phải
+# từ chối rồi tiêu một lượt gọi.
+_DOWNGRADABLE_MISSING_FIELDS: dict[str, tuple[str, ...]] = {
+    "vehicle_id": ("plate_number", "vehicle_type"),
+}
+
+# Field ĐI RA tới người dùng. Hai điều kiện, cả hai đều cần:
+#
+#   với-tới-được  — thuộc input của một tool Agent lập được
+#   có nhãn       — `build_question` ghép câu hỏi TỪ `MISSING_FIELD_LABELS`
+#
+# Giao của hai tập, không phải hợp. Trừ tiếp phần có thẩm quyền.
+PUBLIC_MISSING_FIELDS: frozenset[str] = (
+    (_fields_of_tools(AGENT_REACHABLE_TOOLS) & frozenset(MISSING_FIELD_LABELS)) - AUTHORITATIVE_MISSING_FIELDS
+) | {
     UNSUPPORTED_GOAL_FIELD,
     PAYMENT_QUOTE_REQUIRED_FIELD,
 }
+
+# Tên model được phép NÊU. Rộng hơn `PUBLIC_MISSING_FIELDS` đúng hai phần, và cả
+# hai đều có đường xử lý deterministic:
+#
+#   alias hạ cấp được    → đổi thành câu hỏi công khai
+#   dữ liệu có thẩm quyền → đổi thành `payment_quote`, hoặc từ chối fail-closed
+#
+# Nhận chúng ở schema KHÔNG phải nới lỏng: nó là cách phân biệt "model nói một
+# cái tên nội bộ" với "model bịa một cái tên", để cái thứ nhất được xử lý đúng
+# thay vì tiêu một lượt sửa lỗi.
+RAW_MODEL_MISSING_FIELDS: frozenset[str] = (
+    PUBLIC_MISSING_FIELDS | frozenset(_DOWNGRADABLE_MISSING_FIELDS) | AUTHORITATIVE_MISSING_FIELDS
+)
+
+# Tên cũ, giữ cho các chỗ đã import. Nó là allowlist của SCHEMA.
+_ALLOWED_MISSING_FIELDS: frozenset[str] = RAW_MODEL_MISSING_FIELDS
+
+# Field có thẩm quyền thuộc PHÍA THANH TOÁN. Model nêu chúng nghĩa là nó thiếu
+# báo giá — một sự cố phía hệ thống, không phải thiếu thông tin của khách.
+_PAYMENT_CONTEXT_FIELDS: frozenset[str] = frozenset({"booking_id", "amount", "currency"})
+
 
 # --- Trust boundary cho thanh toán ------------------------------------------
 #
@@ -126,18 +232,29 @@ _ALLOWED_MISSING_FIELDS: frozenset[str] = frozenset(MISSING_FIELD_LABELS) | {
 # dict do caller tùy ý truyền — nó chỉ đảm bảo không có nguồn thứ ba nào lọt vào.
 _TRUSTED_PAYMENT_FIELDS: tuple[str, ...] = ("booking_id", "amount", "currency")
 
+# Câu này LIỆT KÊ những gì Agent làm được, nên nó phải khớp
+# `PLANNER_ALLOWED_TOOLS` — không hơn một dịch vụ nào.
+#
+# "tìm nhà" và "đăng ký cư dân" đã bị gỡ khỏi câu: cả hai nằm ngoài phạm vi
+# Agent (`PLANNER_FORBIDDEN_TOOLS`). Hứa một việc rồi từ chối chính việc ấy ở
+# lượt sau là cách chắc chắn nhất để người dùng mất niềm tin vào phần còn lại.
 _UNSUPPORTED_GOAL_QUESTION = (
     "Mục tiêu của bạn có phần nằm ngoài các dịch vụ mình hỗ trợ "
-    "(tìm nhà, đặt lịch xem nhà, đăng ký cư dân, đăng ký xe, "
-    "đặt chỗ đậu xe, bảo trì, chuyển nhà, thanh toán phí). "
+    "(đặt lịch xem nhà, đăng ký quan tâm dự án, đăng ký xe, "
+    "đặt chỗ đậu xe, bảo trì, chuyển nhà, đặt xe tham quan, thanh toán phí). "
     "Bạn xác nhận chỉ thực hiện những dịch vụ này, hoặc mô tả lại mục tiêu giúp mình nhé?"
 )
 
-# Cố ý KHÔNG mời người dùng nhập số tiền: đây là sự cố phía hệ thống chưa lấy
-# được báo phí, không phải thiếu thông tin từ người dùng.
-_PAYMENT_QUOTE_QUESTION = (
-    "Mình chưa lấy được thông tin phí từ hệ thống đặt chỗ. Vui lòng kiểm tra lại mã đặt chỗ hoặc thử lại sau."
-)
+# Câu này KHÔNG đòi người dùng bất cứ thứ gì, và đó là toàn bộ điểm của nó.
+#
+# Bản cũ nói "Vui lòng kiểm tra lại mã đặt chỗ hoặc thử lại sau" — nó đẩy trách
+# nhiệm `booking_id` sang người dùng, đúng thứ chính sách đã xác định là dữ liệu
+# có thẩm quyền: mã ấy do `book_parking` sinh ra, người dùng không thấy, không
+# tra được, và không làm gì được với lời khuyên đó.
+#
+# Thiếu báo phí là sự cố PHÍA HỆ THỐNG. Câu nói ra phải phản ánh đúng vậy —
+# không nhắc số tiền, không nhắc mã, không mời bổ sung gì.
+_PAYMENT_QUOTE_QUESTION = "Mình chưa lấy được báo phí từ hệ thống đặt chỗ. Bạn vui lòng thử lại sau."
 
 
 class PlannerError(RuntimeError):
@@ -216,21 +333,6 @@ def _already_supplied(field: str, context: dict[str, Any]) -> bool:
 # Không gian kế hoạch của Agent
 # ---------------------------------------------------------------------------
 #
-# `AllowedTool` là contract PROVIDER — 9 tool mà hệ thống có connector phục vụ.
-# Đây là tập con mà PLANNER được phép lập kế hoạch, và nó nhỏ hơn một tool.
-#
-# `register_resident` bị loại: đăng ký / liên kết / xác minh hồ sơ cư dân xảy ra
-# NGOÀI Agent (đường admin/provider). Nếu Planner tự thêm nó, nó sẽ hỏi
-# `full_name`/`apartment_code`/`residential_area` — ba field mà giao diện không
-# có ô nhập và không nên có. Người dùng nhận một câu hỏi không có câu trả lời
-# hợp lệ, và workflow không bao giờ hội tụ.
-#
-# Đã quan sát trên DeepSeek thật: model KHÔNG tất định, có lần tự thêm
-# `register_resident` cho tài khoản đã VERIFIED dù prompt đã dặn ngược lại. Vì
-# vậy ràng buộc phải nằm ở code — prompt chỉ là gợi ý.
-PLANNER_FORBIDDEN_TOOLS: frozenset[str] = frozenset({"register_resident"})
-
-PLANNER_ALLOWED_TOOLS: frozenset[str] = frozenset(get_args(AllowedTool)) - PLANNER_FORBIDDEN_TOOLS
 
 # Field CHỈ tồn tại để tạo hồ sơ cư dân. Planner hỏi chúng nghĩa là nó đang cố
 # onboarding qua TaskPlan — việc mà kiến trúc đã đặt ra ngoài Agent.
@@ -245,6 +347,21 @@ PLANNER_FORBIDDEN_MISSING_FIELDS: frozenset[str] = frozenset({"full_name", "apar
 
 
 _CORRECTIVE_INSTRUCTIONS: dict[str, str] = {
+    "FACT_WITHOUT_EVIDENCE": (
+        "Trong explicit_facts, bạn nêu một kết luận mà phần 'evidence' không xuất hiện "
+        "nguyên văn trong yêu cầu của người dùng. Mỗi mục phải trích đúng một đoạn có "
+        "thật trong yêu cầu đó. Nếu không trích được, hãy BỎ mục ấy đi: người dùng chưa "
+        "nói rõ, và việc còn thiếu sẽ được hỏi lại."
+    ),
+    "CONTRADICTORY_FACT": (
+        "Trong explicit_facts, bạn đưa hai kết luận trái ngược nhau cho cùng một ô. Mỗi ô "
+        "chỉ được xuất hiện MỘT lần. Nếu yêu cầu của người dùng nói nước đôi về ô đó, hãy "
+        "bỏ nó khỏi explicit_facts để hệ thống hỏi lại."
+    ),
+    "FACT_AND_MISSING_CONFLICT": (
+        "Bạn vừa nêu một ô trong explicit_facts vừa nêu chính ô đó trong missing_fields. "
+        "Hai điều này loại trừ nhau: hoặc người dùng đã nói rõ, hoặc chưa. Chọn một."
+    ),
     "FORBIDDEN_PLANNER_TOOL": (
         "Kế hoạch của bạn chứa một bước đăng ký/liên kết hồ sơ cư dân. Việc đó "
         "nằm NGOÀI phạm vi của bạn và do bộ phận quản lý thực hiện. Nếu phần "
@@ -255,6 +372,13 @@ _CORRECTIVE_INSTRUCTIONS: dict[str, str] = {
         "Bạn hỏi thông tin dùng để tạo hồ sơ cư dân. Không được hỏi những thông "
         "tin đó: hồ sơ cư dân do bộ phận quản lý lập, không thu thập trong hội "
         "thoại này. Chỉ hỏi dữ liệu cần cho chính dịch vụ người dùng yêu cầu."
+    ),
+    "MISSING_FIELD_NOT_ASKABLE": (
+        "Bạn hỏi dữ liệu mà hệ thống tự biết: mã cư dân, mã đặt chỗ, mã lịch xem, "
+        "số tiền, loại tiền tệ. Những giá trị này đến từ tài khoản đã xác minh "
+        "hoặc từ kết quả của bước trước trong chính kế hoạch — không hỏi người "
+        "dùng. Dùng InputRef để lấy chúng từ bước trước, hoặc chỉ nêu những field "
+        "người dùng thật sự phải cung cấp."
     ),
     "MISSING_FIELD_ALREADY_PROVIDED": (
         "Bạn nêu field còn thiếu, nhưng những field đó ĐÃ có giá trị trong phần "
@@ -313,12 +437,30 @@ class _InconsistentResponseError(PlannerError):
         self.kind = kind
 
 
+# Lỗi nghĩa là "model trả nội dung dùng không được" — hỏi lại một lần thì sửa
+# được. KHÁC hẳn auth/rate-limit/network: những thứ đó hỏi lại cũng vô ích.
+#
+#   ValidationError      output đúng JSON nhưng sai schema
+#   OutputParserException LangChain không parse nổi output
+#   JSONDecodeError      output không phải JSON hợp lệ
+#
+# Hai loại sau từng KHÔNG có trong danh sách, và hậu quả đo được trên stack
+# thật: 1/18 yêu cầu nhiều dịch vụ chết hẳn với "Planner không gọi được LLM
+# (OutputParserException)" — đúng loại lỗi mà vòng corrective retry được viết
+# ra để xử lý, lại bị đối xử như một lỗi xác thực và bỏ cuộc ngay.
+_REPAIRABLE_LLM_ERRORS: tuple[type[BaseException], ...] = (
+    ValidationError,
+    OutputParserException,
+    json.JSONDecodeError,
+)
+
+
 def _is_repairable_llm_error(exc: BaseException) -> bool:
     """Lỗi từ `ainvoke` có phải loại sửa được bằng cách hỏi lại không.
 
-    Chỉ `ValidationError` mới sửa được: nó nghĩa là model trả nội dung không
-    khớp schema. Auth, rate limit, network và configuration KHÔNG bao giờ là
-    `ValidationError`, nên tự động rơi vào nhánh không retry.
+    Danh sách ở `_REPAIRABLE_LLM_ERRORS`. Auth, rate limit, network và
+    configuration không thuộc loại nào trong đó, nên tự động rơi vào nhánh
+    không retry — mặc định vẫn là fail-fast.
 
     LangChain có thể bọc lỗi parse trong exception riêng, nên dò cả chuỗi
     `__cause__`/`__context__` thay vì chỉ kiểm tra lớp ngoài cùng.
@@ -327,7 +469,7 @@ def _is_repairable_llm_error(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, ValidationError):
+        if isinstance(current, _REPAIRABLE_LLM_ERRORS):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -356,6 +498,47 @@ _JSON_MODE_INSTRUCTION = (
 )
 
 
+# Ba ô boolean mà người dùng có thể nói rõ ngay trong goal. Danh sách này là
+# `Literal` ở schema chứ không phải một lượt kiểm sau đó: một `_PlannerResponse`
+# mang `resident_id` phải KHÔNG DỰNG ĐƯỢC, để mọi đường dùng nó — kể cả đường
+# viết sau này — đều được chặn theo. Trust boundary bằng cấu trúc, không bằng
+# danh sách chặn.
+ExplicitFactField = Literal["consent", "needs_loading_support", "needs_elevator"]
+
+
+class _ExplicitFact(BaseModel):
+    """Một điều người dùng đã NÓI RÕ, kèm chỗ họ nói.
+
+    `evidence` là phần khiến cấu trúc này khác một dict tự do: model phải TRÍCH
+    DẪN được từ chính goal. Không trích được nghĩa là nó đang bịa, và code bắt
+    được điều đó mà không cần hiểu tiếng Việt.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: ExplicitFactField = Field(description="Tên ô. Chỉ ba giá trị này, không có ô nào khác.")
+    value: bool = Field(
+        strict=True,
+        description="true hoặc false. Phải là boolean thật, không phải chuỗi.",
+    )
+    evidence: str = Field(
+        min_length=1,
+        description="Đoạn NGUYÊN VĂN trong yêu cầu của người dùng chứng minh kết luận này.",
+    )
+
+    @field_validator("evidence")
+    @classmethod
+    def _evidence_must_carry_text(cls, raw: str) -> str:
+        """Khoảng trắng không phải một trích dẫn.
+
+        `min_length=1` cho " " đi qua, và một chuỗi trắng thì khớp với mọi goal
+        — tức là lớp kiểm trích dẫn bên dưới sẽ luôn xanh, và luôn vô nghĩa.
+        """
+        if not raw.strip():
+            raise ValueError("evidence rỗng.")
+        return raw
+
+
 class _PlannerResponse(BaseModel):
     """Schema structured output mà LLM phải điền.
 
@@ -368,7 +551,10 @@ class _PlannerResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: PlannerStatus = Field(
-        description="READY khi lập được kế hoạch; NEEDS_INFORMATION khi thiếu dữ liệu bắt buộc.",
+        description=(
+            "READY khi lập được kế hoạch; NEEDS_INFORMATION khi thiếu dữ liệu bắt buộc; "
+            "QUESTION khi người dùng đang HỎI chứ không yêu cầu làm."
+        ),
     )
     plan: TaskPlan | None = Field(
         default=None,
@@ -381,6 +567,33 @@ class _PlannerResponse(BaseModel):
             "cho phép. Phải rỗng khi status=READY."
         ),
     )
+    explicit_facts: list[_ExplicitFact] = Field(
+        default_factory=list,
+        description=(
+            "Những ô consent/needs_loading_support/needs_elevator mà người dùng đã NÓI RÕ "
+            "trong yêu cầu, kèm đoạn nguyên văn chứng minh. Bỏ trống nếu họ không nói, nói "
+            "nước đôi, hoặc chỉ nhắc tới chủ đề mà không yêu cầu. Không suy diễn từ việc "
+            "họ im lặng. Một ô đã nêu ở đây thì KHÔNG được nêu lại trong missing_fields."
+        ),
+    )
+
+    @field_validator("missing_fields")
+    @classmethod
+    def _only_fields_the_agent_can_act_on(cls, raw: list[str]) -> list[str]:
+        """Field còn thiếu phải nằm trong allowlist NGAY Ở SCHEMA.
+
+        `_clean_missing_fields` cũng kiểm, nhưng nó chạy sau — và một
+        `_PlannerResponse` hợp lệ mang field của một dịch vụ đã bị loại là một
+        object hợp lệ mô tả một việc không làm được. Chặn ở chỗ object ra đời
+        thì mọi đường dùng nó đều được chặn theo.
+
+        Chỉ nêu VỊ TRÍ. Giá trị do LLM sinh và có thể mang theo nội dung người
+        dùng gõ; đưa nó vào message là đưa nó vào log.
+        """
+        bad = [index for index, name in enumerate(raw) if name not in _ALLOWED_MISSING_FIELDS]
+        if bad:
+            raise ValueError(f"missing_fields có giá trị ngoài danh sách cho phép tại vị trí {bad}.")
+        return raw
 
     @model_validator(mode="after")
     def _enforce_exclusive_states(self) -> _PlannerResponse:
@@ -393,6 +606,11 @@ class _PlannerResponse(BaseModel):
         Wire shape phẳng tương thích rộng hơn; ràng buộc loại trừ được cưỡng chế
         ở đây, cho cùng một hiệu lực: sai là `ValidationError` ngay lúc parse.
         """
+        if self.status == "QUESTION":
+            if self.plan is not None or self.missing_fields:
+                raise ValueError("status=QUESTION phải không có plan và không có missing_fields.")
+            return self
+
         if self.status == "READY":
             if self.plan is None:
                 raise ValueError("status=READY phải kèm plan.")
@@ -463,6 +681,23 @@ def build_question(missing_fields: tuple[str, ...]) -> str:
 
 
 @dataclass(frozen=True)
+class ExplicitFact:
+    """Một fact ĐÃ QUA KIỂM, sẵn sàng đi vào ngữ cảnh.
+
+    Kiểu riêng chứ không phải `dict`: một dict đi qua bốn tầng thì tầng thứ tư
+    không có cách nào biết nó đã được kiểm hay chưa. Object này chỉ ra đời từ
+    `Planner._accept_explicit_facts`, nên sự tồn tại của nó LÀ bằng chứng.
+
+    `evidence` KHÔNG được mang theo: nó là nguyên văn lời người dùng, và mọi
+    tầng dưới đây (state, clarification, log) đều không phải chỗ cho nó. Nó đã
+    làm xong việc của mình ở tầng kiểm.
+    """
+
+    field: ExplicitFactField
+    value: bool
+
+
+@dataclass(frozen=True)
 class PlannerResult:
     """Kết quả Planner trả cho caller.
 
@@ -470,6 +705,8 @@ class PlannerResult:
 
       - READY             -> `plan` là TaskPlan; `missing_fields` rỗng.
       - NEEDS_INFORMATION -> `plan` None; `missing_fields` khác rỗng, hợp lệ.
+      - QUESTION          -> `plan` None; `missing_fields` rỗng. Câu hỏi, không
+                             phải yêu cầu. Không mang theo câu trả lời.
 
     `question` KHÔNG phải field khởi tạo — nó là property dựng từ
     `missing_fields`. Caller không có chỗ nào để chèn văn bản tự do vào câu hỏi
@@ -483,6 +720,10 @@ class PlannerResult:
     status: PlannerStatus
     plan: TaskPlan | None = None
     missing_fields: tuple[str, ...] = field(default_factory=tuple)
+    # Đi kèm MỌI trạng thái, kể cả READY: người dùng có thể nói rõ cả ba ô và
+    # vẫn thiếu một thứ khác, hoặc không thiếu gì cả. Gắn fact vào riêng nhánh
+    # NEEDS_INFORMATION sẽ làm mất chúng đúng lúc kế hoạch chạy được.
+    explicit_facts: tuple[ExplicitFact, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         # `Literal` chỉ có tác dụng khi type-check tĩnh; dataclass không kiểm tra
@@ -490,12 +731,18 @@ class PlannerResult:
         if self.status not in _VALID_STATUSES:
             raise ValueError("PlannerResult.status không hợp lệ.")
 
+        # QUESTION là trạng thái RỖNG: không kế hoạch, không field thiếu. Cho
+        # phép kèm `missing_fields` sẽ dựng ra một trạng thái lai — vừa hỏi lại
+        # vừa trả lời — và giao diện không biết hiện cái nào.
+        if self.status == "QUESTION" and (self.plan is not None or self.missing_fields):
+            raise ValueError("PlannerResult.QUESTION phải không có plan và không có missing_fields.")
+
         # List/set/str đều lọt qua các vòng lặp bên dưới nhưng phá bất biến
         # frozen + hashable của dataclass. Yêu cầu đúng tuple.
         if not isinstance(self.missing_fields, tuple):
             raise ValueError("PlannerResult.missing_fields phải là tuple.")
 
-        bad_positions = [index for index, name in enumerate(self.missing_fields) if name not in _ALLOWED_MISSING_FIELDS]
+        bad_positions = [index for index, name in enumerate(self.missing_fields) if name not in PUBLIC_MISSING_FIELDS]
         if bad_positions:
             raise ValueError(f"PlannerResult.missing_fields có giá trị không hợp lệ tại vị trí {bad_positions}.")
 
@@ -510,6 +757,10 @@ class PlannerResult:
                 raise ValueError("PlannerResult READY phải có plan.")
             if self.missing_fields:
                 raise ValueError("PlannerResult READY không được có missing_fields.")
+            return
+
+        # Nhánh QUESTION đã kiểm xong ở trên — nó rỗng cả hai phía.
+        if self.status == "QUESTION":
             return
 
         if self.plan is not None:
@@ -575,6 +826,7 @@ class Planner:
         self,
         goal: str,
         existing_context: dict[str, Any] | None = None,
+        recalled: list[dict[str, Any]] | None = None,
     ) -> PlannerResult:
         """Lập kế hoạch cho `goal`, có tính đến dữ liệu đã có trong `existing_context`.
 
@@ -593,7 +845,7 @@ class Planner:
             system_prompt = f"{PLANNER_SYSTEM_PROMPT}\n\n{_JSON_MODE_INSTRUCTION}"
         messages = [
             ("system", system_prompt),
-            ("human", self._build_user_message(goal, context)),
+            ("human", self._build_user_message(goal, context, recalled)),
         ]
 
         for attempt in range(_MAX_CORRECTIVE_RETRIES + 1):
@@ -603,7 +855,15 @@ class Planner:
                 response = await self._structured_llm.ainvoke(messages)
             except Exception as exc:  # noqa: BLE001 — mọi lỗi LLM đều quy về một loại
                 if _is_repairable_llm_error(exc) and not is_last_attempt:
-                    # Model trả nội dung không khớp schema — hỏi lại một lần.
+                    # Model trả nội dung dùng không được — hỏi lại một lần.
+                    #
+                    # GHI LẠI dù lần hỏi lại này thường thành công: một lượt
+                    # retry im lặng nghĩa là không ai biết tần suất model trả
+                    # output hỏng, và cũng không có cách nào chứng minh vòng
+                    # retry đang thật sự chạy. `warning` chứ không `info`: log
+                    # ứng dụng lọc dưới mức đó, và một dòng không đọc được thì
+                    # bằng không có.
+                    logger.warning("planner hỏi lại sau output không dùng được (%s)", type(exc).__name__)
                     messages = self._with_correction(messages, "SCHEMA_MISMATCH")
                     continue
                 # Auth, rate limit, network, configuration: hỏi lại cũng vô ích.
@@ -612,7 +872,7 @@ class Planner:
                 raise PlannerError(f"Planner không gọi được LLM ({type(exc).__name__}).") from None
 
             try:
-                return self._to_result(response, goal, context)
+                return self._to_result(response, goal, context, recalled)
             except _InconsistentResponseError as exc:
                 if is_last_attempt:
                     # Sai cả hai lần: dừng, không retry thêm.
@@ -634,12 +894,76 @@ class Planner:
         return [*messages, ("human", _CORRECTIVE_PREAMBLE + instruction)]
 
     @staticmethod
-    def _build_user_message(goal: str, existing_context: dict[str, Any]) -> str:
+    def _build_user_message(
+        goal: str,
+        existing_context: dict[str, Any],
+        recalled: list[dict[str, Any]] | None = None,
+    ) -> str:
         try:
-            return build_planner_user_message(goal, existing_context)
+            # Ngày hôm nay lấy tại ĐÂY, không truyền từ ngoài vào: mọi lời gọi
+            # planner đều phải thấy cùng một "hôm nay" với `TaskPlanValidator`,
+            # vốn cũng dùng `date.today()`. Hai nguồn ngày khác nhau thì kế
+            # hoạch hợp lệ lúc dựng có thể thành quá khứ lúc kiểm.
+            return build_planner_user_message(goal, existing_context, today=date.today().isoformat(), recalled=recalled)
         except (TypeError, ValueError) as exc:
             # Không echo context: nó có thể chứa dữ liệu cư dân.
             raise PlannerError(f"existing_context không serialize được sang JSON ({type(exc).__name__}).") from None
+
+    @staticmethod
+    def _fields_taken_from_recall(
+        plan: TaskPlan,
+        recalled: list[dict[str, Any]],
+        existing_context: dict[str, Any],
+        goal: str,
+    ) -> list[str]:
+        """Field nào trong plan lấy giá trị TỪ CHUYỆN CŨ mà lần này chưa ai xác nhận.
+
+        Cưỡng chế bằng CODE, không chỉ bằng prompt — cùng lý do với
+        `_reject_untrusted_payment_values`. Prompt là lời khuyên: model đọc
+        "`nho_lai` không phải một nguồn" rồi vẫn có thể điền, và khi nó điền thì
+        hành động xảy ra thật. Không có gì ở giữa bắt lại.
+
+        Cái giá của một lần đoán sai không đối xứng. Hỏi thừa một câu: người
+        dùng gõ thêm ba chữ. Đặt nhầm khu vì "lần trước khu A": họ tới nơi mới
+        biết, chỗ đã bị giữ, và phải huỷ rồi đặt lại.
+
+        Một giá trị bị coi là "lấy từ chuyện cũ" khi nó xuất hiện trong
+        `nho_lai` mà KHÔNG xuất hiện trong `existing_context` (dữ kiện lần này)
+        và KHÔNG xuất hiện trong chính câu người dùng vừa nói.
+
+        So sánh trên chuỗi đã chuẩn hoá: model thường viết lại giá trị theo dạng
+        chuẩn ("ZONE_A") trong khi chuyện cũ lưu dạng người nói ("khu A"). So
+        thô sẽ bỏ lọt đúng những ca cần bắt.
+        """
+        if not recalled:
+            return []
+
+        def norm(value: Any) -> str:
+            return str(value).strip().casefold().replace("_", " ")
+
+        goal_text = norm(goal)
+        confirmed = {norm(v) for v in existing_context.values() if v is not None}
+        remembered: set[str] = set()
+        for turn in recalled:
+            for value in turn.values():
+                if value is not None:
+                    remembered.add(norm(value))
+
+        offending: list[str] = []
+        for task in plan.tasks:
+            for field_name, value in (task.input or {}).items():
+                # InputRef (dict) là output của task trước — nguồn hợp lệ.
+                if not isinstance(value, (str, int, float)):
+                    continue
+                # So bằng MỌI cách giá trị đó có thể đã được nói ra: model viết
+                # `ZONE_A`, người dùng nói "khu A". Xem `spoken_forms`.
+                forms = [norm(f) for f in spoken_forms(str(value))]
+                if any(f in confirmed or f in goal_text for f in forms if f):
+                    continue
+                if any(f and (f in memory or memory in f) for f in forms for memory in remembered if memory):
+                    if field_name not in offending:
+                        offending.append(field_name)
+        return offending
 
     @staticmethod
     def _reject_untrusted_payment_values(plan: TaskPlan, existing_context: dict[str, Any]) -> None:
@@ -738,10 +1062,80 @@ class Planner:
                     f"pay_fee dùng '{field_name}' không đến từ book_parking hay existing_context.",
                 )
 
-    def _to_result(self, response: Any, goal: str, existing_context: dict[str, Any]) -> PlannerResult:
+    @staticmethod
+    def _normalise_for_quote(text: str) -> str:
+        """Chuẩn hoá tối thiểu để so trích dẫn: thường hoá + gộp khoảng trắng.
+
+        CỐ Ý không bỏ dấu. `evidence` phải là một trích dẫn gần như nguyên văn;
+        một model viết lại câu không dấu thì nó đang diễn giải chứ không trích,
+        và đó chính là thứ lớp kiểm này tồn tại để bắt. Chỉ tha thứ hai khác
+        biệt vô hại: hoa/thường, và khoảng trắng thừa do xuống dòng.
+        """
+        return " ".join(text.casefold().split())
+
+    def _accept_explicit_facts(self, response: _PlannerResponse, goal: str) -> tuple[ExplicitFact, ...]:
+        """Nhận những fact CHỨNG MINH ĐƯỢC, từ chối cả response nếu có cái không.
+
+        Ba cửa, và cửa nào cũng ném `_InconsistentResponseError` — tức là đi vào
+        đúng vòng sửa một lần đã có sẵn, không dựng cơ chế thứ hai:
+
+          trích dẫn không có thật     model đang bịa một điều người dùng chưa nói
+          hai kết luận trái nhau      response tự mâu thuẫn với chính nó
+          vừa nhận vừa hỏi lại        cũng vậy, chỉ ở một trục khác
+
+        KHÔNG lặng lẽ bỏ mục hỏng rồi giữ phần còn lại: một response đã sai ở
+        một chỗ thì không có cơ sở nào để tin phần còn lại của nó, và bỏ im
+        lặng nghĩa là không ai đo được model sai bao nhiêu lần.
+
+        Từ chối là AN TOÀN theo đúng chiều cần thiết: mất một fact thì hệ thống
+        hỏi lại và người dùng gõ thêm vài chữ; nhận một fact bịa thì nó gọi điện
+        cho người vừa từ chối, và không màn hình nào nói ra điều đó.
+        """
+        if not response.explicit_facts:
+            return ()
+
+        goal_text = self._normalise_for_quote(goal)
+        ket_luan: dict[str, bool] = {}
+        for fact in response.explicit_facts:
+            trich = self._normalise_for_quote(fact.evidence)
+            if not trich or trich not in goal_text:
+                # Chỉ nêu TÊN Ô. `evidence` là nguyên văn lời người dùng, và
+                # message này đi vào log lẫn prompt sửa lỗi.
+                raise _InconsistentResponseError(
+                    "FACT_WITHOUT_EVIDENCE",
+                    f"Planner nêu kết luận không trích dẫn được cho ô: {fact.field}.",
+                )
+            if fact.field in ket_luan and ket_luan[fact.field] != fact.value:
+                raise _InconsistentResponseError(
+                    "CONTRADICTORY_FACT",
+                    f"Planner đưa hai kết luận trái nhau cho ô: {fact.field}.",
+                )
+            ket_luan[fact.field] = fact.value
+
+        trung = sorted(set(ket_luan) & set(response.missing_fields))
+        if trung:
+            raise _InconsistentResponseError(
+                "FACT_AND_MISSING_CONFLICT",
+                "Planner vừa kết luận vừa hỏi lại cùng một ô: " + ", ".join(trung) + ".",
+            )
+
+        return tuple(ExplicitFact(field=name, value=value) for name, value in ket_luan.items())
+
+    def _to_result(
+        self,
+        response: Any,
+        goal: str,
+        existing_context: dict[str, Any],
+        recalled: list[dict[str, Any]] | None = None,
+    ) -> PlannerResult:
         """Kiểm tra tính nhất quán rồi chuyển sang kết quả public."""
         if not isinstance(response, _PlannerResponse):
             raise _InconsistentResponseError("SCHEMA_MISMATCH", "Planner nhận được kết quả sai schema từ LLM.")
+
+        # Kiểm fact TRƯỚC khi rẽ nhánh trạng thái: chúng đi kèm cả ba trạng
+        # thái, và một response bịa trích dẫn thì không được đi tiếp dù nó có
+        # kèm kế hoạch hợp lệ hay không.
+        facts = self._accept_explicit_facts(response, goal)
 
         if response.status == "READY":
             # `_PlannerResponse._enforce_exclusive_states` đã chặn hai trường hợp
@@ -777,7 +1171,38 @@ class Planner:
             # Trust boundary: chặn trước khi plan rời khỏi Planner.
             self._reject_untrusted_payment_values(plan, existing_context)
 
-            return PlannerResult(status="READY", plan=plan)
+            # Giá trị lấy từ chuyện cũ → HỎI LẠI, không phải báo lỗi.
+            #
+            # Báo lỗi là trừng phạt người dùng vì model đoán ẩu; hỏi lại đúng
+            # là thứ lẽ ra phải xảy ra. Và nó giữ được giá trị của `nho_lai`:
+            # model đã hiểu "như lần trước" nghĩa là gì, chỉ là nó phải xác
+            # nhận trước khi biến điều đó thành hành động.
+            recalled_fields = self._fields_taken_from_recall(plan, recalled or [], existing_context, goal)
+            if recalled_fields:
+                logger.info("planner: %d field lấy từ nho_lai → hỏi lại", len(recalled_fields))
+                return PlannerResult(
+                    status="NEEDS_INFORMATION", missing_fields=tuple(recalled_fields), explicit_facts=facts
+                )
+
+            # Fact đi kèm kế hoạch, nhưng KHÔNG đụng vào nó. Kế hoạch đã qua
+            # Validator; một fact không được thêm, bớt hay sửa task nào. Nó chỉ
+            # là ngữ cảnh cho lượt sau.
+            return PlannerResult(status="READY", plan=plan, explicit_facts=facts)
+
+        if response.status == "QUESTION":
+            # Câu hỏi: không kế hoạch, không field thiếu, không câu chữ.
+            #
+            # Phải chặn ở ĐÂY chứ không để rơi xuống nhánh NEEDS_INFORMATION bên
+            # dưới. Nhánh đó gọi `_clean_missing_fields`, và danh sách rỗng thì
+            # nó ném `NEEDS_INFORMATION_WITHOUT_FIELDS` — đo được: cả 5 câu hỏi
+            # thử nghiệm đều chết ở đúng chỗ này, dù model đã trả `QUESTION`
+            # hoàn toàn đúng.
+            if response.plan is not None or response.missing_fields:
+                raise _InconsistentResponseError(
+                    "QUESTION_WITH_PAYLOAD",
+                    "Planner trả QUESTION nhưng vẫn kèm kế hoạch hoặc field thiếu.",
+                )
+            return PlannerResult(status="QUESTION", explicit_facts=facts)
 
         # NEEDS_INFORMATION — cũng đã được validator chặn, giữ làm lớp phòng thủ.
         if response.plan is not None:
@@ -816,40 +1241,67 @@ class Planner:
             )
 
         # `question` không truyền vào — `PlannerResult` tự dựng từ missing_fields.
-        return PlannerResult(status="NEEDS_INFORMATION", plan=None, missing_fields=cleaned)
+        return PlannerResult(status="NEEDS_INFORMATION", plan=None, missing_fields=cleaned, explicit_facts=facts)
 
     @staticmethod
     def _clean_missing_fields(raw_fields: list[str]) -> tuple[str, ...]:
-        """Lọc `missing_fields` theo allowlist, giữ thứ tự và bỏ trùng.
+        """Lọc `missing_fields` về những gì HỎI ĐƯỢC, giữ thứ tự và bỏ trùng.
 
-        Khớp chính xác với allowlist nên chuỗi rỗng, whitespace, URL và
-        credential marker đều bị loại mà không cần luật riêng.
+        Ba nhóm, ba cách xử lý:
 
-        Giá trị không hợp lệ KHÔNG được đưa vào message: chúng do LLM sinh và có
-        thể mang dữ liệu người dùng. Chỉ báo vị trí.
+          alias hạ cấp được   `vehicle_id` → `plate_number` + `vehicle_type`.
+                              Model nêu một ID nội bộ; người dùng biết biển số.
+
+          thuộc thanh toán    `booking_id`/`amount`/`currency` → `payment_quote`.
+                              Model nêu chúng nghĩa là nó thiếu BÁO GIÁ — sự cố
+                              phía hệ thống, không phải thiếu thông tin của
+                              khách. Hỏi khách số tiền là mời chính người phải
+                              trả tự khai số phải trả.
+
+          có thẩm quyền khác  `resident_id`, `viewing_id`... → từ chối, lý do cố
+                              định. Chúng đến từ tài khoản đã xác minh hoặc từ
+                              kết quả một bước trước; không có câu hỏi nào đúng
+                              để đặt ra.
+
+        Giá trị không hợp lệ KHÔNG vào message: chúng do LLM sinh và có thể mang
+        dữ liệu người dùng. Chỉ báo vị trí.
 
         Ở đây bỏ trùng thay vì từ chối: output LLM là dữ liệu nhiễu cần chuẩn
         hoá. `PlannerResult` thì ngược lại — nó từ chối trùng, vì caller dựng
         trực tiếp phải truyền dữ liệu đã sạch.
         """
-        bad_positions = [index for index, name in enumerate(raw_fields) if name not in _ALLOWED_MISSING_FIELDS]
+        bad_positions = [index for index, name in enumerate(raw_fields) if name not in RAW_MODEL_MISSING_FIELDS]
         if bad_positions:
             raise _InconsistentResponseError(
                 "MISSING_FIELD_NOT_ALLOWED",
                 f"Planner nêu field còn thiếu không hợp lệ tại vị trí {bad_positions} (ngoài danh sách cho phép).",
             )
 
+        # Thiếu ngữ cảnh thanh toán thì CẢ danh sách quy về một control field:
+        # ghép nó với các câu hỏi khác sẽ dựng ra một màn vừa hỏi vừa báo lỗi.
+        if any(name in _PAYMENT_CONTEXT_FIELDS for name in raw_fields):
+            return (PAYMENT_QUOTE_REQUIRED_FIELD,)
+
+        blocked = [
+            index
+            for index, name in enumerate(raw_fields)
+            if name in AUTHORITATIVE_MISSING_FIELDS and name not in _PAYMENT_CONTEXT_FIELDS
+        ]
+        if blocked:
+            raise _InconsistentResponseError(
+                "MISSING_FIELD_NOT_ASKABLE",
+                f"Planner hỏi dữ liệu hệ thống tự biết tại vị trí {blocked}; dữ liệu này không hỏi người dùng.",
+            )
+
         seen: set[str] = set()
         cleaned: list[str] = []
         for name in raw_fields:
-            if name not in seen:
-                seen.add(name)
-                # vehicle_id là ID nội bộ. Nếu account chưa có phương tiện,
-                # hỏi dữ liệu người dùng hiểu được để tạo register_vehicle.
-                replacements = ("plate_number", "vehicle_type") if name == "vehicle_id" else (name,)
-                for replacement in replacements:
-                    if replacement not in cleaned:
-                        cleaned.append(replacement)
+            if name in seen:
+                continue
+            seen.add(name)
+            for replacement in _DOWNGRADABLE_MISSING_FIELDS.get(name, (name,)):
+                if replacement not in cleaned:
+                    cleaned.append(replacement)
 
         if not cleaned:
             raise _InconsistentResponseError(

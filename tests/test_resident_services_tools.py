@@ -29,6 +29,9 @@ MAINTENANCE_INPUT = {
 MOVE_INPUT = {
     "move_date": "2026-11-27",
     "move_time": "14:00",
+    "move_origin_id": "MOVE-Q7-A1",
+    "move_destination_id": "MOVE-Q7-B1",
+    "move_size": "medium",
     "needs_elevator": True,
     "needs_loading_support": True,
     "move_vehicle": "truck",
@@ -96,14 +99,23 @@ def test_runtime_factory_registers_resident_services_connector() -> None:
     connectors = build_connectors(resident_services_url="http://resident-services")
     connector = next(item for item in connectors if isinstance(item, ResidentServicesConnector))
     assert connector.base_url == "http://resident-services"
-    assert set(connector.tool_names) == {"create_maintenance_request", "schedule_move"}
+    assert set(connector.tool_names) == {
+        "create_maintenance_request",
+        "schedule_move",
+        "cancel_maintenance",
+        "cancel_move",
+    }
 
 
 class _Boundary:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def execute(self, plan, workflow_id=None, *, finalize=True, parent_workflow_id=None, session_id=None):
+    # `**_forwarded`: đồ giả phải RỘNG bằng hàng thật, nếu không `TypeError`
+    # lúc chạy trông y hệt một thất bại của sản phẩm.
+    async def execute(
+        self, plan, workflow_id=None, *, finalize=True, parent_workflow_id=None, session_id=None, **_forwarded
+    ):
         self.calls += 1
         return workflow_id or "workflow", {}
 
@@ -204,6 +216,10 @@ async def test_resident_services_provider_rejects_invalid_schedule(path: str, pa
 # ---------------------------------------------------------------------------
 
 _RESIDENT_ONLY_PLANS = {
+    "change_parking_zone": {"booking_id": "BOOK-001", "parking_zone": "ZONE_B"},
+    "cancel_parking": {"booking_id": "BOOK-001"},
+    "cancel_maintenance": {"maintenance_id": "MAINT-001"},
+    "cancel_move": {"move_request_id": "MOVE-001"},
     "register_vehicle": {"resident_id": "RES-001", "plate_number": "51A-12345", "vehicle_type": "car"},
     "book_parking": {"vehicle_id": "VEH-001", "booking_date": "2026-12-10", "parking_zone": "ZONE_A"},
     "pay_fee": {"booking_id": "BOOK-001", "amount": 1000, "currency": "VND"},

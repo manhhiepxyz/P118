@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -47,6 +46,7 @@ from src.orchestration.runtime_provider import (
 )
 from src.services.mock.apartment_ownership import apartment_ownership_app
 from src.services.mock.transport import transport_app
+from tests._otp_registration import dang_ky_qua_duong_that
 
 # Chủ sở hữu thật trong `apartment_owners` — provider trả ownership_match=True.
 OWNER_CLAIM = {
@@ -74,12 +74,8 @@ async def verif_env(e2e_pool, tmp_path):
     repo._pool = SharedPool(repo._pool)  # noqa: SLF001 - route close() = no-op
     set_repository_provider(lambda: _ready(repo))
 
-    ownership_client = AsyncClient(
-        transport=ASGITransport(app=apartment_ownership_app), base_url="http://ownership"
-    )
-    transport_client = AsyncClient(
-        transport=ASGITransport(app=transport_app), base_url="http://transport"
-    )
+    ownership_client = AsyncClient(transport=ASGITransport(app=apartment_ownership_app), base_url="http://ownership")
+    transport_client = AsyncClient(transport=ASGITransport(app=transport_app), base_url="http://transport")
 
     app.dependency_overrides[get_user_repository] = lambda: repo.users
     app.dependency_overrides[_ownership_connector] = lambda: OwnershipConnector(
@@ -113,24 +109,20 @@ def _headers(user: dict) -> dict:
 
 
 async def _register_customer(client) -> dict:
-    username = _unique("customer")
-    res = await client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "matkhau123"},
-    )
-    assert res.status_code == 201, res.text
-    data = res.json()
-    return {
-        "id": data["id"],
-        "username": data["username"],
-        "role": data["role"],
-    }
+    """Khách mới, tạo qua ĐÚNG đường sản phẩm — gồm cả bước OTP.
+
+    Phần cơ học nằm ở `tests/_otp_registration`: cùng một việc cũng cần cho
+    `tests/test_db`, và hai bản sao của một luồng đăng ký là hai chỗ để lệch
+    nhau khi hợp đồng đổi. Lần này nó đã đổi thật — bước OTP được thêm — và
+    đó là lý do file này từng đỏ 9 bài.
+    """
+    data = await dang_ky_qua_duong_that(client, _unique("customer"), password="matkhau123")
+    assert data is not None, "tên đăng ký bị trùng — `_unique` không còn duy nhất"
+    return {"id": data["id"], "username": data["username"], "role": data["role"]}
 
 
 async def _make_provider(repo) -> dict:
-    user = await repo.users.create_user(
-        _unique("provider"), hash_password("matkhau123"), role="provider"
-    )
+    user = await repo.users.create_user(_unique("provider"), hash_password("matkhau123"), role="provider")
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
@@ -203,15 +195,11 @@ async def test_customer_cannot_list_or_decide(verif_env, verif_client):
     await _create_record(verif_client, customer, "apartment", OWNER_CLAIM)
 
     # Danh sách hồ sơ cho người duyệt — customer bị chặn 403.
-    listed = await verif_client.get(
-        "/api/v1/verification-records", headers=_headers(customer)
-    )
+    listed = await verif_client.get("/api/v1/verification-records", headers=_headers(customer))
     assert listed.status_code == 403
 
     # Duyệt — customer bị chặn 403.
-    records = await verif_client.get(
-        "/api/v1/verification-records/my", headers=_headers(customer)
-    )
+    records = await verif_client.get("/api/v1/verification-records/my", headers=_headers(customer))
     record_id = records.json()["items"][0]["record_id"]
     decided = await _decide(verif_client, customer, record_id, "approve")
     assert decided.status_code == 403
@@ -237,12 +225,8 @@ async def test_my_records_isolated_per_user(verif_env, verif_client):
     bob = await _register_customer(verif_client)
     await _create_record(verif_client, alice, "apartment", OWNER_CLAIM)
 
-    alice_mine = await verif_client.get(
-        "/api/v1/verification-records/my", headers=_headers(alice)
-    )
-    bob_mine = await verif_client.get(
-        "/api/v1/verification-records/my", headers=_headers(bob)
-    )
+    alice_mine = await verif_client.get("/api/v1/verification-records/my", headers=_headers(alice))
+    bob_mine = await verif_client.get("/api/v1/verification-records/my", headers=_headers(bob))
 
     # Không dò được đơn của người khác — đây là danh sách theo JWT, không nhận user_id.
     assert len(alice_mine.json()["items"]) == 1
@@ -281,9 +265,7 @@ async def test_approve_apartment_opens_resident_services(verif_env, verif_client
             customer["id"],
         )
         assert link is not None
-        resident = await conn.fetchrow(
-            "SELECT resident_id FROM residents WHERE apartment_code = 'A1201'"
-        )
+        resident = await conn.fetchrow("SELECT resident_id FROM residents WHERE apartment_code = 'A1201'")
         assert resident is not None
 
 
@@ -301,7 +283,7 @@ async def test_approve_vehicle_creates_vehicle(verif_env, verif_client):
         full_name="Lâm Thành Bảo",
     )
 
-    plate = f"51F-{uuid.uuid4().hex[:5].upper()}"
+    plate = f"51F-{uuid.uuid4().int % 100000:05d}"
     created = await _create_record(
         verif_client,
         customer,
@@ -351,7 +333,7 @@ async def test_approve_vehicle_fails_when_link_revoked(verif_env, verif_client):
         verif_client,
         customer,
         "vehicle",
-        {"plate_number": f"51F-{uuid.uuid4().hex[:5].upper()}", "vehicle_type": "car"},
+        {"plate_number": f"51F-{uuid.uuid4().int % 100000:05d}", "vehicle_type": "car"},
     )
     record_id = created.json()["item"]["record_id"]
 
@@ -415,3 +397,81 @@ async def test_provider_list_never_leaks_owner_name(verif_env, verif_client):
     # List có ownership_match để người duyệt quyết định, nhưng KHÔNG có owner_name.
     assert all("ownership_match" in i for i in items)
     assert not _has_key(res.json(), "owner_name")
+
+
+# ---------------------------------------------------------------------------
+# Không ai duyệt hồ sơ của chính mình
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_reviewer_cannot_approve_their_own_application(verif_env, verif_client):
+    """Leo thang quyền đã tái hiện được, chạy đến tận cùng:
+
+        provider nộp hồ sơ căn hộ "SELF-9001"  → tạo được
+        provider tự duyệt hồ sơ đó              → APPROVED, decided_by=provider
+        /auth/me                                → VERIFIED, căn hộ SELF-9001
+
+    Người duyệt tự cấp cho mình tư cách cư dân của một căn hộ KHÔNG có trong
+    registry. Toàn bộ giá trị của bước xác thực nằm ở chỗ có người thứ hai nhìn
+    vào hồ sơ — người duyệt trùng người nộp thì bước đó bằng không.
+    """
+    provider = await _make_provider(verif_env)
+
+    created = await _create_record(
+        verif_client,
+        provider,
+        "apartment",
+        {"apartment_code": "SELF-9001", "residential_area": "Vinhomes Ocean Park", "full_name": "Toi Tu Khai"},
+    )
+    assert created.status_code == 201, created.text
+    record_id = created.json()["item"]["record_id"]
+
+    decided = await _decide(verif_client, provider, record_id, "approve")
+    assert decided.status_code == 403, f"tự duyệt lọt qua: {decided.status_code} {decided.text}"
+    assert "chính mình" in decided.json()["detail"]
+
+    # Và hồ sơ phải còn nguyên PENDING — chặn sau khi đã đổi trạng thái thì
+    # rollback nghĩa là phải gỡ cả liên kết cư dân đã materialize.
+    mine = await verif_client.get("/api/v1/verification-records/my", headers=_headers(provider))
+    assert mine.json()["items"][0]["status"] == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_self_rejection_is_blocked_too(verif_env, verif_client):
+    """Từ chối cũng là quyết định.
+
+    Chỉ chặn `approve` thì người duyệt vẫn tự dập được hồ sơ bất lợi của mình —
+    và `decide_record` claim bằng UPDATE trên `status='PENDING'`, nên một lần từ
+    chối là hồ sơ hết đường được xem xét lại.
+    """
+    provider = await _make_provider(verif_env)
+    created = await _create_record(
+        verif_client,
+        provider,
+        "apartment",
+        {"apartment_code": "SELF-9002", "residential_area": "Vinhomes Ocean Park", "full_name": "Toi Tu Khai"},
+    )
+    record_id = created.json()["item"]["record_id"]
+
+    decided = await _decide(verif_client, provider, record_id, "reject", "tự dập hồ sơ của mình")
+    assert decided.status_code == 403, decided.text
+
+
+@pytest.mark.asyncio
+async def test_reviewing_someone_elses_application_still_works(verif_env, verif_client):
+    """Chốt phải HẸP. Chặn nhầm cả hồ sơ người khác là làm hỏng luồng duyệt.
+
+    Mutation test sống: siết `_reject_self_review` thành "chặn mọi hồ sơ" thì
+    test này đỏ ngay.
+    """
+    customer = await _register_customer(verif_client)
+    provider = await _make_provider(verif_env)
+
+    created = await _create_record(verif_client, customer, "apartment", OWNER_CLAIM)
+    assert created.status_code == 201, created.text
+    record_id = created.json()["item"]["record_id"]
+
+    decided = await _decide(verif_client, provider, record_id, "reject", "Giấy tờ chưa rõ")
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["item"]["status"] == "REJECTED"

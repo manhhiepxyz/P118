@@ -6,6 +6,7 @@ import { WorkspaceShell } from '../components/workspace/WorkspaceShell'
 import { myVerificationRecords, updateProfile } from '../lib/agentApi'
 import { useAuth } from '../lib/auth'
 import type { VerificationRecord } from '../lib/types'
+import { latestApartmentRecord } from '../lib/verification'
 
 /**
  * Hồ sơ tài khoản — Phase D.
@@ -81,8 +82,37 @@ export function ProfilePage() {
 
   if (!user) return null
 
-  const status = user.resident_verification_status
-  const linked = status === 'VERIFIED'
+  const linked = user.resident_verification_status === 'VERIFIED'
+
+  /*
+   * Trạng thái chờ duyệt phải đọc từ HỒ SƠ ĐÃ NỘP, không từ
+   * `resident_verification_status`.
+   *
+   * Hai hệ thống song song: `resident_verification_status` suy ra từ
+   * `user_resident_links` (luồng link-request cũ), còn luồng nộp mà UI thực sự
+   * đưa người dùng đi lại ghi vào `verification_records`. Bảng thứ hai chỉ
+   * chạm vào bảng thứ nhất KHI ĐƯỢC DUYỆT, qua `materialize_resident_link`.
+   *
+   * Nên trạng thái chờ không bao giờ tới được trang này. Đã đo: nộp hồ sơ
+   * xong, `/auth/me` vẫn trả `NOT_LINKED`, và mục Liên kết hiện "Chưa liên
+   * kết" — trong khi người dùng vừa gửi ảnh sổ hồng đi xong.
+   *
+   * Sửa ở đây thay vì cho `/auth/me` đọc thêm `verification_records`: đó là
+   * endpoint nóng, gọi ở mọi lần khởi động phiên, và thêm một lượt HTTP sang
+   * mock provider vào nó là thêm độ trễ cùng một điểm hỏng mới cho việc đăng
+   * nhập. Trang này vốn đã nạp sẵn danh sách hồ sơ rồi.
+   *
+   * `linked` vẫn là thứ DUY NHẤT quyết định quyền — hồ sơ chỉ kể chuyện đang
+   * xảy ra, không mở khoá gì.
+   */
+  const latestRecord = latestApartmentRecord(records)
+  const awaitingReview = !linked && latestRecord?.status === 'PENDING'
+  const rejected = !linked && latestRecord?.status === 'REJECTED'
+
+  // Chưa nạp xong hồ sơ thì CHƯA kết luận. Không có nó, badge hiện "Chưa liên
+  // kết" một nhịp rồi mới nhảy sang "Đang chờ duyệt" — và nhịp sai đó lại đúng
+  // là câu người dùng sợ nhất đọc thấy sau khi vừa gửi giấy tờ đi.
+  const linkStateKnown = linked || !recordsLoading
 
   // `user` đã kiểm non-null ở trên; bản sao cho closure dùng mà TS không lỗi.
   const currentUser = user
@@ -146,7 +176,8 @@ export function ProfilePage() {
   return (
     <WorkspaceShell>
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto w-full max-w-[1000px] px-12 pb-16 pt-12">
+        {/* `seq` — cùng ngôn ngữ chuyển động với Hành trình và Lịch sử. */}
+        <div className="seq mx-auto w-full max-w-[1000px] px-12 pb-16 pt-12">
           <p className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
             Tài khoản
           </p>
@@ -157,18 +188,29 @@ export function ProfilePage() {
             {user.username} · {ROLE_LABEL[user.role] ?? user.role}
           </p>
 
-          {saved && (
-            <p
-              className="mt-6 rounded-[var(--r-sm)] px-4 py-3 text-[14.5px]"
-              style={{
-                color: 'var(--success)',
-                backgroundColor: 'color-mix(in srgb, var(--success) 12%, transparent)',
-              }}
-              role="status"
-            >
-              Đã lưu hồ sơ.
-            </p>
-          )}
+          {/* Bọc trong một thẻ LUÔN tồn tại, thay vì render có điều kiện ở
+              cấp này.
+
+              `.seq` đánh độ trễ theo `nth-child`. Banner "Đã lưu" xuất hiện
+              rồi tự tắt sau 4 giây, nên nếu nó là con trực tiếp thì mỗi lần
+              lưu hồ sơ là một lần chỉ số của mọi khối phía dưới dịch đi một
+              nấc — và cả trang chạy lại animation vào. Người dùng vừa bấm Lưu
+              mà thấy toàn bộ màn hình nhấp nháy lại thì đó là lỗi, không phải
+              hiệu ứng. */}
+          <div>
+            {saved && (
+              <p
+                className="mt-6 rounded-[var(--r-sm)] px-4 py-3 text-[14.5px]"
+                style={{
+                  color: 'var(--success)',
+                  backgroundColor: 'color-mix(in srgb, var(--success) 12%, transparent)',
+                }}
+                role="status"
+              >
+                Đã lưu hồ sơ.
+              </p>
+            )}
+          </div>
 
           {/* ── 1. Quan hệ cư dân – căn hộ ────────────────────────────
               Đặt TRƯỚC thông tin cá nhân: đây là thứ P-118 dùng để quyết định
@@ -180,10 +222,24 @@ export function ProfilePage() {
               </h2>
               <span
                 className="inline-flex items-center gap-1.5 text-[13px] font-semibold"
-                style={{ color: linked ? 'var(--success)' : 'var(--waiting-user)' }}
+                style={{
+                  color: linked
+                    ? 'var(--success)'
+                    : rejected
+                      ? 'var(--danger)'
+                      : 'var(--waiting-user)',
+                }}
               >
                 {linked ? <BadgeCheck className="h-4 w-4" aria-hidden /> : <Clock className="h-4 w-4" aria-hidden />}
-                {linked ? 'Đã xác minh' : status === 'PENDING' ? 'Chờ duyệt' : 'Chưa liên kết'}
+                {!linkStateKnown
+                  ? 'Đang tải…'
+                  : linked
+                  ? 'Đã xác minh'
+                  : awaitingReview
+                    ? 'Đang chờ duyệt'
+                    : rejected
+                      ? 'Chưa được duyệt'
+                      : 'Chưa liên kết'}
               </span>
             </div>
 
@@ -214,12 +270,62 @@ export function ProfilePage() {
                 </div>
               </div>
             ) : (
-              <div className="mt-4 rounded-[var(--r-sm)] border border-dashed border-[var(--border-strong)] p-6 text-center">
-                <p className="text-[14.5px] leading-[1.6] text-[var(--text-secondary)]">
-                  {status === 'PENDING'
-                    ? 'Yêu cầu liên kết đang chờ ban quản lý duyệt.'
-                    : 'Bạn chưa liên kết bất động sản nào. Liên kết để dùng các dịch vụ dành cho cư dân.'}
-                </p>
+              <div className="mt-4 rounded-[var(--r-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] p-5">
+                {/* Đang chờ duyệt KHÔNG phải trạng thái rỗng. Người dùng vừa
+                    khai mã căn hộ và gửi ảnh giấy tờ đi — hiện đúng cái họ đã
+                    gửi, chứ không phải ô gạch đứt nói "chưa có gì". */}
+                {awaitingReview && latestRecord ? (
+                  <div className="flex items-start gap-4">
+                    <span
+                      aria-hidden
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--r-sm)] border border-[var(--border-subtle)]"
+                      style={{ color: 'var(--waiting-user)' }}
+                    >
+                      <Clock className="h-5 w-5" strokeWidth={1.9} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[18px] font-semibold leading-[1.3] text-[var(--text-primary)]">
+                        {claimedApartment(latestRecord)}
+                      </p>
+                      <p className="mt-1 text-[14.5px] text-[var(--text-secondary)]">
+                        Đang chờ đơn vị xác thực đối chiếu giấy tờ.
+                      </p>
+                      <p className="mt-3 text-[12.5px] text-[var(--text-muted)]">
+                        Đã gửi {formatSubmitted(latestRecord.created_at)} ·{' '}
+                        {latestRecord.proof_image_urls?.length ?? 0} ảnh giấy tờ
+                      </p>
+                    </div>
+                  </div>
+                ) : rejected && latestRecord ? (
+                  <div className="flex items-start gap-4">
+                    <span
+                      aria-hidden
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--r-sm)] border border-[var(--border-subtle)]"
+                      style={{ color: 'var(--danger)' }}
+                    >
+                      <Clock className="h-5 w-5" strokeWidth={1.9} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[18px] font-semibold leading-[1.3] text-[var(--text-primary)]">
+                        {claimedApartment(latestRecord)}
+                      </p>
+                      <p className="mt-1 text-[14.5px] text-[var(--text-secondary)]">
+                        Đơn vị xác thực chưa đối chiếu được thông tin.
+                      </p>
+                      {latestRecord.reject_reason && (
+                        <p className="mt-2 text-[13.5px] text-[var(--text-muted)]">
+                          Lý do: {latestRecord.reject_reason}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ) : !linkStateKnown ? (
+                  <div className="h-14 animate-pulse rounded-[var(--r-sm)] bg-[var(--surface-overlay)]" />
+                ) : (
+                  <p className="py-1 text-center text-[14.5px] leading-[1.6] text-[var(--text-secondary)]">
+                    Bạn chưa liên kết bất động sản nào. Liên kết để dùng các dịch vụ dành cho cư dân.
+                  </p>
+                )}
               </div>
             )}
 
@@ -227,8 +333,16 @@ export function ProfilePage() {
               to="/apartment-link"
               className="press mt-4 inline-flex min-h-11 items-center gap-2 rounded-[var(--r-sm)] border border-[var(--border-strong)] px-4 text-[14px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
             >
-              <Plus className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-              Liên kết thêm bất động sản
+              {/* Đang chờ duyệt thì không còn gì để "xác minh" — mời họ làm
+                  lại việc vừa làm là cách nói rằng hồ sơ chưa được nhận. */}
+              {awaitingReview ? null : <Plus className="h-4 w-4" strokeWidth={2.2} aria-hidden />}
+              {/* Tên nút phải KHỚP tên trang đích và lời Agent nói.
+                  Trước đây ba chỗ gọi cùng một việc bằng ba tên: Agent bảo mở
+                  mục "Xác minh căn hộ", thanh bên không có mục nào tên vậy,
+                  còn nút này thì tên "Liên kết thêm bất động sản". Người dùng
+                  đi tìm đúng thứ được bảo, không thấy, rồi hỏi lại — và đó là
+                  nguyên văn chuyện đã xảy ra. */}
+              {awaitingReview ? 'Xem hồ sơ đã gửi' : rejected ? 'Gửi lại hồ sơ' : 'Xác minh căn hộ'}
             </Link>
           </section>
 
@@ -352,11 +466,11 @@ export function ProfilePage() {
                 {
                   label: 'Quan hệ cư dân – căn hộ',
                   done: linked,
-                  note: linked ? 'Ban quản lý đã duyệt' : 'Chưa liên kết bất động sản',
+                  note: linked ? 'Đơn vị xác thực đã duyệt' : 'Chưa liên kết bất động sản',
                 },
                 // TODO(backend): chưa có cờ xác minh riêng cho từng kênh.
-                // Không đánh dấu ✓ khi không có bằng chứng — đó chính là mâu
-                // thuẫn của bản cũ.
+                // Không đánh dấu ✓ khi không có bằng chứng — tài khoản legacy
+                // có thể có email từ trước khi OTP/Google Auth tồn tại.
                 { label: 'Số điện thoại', done: false, note: user.phone ? 'Đã khai, chưa xác minh' : 'Chưa khai' },
                 { label: 'Email', done: false, note: user.email ? 'Đã khai, chưa xác minh' : 'Chưa khai' },
                 { label: 'Danh tính (eKYC)', done: false, note: 'Chưa xác minh' },
@@ -397,20 +511,26 @@ export function ProfilePage() {
 
             <p className="mt-4 inline-flex items-center gap-2 text-[13px] text-[var(--text-muted)]">
               <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
-              Nguồn xác minh: hệ thống cư dân của ban quản lý
+              Nguồn xác minh: đơn vị xác thực chủ sở hữu
             </p>
-
-            {!recordsLoading && records.length > 0 && (
-              <p className="mt-3 text-[13.5px] text-[var(--text-secondary)]">
-                Bạn có {records.length} hồ sơ đã nộp.{' '}
-                <Link to="/apartment-link" className="font-medium text-[var(--agent)] hover:underline">
-                  Xem hồ sơ
-                </Link>
-              </p>
-            )}
           </section>
         </div>
       </div>
     </WorkspaceShell>
   )
+}
+
+function claimedApartment(record: VerificationRecord): string {
+  const claim = record.claimed_data
+  if (claim && 'apartment_code' in claim) {
+    return claim.residential_area ? `${claim.apartment_code} · ${claim.residential_area}` : claim.apartment_code
+  }
+  return 'Hồ sơ căn hộ'
+}
+
+/** Ngày gửi, dạng người Việt đọc được. Chuỗi ISO thô không nói gì với họ. */
+function formatSubmitted(iso: string): string {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return 'trước đó'
+  return at.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })
 }

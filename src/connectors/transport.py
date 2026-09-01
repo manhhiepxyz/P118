@@ -37,7 +37,7 @@ import httpx
 
 from src.common.enums import ErrorCode
 from src.common.results import StandardResult
-from src.connectors.base import Connector
+from src.connectors.base import Connector, ProviderCallContext
 
 
 class TransportConnector(Connector):
@@ -63,18 +63,24 @@ class TransportConnector(Connector):
     @property
     def tool_names(self) -> list[str]:
         # Executor đọc list này để biết 2 tool đều thuộc về Connector này
-        return ["register_vehicle", "book_parking"]
+        return ["register_vehicle", "book_parking", "change_parking_zone", "cancel_parking"]
 
     async def execute(
         self,
         tool_name: str,
         input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
     ) -> StandardResult:
         # Dispatch đến method phù hợp theo tool_name
         if tool_name == "register_vehicle":
             return await self._execute_register_vehicle(input_data)
         elif tool_name == "book_parking":
-            return await self._execute_book_parking(input_data)
+            return await self._execute_book_parking(input_data, context=context)
+        elif tool_name == "change_parking_zone":
+            return await self._execute_change_parking_zone(input_data, context=context)
+        elif tool_name == "cancel_parking":
+            return await self._execute_cancel_parking(input_data)
         else:
             # tool_name không thuộc danh sách → lỗi routing
             return StandardResult.fail(
@@ -145,9 +151,156 @@ class TransportConnector(Connector):
                 retryable=False,
             )
 
+    def is_retry_safe(self, tool_name: str) -> bool:
+        """Chỉ `change_parking_zone` chứng minh được là gọi lại an toàn.
+
+        Nó là phép GÁN: đặt zone thành `ZONE_B` hai lần vẫn ra đúng một chỗ ở
+        `ZONE_B`, cùng `booking_id`, cùng giá. Provider làm trọn trong một
+        transaction và trả về trạng thái cuối, không cộng dồn gì.
+
+        `book_parking` và `register_vehicle` thì KHÔNG: chúng tạo bản ghi mới,
+        và một lần gọi lại sau timeout có thể tạo bản ghi thứ hai — provider đã
+        ghi rồi mới timeout ở đường về là chuyện bình thường. Giữ fail-closed.
+        """
+        return tool_name in {"change_parking_zone", "cancel_parking"}
+
+    async def _execute_cancel_parking(self, input_data: dict[str, Any]) -> StandardResult:
+        """Huỷ một chỗ ĐÃ GIỮ → POST /api/parking/bookings/{id}/cancel.
+
+        Body rỗng và KHÔNG gửi thời điểm: mốc hoàn tiền do provider tính từ
+        `booking_date`. Nhận `now` từ caller là để khách tự chọn mình còn hạn
+        hay không — cùng lý do `amount` không bao giờ do caller khai.
+
+        Trả `refunded_amount` để tầng trên NÓI ĐƯỢC, không phải để tính lại.
+        """
+        booking_id = str(input_data.get("booking_id") or "").strip()
+        if not booking_id:
+            return StandardResult.fail(
+                error_code=ErrorCode.INVALID_INPUT, message="Thiếu booking_id để huỷ", retryable=False
+            )
+        try:
+            async with self._get_client() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/parking/bookings/{booking_id}/cancel", timeout=self.timeout
+                )
+                if not response.is_success:
+                    return self._handle_error_response(response)
+                data, env_error = self._extract_payload(response.json())
+                if env_error is not None:
+                    return self._build_envelope_failure(env_error)
+                thieu = [k for k in ("booking_id", "booking_status") if k not in data]
+                if thieu:
+                    return StandardResult.fail(
+                        error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                        message=f"Thiếu {', '.join(thieu)} trong response",
+                        retryable=False,
+                    )
+                return StandardResult.ok(
+                    {
+                        "booking_id": data["booking_id"],
+                        "booking_status": data["booking_status"],
+                        "refunded_amount": int(data.get("refunded_amount") or 0),
+                        "refund_denied": bool(data.get("refund_denied")),
+                    }
+                )
+        except httpx.TimeoutException:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_TIMEOUT, message="Parking service timeout", retryable=True
+            )
+        except httpx.ConnectError:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_UNAVAILABLE, message="Không thể kết nối Parking service", retryable=True
+            )
+
+    async def _execute_change_parking_zone(
+        self,
+        input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
+    ) -> StandardResult:
+        """Đổi khu cho một chỗ ĐÃ GIỮ → POST /api/parking/bookings/{id}/zone.
+
+        Input: {"booking_id": "BOOK-019", "parking_zone": "ZONE_B"}
+
+        Một lời gọi, không phải huỷ-rồi-đặt. Provider làm trọn trong một
+        transaction, nên khu mới hết chỗ thì chỗ cũ còn nguyên — khách không
+        bao giờ rơi vào khoảng trống giữa hai lời gọi.
+
+        `booking_id` đi trong ĐƯỜNG DẪN, không trong body: nó định danh tài
+        nguyên. Body chỉ mang khu mới; `amount` do provider tính lại theo khu và
+        trả về, không bao giờ do caller khai.
+
+        Trả về CÙNG 5 field canonical với `book_parking`, nên `pay_fee` resolve
+        InputRef y hệt dù chỗ đỗ đến từ đường nào.
+        """
+        booking_id = str(input_data.get("booking_id") or "").strip()
+        if not booking_id:
+            return StandardResult.fail(
+                error_code=ErrorCode.INVALID_INPUT,
+                message="Thiếu booking_id để đổi khu",
+                retryable=False,
+            )
+        try:
+            async with self._get_client() as client:
+                headers: dict[str, str] = {}
+                if context is not None and context.workflow_id and context.task_id:
+                    headers = {
+                        "X-P118-Workflow-ID": context.workflow_id,
+                        "X-P118-Task-ID": context.task_id,
+                    }
+                request_options: dict[str, Any] = {
+                    "json": {"parking_zone": input_data.get("parking_zone")},
+                    "timeout": self.timeout,
+                }
+                if headers:
+                    request_options["headers"] = headers
+                response = await client.post(
+                    f"{self.base_url}/api/parking/bookings/{booking_id}/zone",
+                    **request_options,
+                )
+
+                if response.is_success:
+                    data, env_error = self._extract_payload(response.json())
+                    if env_error is not None:
+                        return self._build_envelope_failure(env_error)
+                    required_keys = ["booking_id", "parking_zone", "booking_date", "amount", "currency"]
+                    missing = [k for k in required_keys if k not in data]
+                    if missing:
+                        return StandardResult.fail(
+                            error_code=ErrorCode.UNKNOWN_EXTERNAL_ERROR,
+                            message=f"Thiếu {', '.join(missing)} trong response",
+                            retryable=False,
+                        )
+                    ket_qua = {k: data[k] for k in required_keys}
+                    # Số tiền provider đã hoàn lại. Không bắt buộc — một
+                    # provider chưa hỗ trợ hoàn tiền vẫn đổi khu được, và mặc
+                    # định 0 nói đúng điều đó thay vì để tầng trên phải đoán.
+                    ket_qua["refunded_amount"] = int(data.get("refunded_amount") or 0)
+                    return StandardResult.ok(data=ket_qua)
+
+                # Khu mới hết chỗ là ca phổ biến nhất ở đây, và mã phải là
+                # `NO_AVAILABILITY` canonical — vòng sửa lỗi đọc MÃ, không đọc
+                # câu chữ.
+                return self._handle_error_response(response)
+
+        except httpx.TimeoutException:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_TIMEOUT,
+                message="Parking service timeout",
+                retryable=True,
+            )
+        except httpx.ConnectError:
+            return StandardResult.fail(
+                error_code=ErrorCode.SERVICE_UNAVAILABLE,
+                message="Không thể kết nối Parking service",
+                retryable=True,
+            )
+
     async def _execute_book_parking(
         self,
         input_data: dict[str, Any],
+        *,
+        context: ProviderCallContext | None = None,
     ) -> StandardResult:
         """Đặt chỗ đỗ xe → POST /api/parking/bookings.
 
@@ -169,10 +322,18 @@ class TransportConnector(Connector):
         try:
             async with self._get_client() as client:
                 # --- Gọi HTTP: payload nguyên vẹn từ TaskPlan ---
+                headers: dict[str, str] = {}
+                if context is not None and context.workflow_id and context.task_id:
+                    headers = {
+                        "X-P118-Workflow-ID": context.workflow_id,
+                        "X-P118-Task-ID": context.task_id,
+                    }
+                request_options: dict[str, Any] = {"json": input_data, "timeout": self.timeout}
+                if headers:
+                    request_options["headers"] = headers
                 response = await client.post(
                     f"{self.base_url}/api/parking/bookings",  # endpoint cố định
-                    json=input_data,
-                    timeout=self.timeout,
+                    **request_options,
                 )
 
                 if response.is_success:
