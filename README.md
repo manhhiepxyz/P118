@@ -12,24 +12,34 @@ Core value: **goal-oriented multi-service orchestration** + **failure-aware exec
 
 ## Problem
 
-Trong hệ sinh thái có nhiều dịch vụ, người dùng thường phải tự:
+Một mục tiêu của người dùng thường cắt ngang **nhiều đơn vị cung cấp không quen
+nhau** — ban quản lý bãi xe, đội bảo trì, đơn vị chuyển nhà, bộ phận kinh doanh.
+Không ai đứng giữa nối họ lại, nên người dùng phải tự:
 
-- Tìm đúng service theo đúng thứ tự
+- Tìm đúng đơn vị theo đúng thứ tự
 - Nhập lại dữ liệu ở từng bước
-- Theo dõi trạng thái riêng lẻ
+- Theo dõi trạng thái riêng lẻ ở từng nơi
 - Xử lý failure mà không có hỗ trợ
 
 **Business scenario (mô phỏng):**
 
 ```
-Cư dân mới chuyển vào VinHomes
-→ Register Resident
-→ Register Vehicle
-→ Book Parking
-→ Pay Fee
+Một cư dân mới chuyển vào
+→ Register Resident   (hồ sơ cư dân)
+→ Register Vehicle    ─┐ ban quản lý bãi xe
+→ Book Parking        ─┘
+→ Pay Fee             (cổng thanh toán)
 ```
 
-Đây là business scenario mô phỏng cho bài toán multi-service orchestration. Project không kết nối production VinHomes API.
+Đây chỉ là **một** trong nhiều đường đi. Hệ thống phục vụ 8 dịch vụ thuộc 5 đơn
+vị độc lập (xem [Features](#features)) — mỗi đơn vị có hàng đợi duyệt riêng và
+chỉ quyết định được việc của mình.
+
+> **Bối cảnh.** Dự án là nền tảng điều phối **đa nhà cung cấp** cho dịch vụ cư
+> dân và bất động sản. Nó không phục vụ riêng một hệ sinh thái nào và không kết
+> nối API production của bất kỳ đơn vị nào. Tên dự án bất động sản xuất hiện
+> trong sample query là **dữ liệu demo** (`src/common/projects.py`), có mặt để
+> câu tiếng Việt của người dùng có thứ để khớp.
 
 ---
 
@@ -84,24 +94,33 @@ Pay Fee (dùng payment_info)
     ↓ receipt
 ```
 
-**Planner tool allowlist:**
+**Planner tool allowlist** — nguồn sự thật: `AGENT_REACHABLE_TOOLS` trong
+[`src/common/agent_tool_policy.py`](src/common/agent_tool_policy.py), tính bằng
+`PROVIDER_TOOLS - AGENT_FORBIDDEN_TOOLS`. Không phải một danh sách viết tay:
 
-- `search_properties`
 - `schedule_property_viewing`
 - `register_property_interest`
 - `create_maintenance_request`
 - `schedule_move`
-- `register_resident`
 - `register_vehicle`
 - `book_parking`
+- `book_shuttle`
 - `pay_fee`
 
-Compensation actions (`cancel_resident`, `refund_payment`...) không xuất hiện trong Planner plan — chỉ được hệ thống nội bộ gọi khi rollback.
+**Có connector nhưng Agent KHÔNG chạm được** (`AGENT_FORBIDDEN_TOOLS`):
 
-Luồng tìm nhà là read-only: `search_properties` chỉ trả gợi ý. Sau khi người
-dùng tự chọn `property_id`, họ có thể chạy `schedule_property_viewing` hoặc
-`register_property_interest`. Hai task độc lập có thể chạy song song.
-Agent không tự đặt cọc, ký hợp đồng hoặc hoàn tất giao dịch thuê/mua.
+| Tool                                          | Vì sao đóng                                                                                                          |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `register_resident`                           | Đăng ký / liên kết hồ sơ cư dân xảy ra ngoài Agent (đường admin/provider); giao diện không có chỗ nhập ba ô nó sẽ hỏi |
+| `search_properties`                           | Quyết định sản phẩm — listing là chức năng marketplace, không phải tác vụ của Agent                                  |
+| `change_parking_zone`                         | Thao tác SỬA trên chỗ đã giữ; chỉ có nghĩa khi đã có `booking_id` thật từ bước trước                                 |
+| `cancel_*` (viewing, parking, maintenance, move, shuttle) | Cùng lý do: mã định danh chỉ có thật khi đến từ một bước đã chạy. Để model tự viết ra là để nó huỷ lịch của người khác |
+
+Ràng buộc nằm ở tầng chính sách, **không** ở prompt — đã quan sát trên model
+thật: nó tự thêm một tool mà prompt đã dặn không dùng.
+
+Đường sửa lỗi và đường huỷ dựng task từ **kết quả đã chạy**, không từ câu người
+dùng gõ. Agent không tự đặt cọc, ký hợp đồng hoặc hoàn tất giao dịch thuê/mua.
 Bảo trì và chuyển nhà chỉ dành cho tài khoản cư dân đã liên kết; hai yêu cầu
 độc lập có thể được Executor chạy song song.
 
@@ -111,17 +130,42 @@ Bảo trì và chuyển nhà chỉ dành cho tài khoản cư dân đã liên k�
 
 ## Features
 
+**Orchestration**
+
 - Natural-language goal input — user đưa mục tiêu bằng tiếng Việt
 - AI-generated TaskPlan với deterministic validation (schema, allowlist, dependency, cycle detection)
 - Dependency-aware execution — output bước trước tự động là input bước sau
-- Persistent workflow state (PostgreSQL)
-- Failure recovery — Hero REPLAN scenario (`NO_AVAILABILITY` → alternative)
-- Policy Engine — phân loại action thành `AUTO_ALLOWED` / `REQUIRES_APPROVAL` / `DENIED`
-- HITL — agent dừng chờ user approve với action `REQUIRES_APPROVAL`
-- Retry, Saga Compensation, Idempotency
-- React Workflow Timeline; WebSocket realtime là hạng mục Demo Day, chưa triển khai
+- Persistent workflow state (PostgreSQL) — resume được sau restart
+- Failure recovery — Hero REPLAN scenario (`NO_AVAILABILITY` → alternative), tối đa 1 lượt sửa
+- Retry, Saga Compensation, Idempotency key theo từng lời gọi provider
 
-> Policy Engine, HITL, Saga Compensation và React UI thuộc Demo Day Final MVP. Gate 2 tập trung vào core orchestration và Live URL.
+**Hai cổng người thật, KHÁC nhau**
+
+- **HITL — người dùng duyệt.** Policy Engine phân loại action thành
+  `AUTO_ALLOWED` / `REQUIRES_APPROVAL` / `DENIED`; tiền là quyết định của khách.
+- **Cổng đơn vị cung cấp.** `SERVICE_GATED_TOOLS` — một chỗ đỗ, một buổi bảo
+  trì, một chuyến chuyển nhà là cam kết ở phía đơn vị, nên đơn vị duyệt trước
+  khi hệ thống gọi ra ngoài. Mỗi dòng chờ duyệt có **chủ sở hữu** cụ thể
+  (`service_provider_id`, xem `src/orchestration/provider_directory.py`) và cổng
+  quyết định fail-closed: không phải đơn vị của dòng đó thì nhận 404, không phải
+  403 — 403 xác nhận dòng ấy có tồn tại.
+
+**Sau khi việc đã xong**
+
+- Thẻ kết quả dựng **một thẻ cho mỗi dịch vụ** có mốc thời gian (ngày giờ, điểm
+  gặp, người liên hệ, tải `.ics` riêng từng buổi).
+- **Không có nút đổi/huỷ.** Mỗi dịch vụ đều cần một lượt xác nhận của đơn vị và
+  đơn vị gọi điện để làm việc ấy, nên đổi/huỷ đi bằng chính cuộc gọi đó. Đường
+  huỷ phía sau (`POST /support-requests` → đơn vị duyệt →
+  `run_approved_requests` gọi `cancel_*` thật) vẫn còn nguyên và còn test phủ —
+  một "đã huỷ" trên màn hình mà lịch bên kia vẫn nằm nguyên là lỗi mà cả module
+  `src/orchestration/support_request.py` được viết ra để chặn.
+
+**Giao diện**
+
+- React SPA (`frontend/`) — workspace hội thoại, trang chi tiết yêu cầu, hàng
+  đợi duyệt cho đơn vị, màn giám sát cho admin. Poll trạng thái; WebSocket
+  realtime chưa triển khai.
 
 ---
 
@@ -147,39 +191,62 @@ Completed tasks không bị chạy lại. Data propagation từ các bước tr�
 ├── src/
 │   ├── agents/              # LangGraph Agent
 │   │   ├── graph.py         # State graph (nodes + edges)
-│   │   ├── state.py         # WorkflowState schema
-│   │   ├── nodes/           # planner, executor, hitl, compensator
-│   │   └── tools/           # Agent tools (@tool)
+│   │   ├── state.py         # AgentState schema
+│   │   ├── planner.py       # LLM Planner
+│   │   ├── validator.py     # TaskPlan validation (deterministic)
+│   │   ├── fast_lane.py     # Đường tắt cho goal đã đủ dữ kiện
+│   │   ├── prompts/         # Prompt của từng agent
+│   │   ├── nodes/ tools/
+│   │   └── *_intent.py      # Đọc ý định người dùng ở từng loại lượt chờ
+│   ├── common/              # Tầng DƯỚI CÙNG — mọi tầng khác dựng trên nó
+│   │   ├── task_plan.py     # `AllowedTool`, schema TaskPlan
+│   │   ├── agent_tool_policy.py  # Agent được phép chạm tool nào
+│   │   ├── policy.py        # AUTO_ALLOWED / REQUIRES_APPROVAL / DENIED
+│   │   └── schedule_policy.py, field_parsers.py, results.py, ...
+│   ├── connectors/          # MỘT connector cho MỖI dịch vụ ngoài
+│   │   ├── base.py          # ABC: tool_names, execute, idempotency_key_for
+│   │   ├── resident.py transport.py payment.py property.py
+│   │   ├── resident_services.py tour.py shuttle.py consultation.py
+│   │   └── vnpay.py
+│   ├── executor/            # Chạy TaskPlan theo dependency
+│   ├── orchestration/       # Tầng quyết định (KHÔNG gọi LLM)
+│   │   ├── demo_service.py       # Vòng đời một yêu cầu, resume
+│   │   ├── deps.py               # build_connectors() — nơi ĐĂNG KÝ duy nhất
+│   │   ├── service_approval.py   # Cổng duyệt của đơn vị cung cấp
+│   │   ├── provider_directory.py # tool → đơn vị chịu trách nhiệm
+│   │   ├── provider_gateway.py   # Mọi lời gọi ra ngoài đi qua đây
+│   │   ├── support_request.py    # "Đồng ý cho huỷ" → gọi cancel_* thật
+│   │   ├── payment_approval.py compensation.py proposal*.py
+│   │   └── provider_selection.py, provider_matching.py, ...
 │   ├── api/                 # FastAPI routes
-│   │   └── routes.py
-│   ├── services/            # Business logic
-│   │   └── mock/            # Mock services: Resident, Transport, Payment
-│   ├── models/              # Pydantic schemas
+│   │   ├── routes.py                  # Đường của người dùng
+│   │   ├── service_approval_routes.py # Đường của đơn vị cung cấp
+│   │   ├── admin_routes.py, auth*.py, verification_routes.py, ...
+│   ├── db/                  # PostgreSQL: schema.sql, migrations, repository
+│   ├── services/mock/       # Mock provider (in-process, dùng chung DB pool)
+│   ├── mock/                # Mock provider chạy như service riêng (routers/)
+│   ├── models/schemas.py    # Pydantic schema của API — contract với frontend
+│   ├── monitoring/          # LLM trace, chi phí, usage
 │   ├── config.py
 │   └── main.py
-├── tests/
-│   ├── test_agents/
-│   └── test_api/
-├── scripts/                 # AI Logging Hooks
-│   ├── log_hook.py
-│   ├── log_manual.py
-│   ├── submit_log.py
-│   └── setup_hooks.sh
-├── docs/
-│   ├── architecture_diagram.md
-│   └── gate1/
-│       ├── brief.md
-│       ├── prd.md
-│       └── wireframe.md
-├── eval/
-│   └── results/
-├── presentation/
-├── .ai-log/                 # AI usage logs (auto-generated)
-├── .github/workflows/       # CI/CD
+├── frontend/                # React + Vite + Tailwind
+│   └── src/
+│       ├── pages/           # WorkflowPage, JourneyWorkspacePage, ProviderReviewPage, ...
+│       ├── components/      # workspace/ (ResultSummary, StepList, JourneyCanvas), journey/
+│       └── lib/             # agentApi.ts (client), types.ts (contract), status.ts
+├── tests/                   # ~4.6k test
+│   ├── test_db/             # Cần PostgreSQL thật (TEST_DATABASE_URL)
+│   ├── test_api/ test_agents/ test_orchestration/ test_integration/
+│   ├── test_mock/ test_demo/ unit/ matrix/ e2e/
+│   └── fakes/ fixtures/     # Fake LLM, fake connector — test KHÔNG gọi LLM thật
+├── scripts/                 # AI Logging Hooks + tiện ích vận hành
+├── docs/                    # RUNBOOK, SLO, architecture_diagram, gate1/
+├── eval/results/
+├── ARCHITECTURE.md JOURNAL.md AGENTS.md
+├── .github/workflows/       # CI: ruff + pytest + build frontend + guard không-skip
 ├── .claude/ .codex/ .cursor/ .gemini/   # Per-tool hook configs
-├── JOURNAL.md
 ├── Dockerfile
-└── docker-compose.yml
+└── docker-compose.yml       # postgres + migrate + backend + 9 mock provider
 ```
 
 ---
@@ -538,7 +605,10 @@ ruff format --check src/ tests/
 
 ### Debug lỗi liên tầng
 
-Khi test fail, xem [docs/integration-debug-guide.md](docs/integration-debug-guide.md) để phân loại lỗi thuộc Planner / Executor / Connector / Provider / DB / Docker.
+Khi test fail, phân loại lỗi theo tầng trước khi sửa: Planner (kế hoạch sai) →
+Executor (chạy sai thứ tự / thiếu dữ kiện) → Connector (đường dẫn, tên field) →
+Provider (mock trả gì) → DB (schema, migration) → Docker (cổng, container).
+Đọc log của đúng tầng đầu tiên hỏng — các tầng sau thường chỉ là hệ quả.
 
 ---
 
@@ -562,9 +632,11 @@ docker compose logs -f mock-resident
 - [Project Brief](docs/gate1/brief.md)
 - [PRD](docs/gate1/PRD.md)
 - [Wireframe / UI Flow](docs/gate1/wireframe.md)
-- [Architecture Diagram](docs/architecture_diagram.md)
+- [Architecture](ARCHITECTURE.md) · [Architecture Diagram](docs/architecture_diagram.md)
+- [Runbook](docs/RUNBOOK.md) · [SLO](docs/SLO.md)
+- [Đề xuất đơn vị cung cấp](docs/DE_XUAT_DON_VI_CUNG_CAP.md)
 - [Weekly Journal](JOURNAL.md)
-- [Evaluation](eval/results/report.md)
+- [Evaluation](eval/results/report.md) · [Evaluation report (chi tiết)](docs/P118_EVALUATION_REPORT.md)
 
 ---
 
