@@ -71,3 +71,13 @@ out/
 # của dự án. `.claude/settings.json` thì VẪN theo dõi, vì đó là thoả thuận
 # chung của cả nhóm.
 .claude/skills/
+
+# Kết quả và script chạy tay ở GỐC repo. Hai file đã từng bị commit nhầm:
+# `e2e_wf.txt` (36 byte, đúng một workflow_id của một lượt chạy local) và
+# `e2e_shuttle_check.py` (script smoke tự viết, hardcode tài khoản localhost).
+#
+# Cùng một họ với `*token*.txt` phía trên: chúng sinh ra trong lúc thử tay, và
+# lần sau sẽ mang tên khác. E2E THẬT của dự án nằm ở `tests/e2e/` — một script
+# ở gốc repo là bản sao không ai chạy và không ai bảo trì.
+/e2e_*.txt
+/e2e_*.py
