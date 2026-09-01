@@ -9,7 +9,16 @@ on:
 jobs:
   lint-and-test:
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 20
+    # 45, không phải 20. Con số 20 đặt lúc đầu dựa trên một ước lượng SAI về
+    # thời gian chạy, và nó đã cắt job giữa lượt pytest (huỷ ở 50%). Ngân sách
+    # này phải bao được: cài dependency, `npm ci` + build frontend, chờ
+    # Postgres, ruff, và một lượt pytest 4.5k test trên runner DÙNG CHUNG của
+    # BTC — nơi máy có thể đang chạy job của team khác cùng lúc.
+    #
+    # Nó là hàng rào chống TREO, không phải chỉ tiêu tốc độ: mục đích duy nhất
+    # là không để một job hỏng chiếm runner 6 tiếng (mặc định của GitHub).
+    # Đặt sát quá thì chính hàng rào ấy thành nguyên nhân làm CI đỏ.
+    timeout-minutes: 45
 
     # PostgreSQL ephemeral cho job này. Không có credential thật ở đây:
     # container chỉ sống trong thời gian job chạy, chỉ nghe trên localhost của
@@ -137,17 +146,32 @@ jobs:
         run: ruff format --check src/ tests/
 
       - name: Run tests
-        run: pytest tests/ -v --tb=short
+        # MỘT lượt chạy, giữ lại output cho step guard phía dưới.
+        #
+        # Trước đây step này và step guard mỗi cái chạy lại TOÀN BỘ suite —
+        # 4.5k test hai lần, chỉ để lần thứ hai đếm chữ "skipped" trong dòng
+        # tổng kết. Một lượt mất ~4 phút trên máy dev và lâu hơn nhiều trên
+        # runner dùng chung của BTC; nhân đôi là đủ để job bị `timeout-minutes`
+        # cắt giữa chừng (đo được: huỷ ở 50% của lượt ĐẦU).
+        #
+        # `set -o pipefail`: không có nó thì `tee` nuốt mã thoát của pytest và
+        # một suite đỏ vẫn cho step này xanh — đúng loại lỗi mà cả file này tồn
+        # tại để chặn.
+        run: |
+          set -o pipefail
+          pytest tests/ -v --tb=short | tee /tmp/pytest_output.txt
 
       - name: Guard — không được có test bị skip
         # Skip âm thầm là rủi ro lớn nhất của suite này: thiếu DB thì toàn bộ
         # tầng PostgreSQL không được kiểm mà CI vẫn xanh.
+        #
+        # Đọc lại output của step trên, KHÔNG chạy lại. Một lượt chạy thứ hai
+        # không kiểm thêm được gì: cùng suite, cùng môi trường, cùng kết quả.
         run: |
-          pytest tests/ -q --tb=no -p no:cacheprovider > /tmp/pytest_summary.txt 2>&1 || true
-          tail -5 /tmp/pytest_summary.txt
-          if grep -qE "[0-9]+ skipped" /tmp/pytest_summary.txt; then
+          tail -5 /tmp/pytest_output.txt
+          if grep -qE "[0-9]+ skipped" /tmp/pytest_output.txt; then
             echo "::error::Có test bị skip trong CI. Mọi test phải chạy thật."
-            grep -E "[0-9]+ skipped" /tmp/pytest_summary.txt
+            grep -E "[0-9]+ skipped" /tmp/pytest_output.txt
             exit 1
           fi
           echo "Không có test nào bị skip."
