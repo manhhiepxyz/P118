@@ -89,7 +89,11 @@ async def _handle_gateway_callback(params: dict[str, str]) -> tuple[str, dict[st
 
 @router.get("/return")
 async def vnpay_return(http_request: Request) -> RedirectResponse:
-    """Trình duyệt user quay về sau trang VNPay. CHỈ hiển thị — không ghi tiền."""
+    """Trình duyệt user quay về sau trang VNPay.
+    
+    Đóng vai trò dự phòng (fallback) để chốt thanh toán nếu IPN tới trễ hoặc
+    chưa được cấu hình đúng trên Merchant Sandbox, vì chữ ký đã được xác thực.
+    """
     params = {k: v for k, v in http_request.query_params.items()}
     outcome, payment = await _handle_gateway_callback(params)
 
@@ -97,7 +101,26 @@ async def vnpay_return(http_request: Request) -> RedirectResponse:
     if payment is None or not payment.get("workflow_id"):
         return RedirectResponse(f"{frontend}/payment/result?vnp_status={outcome}")
 
-    workflow_id = payment["workflow_id"]
+    workflow_id = str(payment["workflow_id"])
+
+    # Fallback xử lý giao dịch nếu IPN chưa kịp chạy
+    if outcome == "success" and "vnp_Amount" in params:
+        repository = await acquire_repository()
+        pool = repository._pool  # noqa: SLF001
+        try:
+            parsed_amount = int(params["vnp_Amount"]) // 100
+            confirmation = await confirm_pending_payment(pool, payment_id=payment["payment_id"], amount_vnd=parsed_amount)
+            
+            if confirmation == "CONFIRMED":
+                await resume_vnpay_after_gateway(workflow_id)
+                from src.api.routes import _DEMO_JOBS, request_fresh_answer
+                job = _DEMO_JOBS.get(workflow_id)
+                request_fresh_answer(workflow_id, job=job)
+        except Exception:
+            logger.exception("Lỗi khi xử lý fallback payment tại Return URL: %s", payment["payment_id"])
+        finally:
+            await pool.close()
+
     return RedirectResponse(f"{frontend}/payment/result?workflow_id={workflow_id}&vnp_status={outcome}")
 
 
