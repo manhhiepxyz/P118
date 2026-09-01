@@ -1,25 +1,30 @@
-import { useState } from 'react'
-import {
-  CalendarPlus,
-  Check,
-  Clock,
-  MapPin,
-  MessageCircle,
-  Navigation,
-  Phone,
-  RefreshCw,
-  XCircle,
-} from 'lucide-react'
+import { CalendarPlus, Check, Clock, MessageCircle, Navigation, Phone } from 'lucide-react'
 
-import { createSupportRequest } from '../../lib/agentApi'
 import type { AgentTaskResult } from '../../lib/types'
 
 /**
- * Kết quả cuối cùng của một hành trình đã xong, trình bày cho NGƯỜI DÙNG.
+ * Kết quả của MỘT dịch vụ đã xong, trình bày cho NGƯỜI DÙNG.
  *
- * Trang này trả lời sáu câu hỏi họ thật sự có sau khi agent chạy xong: đi đâu ·
- * khi nào · xem gì · gặp ai · chuẩn bị gì · đổi/huỷ được không. Trạng thái kỹ
- * thuật của agent lùi xuống cuối.
+ * MỘT dịch vụ, không phải một yêu cầu. Một yêu cầu có thể chứa nhiều dịch vụ,
+ * và nhiều dịch vụ trong số đó có mốc thời gian riêng — đúng ca mà
+ * `ScheduleConflictAction` (`task_a`/`task_b`) sinh ra để xử lý. `WorkflowPage`
+ * dựng MỘT thẻ cho MỖI bước như vậy; thành phần này không biết và không cần
+ * biết có bao nhiêu thẻ bên cạnh nó.
+ *
+ * Thẻ trả lời năm câu hỏi khách thật sự có về dịch vụ ấy: đi đâu · khi nào ·
+ * xem gì · gặp ai · chuẩn bị gì. Trạng thái kỹ thuật của agent lùi xuống cuối
+ * trang, không nằm ở đây.
+ *
+ * KHÔNG có nút đổi/huỷ, và đó là chủ ý. Mỗi dịch vụ đều cần một lượt xác nhận
+ * của đơn vị, và đơn vị gọi cho khách để làm việc ấy — nên đường ngắn nhất để
+ * đổi hay huỷ là chính cuộc gọi đó. Một cặp nút gửi vào hàng đợi rồi chờ duyệt
+ * là con đường DÀI hơn cho cùng một kết quả, và với "đổi lịch" thì nó còn
+ * không dẫn tới đâu: `support_request._ACTIONS` cố ý không có `AMEND` vì "đồng
+ * ý cho đổi" chưa nói đổi sang lúc nào.
+ *
+ * Dòng nhắc "bên dịch vụ sẽ liên hệ" KHÔNG ở đây mà ở `WorkflowPage`, dưới cả
+ * nhóm thẻ: nó nói về mọi đơn vị trong yêu cầu. Đặt trong thẻ thì với ba dịch
+ * vụ nó lặp ba lần, và mỗi lần đọc như thể chỉ đơn vị của thẻ ấy sẽ gọi.
  *
  * Nhóm thông tin theo NHÃN do backend đặt, KHÔNG theo tên tool — giữ đúng ranh
  * giới đã định: giao diện không suy diễn nghiệp vụ từ `tool`. Nhãn lạ rơi vào
@@ -38,9 +43,6 @@ const PHONE_LABELS = new Set(['Số điện thoại', 'Điện thoại'])
 
 interface Props {
   task: AgentTaskResult
-  journeyTitle: string
-  /** Yêu cầu chứa bước này — cần để ghim hồ sơ vào đúng hàng đợi. */
-  workflowId: string
 }
 
 /** "2026-10-05 10:00" → nhãn tiếng Việt. Không parse được thì trả nguyên văn. */
@@ -58,8 +60,20 @@ function readableWhen(raw: string): { day: string; time: string } | null {
   return { day: day.charAt(0).toUpperCase() + day.slice(1), time: hm ?? '' }
 }
 
-/** Tệp .ics dựng ngay ở trình duyệt — không cần backend, và là hành động THẬT. */
-function downloadIcs(title: string, raw: string) {
+/**
+ * Tệp .ics dựng ngay ở trình duyệt — không cần backend, và là hành động THẬT.
+ *
+ * `id` đi vào TÊN TỆP. Một yêu cầu có thể chứa hai buổi hẹn (đúng ca mà
+ * `ScheduleConflictAction` sinh ra để xử lý), và khách tải cả hai: tên tệp cố
+ * định làm trình duyệt lưu thành `... (1).ics`, hai mốc khác nhau nằm dưới hai
+ * cái tên không nói được cái nào là cái nào.
+ *
+ * Tên tệp cũ là `p118-lich-tham-quan.ics` — chữ cứng của MỘT dịch vụ, đúng lỗi
+ * `INT-003` mà cả file này được viết lại để tránh. Nó lọt qua bài kiểm vì dấu
+ * gạch nối: `test_the_result_card_never_names_one_service` tìm `"tham quan"`
+ * có dấu cách.
+ */
+function downloadIcs(title: string, raw: string, id: string) {
   const match = raw.match(/(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/)
   if (!match) return
   const [, y, m, d, hh = '09', mm = '00'] = match
@@ -80,7 +94,7 @@ function downloadIcs(title: string, raw: string) {
   const url = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' }))
   const link = document.createElement('a')
   link.href = url
-  link.download = 'p118-lich-tham-quan.ics'
+  link.download = `p118-${id}.ics`
   link.click()
   URL.revokeObjectURL(url)
 }
@@ -109,58 +123,7 @@ function Block({ title, children }: { title: string; children: React.ReactNode }
   )
 }
 
-export function ResultSummary({ task, journeyTitle, workflowId }: Props) {
-  const [note, setNote] = useState<string | null>(null)
-  const [dangGui, setDangGui] = useState<'AMEND' | 'CANCEL' | null>(null)
-
-  /**
-   * Gửi lời nhờ tới đơn vị. KHÔNG tự đổi, KHÔNG tự huỷ.
-   *
-   * Hai nút này từng chỉ hiện một dòng chữ bảo người dùng đi gõ chat. Ô chat ấy
-   * đã bị gỡ, và kể cả khi còn thì nó cũng không dẫn tới đâu: không có tool nào
-   * đổi hay huỷ một việc đã xong.
-   *
-   * Câu trả về là câu backend viết. Không dựng câu ở đây: màn hình này không
-   * biết đơn vị sẽ trả lời gì, và một câu lạc quan ("đã huỷ nhé") sẽ sai ngay
-   * khi đơn vị từ chối.
-   */
-  /**
-   * Nói TRƯỚC kết cục tiền, không phải sau.
-   *
-   * Luật hoàn tiền là tất định (huỷ trước 24 giờ thì được hoàn), nên hệ thống
-   * BIẾT kết cục ngay lúc khách chưa bấm. Giấu nó tới sau khi đơn vị duyệt là
-   * để họ bấm một nút mà không biết nó tốn bao nhiêu.
-   *
-   * `null` = không có gì để cảnh báo: chưa tới hạn, hoặc không đọc được mốc.
-   * Không đoán theo hướng đáng sợ hơn — một cảnh báo sai làm người ta bỏ một
-   * việc họ hoàn toàn làm được.
-   */
-  function loiCanhBao(): string | null {
-    if (!whenRaw) return null
-    const moc = Date.parse(whenRaw.replace(' ', 'T'))
-    if (Number.isNaN(moc)) return null
-    if (moc - Date.now() >= 24 * 60 * 60 * 1000) return null
-    return 'Còn dưới 24 giờ nữa tới giờ hẹn. Huỷ lúc này vẫn được, nhưng khoản đã thanh toán sẽ không được hoàn.'
-  }
-
-  async function nho(kind: 'AMEND' | 'CANCEL') {
-    if (dangGui) return
-    if (kind === 'CANCEL') {
-      const canh_bao = loiCanhBao()
-      if (canh_bao && !window.confirm(`${canh_bao}\n\nBạn vẫn muốn gửi yêu cầu huỷ?`)) return
-    }
-    setDangGui(kind)
-    setNote(null)
-    try {
-      const res = await createSupportRequest(workflowId, { task_id: task.task_id, kind })
-      setNote(res.message)
-    } catch (e) {
-      setNote(e instanceof Error ? e.message : 'Chưa gửi được yêu cầu. Bạn thử lại giúp mình nhé.')
-    } finally {
-      setDangGui(null)
-    }
-  }
-
+export function ResultSummary({ task }: Props) {
   const details = task.details ?? []
   const byLabel = new Map(details.map((detail) => [detail.label, detail.value]))
 
@@ -241,10 +204,14 @@ export function ResultSummary({ task, journeyTitle, workflowId }: Props) {
               ))}
           </dl>
 
+          {/* Tên sự kiện trong `.ics` là tên của CHÍNH buổi hẹn này, không
+              phải tiêu đề của cả yêu cầu. Một yêu cầu hai buổi hẹn từng đẩy
+              MỘT tiêu đề chung xuống đây, nên hai mốc vào lịch điện thoại dưới
+              cùng một cái tên — và đó là tên của một trong hai dịch vụ. */}
           <div className="mt-7 flex flex-wrap gap-2.5">
             <button
               type="button"
-              onClick={() => whenRaw && downloadIcs(journeyTitle, whenRaw)}
+              onClick={() => whenRaw && downloadIcs(task.title, whenRaw, task.task_id)}
               disabled={!whenRaw}
               className="press inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] px-4 text-[14px] font-semibold disabled:opacity-40"
               style={{ backgroundColor: 'var(--agent)', color: 'var(--surface-base)' }}
@@ -252,35 +219,7 @@ export function ResultSummary({ task, journeyTitle, workflowId }: Props) {
               <CalendarPlus className="h-4 w-4" strokeWidth={2.2} aria-hidden />
               Thêm vào lịch
             </button>
-
-            {/* TODO(backend): đổi/huỷ chưa có endpoint. Hiện chỉ báo cho người
-                dùng biết cách làm, không giả vờ đã thực hiện. */}
-            <button
-              type="button"
-              onClick={() => void nho('AMEND')}
-              disabled={dangGui !== null}
-              className="press inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border border-[var(--border-strong)] px-4 text-[14px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
-            >
-              <RefreshCw className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-              {dangGui === 'AMEND' ? 'Đang gửi…' : 'Đổi lịch'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void nho('CANCEL')}
-              disabled={dangGui !== null}
-              className="press inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--r-sm)] px-4 text-[14px] font-medium transition-colors disabled:opacity-50"
-              style={{ color: 'var(--danger)' }}
-            >
-              <XCircle className="h-4 w-4" strokeWidth={2.2} aria-hidden />
-              {dangGui === 'CANCEL' ? 'Đang gửi…' : 'Huỷ lịch'}
-            </button>
           </div>
-
-          {note && (
-            <p className="mt-4 rounded-[var(--r-sm)] bg-[var(--surface-raised)] px-4 py-3 text-[14px] leading-[1.55] text-[var(--text-secondary)]">
-              {note}
-            </p>
-          )}
         </Block>
 
         <Block title="Trước buổi hẹn">
@@ -406,10 +345,6 @@ export function ResultSummary({ task, journeyTitle, workflowId }: Props) {
           </Block>
         )}
 
-        <p className="flex items-start gap-2 text-[13px] leading-[1.55] text-[var(--text-muted)]">
-          <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-          Cần đổi gì? Dùng nút Đổi lịch hoặc Huỷ lịch phía trên — mình sẽ chuyển tới đơn vị.
-        </p>
       </div>
     </div>
   )

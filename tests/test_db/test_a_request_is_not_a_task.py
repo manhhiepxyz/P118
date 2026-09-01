@@ -264,14 +264,24 @@ async def test_an_unknown_step_is_refused(client, db_pool):
     assert res.status_code == 422, res.text
 
 
-# --- phía giao diện: nút phải GỬI, không phải hiện một dòng chữ --------------
+# --- phía giao diện: không hứa một việc màn hình không làm được --------------
 
 
-def test_the_buttons_actually_send_something():
-    """Hai nút này từng chỉ `setNote(...)` — hiện chữ, không gửi gì.
+def test_the_result_card_offers_no_change_or_cancel_button():
+    """Thẻ kết quả KHÔNG có nút đổi/huỷ, và nói thẳng ai sẽ liên hệ.
 
-    Chúng bảo người dùng "Nhắn cho P-118 ở ô bên dưới", và ô ấy đã bị gỡ. Một
-    nút trông bấm được nhưng không dẫn tới đâu tệ hơn là không có nút.
+    Ba đời của cùng một chỗ trên màn hình:
+
+      1. hai nút chỉ `setNote(...)` — hiện chữ bảo người dùng đi gõ chat, và ô
+         chat ấy đã bị gỡ;
+      2. hai nút gọi `createSupportRequest` — "Huỷ lịch" chạy thật, còn
+         "Đổi lịch" ghim một hồ sơ mà `support_request._ACTIONS` cố ý không có
+         cặp nào để thực hiện, nên đơn vị bấm Duyệt rồi không có gì xảy ra;
+      3. không nút nào. Mỗi dịch vụ đều cần một lượt xác nhận của đơn vị, và
+         đơn vị GỌI ĐIỆN để làm việc ấy — nên đổi/huỷ đi bằng cuộc gọi đó.
+
+    Cả ba đời hỏng theo cùng một kiểu nếu làm sai: màn hình bày ra một lối đi
+    không dẫn tới đâu. Bài kiểm này giữ đời thứ ba đúng hình.
 
     Frontend không có hạ tầng test nên kiểm bằng cách đọc file TSX — cùng kỹ
     thuật `tests/test_every_refusal_carries_a_cause.py` đã dùng.
@@ -281,12 +291,21 @@ def test_the_buttons_actually_send_something():
     goc = Path(__file__).resolve().parents[2] / "frontend" / "src"
     card = (goc / "components" / "workspace" / "ResultSummary.tsx").read_text(encoding="utf-8")
 
-    assert "createSupportRequest(" in card, "nút đổi/huỷ không gọi tới đâu cả"
+    assert "createSupportRequest(" not in card, "thẻ kết quả gửi lại hồ sơ đổi/huỷ"
     assert "Nhắn cho P-118" not in card, "vẫn chỉ người dùng tới ô chat đã bị gỡ"
-    # Câu trả lời là câu BACKEND viết. Màn hình này không biết đơn vị sẽ nói gì,
-    # và một câu lạc quan ("đã huỷ nhé") sai ngay khi đơn vị từ chối.
-    assert "setNote(res.message)" in card, "màn hình tự dựng câu trả lời thay cho đơn vị"
 
+    # Gỡ nút mà không nói gì thay vào chỗ ấy là để khách ngồi im không biết
+    # bước tiếp theo là gì.
+    #
+    # Dòng nhắc ở TRANG, không ở thẻ: nó nói về mọi đơn vị trong yêu cầu, và
+    # một yêu cầu có thể có nhiều thẻ. Đặt trong thẻ thì ba dịch vụ lặp ba lần,
+    # mỗi lần đọc như thể chỉ đơn vị của thẻ ấy sẽ gọi.
+    trang = (goc / "pages" / "WorkflowPage.tsx").read_text(encoding="utf-8")
+    assert "Hãy chú ý điện thoại" in trang, "gỡ nút xong không nói ai sẽ liên hệ"
+    assert "Hãy chú ý điện thoại" not in card, "dòng nhắc chung nằm trong thẻ của MỘT dịch vụ"
+
+    # Route và client vẫn sống — backend `run_approved_requests` còn nguyên và
+    # còn test phủ. Nếu sau này mở lại cổng đổi/huỷ thì đây là đường vào.
     api = (goc / "lib" / "agentApi.ts").read_text(encoding="utf-8")
     dai = api[api.index("export async function createSupportRequest") :][:900]
     assert "support-requests" in dai, dai[:200]

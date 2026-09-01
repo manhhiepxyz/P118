@@ -107,6 +107,11 @@ def test_the_result_card_shows_the_thing_the_customer_holds():
     code = _lich_su()
 
     assert "d.label === 'Thời gian'" in code, "thẻ kết quả vẫn lấy bước cuối cùng, tức biên lai"
-    assert "successWithDetails[successWithDetails.length - 1]" in code, (
+    # Đường lui cho dịch vụ KHÔNG có mốc hẹn (đăng ký tư vấn, tìm bất động sản):
+    # không có bước nào mang `Thời gian` thì vẫn phải còn MỘT thẻ, dựng từ bước
+    # xong cuối cùng. Trước đây viết là `successWithDetails[... .length - 1]`;
+    # giờ là `.slice(-1)` vì `resultTasks` đã thành một MẢNG — một thẻ cho mỗi
+    # buổi hẹn, xem `test_every_appointment_gets_its_own_card`.
+    assert "successWithDetails.slice(-1)" in code, (
         "không còn đường lui cho dịch vụ KHÔNG có mốc hẹn — chúng sẽ mất luôn thẻ kết quả"
     )

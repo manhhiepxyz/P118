@@ -940,6 +940,13 @@ export async function listServiceApprovals(
  *
  * Khác `cancelWorkflow`: hàm đó đánh dấu workflow CANCELLED trong database của
  * chính hệ thống này và không nói gì với đơn vị — lịch bên kia vẫn nằm nguyên.
+ *
+ * KHÔNG MÀN HÌNH NÀO GỌI HÀM NÀY NỮA. `ResultSummary` từng có hai nút
+ * "Đổi lịch"/"Huỷ lịch"; chúng đã được gỡ vì đơn vị gọi điện xác nhận từng
+ * dịch vụ, nên đổi/huỷ đi bằng cuộc gọi ấy. Giữ lại vì route
+ * `POST /support-requests` và `run_approved_requests` phía backend vẫn sống và
+ * vẫn có test phủ — nếu sau này cần mở lại cổng đổi/huỷ thì đây là đường vào,
+ * không phải một hàm chết cần dựng lại từ đầu.
  */
 export async function createSupportRequest(
   workflowId: string,

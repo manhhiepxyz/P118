@@ -108,6 +108,27 @@ def test_the_pickup_time_is_not_a_second_field():
 # --- phía giao diện: thẻ không được gọi tên một dịch vụ cụ thể ----------------
 
 
+def _bo_ghi_chu(code: str) -> str:
+    """Bỏ ghi chú khỏi mã TSX.
+
+    Ghi chú NÓI VỀ mã cũ — chúng chép lại đúng những chuỗi mà các bài kiểm dưới
+    đây đang cấm, vì đó là cách một ghi chú giải thích "trước đây sai thế nào".
+    Không bỏ chúng ra thì mọi bài kiểm loại này đỏ ngay khi ai đó viết một ghi
+    chú trung thực.
+    """
+    con_lai, i = [], 0
+    while i < len(code):
+        for mo, dong in (("{/*", "*/}"), ("/*", "*/")):
+            if code.startswith(mo, i):
+                ket = code.find(dong, i)
+                i = len(code) if ket < 0 else ket + len(dong)
+                break
+        else:
+            con_lai.append(code[i])
+            i += 1
+    return "".join(con_lai)
+
+
 def test_the_result_card_never_names_one_service():
     """Thẻ kết quả phục vụ 5 dịch vụ; chữ cứng của một dịch vụ là lỗi `INT-003`.
 
@@ -117,20 +138,48 @@ def test_the_result_card_never_names_one_service():
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "frontend" / "src" / "components" / "workspace" / "ResultSummary.tsx"
-    code = src.read_text(encoding="utf-8")
-    # Bỏ ghi chú: chúng NÓI VỀ chữ cứng cũ, không phải chữ cứng.
-    ngoai_ghi_chu, i = [], 0
-    while i < len(code):
-        for mo, dong in (("{/*", "*/}"), ("/*", "*/")):
-            if code.startswith(mo, i):
-                ket = code.find(dong, i)
-                i = len(code) if ket < 0 else ket + len(dong)
-                break
-        else:
-            ngoai_ghi_chu.append(code[i])
-            i += 1
-    code = "".join(ngoai_ghi_chu)
+    code = _bo_ghi_chu(src.read_text(encoding="utf-8"))
 
     for ten in ("tham quan", "đỗ xe", "bảo trì", "chuyển nhà", "tư vấn", "đưa đón"):
         assert ten not in code.casefold(), f'thẻ kết quả gọi tên một dịch vụ cụ thể: "{ten}"'
     assert "title={task.title}" in code, "tiêu đề thẻ không lấy từ tên dịch vụ backend đặt"
+
+
+def test_every_appointment_gets_its_own_card():
+    """Hai buổi hẹn trong một yêu cầu thì phải có HAI thẻ, không phải một.
+
+    Lỗi đo được: `WorkflowPage` chọn thẻ bằng
+
+        [...successWithDetails].reverse().find((t) => t.details?.some(...))
+
+    `reverse().find()` trả về "bước có `Thời gian` đứng SAU CÙNG trong mảng", và
+    thứ tự ấy là thứ tự Planner xếp bước — không phải mức quan trọng, không phải
+    mốc gần nhất. Một yêu cầu "đặt chỗ đỗ xe + đặt lịch tham quan" có hai mốc;
+    cái nào lên thẻ là ngẫu nhiên, và buổi còn lại rơi xuống mục "Các bước", gập
+    sau nút "Chi tiết": không địa điểm, không người đón tiếp, không `.ics`.
+
+    Đây không phải ca giả định — chính codebase mô hình hoá nó:
+    `ScheduleConflictAction` có `task_a`/`task_b` vì hai bước trong CÙNG một
+    workflow đụng giờ nhau.
+
+    Frontend không có hạ tầng test nên kiểm bằng cách đọc file TSX — cùng kỹ
+    thuật `tests/test_every_refusal_carries_a_cause.py` đã dùng.
+    """
+    from pathlib import Path
+
+    goc = Path(__file__).resolve().parents[1] / "frontend" / "src"
+    trang = _bo_ghi_chu((goc / "pages" / "WorkflowPage.tsx").read_text(encoding="utf-8"))
+
+    assert "resultTasks.map(" in trang, "trang chỉ dựng MỘT thẻ kết quả"
+    assert ".reverse().find(" not in trang, "vẫn chọn một buổi hẹn theo thứ tự mảng"
+
+    # Mỗi thẻ tự đặt tên sự kiện `.ics` của nó. Truyền một tiêu đề chung từ
+    # trang xuống nghĩa là hai mốc vào lịch điện thoại dưới cùng một cái tên —
+    # và đó là tên của một trong hai dịch vụ.
+    card = _bo_ghi_chu((goc / "components" / "workspace" / "ResultSummary.tsx").read_text(encoding="utf-8"))
+    assert "journeyTitle" not in card, "thẻ vẫn nhận tiêu đề chung của cả yêu cầu"
+    assert "downloadIcs(task.title" in card, "tên sự kiện .ics không lấy từ chính buổi hẹn này"
+
+    # Tên tệp phải khác nhau giữa hai thẻ, nếu không trình duyệt lưu thành
+    # `... (1).ics` và khách không biết cái nào là cái nào.
+    assert "p118-${id}.ics" in card, "mọi buổi hẹn tải về cùng một tên tệp"
