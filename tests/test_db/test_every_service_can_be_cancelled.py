@@ -1,8 +1,9 @@
 """Năm dịch vụ có hẹn, năm đường huỷ — cùng một khuôn, không dịch vụ nào bị bỏ lại.
 
-Nút "Huỷ lịch" hiện trên MỌI thẻ kết quả có mốc thời gian. Một dịch vụ có nút mà
-không có tool là một nút bấm được rồi không có gì xảy ra — và người duyệt bên
-kia bấm đồng ý cho một việc không ai thực hiện.
+Khách không còn nút huỷ trên thẻ kết quả — họ nói với đơn vị trong cuộc gọi xác
+nhận, và đơn vị mở hồ sơ huỷ. Nhưng đường phía sau hồ sơ ấy vẫn phải đủ cho MỌI
+dịch vụ: một dịch vụ có hồ sơ mà không có tool là người duyệt bấm đồng ý cho một
+việc không ai thực hiện, và cả hai bên đều tưởng đã xong.
 
 Bài kiểm này đi từ hồ sơ của khách tới bản ghi ở phía đơn vị, cho từng dịch vụ.
 Không mock connector: dùng chính app in-process của provider, nên nếu đường dẫn
@@ -180,21 +181,26 @@ def test_the_cancel_tool_is_owned_and_out_of_reach(tool: str):
 # --- phía giao diện ----------------------------------------------------------
 
 
-def test_the_card_warns_about_the_money_before_the_click():
-    """Luật hoàn tiền là TẤT ĐỊNH, nên hệ thống biết kết cục trước khi khách bấm.
+def test_the_card_never_starts_a_cancellation_it_cannot_explain():
+    """Không có nút huỷ trên thẻ, nên không có lượt huỷ nào chưa được cảnh báo.
 
-    Giấu nó tới sau khi đơn vị duyệt là để họ bấm một nút mà không biết nó tốn
-    bao nhiêu. Frontend không có hạ tầng test nên kiểm bằng cách đọc file TSX.
+    Bài kiểm này TỪNG đòi thẻ tự tính mốc 24 giờ và `window.confirm` trước khi
+    gửi: luật hoàn tiền là tất định, nên giấu kết cục tới sau khi đơn vị duyệt
+    là để khách bấm một nút mà không biết nó tốn bao nhiêu.
+
+    Nút ấy đã bị gỡ — đơn vị gọi điện xác nhận từng dịch vụ, và khách nói
+    "cho tôi huỷ" trong chính cuộc gọi đó, nơi người bên kia đọc được số tiền
+    thật cho đúng lịch thật. Cảnh báo do CON NGƯỜI đưa ra, không do thẻ đoán.
+
+    Nên bất biến còn lại là: thẻ không được mở một lượt huỷ nào cả. Luật tiền
+    vẫn được `test_cancelling_late_costs_the_money.py` giữ ở phía backend, nơi
+    nó thuộc về.
     """
     from pathlib import Path
 
-    card = (
-        Path(__file__).resolve().parents[2] / "frontend" / "src" / "components" / "workspace" / "ResultSummary.tsx"
-    ).read_text(encoding="utf-8")
+    goc = Path(__file__).resolve().parents[2] / "frontend" / "src"
+    card = (goc / "components" / "workspace" / "ResultSummary.tsx").read_text(encoding="utf-8")
+    trang = (goc / "pages" / "WorkflowPage.tsx").read_text(encoding="utf-8")
 
-    assert "24 * 60 * 60 * 1000" in card, "thẻ không tính mốc 24 giờ"
-    assert "sẽ không được hoàn" in card, "không nói trước là mất tiền"
-    assert "window.confirm" in card, "cảnh báo hiện ra nhưng vẫn gửi dù khách chưa đồng ý"
-    # Cảnh báo CHỈ cho lệnh huỷ. "Đổi lịch" không đụng tới khoản đã trả.
-    nho = card[card.index("async function nho(") :][:900]
-    assert "kind === 'CANCEL'" in nho, "cảnh báo mất tiền hiện cả khi khách chỉ xin đổi lịch"
+    assert "createSupportRequest(" not in card, "thẻ mở lượt huỷ mà không cảnh báo tiền"
+    assert "Hãy chú ý điện thoại" in trang, "gỡ nút xong không nói ai sẽ liên hệ"

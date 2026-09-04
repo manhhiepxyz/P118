@@ -495,8 +495,7 @@ async def test_the_customer_view_uses_the_changed_zone_and_price(client, db_pool
     # Sau thanh toán, InputRef của T8 vẫn trỏ T5 (dấu vết giữ chỗ ban đầu).
     # Read-model phải giải nó qua projection hiện hành, không quay về 150.000.
     await db_pool.execute(
-        "UPDATE workflow_tasks SET status='SUCCESS', result_data=$2::jsonb "
-        "WHERE workflow_id=$1::uuid AND task_id='T8'",
+        "UPDATE workflow_tasks SET status='SUCCESS', result_data=$2::jsonb WHERE workflow_id=$1::uuid AND task_id='T8'",
         wid,
         json.dumps({"payment_id": "PAY-31", "payment_status": "PAID"}),
     )

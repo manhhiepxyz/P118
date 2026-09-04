@@ -334,9 +334,7 @@ async def test_a_provider_cannot_decide_another_providers_request(client, db_poo
     await _gan_don_vi(db_pool, id_b, MOV_02)
 
     cua_b = await _yeu_cau(db_pool, khach_id, MOV_02)
-    res = await client.post(
-        f"{SERVICE}/{cua_b}/T1/decide", json={"decision": "approve"}, headers=_auth(tok_a)
-    )
+    res = await client.post(f"{SERVICE}/{cua_b}/T1/decide", json={"decision": "approve"}, headers=_auth(tok_a))
     assert res.status_code in (403, 404), f"đơn vị A duyệt được việc của B: {res.status_code}"
 
     trang_thai = await db_pool.fetchval(
@@ -351,9 +349,7 @@ async def test_a_provider_with_no_mapping_cannot_decide_anything(client, db_pool
     tok, _ = await _tai_khoan(client, db_pool, "donvi_chua_gan_2", role="provider")
     wid = await _yeu_cau(db_pool, khach_id, MOV_01)
 
-    res = await client.post(
-        f"{SERVICE}/{wid}/T1/decide", json={"decision": "approve"}, headers=_auth(tok)
-    )
+    res = await client.post(f"{SERVICE}/{wid}/T1/decide", json={"decision": "approve"}, headers=_auth(tok))
     assert res.status_code in (403, 404)
 
 
@@ -365,9 +361,7 @@ async def test_a_legacy_row_cannot_be_decided_by_a_provider(client, db_pool):
     await _gan_don_vi(db_pool, uid, MOV_01)
     cu = await _yeu_cau(db_pool, khach_id, None)
 
-    res = await client.post(
-        f"{SERVICE}/{cu}/T1/decide", json={"decision": "approve"}, headers=_auth(tok)
-    )
+    res = await client.post(f"{SERVICE}/{cu}/T1/decide", json={"decision": "approve"}, headers=_auth(tok))
     assert res.status_code in (403, 404)
 
 
@@ -435,9 +429,7 @@ async def test_the_owner_can_still_decide_its_own_request(client, db_pool):
     await _gan_don_vi(db_pool, uid, MOV_01)
     wid = await _yeu_cau(db_pool, khach_id, MOV_01)
 
-    res = await client.post(
-        f"{SERVICE}/{wid}/T1/decide", json={"decision": "approve"}, headers=_auth(tok)
-    )
+    res = await client.post(f"{SERVICE}/{wid}/T1/decide", json={"decision": "approve"}, headers=_auth(tok))
     assert res.status_code < 400, f"chủ sở hữu bị chặn: {res.status_code} {res.text}"
     assert (
         await db_pool.fetchval(
@@ -459,12 +451,7 @@ async def test_the_mapping_lives_in_postgresql_not_in_memory(client, db_pool):
     """
     _, uid = await _tai_khoan(client, db_pool, "donvi_ben_vung", role="provider")
     await _gan_don_vi(db_pool, uid, MOV_01)
-    assert (
-        await db_pool.fetchval(
-            "SELECT count(*) FROM service_provider_accounts WHERE user_id = $1::uuid", uid
-        )
-        == 1
-    )
+    assert await db_pool.fetchval("SELECT count(*) FROM service_provider_accounts WHERE user_id = $1::uuid", uid) == 1
 
 
 @pytest.mark.asyncio

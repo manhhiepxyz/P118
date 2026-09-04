@@ -536,6 +536,7 @@ class ScheduleConflictAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["SCHEDULE_CONFLICT"] = "SCHEDULE_CONFLICT"
+    title: str = "Lịch bị trùng giờ"
     task_a: ConflictTaskInfo
     task_b: ConflictTaskInfo
     can_act: StrictBool

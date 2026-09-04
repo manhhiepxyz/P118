@@ -175,7 +175,9 @@ async def test_a_refusal_leaves_the_step_untouched(db_pool):
         )
         == "PENDING"
     )
-    assert await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == "PENDING"
+    assert (
+        await db_pool.fetchval("SELECT status FROM workflows WHERE workflow_id=$1::uuid", uuid.UUID(wid)) == "PENDING"
+    )
 
 
 @pytest.mark.asyncio

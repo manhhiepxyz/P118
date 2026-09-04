@@ -236,6 +236,7 @@ export interface ConflictTaskInfo {
 
 export interface AgentScheduleConflictAction {
   kind: 'SCHEDULE_CONFLICT'
+  title: string
   task_a: ConflictTaskInfo
   task_b: ConflictTaskInfo
   can_act: boolean

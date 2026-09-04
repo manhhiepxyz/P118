@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, ChevronDown, Clock3, Info } from 'lucide-react'
+import { ArrowLeft, ChevronDown, Clock3, Info, Phone } from 'lucide-react'
 
 import { InspectorPanel } from '../components/workspace/InspectorPanel'
 import { JourneyCanvas } from '../components/workspace/JourneyCanvas'
@@ -212,27 +212,54 @@ export function WorkflowPage() {
     ? data.events.filter((event) => !NOISE.some((noise) => (event.message ?? '').toLowerCase().includes(noise)))
     : data.events
   /**
-   * Bước mang thứ người dùng THẬT SỰ nhận được.
+   * Những bước mang thứ người dùng THẬT SỰ nhận được.
    *
    * "Bước xong cuối cùng" là sai với mọi luồng có thanh toán: bước cuối là
    * `pay_fee`, và nó chỉ có mã giao dịch cùng chữ PAID. Đo được trên browser —
    * một chỗ đỗ xe đã đặt và trả tiền xong hiện ra là "Thanh toán phí thành
-   * công · Mã thanh toán · Trạng thái", không ngày, không khu, và KHÔNG có hai
-   * nút Đổi/Huỷ. Cái khách giữ trong tay là chỗ đỗ, không phải biên lai.
+   * công · Mã thanh toán · Trạng thái", không ngày, không khu. Cái khách giữ
+   * trong tay là chỗ đỗ, không phải biên lai.
    *
-   * Ưu tiên bước có MỐC THỜI GIAN — cùng dữ kiện mà `ResultSummary` dùng để
-   * quyết định dựng thẻ hẹn. Không có bước nào như vậy (đăng ký tư vấn, tìm bất
-   * động sản) thì rơi về bước cuối như cũ.
+   * Lọc theo MỐC THỜI GIAN — cùng dữ kiện mà `ResultSummary` dùng để quyết
+   * định dựng thẻ hẹn. Không có bước nào như vậy (đăng ký tư vấn, tìm bất động
+   * sản) thì rơi về bước cuối.
+   *
+   * MẢNG, không phải một bước. Dòng cũ là:
+   *
+   *     [...successWithDetails].reverse().find((t) => t.details?.some(...))
+   *
+   * `reverse().find()` = "bước có `Thời gian` đứng SAU CÙNG trong mảng", và
+   * thứ tự ấy là thứ tự Planner xếp bước — không phải mức quan trọng, không
+   * phải mốc gần nhất. Một yêu cầu hai buổi hẹn (ca mà `ScheduleConflictAction`
+   * sinh ra để xử lý: `task_a` đụng giờ `task_b`) thì cái nào lên thẻ là ngẫu
+   * nhiên, và buổi còn lại rơi xuống mục "Các bước", gập sau nút "Chi tiết":
+   * không địa điểm, không người đón tiếp, và không tải được `.ics`. Khách đặt
+   * hai lịch, thêm được một vào điện thoại.
+   *
+   * Thứ tự giữ NGUYÊN như `data.tasks` — thứ tự thực hiện. Sắp lại theo mốc
+   * thời gian là một quyết định trình bày khác, và nó cần dữ kiện mà nhãn
+   * `Thời gian` (một chuỗi tự do) không hứa sẽ luôn phân tích được.
    */
   const successWithDetails = data.tasks.filter(
     (task) => task.status === 'SUCCESS' && (task.details?.length ?? 0) > 0,
   )
-  const resultTask =
-    [...successWithDetails].reverse().find((task) => task.details?.some((d) => d.label === 'Thời gian')) ??
-    successWithDetails[successWithDetails.length - 1]
-  const subject = resultTask?.details?.find((detail) => detail.label === 'Dự án')?.value ?? null
-  // Tiêu đề gọn: nói KẾT QUẢ, không lặp lại cả câu tường thuật.
-  const headline = finished && resultTask ? `${resultTask.title} thành công` : (data.summary || data.message || 'Yêu cầu của bạn')
+  const appointments = successWithDetails.filter((task) => task.details?.some((d) => d.label === 'Thời gian'))
+  const resultTasks =
+    appointments.length > 0 ? appointments : successWithDetails.slice(-1)
+  const subject = resultTasks[0]?.details?.find((detail) => detail.label === 'Dự án')?.value ?? null
+  /*
+   * Tiêu đề gọn: nói KẾT QUẢ, không lặp lại cả câu tường thuật.
+   *
+   * Nhiều dịch vụ thì GỌI TÊN TỪNG CÁI. Dòng cũ là `${resultTask.title} thành
+   * công` với `resultTask` là một bước duy nhất, nên yêu cầu "đăng ký xe + đặt
+   * chỗ đỗ + đặt lịch tham quan" ra tiêu đề "Đặt lịch tham quan thành công" —
+   * hai việc kia biến mất khỏi câu tổng kết của chính chúng.
+   */
+  const headline = finished && resultTasks.length > 0
+    ? resultTasks.length === 1
+      ? `${resultTasks[0].title} thành công`
+      : `${resultTasks.map((task) => task.title).join(' · ')} — đã xong`
+    : (data.summary || data.message || 'Yêu cầu của bạn')
   /** Bước hỏng ĐẦU TIÊN — cái sau thường chỉ là hệ quả của cái này. */
   const failedStep = data.tasks.find((task) => task.status === 'FAILED')
   // Cùng status WAITING_APPROVAL nhưng KHÁC loại chờ: lịch tham quan chờ đơn vị
@@ -542,9 +569,39 @@ export function WorkflowPage() {
           )}
 
           {/* ── Kết quả cho NGƯỜI DÙNG ─────────────────────────────── */}
-          {finished && resultTask && (
-            <div className="mt-11">
-              <ResultSummary task={resultTask} journeyTitle={headline} workflowId={workflowId} />
+          {/* MỘT thẻ cho MỖI dịch vụ có mốc thời gian. Yêu cầu hai buổi hẹn
+              trước đây chỉ dựng một thẻ, và buổi còn lại nằm gập trong mục
+              "Các bước" phía dưới — không địa điểm, không người đón tiếp,
+              không tải được `.ics`. */}
+          {finished && resultTasks.length > 0 && (
+            <div className="mt-11 space-y-11">
+              {resultTasks.map((task) => (
+                <ResultSummary key={task.task_id} task={task} />
+              ))}
+
+              {/*
+               * Đổi/huỷ đi bằng ĐIỆN THOẠI, không bằng nút.
+               *
+               * Mỗi dịch vụ đều cần một lượt xác nhận của đơn vị, và đơn vị gọi
+               * cho khách để làm việc ấy. Nên đường ngắn nhất để đổi hay huỷ là
+               * chính cuộc gọi đó — không phải một hàng đợi thứ hai mà khách
+               * gửi vào rồi ngồi chờ không biết bao lâu.
+               *
+               * MỘT lần, dưới cả nhóm thẻ — không nằm trong `ResultSummary`.
+               * Câu này nói về MỌI đơn vị trong yêu cầu; đặt trong thẻ thì với
+               * ba dịch vụ nó lặp ba lần, và mỗi lần đọc như thể chỉ đơn vị của
+               * thẻ ấy sẽ gọi.
+               *
+               * Đây là dòng nhắc, KHÔNG phải lời hứa hệ thống sẽ làm gì: nó nói
+               * đúng một việc có thật và không nói gì thêm.
+               */}
+              <p className="flex items-start gap-2.5 rounded-[var(--r-sm)] bg-[var(--surface-raised)] px-4 py-3 text-[14px] leading-[1.55] text-[var(--text-secondary)]">
+                <Phone className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.2} aria-hidden />
+                <span>
+                  Hãy chú ý điện thoại — bên dịch vụ sẽ liên hệ với bạn sớm nhất! Cần đổi hoặc huỷ,
+                  bạn nói ngay trong cuộc gọi đó: họ là người quyết định lịch này.
+                </span>
+              </p>
             </div>
           )}
 
